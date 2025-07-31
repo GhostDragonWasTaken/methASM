@@ -1,0 +1,16 @@
+// Simple test file for MethASM
+var counter: int32 = 42;
+var message = "Hello, World!";
+
+function add(a: int32, b: int32) -> int32 {
+    return a + b;
+}
+
+struct Point {
+    x: float64;
+    y: float64;
+    
+    method distance() -> float64 {
+        return 0.0;
+    }
+}
