@@ -20,7 +20,7 @@ make
 ## Usage
 
 ```bash
-./bin/easyasm input.masm -o output.s
+./bin/methasm input.masm -o output.s
 ```
 
 ## Project Structure

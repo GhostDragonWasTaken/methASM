@@ -25,19 +25,27 @@ void register_allocator_destroy(RegisterAllocator* allocator) {
 
 int register_allocator_allocate_function(RegisterAllocator* allocator, ASTNode* function) {
     // Stub implementation - always succeeds for now
+    (void)allocator; // Suppress unused parameter warning
+    (void)function;  // Suppress unused parameter warning
     return 1;
 }
 
 x86Register register_allocator_get_register(RegisterAllocator* allocator, const char* variable) {
     // Stub implementation
+    (void)allocator; // Suppress unused parameter warning
+    (void)variable;  // Suppress unused parameter warning
     return REG_RAX;
 }
 
 int register_allocator_get_memory_offset(RegisterAllocator* allocator, const char* variable) {
     // Stub implementation
+    (void)allocator; // Suppress unused parameter warning
+    (void)variable;  // Suppress unused parameter warning
     return -8; // Default stack offset
 }
 
 void register_allocator_spill_variable(RegisterAllocator* allocator, const char* variable) {
     // Stub implementation
+    (void)allocator; // Suppress unused parameter warning
+    (void)variable;  // Suppress unused parameter warning
 }

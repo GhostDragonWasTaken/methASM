@@ -35,6 +35,7 @@ void code_generator_destroy(CodeGenerator* generator) {
 
 int code_generator_generate_program(CodeGenerator* generator, ASTNode* program) {
     // Generate basic assembly header
+    (void)program; // Suppress unused parameter warning
     code_generator_emit(generator, ".section .text\n");
     code_generator_emit(generator, ".global _start\n\n");
     code_generator_emit(generator, "_start:\n");
@@ -49,14 +50,20 @@ int code_generator_generate_program(CodeGenerator* generator, ASTNode* program) 
 
 void code_generator_generate_function(CodeGenerator* generator, ASTNode* function) {
     // Stub implementation
+    (void)generator; // Suppress unused parameter warning
+    (void)function;  // Suppress unused parameter warning
 }
 
 void code_generator_generate_statement(CodeGenerator* generator, ASTNode* statement) {
     // Stub implementation
+    (void)generator; // Suppress unused parameter warning
+    (void)statement; // Suppress unused parameter warning
 }
 
 void code_generator_generate_expression(CodeGenerator* generator, ASTNode* expression) {
     // Stub implementation
+    (void)generator;  // Suppress unused parameter warning
+    (void)expression; // Suppress unused parameter warning
 }
 
 void code_generator_emit(CodeGenerator* generator, const char* format, ...) {

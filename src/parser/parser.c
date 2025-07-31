@@ -47,10 +47,12 @@ ASTNode* parser_parse_declaration(Parser* parser) {
 
 ASTNode* parser_parse_statement(Parser* parser) {
     // Stub implementation
+    (void)parser; // Suppress unused parameter warning
     return NULL;
 }
 
 ASTNode* parser_parse_expression(Parser* parser) {
     // Stub implementation
+    (void)parser; // Suppress unused parameter warning
     return NULL;
 }

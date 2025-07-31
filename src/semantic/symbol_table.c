@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "symbol_table.h"
 #include <stdlib.h>
 #include <string.h>
@@ -60,11 +61,15 @@ void symbol_table_exit_scope(SymbolTable* table) {
 
 int symbol_table_declare(SymbolTable* table, Symbol* symbol) {
     // Stub implementation
+    (void)table;  // Suppress unused parameter warning
+    (void)symbol; // Suppress unused parameter warning
     return 1;
 }
 
 Symbol* symbol_table_lookup(SymbolTable* table, const char* name) {
     // Stub implementation
+    (void)table; // Suppress unused parameter warning
+    (void)name;  // Suppress unused parameter warning
     return NULL;
 }
 

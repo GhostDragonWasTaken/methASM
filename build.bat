@@ -1,5 +1,5 @@
 @echo off
-REM Windows build script for EasyASM
+REM Windows build script for MethASM
 
 REM Check if gcc is available
 where gcc >nul 2>&1
@@ -48,10 +48,10 @@ gcc -Wall -Wextra -std=c99 -g -O0 -c src\main.c -o obj\main.o
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
 echo Linking...
-gcc obj\lexer\lexer.o obj\parser\ast.o obj\parser\parser.o obj\semantic\symbol_table.o obj\semantic\type_checker.o obj\semantic\register_allocator.o obj\codegen\code_generator.o obj\main.o -o bin\easyasm.exe
+gcc obj\lexer\lexer.o obj\parser\ast.o obj\parser\parser.o obj\semantic\symbol_table.o obj\semantic\type_checker.o obj\semantic\register_allocator.o obj\codegen\code_generator.o obj\main.o -o bin\methasm.exe
 
 if %ERRORLEVEL% EQU 0 (
-    echo Build successful! Executable created at bin\easyasm.exe
+    echo Build successful! Executable created at bin\methasm.exe
 ) else (
     echo Build failed!
     exit /b 1

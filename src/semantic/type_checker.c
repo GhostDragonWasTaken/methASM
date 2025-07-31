@@ -21,15 +21,21 @@ void type_checker_destroy(TypeChecker* checker) {
 
 int type_checker_check_program(TypeChecker* checker, ASTNode* program) {
     // Stub implementation - always succeeds for now
+    (void)checker; // Suppress unused parameter warning
+    (void)program; // Suppress unused parameter warning
     return 1;
 }
 
 Type* type_checker_infer_type(TypeChecker* checker, ASTNode* expression) {
     // Stub implementation
+    (void)checker;    // Suppress unused parameter warning
+    (void)expression; // Suppress unused parameter warning
     return NULL;
 }
 
 int type_checker_are_compatible(Type* type1, Type* type2) {
     // Stub implementation
+    (void)type1; // Suppress unused parameter warning
+    (void)type2; // Suppress unused parameter warning
     return 1;
 }

@@ -117,7 +117,7 @@ make clean && make
 build.bat
 
 # Test with sample file
-./bin/easyasm test_example.masm -o output.s
+./bin/methasm test_example.masm -o output.s
 ```
 
 The project structure is solid and ready for the next phase of implementation!
