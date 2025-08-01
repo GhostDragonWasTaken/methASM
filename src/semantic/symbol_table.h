@@ -28,6 +28,12 @@ typedef struct Type {
     size_t alignment;
     struct Type* base_type; // For pointers and arrays
     size_t array_size;      // For arrays
+    
+    // Struct-specific fields
+    char** field_names;     // For structs - field names
+    struct Type** field_types; // For structs - field types
+    size_t* field_offsets;  // For structs - field memory offsets
+    size_t field_count;     // For structs - number of fields
 } Type;
 
 typedef enum {
@@ -57,6 +63,7 @@ typedef struct Symbol {
     Type* type;
     Scope* scope;
     int is_initialized;
+    int is_forward_declaration;  // For functions that are declared but not defined
     union {
         struct {
             int register_id;
@@ -84,7 +91,20 @@ void symbol_table_enter_scope(SymbolTable* table, ScopeType type);
 void symbol_table_exit_scope(SymbolTable* table);
 int symbol_table_declare(SymbolTable* table, Symbol* symbol);
 Symbol* symbol_table_lookup(SymbolTable* table, const char* name);
+Symbol* symbol_table_lookup_current_scope(SymbolTable* table, const char* name);
+int symbol_table_declare_forward(SymbolTable* table, Symbol* symbol);
+int symbol_table_resolve_forward_declaration(SymbolTable* table, Symbol* symbol);
+int symbol_table_validate_declaration(SymbolTable* table, Symbol* symbol);
+Scope* symbol_table_get_current_scope(SymbolTable* table);
+Symbol* symbol_create(const char* name, SymbolKind kind, Type* type);
+void symbol_destroy(Symbol* symbol);
 Type* type_create(TypeKind kind, const char* name);
 void type_destroy(Type* type);
+
+// Struct type creation and manipulation functions
+Type* type_create_struct(const char* name, char** field_names, Type** field_types, size_t field_count);
+Type* type_get_field_type(Type* struct_type, const char* field_name);
+size_t type_get_field_offset(Type* struct_type, const char* field_name);
+int type_has_field(Type* struct_type, const char* field_name);
 
 #endif // SYMBOL_TABLE_H
