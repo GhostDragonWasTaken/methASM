@@ -224,6 +224,9 @@ Source (.masm) → Lexer → Parser → AST → Type Checker → Code Generator 
 
 - Full compilation pipeline (lex → parse → type-check → codegen)
 - Variables, functions, structs with methods
+- **Control flow**: `if` / `else` and `while` (parsing + codegen)
+- **Method calls**: `obj.method(args)` with name mangling
+- **Struct field assignment**: `obj.field = expr`
 - Inline assembly with register preservation
 - Type system (int8–64, uint8–64, float32/64, string, void)
 - Symbol table with hierarchical scopes
@@ -233,9 +236,7 @@ Source (.masm) → Lexer → Parser → AST → Type Checker → Code Generator 
 
 ### In Progress
 
-- Control flow (if/while parsing done; codegen in progress)
-- Struct method dispatch
-- Optimization passes
+- Optimization passes (framework present; no concrete passes yet)
 
 ### Planned
 
