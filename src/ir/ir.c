@@ -260,12 +260,20 @@ static const char *ir_opcode_name(IROpcode op) {
     return "local";
   case IR_OP_ASSIGN:
     return "assign";
+  case IR_OP_ADDRESS_OF:
+    return "addr_of";
+  case IR_OP_LOAD:
+    return "load";
+  case IR_OP_STORE:
+    return "store";
   case IR_OP_BINARY:
     return "binary";
   case IR_OP_UNARY:
     return "unary";
   case IR_OP_CALL:
     return "call";
+  case IR_OP_NEW:
+    return "new";
   case IR_OP_RETURN:
     return "return";
   case IR_OP_INLINE_ASM:
@@ -368,6 +376,18 @@ int ir_program_dump(IRProgram *program, FILE *output) {
         fprintf(output, "%s %s <- %s\n", ir_opcode_name(instruction->op), dest,
                 lhs);
         break;
+      case IR_OP_ADDRESS_OF:
+        fprintf(output, "%s %s <- &%s\n", ir_opcode_name(instruction->op), dest,
+                lhs);
+        break;
+      case IR_OP_LOAD:
+        fprintf(output, "%s %s <- *%s [%s]\n", ir_opcode_name(instruction->op),
+                dest, lhs, rhs);
+        break;
+      case IR_OP_STORE:
+        fprintf(output, "%s *%s <- %s [%s]\n", ir_opcode_name(instruction->op),
+                dest, lhs, rhs);
+        break;
       case IR_OP_BINARY:
         fprintf(output, "%s %s = %s %s %s\n", ir_opcode_name(instruction->op),
                 dest, lhs, instruction->text ? instruction->text : "?", rhs);
@@ -386,6 +406,10 @@ int ir_program_dump(IRProgram *program, FILE *output) {
           fprintf(output, "%s%s", arg_i == 0 ? "" : ", ", arg_buffer);
         }
         fprintf(output, ")\n");
+        break;
+      case IR_OP_NEW:
+        fprintf(output, "%s %s = %s [%s]\n", ir_opcode_name(instruction->op),
+                dest, instruction->text ? instruction->text : "<type>", rhs);
         break;
       case IR_OP_RETURN:
         fprintf(output, "%s %s\n", ir_opcode_name(instruction->op), lhs);

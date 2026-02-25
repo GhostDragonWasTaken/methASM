@@ -251,6 +251,189 @@ static int code_generator_store_ir_destination(CodeGenerator *generator,
   }
 }
 
+static int code_generator_get_ir_access_size(CodeGenerator *generator,
+                                             const IROperand *size_operand) {
+  if (!generator || !size_operand || size_operand->kind != IR_OPERAND_INT) {
+    code_generator_set_error(generator, "IR memory access width must be integer");
+    return 0;
+  }
+
+  long long size = size_operand->int_value;
+  if (size == 1 || size == 2 || size == 4 || size == 8) {
+    return (int)size;
+  }
+  if (size > 0) {
+    return 8;
+  }
+
+  code_generator_set_error(generator, "Invalid IR memory access width: %lld", size);
+  return 0;
+}
+
+static void code_generator_emit_ir_load_from_address(CodeGenerator *generator,
+                                                     int size) {
+  if (!generator) {
+    return;
+  }
+
+  switch (size) {
+  case 1:
+    code_generator_emit(generator, "    movzx rax, byte [rax]\n");
+    break;
+  case 2:
+    code_generator_emit(generator, "    movzx rax, word [rax]\n");
+    break;
+  case 4:
+    code_generator_emit(generator, "    mov eax, dword [rax]\n");
+    break;
+  default:
+    code_generator_emit(generator, "    mov rax, qword [rax]\n");
+    break;
+  }
+}
+
+static void code_generator_emit_ir_store_to_address(CodeGenerator *generator,
+                                                    int size) {
+  if (!generator) {
+    return;
+  }
+
+  switch (size) {
+  case 1:
+    code_generator_emit(generator, "    mov byte [rax], cl\n");
+    break;
+  case 2:
+    code_generator_emit(generator, "    mov word [rax], cx\n");
+    break;
+  case 4:
+    code_generator_emit(generator, "    mov dword [rax], ecx\n");
+    break;
+  default:
+    code_generator_emit(generator, "    mov qword [rax], rcx\n");
+    break;
+  }
+}
+
+static int code_generator_emit_ir_address_of(CodeGenerator *generator,
+                                             const IRInstruction *instruction,
+                                             IRTempTable *temp_table) {
+  if (!generator || !instruction || instruction->lhs.kind != IR_OPERAND_SYMBOL ||
+      !instruction->lhs.name) {
+    code_generator_set_error(generator, "IR addr_of requires symbol operand");
+    return 0;
+  }
+
+  Symbol *symbol =
+      symbol_table_lookup(generator->symbol_table, instruction->lhs.name);
+  if (!symbol ||
+      (symbol->kind != SYMBOL_VARIABLE && symbol->kind != SYMBOL_PARAMETER)) {
+    code_generator_set_error(generator, "Unknown addr_of symbol '%s'",
+                             instruction->lhs.name);
+    return 0;
+  }
+
+  if (symbol->data.variable.is_in_register) {
+    code_generator_set_error(
+        generator, "IR addr_of cannot target register-allocated symbol '%s'",
+        instruction->lhs.name);
+    return 0;
+  }
+
+  if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
+    code_generator_emit(generator, "    lea rax, [%s + rip]\n",
+                        instruction->lhs.name);
+  } else {
+    code_generator_emit(generator, "    lea rax, [rbp - %d]\n",
+                        symbol->data.variable.memory_offset);
+  }
+
+  return code_generator_store_ir_destination(generator, &instruction->dest,
+                                             temp_table);
+}
+
+static int code_generator_emit_ir_load(CodeGenerator *generator,
+                                       const IRInstruction *instruction,
+                                       IRTempTable *temp_table) {
+  if (!generator || !instruction) {
+    return 0;
+  }
+
+  int size = code_generator_get_ir_access_size(generator, &instruction->rhs);
+  if (size <= 0) {
+    return 0;
+  }
+
+  if (!code_generator_load_ir_operand(generator, &instruction->lhs, temp_table)) {
+    return 0;
+  }
+
+  code_generator_emit_ir_load_from_address(generator, size);
+  return code_generator_store_ir_destination(generator, &instruction->dest,
+                                             temp_table);
+}
+
+static int code_generator_emit_ir_store(CodeGenerator *generator,
+                                        const IRInstruction *instruction,
+                                        IRTempTable *temp_table) {
+  if (!generator || !instruction) {
+    return 0;
+  }
+
+  int size = code_generator_get_ir_access_size(generator, &instruction->rhs);
+  if (size <= 0) {
+    return 0;
+  }
+
+  if (!code_generator_load_ir_operand(generator, &instruction->dest, temp_table)) {
+    return 0;
+  }
+  code_generator_emit(generator, "    push rax\n");
+
+  if (!code_generator_load_ir_operand(generator, &instruction->lhs, temp_table)) {
+    return 0;
+  }
+  code_generator_emit(generator, "    mov rcx, rax\n");
+  code_generator_emit(generator, "    pop rax\n");
+  code_generator_emit_ir_store_to_address(generator, size);
+  return 1;
+}
+
+static int code_generator_emit_ir_new(CodeGenerator *generator,
+                                      const IRInstruction *instruction,
+                                      IRTempTable *temp_table) {
+  if (!generator || !instruction) {
+    return 0;
+  }
+
+  int allocation_size = 8;
+  if (instruction->rhs.kind == IR_OPERAND_INT && instruction->rhs.int_value > 0) {
+    allocation_size = (int)instruction->rhs.int_value;
+  }
+
+  const char *size_register = "rdi";
+  CallingConventionSpec *conv_spec =
+      generator->register_allocator
+          ? generator->register_allocator->calling_convention
+          : NULL;
+  if (conv_spec && conv_spec->int_param_count > 0) {
+    const char *candidate =
+        code_generator_get_register_name(conv_spec->int_param_registers[0]);
+    if (candidate) {
+      size_register = candidate;
+    }
+  }
+
+  code_generator_emit(generator, "    ; IR new: %s (%d bytes)\n",
+                      instruction->text ? instruction->text : "type",
+                      allocation_size);
+  code_generator_emit(generator, "    mov %s, %d\n", size_register,
+                      allocation_size);
+  code_generator_emit(generator, "    extern gc_alloc\n");
+  code_generator_emit(generator, "    call gc_alloc\n");
+  return code_generator_store_ir_destination(generator, &instruction->dest,
+                                             temp_table);
+}
+
 static int code_generator_emit_ir_binary_fallback(
     CodeGenerator *generator, const IRInstruction *instruction,
     IRTempTable *temp_table) {
@@ -372,6 +555,193 @@ static int code_generator_emit_ir_unary_fallback(
                                              temp_table);
 }
 
+static int code_generator_ir_operand_is_float(const IROperand *operand) {
+  return operand && operand->kind == IR_OPERAND_FLOAT;
+}
+
+static int code_generator_emit_ir_call_argument_stack(
+    CodeGenerator *generator, const IROperand *operand, IRTempTable *temp_table) {
+  if (!code_generator_load_ir_operand(generator, operand, temp_table)) {
+    return 0;
+  }
+  code_generator_emit(generator, "    push rax\n");
+  return 1;
+}
+
+static int code_generator_emit_ir_call_argument_register(
+    CodeGenerator *generator, const IROperand *operand, IRTempTable *temp_table,
+    x86Register target_register, int is_float) {
+  if (!code_generator_load_ir_operand(generator, operand, temp_table)) {
+    return 0;
+  }
+
+  const char *register_name = code_generator_get_register_name(target_register);
+  if (!register_name) {
+    code_generator_set_error(generator, "Invalid parameter register in IR call");
+    return 0;
+  }
+
+  if (is_float) {
+    code_generator_emit(generator, "    movq %s, rax\n", register_name);
+  } else {
+    code_generator_emit(generator, "    mov %s, rax\n", register_name);
+  }
+  return 1;
+}
+
+static int code_generator_emit_ir_call(CodeGenerator *generator,
+                                       const IRInstruction *instruction,
+                                       IRTempTable *temp_table) {
+  if (!generator || !instruction || !instruction->text) {
+    return 0;
+  }
+
+  CallingConventionSpec *conv_spec =
+      generator->register_allocator->calling_convention;
+  if (!conv_spec) {
+    code_generator_set_error(generator, "No calling convention configured");
+    return 0;
+  }
+
+  size_t argument_count = instruction->argument_count;
+  int *is_float = NULL;
+  int *goes_on_stack = NULL;
+  if (argument_count > 0) {
+    is_float = calloc(argument_count, sizeof(int));
+    goes_on_stack = calloc(argument_count, sizeof(int));
+    if (!is_float || !goes_on_stack) {
+      free(is_float);
+      free(goes_on_stack);
+      code_generator_set_error(generator,
+                               "Out of memory while planning IR call arguments");
+      return 0;
+    }
+  }
+
+  int int_reg_cursor = 0;
+  int float_reg_cursor = 0;
+  int stack_argument_count = 0;
+  for (size_t i = 0; i < argument_count; i++) {
+    is_float[i] = code_generator_ir_operand_is_float(&instruction->arguments[i]);
+    if (is_float[i]) {
+      if (float_reg_cursor < (int)conv_spec->float_param_count) {
+        float_reg_cursor++;
+      } else {
+        goes_on_stack[i] = 1;
+        stack_argument_count++;
+      }
+    } else {
+      if (int_reg_cursor < (int)conv_spec->int_param_count) {
+        int_reg_cursor++;
+      } else {
+        goes_on_stack[i] = 1;
+        stack_argument_count++;
+      }
+    }
+  }
+
+  code_generator_emit(generator, "    ; IR call: %s (%zu args)\n",
+                      instruction->text, argument_count);
+
+  int alignment_stack_params = 0;
+  if ((int)argument_count > (int)conv_spec->int_param_count) {
+    alignment_stack_params =
+        (int)argument_count - (int)conv_spec->int_param_count;
+  }
+  int alignment_padding_bytes =
+      ((3 + alignment_stack_params) % 2 != 0) ? 8 : 0;
+
+  code_generator_align_stack_for_call(generator, (int)argument_count);
+  code_generator_save_caller_saved_registers_selective(generator);
+
+  // Push stack arguments right-to-left.
+  for (int i = (int)argument_count - 1; i >= 0; i--) {
+    if (!goes_on_stack || !goes_on_stack[i]) {
+      continue;
+    }
+    if (!code_generator_emit_ir_call_argument_stack(
+            generator, &instruction->arguments[i], temp_table)) {
+      free(is_float);
+      free(goes_on_stack);
+      return 0;
+    }
+  }
+
+  // Fill register arguments left-to-right.
+  int_reg_cursor = 0;
+  float_reg_cursor = 0;
+  for (size_t i = 0; i < argument_count; i++) {
+    if (goes_on_stack && goes_on_stack[i]) {
+      continue;
+    }
+
+    if (is_float && is_float[i]) {
+      if (float_reg_cursor >= (int)conv_spec->float_param_count) {
+        code_generator_set_error(
+            generator, "IR call argument classification mismatch (float)");
+        free(is_float);
+        free(goes_on_stack);
+        return 0;
+      }
+      x86Register target_register =
+          conv_spec->float_param_registers[float_reg_cursor++];
+      if (!code_generator_emit_ir_call_argument_register(
+              generator, &instruction->arguments[i], temp_table, target_register,
+              1)) {
+        free(is_float);
+        free(goes_on_stack);
+        return 0;
+      }
+    } else {
+      if (int_reg_cursor >= (int)conv_spec->int_param_count) {
+        code_generator_set_error(
+            generator, "IR call argument classification mismatch (integer)");
+        free(is_float);
+        free(goes_on_stack);
+        return 0;
+      }
+      x86Register target_register = conv_spec->int_param_registers[int_reg_cursor++];
+      if (!code_generator_emit_ir_call_argument_register(
+              generator, &instruction->arguments[i], temp_table, target_register,
+              0)) {
+        free(is_float);
+        free(goes_on_stack);
+        return 0;
+      }
+    }
+  }
+
+  code_generator_emit(generator, "    call %s\n", instruction->text);
+  code_generator_emit(generator, "    mov rcx, rax\n");
+
+  if (stack_argument_count > 0) {
+    code_generator_emit(generator, "    add rsp, %d\n", stack_argument_count * 8);
+  }
+  if (conv_spec->convention == CALLING_CONV_MS_X64 &&
+      conv_spec->shadow_space_size > 0) {
+    code_generator_emit(generator, "    add rsp, %d\n",
+                        conv_spec->shadow_space_size);
+  }
+  if (alignment_padding_bytes > 0) {
+    code_generator_emit(generator, "    add rsp, %d\n", alignment_padding_bytes);
+  }
+  code_generator_restore_caller_saved_registers_selective(generator);
+  code_generator_emit(generator, "    mov rax, rcx\n");
+
+  Symbol *function_symbol =
+      symbol_table_lookup(generator->symbol_table, instruction->text);
+  Type *return_type = NULL;
+  if (function_symbol && function_symbol->kind == SYMBOL_FUNCTION &&
+      function_symbol->type) {
+    return_type = function_symbol->type;
+  }
+  code_generator_handle_return_value(generator, return_type);
+
+  free(is_float);
+  free(goes_on_stack);
+  return !generator->has_error;
+}
+
 static int code_generator_emit_ir_instruction(CodeGenerator *generator,
                                               const IRInstruction *instruction,
                                               IRTempTable *temp_table) {
@@ -429,6 +799,15 @@ static int code_generator_emit_ir_instruction(CodeGenerator *generator,
     return code_generator_store_ir_destination(generator, &instruction->dest,
                                                temp_table);
 
+  case IR_OP_ADDRESS_OF:
+    return code_generator_emit_ir_address_of(generator, instruction, temp_table);
+
+  case IR_OP_LOAD:
+    return code_generator_emit_ir_load(generator, instruction, temp_table);
+
+  case IR_OP_STORE:
+    return code_generator_emit_ir_store(generator, instruction, temp_table);
+
   case IR_OP_BINARY:
     if (instruction->ast_ref) {
       code_generator_generate_expression(generator, instruction->ast_ref);
@@ -454,17 +833,14 @@ static int code_generator_emit_ir_instruction(CodeGenerator *generator,
                                                  temp_table);
 
   case IR_OP_CALL:
-    if (instruction->ast_ref) {
-      code_generator_generate_expression(generator, instruction->ast_ref);
-      if (generator->has_error) {
-        return 0;
-      }
-      return code_generator_store_ir_destination(generator, &instruction->dest,
-                                                 temp_table);
+    if (!code_generator_emit_ir_call(generator, instruction, temp_table)) {
+      return 0;
     }
-    code_generator_set_error(generator,
-                             "IR call without AST reference is not supported");
-    return 0;
+    return code_generator_store_ir_destination(generator, &instruction->dest,
+                                               temp_table);
+
+  case IR_OP_NEW:
+    return code_generator_emit_ir_new(generator, instruction, temp_table);
 
   case IR_OP_RETURN:
     if (instruction->lhs.kind != IR_OPERAND_NONE) {
