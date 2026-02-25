@@ -1,0 +1,12 @@
+function main() -> int32 {
+  var sum: int32 = 0;
+  for (var i: int32 = 0; i < 3; i = i + 1) {
+    switch (i) {
+      case 1:
+        continue;
+      default:
+        sum = sum + 1;
+    }
+  }
+  return sum;
+}

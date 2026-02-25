@@ -18,6 +18,8 @@ static const char *code_generator_current_break_label(
     CodeGenerator *generator);
 static const char *code_generator_current_continue_label(
     CodeGenerator *generator);
+static int code_generator_eval_integer_constant(ASTNode *expression,
+                                                long long *out_value);
 static int code_generator_get_type_storage_size(Type *type);
 static void code_generator_emit_store_value_at_address(CodeGenerator *generator,
                                                        int element_size);
@@ -199,8 +201,92 @@ static const char *code_generator_current_continue_label(
   if (!generator || generator->control_flow_stack_size == 0) {
     return NULL;
   }
-  return generator
-      ->continue_label_stack[generator->control_flow_stack_size - 1];
+  for (size_t i = generator->control_flow_stack_size; i > 0; i--) {
+    const char *label = generator->continue_label_stack[i - 1];
+    if (label) {
+      return label;
+    }
+  }
+  return NULL;
+}
+
+static int code_generator_eval_integer_constant(ASTNode *expression,
+                                                long long *out_value) {
+  if (!expression || !out_value) {
+    return 0;
+  }
+
+  switch (expression->type) {
+  case AST_NUMBER_LITERAL: {
+    NumberLiteral *literal = (NumberLiteral *)expression->data;
+    if (!literal || literal->is_float) {
+      return 0;
+    }
+    *out_value = literal->int_value;
+    return 1;
+  }
+
+  case AST_UNARY_EXPRESSION: {
+    UnaryExpression *unary_expr = (UnaryExpression *)expression->data;
+    long long operand = 0;
+    if (!unary_expr || !unary_expr->operator || !unary_expr->operand ||
+        !code_generator_eval_integer_constant(unary_expr->operand, &operand)) {
+      return 0;
+    }
+    if (strcmp(unary_expr->operator, "+") == 0) {
+      *out_value = operand;
+      return 1;
+    }
+    if (strcmp(unary_expr->operator, "-") == 0) {
+      *out_value = -operand;
+      return 1;
+    }
+    return 0;
+  }
+
+  case AST_BINARY_EXPRESSION: {
+    BinaryExpression *binary_expr = (BinaryExpression *)expression->data;
+    long long left = 0;
+    long long right = 0;
+    if (!binary_expr || !binary_expr->operator || !binary_expr->left ||
+        !binary_expr->right ||
+        !code_generator_eval_integer_constant(binary_expr->left, &left) ||
+        !code_generator_eval_integer_constant(binary_expr->right, &right)) {
+      return 0;
+    }
+
+    if (strcmp(binary_expr->operator, "+") == 0) {
+      *out_value = left + right;
+      return 1;
+    }
+    if (strcmp(binary_expr->operator, "-") == 0) {
+      *out_value = left - right;
+      return 1;
+    }
+    if (strcmp(binary_expr->operator, "*") == 0) {
+      *out_value = left * right;
+      return 1;
+    }
+    if (strcmp(binary_expr->operator, "/") == 0) {
+      if (right == 0) {
+        return 0;
+      }
+      *out_value = left / right;
+      return 1;
+    }
+    if (strcmp(binary_expr->operator, "%") == 0) {
+      if (right == 0) {
+        return 0;
+      }
+      *out_value = left % right;
+      return 1;
+    }
+    return 0;
+  }
+
+  default:
+    return 0;
+  }
 }
 
 int code_generator_generate_program(CodeGenerator *generator,
@@ -805,19 +891,41 @@ void code_generator_generate_statement(CodeGenerator *generator,
       CaseClause *case_clause = case_node ? (CaseClause *)case_node->data : NULL;
       case_labels[i] = code_generator_generate_label(generator, "case");
       if (!case_labels[i]) {
-        continue;
+        code_generator_set_error(generator,
+                                 "Failed to allocate label for switch case");
+        break;
       }
       if (case_clause && case_clause->is_default) {
         default_index = i;
         continue;
       }
-      if (case_clause && case_clause->value &&
-          case_clause->value->type == AST_NUMBER_LITERAL) {
-        NumberLiteral *num = (NumberLiteral *)case_clause->value->data;
-        long long value = num ? num->int_value : 0;
+      if (case_clause && case_clause->value) {
+        long long value = 0;
+        if (!code_generator_eval_integer_constant(case_clause->value, &value)) {
+          code_generator_set_error(
+              generator,
+              "Case value must be a compile-time integer constant");
+          break;
+        }
+
         code_generator_emit(generator, "    cmp rbx, %lld\n", value);
         code_generator_emit(generator, "    je %s\n", case_labels[i]);
+      } else {
+        code_generator_set_error(generator, "Malformed switch case");
+        break;
       }
+    }
+
+    if (generator->has_error) {
+      code_generator_pop_control_labels(generator);
+      if (case_labels) {
+        for (size_t i = 0; i < case_count; i++) {
+          free(case_labels[i]);
+        }
+        free(case_labels);
+      }
+      free(switch_end);
+      break;
     }
 
     if (default_index != (size_t)-1 && case_labels && case_labels[default_index]) {

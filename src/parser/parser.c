@@ -1781,21 +1781,12 @@ ASTNode *parser_parse_switch_statement(Parser *parser) {
 
     if (parser->current_token.type == TOKEN_CASE) {
       parser_advance(parser);
-      if (parser->current_token.type != TOKEN_NUMBER) {
-        parser_set_error(parser, "Switch case value must be a number literal");
+      case_value = parser_parse_expression(parser);
+      if (!case_value) {
+        parser_set_error(parser,
+                         "Expected constant expression after 'case'");
         break;
       }
-      NumberLiteral tmp = {0};
-      if (strchr(parser->current_token.value, '.')) {
-        tmp.float_value = atof(parser->current_token.value);
-        tmp.is_float = 1;
-        case_value = ast_create_float_literal(tmp.float_value, case_loc);
-      } else {
-        tmp.int_value = atoll(parser->current_token.value);
-        tmp.is_float = 0;
-        case_value = ast_create_number_literal(tmp.int_value, case_loc);
-      }
-      parser_advance(parser);
     } else if (parser->current_token.type == TOKEN_DEFAULT) {
       if (seen_default) {
         parser_set_error(parser, "Only one default case is allowed");

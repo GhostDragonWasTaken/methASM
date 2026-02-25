@@ -68,6 +68,86 @@ static Type *type_checker_parse_array_type(TypeChecker *checker,
   return array_type;
 }
 
+static int type_checker_eval_integer_constant(ASTNode *expression,
+                                              long long *out_value) {
+  if (!expression || !out_value) {
+    return 0;
+  }
+
+  switch (expression->type) {
+  case AST_NUMBER_LITERAL: {
+    NumberLiteral *literal = (NumberLiteral *)expression->data;
+    if (!literal || literal->is_float) {
+      return 0;
+    }
+    *out_value = literal->int_value;
+    return 1;
+  }
+
+  case AST_UNARY_EXPRESSION: {
+    UnaryExpression *unary_expr = (UnaryExpression *)expression->data;
+    long long operand = 0;
+    if (!unary_expr || !unary_expr->operator || !unary_expr->operand ||
+        !type_checker_eval_integer_constant(unary_expr->operand, &operand)) {
+      return 0;
+    }
+
+    if (strcmp(unary_expr->operator, "+") == 0) {
+      *out_value = operand;
+      return 1;
+    }
+    if (strcmp(unary_expr->operator, "-") == 0) {
+      *out_value = -operand;
+      return 1;
+    }
+    return 0;
+  }
+
+  case AST_BINARY_EXPRESSION: {
+    BinaryExpression *binary_expr = (BinaryExpression *)expression->data;
+    long long left = 0;
+    long long right = 0;
+    if (!binary_expr || !binary_expr->operator || !binary_expr->left ||
+        !binary_expr->right ||
+        !type_checker_eval_integer_constant(binary_expr->left, &left) ||
+        !type_checker_eval_integer_constant(binary_expr->right, &right)) {
+      return 0;
+    }
+
+    if (strcmp(binary_expr->operator, "+") == 0) {
+      *out_value = left + right;
+      return 1;
+    }
+    if (strcmp(binary_expr->operator, "-") == 0) {
+      *out_value = left - right;
+      return 1;
+    }
+    if (strcmp(binary_expr->operator, "*") == 0) {
+      *out_value = left * right;
+      return 1;
+    }
+    if (strcmp(binary_expr->operator, "/") == 0) {
+      if (right == 0) {
+        return 0;
+      }
+      *out_value = left / right;
+      return 1;
+    }
+    if (strcmp(binary_expr->operator, "%") == 0) {
+      if (right == 0) {
+        return 0;
+      }
+      *out_value = left % right;
+      return 1;
+    }
+    return 0;
+  }
+
+  default:
+    return 0;
+  }
+}
+
 TypeChecker *type_checker_create(SymbolTable *symbol_table) {
   return type_checker_create_with_error_reporter(symbol_table, NULL);
 }
@@ -1594,6 +1674,19 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       return 0;
     }
 
+    long long *case_values = NULL;
+    size_t case_value_count = 0;
+    int seen_default = 0;
+
+    if (switch_stmt->case_count > 0) {
+      case_values = malloc(switch_stmt->case_count * sizeof(long long));
+      if (!case_values) {
+        type_checker_set_error_at_location(checker, statement->location,
+                                           "Memory allocation failed in switch validation");
+        return 0;
+      }
+    }
+
     checker->switch_depth++;
     for (size_t i = 0; i < switch_stmt->case_count; i++) {
       ASTNode *case_node = switch_stmt->cases ? switch_stmt->cases[i] : NULL;
@@ -1601,6 +1694,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
         type_checker_set_error_at_location(checker, statement->location,
                                            "Invalid case clause in switch");
         checker->switch_depth--;
+        free(case_values);
         return 0;
       }
 
@@ -1609,33 +1703,91 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
         type_checker_set_error_at_location(checker, case_node->location,
                                            "Invalid case clause");
         checker->switch_depth--;
+        free(case_values);
         return 0;
       }
 
-      if (!case_clause->is_default) {
-        if (!case_clause->value || case_clause->value->type != AST_NUMBER_LITERAL) {
-          type_checker_set_error_at_location(checker, case_node->location,
-                                             "Case value must be a numeric literal");
+      if (case_clause->is_default) {
+        if (seen_default) {
+          type_checker_set_error_at_location(
+              checker, case_node->location,
+              "Switch may only contain one default clause");
           checker->switch_depth--;
+          free(case_values);
           return 0;
         }
+        seen_default = 1;
+      } else {
+        if (!case_clause->value) {
+          type_checker_set_error_at_location(
+              checker, case_node->location,
+              "Case clause is missing a value expression");
+          checker->switch_depth--;
+          free(case_values);
+          return 0;
+        }
+
         Type *case_type = type_checker_infer_type(checker, case_clause->value);
-        if (!case_type || !type_checker_is_assignable(checker, switch_type, case_type)) {
-          type_checker_report_type_mismatch(checker, case_clause->value->location,
-                                            switch_type->name,
-                                            case_type ? case_type->name : "unknown");
+        if (!case_type) {
           checker->switch_depth--;
+          free(case_values);
           return 0;
         }
+        if (!type_checker_is_integer_type(case_type)) {
+          type_checker_report_type_mismatch(checker, case_clause->value->location,
+                                            "integer type", case_type->name);
+          checker->switch_depth--;
+          free(case_values);
+          return 0;
+        }
+        if (!type_checker_is_assignable(checker, switch_type, case_type)) {
+          type_checker_report_type_mismatch(checker, case_clause->value->location,
+                                            switch_type->name, case_type->name);
+          checker->switch_depth--;
+          free(case_values);
+          return 0;
+        }
+
+        long long case_value = 0;
+        if (!type_checker_eval_integer_constant(case_clause->value, &case_value)) {
+          type_checker_set_error_at_location(
+              checker, case_clause->value->location,
+              "Case value must be a compile-time integer constant expression");
+          checker->switch_depth--;
+          free(case_values);
+          return 0;
+        }
+
+        for (size_t j = 0; j < case_value_count; j++) {
+          if (case_values[j] == case_value) {
+            type_checker_set_error_at_location(
+                checker, case_clause->value->location,
+                "Duplicate case value '%lld' in switch", case_value);
+            checker->switch_depth--;
+            free(case_values);
+            return 0;
+          }
+        }
+        case_values[case_value_count++] = case_value;
       }
 
-      if (case_clause->body &&
-          !type_checker_check_statement(checker, case_clause->body)) {
+      if (!case_clause->body) {
+        type_checker_set_error_at_location(
+            checker, case_node->location,
+            "Case clause must have a body");
         checker->switch_depth--;
+        free(case_values);
+        return 0;
+      }
+
+      if (!type_checker_check_statement(checker, case_clause->body)) {
+        checker->switch_depth--;
+        free(case_values);
         return 0;
       }
     }
     checker->switch_depth--;
+    free(case_values);
     return 1;
   }
 

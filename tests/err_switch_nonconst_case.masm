@@ -1,0 +1,9 @@
+function main() -> int32 {
+  var k: int32 = 2;
+  switch (1) {
+    case k:
+      return 1;
+    default:
+      return 0;
+  }
+}

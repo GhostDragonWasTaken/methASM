@@ -1,0 +1,14 @@
+function main() -> int32 {
+  var x: int32 = 0;
+  switch (2 + 1) {
+    case 1 + 1:
+      x = 5;
+      break;
+    case 1 + 2:
+      x = 9;
+      break;
+    default:
+      x = 3;
+  }
+  return x;
+}
