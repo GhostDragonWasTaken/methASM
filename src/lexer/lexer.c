@@ -152,6 +152,9 @@ Token lexer_next_token(Lexer *lexer) {
   case '*':
     token.type = TOKEN_MULTIPLY;
     break;
+  case '&':
+    token.type = TOKEN_AMPERSAND;
+    break;
   case '/':
     // Note: comments (//) are already handled above before this switch
     token.type = TOKEN_DIVIDE;

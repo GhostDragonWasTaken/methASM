@@ -141,6 +141,8 @@ static const char *token_type_to_string(TokenType type) {
     return "'asm'";
   case TOKEN_THIS:
     return "'this'";
+  case TOKEN_NEW:
+    return "'new'";
   case TOKEN_COLON:
     return "':'";
   case TOKEN_SEMICOLON:
@@ -169,6 +171,8 @@ static const char *token_type_to_string(TokenType type) {
     return "'-'";
   case TOKEN_MULTIPLY:
     return "'*'";
+  case TOKEN_AMPERSAND:
+    return "'&'";
   case TOKEN_DIVIDE:
     return "'/'";
   case TOKEN_DOT:
@@ -374,6 +378,8 @@ int parser_is_unary_operator(TokenType type) {
   switch (type) {
   case TOKEN_MINUS:
   case TOKEN_PLUS:
+  case TOKEN_MULTIPLY:
+  case TOKEN_AMPERSAND:
     return 1;
   default:
     return 0;
@@ -440,6 +446,60 @@ ASTNode *parser_parse_declaration(Parser *parser) {
   }
 }
 
+static int parser_is_assignment_target(ASTNode *target) {
+  if (!target) {
+    return 0;
+  }
+
+  if (target->type == AST_IDENTIFIER || target->type == AST_MEMBER_ACCESS ||
+      target->type == AST_INDEX_EXPRESSION) {
+    return 1;
+  }
+
+  if (target->type == AST_UNARY_EXPRESSION) {
+    UnaryExpression *unary = (UnaryExpression *)target->data;
+    return unary && unary->operator && strcmp(unary->operator, "*") == 0;
+  }
+
+  return 0;
+}
+
+static ASTNode *parser_parse_assignment_from_target(Parser *parser,
+                                                    ASTNode *target) {
+  if (!parser || !target) {
+    return NULL;
+  }
+
+  if (!parser_is_assignment_target(target)) {
+    parser_set_error(parser, "Invalid assignment target");
+    ast_destroy_node(target);
+    return NULL;
+  }
+
+  parser_advance(parser); // consume '='
+  ASTNode *value = parser_parse_expression(parser);
+  if (!value) {
+    ast_destroy_node(target);
+    return NULL;
+  }
+
+  if (target->type == AST_IDENTIFIER) {
+    Identifier *id = (Identifier *)target->data;
+    if (!id || !id->name) {
+      ast_destroy_node(target);
+      ast_destroy_node(value);
+      parser_set_error(parser, "Invalid assignment target");
+      return NULL;
+    }
+
+    ASTNode *assign = ast_create_assignment(id->name, value, target->location);
+    ast_destroy_node(target);
+    return assign;
+  }
+
+  return ast_create_field_assignment(target, value, target->location);
+}
+
 ASTNode *parser_parse_statement(Parser *parser) {
   if (!parser)
     return NULL;
@@ -463,57 +523,22 @@ ASTNode *parser_parse_statement(Parser *parser) {
     return parser_parse_continue_statement(parser);
   case TOKEN_ASM:
     return parser_parse_inline_asm(parser);
-  case TOKEN_IDENTIFIER:
-    // Could be assignment, field assignment, or function call
-    if (parser->peek_token.type == TOKEN_EQUALS) {
-      return parser_parse_assignment(parser);
-    } else if (parser->peek_token.type == TOKEN_DOT ||
-               parser->peek_token.type == TOKEN_LBRACKET) {
-      // Could be field assignment (obj.field = expr) or method call/field
-      // access
-      ASTNode *lhs = parser_parse_expression(parser);
-      if (!lhs)
-        return NULL;
-      // Check if followed by '=' — this is a field assignment
-      if (parser->current_token.type == TOKEN_EQUALS &&
-          (lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_INDEX_EXPRESSION ||
-           lhs->type == AST_IDENTIFIER)) {
-        parser_advance(parser); // consume '='
-        ASTNode *value = parser_parse_expression(parser);
-        if (!value) {
-          ast_destroy_node(lhs);
-          return NULL;
-        }
-        if (lhs->type == AST_IDENTIFIER) {
-          Identifier *id = (Identifier *)lhs->data;
-          if (!id || !id->name) {
-            ast_destroy_node(lhs);
-            ast_destroy_node(value);
-            parser_set_error(parser, "Invalid assignment target");
-            return NULL;
-          }
-          ASTNode *assign = ast_create_assignment(id->name, value, lhs->location);
-          ast_destroy_node(lhs);
-          return assign;
-        }
-        return ast_create_field_assignment(lhs, value, lhs->location);
-      }
-      // Otherwise it was a normal expression statement (e.g. method call)
-      return lhs;
-    } else {
-      return parser_parse_expression(
-          parser); // Could be function call or other expression
-    }
   case TOKEN_LBRACE:
     return parser_parse_block(parser);
-  case TOKEN_NEW:
   default:
-    // Try to parse as expression statement
-    return parser_parse_expression(parser);
+    break;
   }
 
-  parser_set_error(parser, "Unexpected token in statement");
-  return NULL;
+  ASTNode *expr = parser_parse_expression(parser);
+  if (!expr) {
+    return NULL;
+  }
+
+  if (parser->current_token.type == TOKEN_EQUALS) {
+    return parser_parse_assignment_from_target(parser, expr);
+  }
+
+  return expr;
 }
 
 ASTNode *parser_parse_expression(Parser *parser) {
@@ -546,21 +571,35 @@ static char *parser_parse_type_annotation(Parser *parser) {
     return NULL;
   }
 
-  char *base_type = strdup(parser->current_token.value);
+  char *type_name = strdup(parser->current_token.value);
   parser_advance(parser);
 
-  if (!base_type) {
+  if (!type_name) {
     return NULL;
   }
 
+  while (parser->current_token.type == TOKEN_MULTIPLY) {
+    size_t next_len = strlen(type_name) + 2;
+    char *next_type = malloc(next_len);
+    if (!next_type) {
+      free(type_name);
+      return NULL;
+    }
+
+    snprintf(next_type, next_len, "%s*", type_name);
+    free(type_name);
+    type_name = next_type;
+    parser_advance(parser); // consume '*'
+  }
+
   if (parser->current_token.type != TOKEN_LBRACKET) {
-    return base_type;
+    return type_name;
   }
 
   parser_advance(parser); // consume '['
 
   if (parser->current_token.type != TOKEN_NUMBER) {
-    free(base_type);
+    free(type_name);
     parser_set_error(parser, "Expected array size after '['");
     return NULL;
   }
@@ -569,26 +608,26 @@ static char *parser_parse_type_annotation(Parser *parser) {
   parser_advance(parser);
 
   if (!size_text) {
-    free(base_type);
+    free(type_name);
     return NULL;
   }
 
   if (!parser_expect(parser, TOKEN_RBRACKET)) {
-    free(base_type);
+    free(type_name);
     free(size_text);
     return NULL;
   }
 
-  size_t full_len = strlen(base_type) + strlen(size_text) + 3;
+  size_t full_len = strlen(type_name) + strlen(size_text) + 3;
   char *full_type = malloc(full_len);
   if (!full_type) {
-    free(base_type);
+    free(type_name);
     free(size_text);
     return NULL;
   }
 
-  snprintf(full_type, full_len, "%s[%s]", base_type, size_text);
-  free(base_type);
+  snprintf(full_type, full_len, "%s[%s]", type_name, size_text);
+  free(type_name);
   free(size_text);
   return full_type;
 }
@@ -609,22 +648,8 @@ static ASTNode *parser_parse_for_initializer(Parser *parser) {
   if (!expr)
     return NULL;
 
-  if (parser->current_token.type == TOKEN_EQUALS &&
-      (expr->type == AST_IDENTIFIER || expr->type == AST_MEMBER_ACCESS ||
-       expr->type == AST_INDEX_EXPRESSION)) {
-    parser_advance(parser); // consume '='
-    ASTNode *value = parser_parse_expression(parser);
-    if (!value) {
-      ast_destroy_node(expr);
-      return NULL;
-    }
-    if (expr->type == AST_IDENTIFIER) {
-      Identifier *id = (Identifier *)expr->data;
-      ASTNode *assign = ast_create_assignment(id->name, value, expr->location);
-      ast_destroy_node(expr);
-      return assign;
-    }
-    return ast_create_field_assignment(expr, value, expr->location);
+  if (parser->current_token.type == TOKEN_EQUALS) {
+    return parser_parse_assignment_from_target(parser, expr);
   }
 
   return expr;
@@ -815,6 +840,29 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
       parser_advance(parser);
 
       expr = ast_create_member_access(expr, member, location);
+      free(member);
+
+    } else if (parser->current_token.type == TOKEN_ARROW) {
+      // Pointer member access: p->field == (*p).field
+      parser_advance(parser); // consume '->'
+
+      if (parser->current_token.type != TOKEN_IDENTIFIER) {
+        parser_set_error(parser, "Expected member name after '->'");
+        ast_destroy_node(expr);
+        return NULL;
+      }
+
+      char *member = strdup(parser->current_token.value);
+      parser_advance(parser);
+
+      ASTNode *deref = ast_create_unary_expression("*", expr, location);
+      if (!deref) {
+        free(member);
+        ast_destroy_node(expr);
+        return NULL;
+      }
+
+      expr = ast_create_member_access(deref, member, location);
       free(member);
 
     } else if (parser->current_token.type == TOKEN_LBRACKET) {
@@ -1680,25 +1728,14 @@ ASTNode *parser_parse_for_statement(Parser *parser) {
       return NULL;
     }
 
-    if (parser->current_token.type == TOKEN_EQUALS &&
-        (expr->type == AST_IDENTIFIER || expr->type == AST_MEMBER_ACCESS ||
-         expr->type == AST_INDEX_EXPRESSION)) {
-      parser_advance(parser);
-      ASTNode *value = parser_parse_expression(parser);
-      if (!value) {
-        ast_destroy_node(expr);
+    if (parser->current_token.type == TOKEN_EQUALS) {
+      increment = parser_parse_assignment_from_target(parser, expr);
+      if (!increment) {
         if (initializer)
           ast_destroy_node(initializer);
         if (condition)
           ast_destroy_node(condition);
         return NULL;
-      }
-      if (expr->type == AST_IDENTIFIER) {
-        Identifier *id = (Identifier *)expr->data;
-        increment = ast_create_assignment(id->name, value, expr->location);
-        ast_destroy_node(expr);
-      } else {
-        increment = ast_create_field_assignment(expr, value, expr->location);
       }
     } else {
       increment = expr;
@@ -2180,3 +2217,5 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
 
   return method_decl;
 }
+
+

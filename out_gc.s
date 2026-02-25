@@ -21,80 +21,71 @@ main:
     push r13         ; Save callee-saved register
     push r14         ; Save callee-saved register
     push r15         ; Save callee-saved register
-    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    sub rsp, 16    ; Allocate 16 bytes on stack (aligned)
     ; Zero-initialize local variable space
     mov rdi, rsp  ; Destination for memset
     mov rax, 0     ; Value to set (zero)
-    mov rcx, 32    ; Number of bytes
+    mov rcx, 16    ; Number of bytes
     rep stosb         ; Zero-fill the stack space
     ; Registering 0 function parameters
-    ; Added 4 bytes padding for 16-byte alignment
-    ; Local variable: v1 (Vector3, 12 bytes) at offset -12
+    ; Added 8 bytes padding for 16-byte alignment
+    ; Local variable: v1 (Vector3*, 8 bytes) at offset -8
     ; Initialize variable v1
     ; Heap allocation: new Vector3
     mov rdi, 12      ; size in bytes
     extern gc_alloc
     call gc_alloc
-    mov [rbp - 12], rax     ; Store int64
-    ; Field assignment: .x = ...
+    mov [rbp - 8], rax     ; Store int64
     ; Integer literal: 10
     mov rax, 10
-    push rax           ; Save value
+    push rax           ; Save assigned value
     ; Load variable: v1
-    mov rax, [rbp - 12]  ; From stack [rbp - 12]
+    mov rax, [rbp - 8]  ; From stack [rbp - 8]
     pop rcx            ; Restore value
-    mov [rax], rcx     ; Store value to field
-    ; Field assignment: .y = ...
+    mov dword [rax], ecx
     ; Integer literal: 20
     mov rax, 20
-    push rax           ; Save value
+    push rax           ; Save assigned value
     ; Load variable: v1
-    mov rax, [rbp - 12]  ; From stack [rbp - 12]
-    add rax, 4       ; Add field offset
+    mov rax, [rbp - 8]  ; From stack [rbp - 8]
+    add rax, 4       ; Field address
     pop rcx            ; Restore value
-    mov [rax], rcx     ; Store value to field
-    ; Added 4 bytes padding for 16-byte alignment
-    ; Local variable: v2 (Vector3, 12 bytes) at offset -28
+    mov dword [rax], ecx
+    ; Added 8 bytes padding for 16-byte alignment
+    ; Local variable: v2 (Vector3*, 8 bytes) at offset -24
     ; Initialize variable v2
     ; Heap allocation: new Vector3
     mov rdi, 12      ; size in bytes
     extern gc_alloc
     call gc_alloc
-    mov [rbp - 28], rax     ; Store int64
-    ; Field assignment: .z = ...
+    mov [rbp - 24], rax     ; Store int64
     ; Integer literal: 30
     mov rax, 30
-    push rax           ; Save value
+    push rax           ; Save assigned value
     ; Load variable: v2
-    mov rax, [rbp - 28]  ; From stack [rbp - 28]
-    add rax, 8       ; Add field offset
+    mov rax, [rbp - 24]  ; From stack [rbp - 24]
+    add rax, 8       ; Field address
     pop rcx            ; Restore value
-    mov [rax], rcx     ; Store value to field
+    mov dword [rax], ecx
     ; Return statement
     ; Binary operation: +
     ; Binary operation: +
-    ; Member access: .x
     ; Load variable: v1
-    mov rax, [rbp - 12]  ; From stack [rbp - 12]
-    ; Field offset for x: 0
-    mov rax, [rax]    ; Load field value
+    mov rax, [rbp - 8]  ; From stack [rbp - 8]
+    mov eax, dword [rax]
     push rax           ; Save left operand
-    ; Member access: .y
     ; Load variable: v1
-    mov rax, [rbp - 12]  ; From stack [rbp - 12]
-    ; Field offset for y: 4
-    add rax, 4       ; Add field offset
-    mov rax, [rax]    ; Load field value
+    mov rax, [rbp - 8]  ; From stack [rbp - 8]
+    add rax, 4       ; Field address
+    mov eax, dword [rax]
     mov rbx, rax     ; Move right operand to RBX
     pop rax            ; Restore left operand
     add rax, rbx      ; + operation
     push rax           ; Save left operand
-    ; Member access: .z
     ; Load variable: v2
-    mov rax, [rbp - 28]  ; From stack [rbp - 28]
-    ; Field offset for z: 8
-    add rax, 8       ; Add field offset
-    mov rax, [rax]    ; Load field value
+    mov rax, [rbp - 24]  ; From stack [rbp - 24]
+    add rax, 8       ; Field address
+    mov eax, dword [rax]
     mov rbx, rax     ; Move right operand to RBX
     pop rax            ; Restore left operand
     add rax, rbx      ; + operation

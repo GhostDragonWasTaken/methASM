@@ -284,6 +284,7 @@ Type *type_create(TypeKind kind, const char *name) {
   case TYPE_INT64:
   case TYPE_UINT64:
   case TYPE_FLOAT64:
+  case TYPE_POINTER:
     type->size = 8;
     type->alignment = 8;
     break;

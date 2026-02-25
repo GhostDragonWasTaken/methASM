@@ -27,6 +27,9 @@ static void code_generator_emit_load_value_from_address(CodeGenerator *generator
                                                         int element_size);
 static int code_generator_generate_array_element_address(
     CodeGenerator *generator, ASTNode *array_expr, ASTNode *index_expr);
+static int code_generator_generate_lvalue_address(CodeGenerator *generator,
+                                                  ASTNode *target,
+                                                  Type **out_target_type);
 
 CodeGenerator *code_generator_create(SymbolTable *symbol_table,
                                      TypeChecker *type_checker,
@@ -499,6 +502,16 @@ void code_generator_register_function_parameters(
     const char *param_name = func_data->parameter_names[i];
     const char *type_name = func_data->parameter_types[i];
 
+    Type *resolved_param_type = NULL;
+    if (type_name) {
+      resolved_param_type =
+          type_checker_get_type_by_name(generator->type_checker, type_name);
+    }
+    if (!resolved_param_type) {
+      resolved_param_type =
+          type_checker_get_type_by_name(generator->type_checker, "int64");
+    }
+
     // Create a temporary variable declaration AST node for the parameter
     ASTNode *param_var_decl = ast_create_var_declaration(
         param_name, type_name, NULL, (SourceLocation){0, 0});
@@ -506,12 +519,20 @@ void code_generator_register_function_parameters(
       continue;
 
     Symbol *param_symbol =
-        symbol_table_lookup(generator->symbol_table, param_name);
+        symbol_table_lookup_current_scope(generator->symbol_table, param_name);
     if (!param_symbol) {
-      // This should have been created during semantic analysis, but as a
-      // fallback:
-      param_symbol = symbol_create(param_name, SYMBOL_VARIABLE, NULL);
-      symbol_table_insert(generator->symbol_table, param_symbol);
+      param_symbol = symbol_create(param_name, SYMBOL_PARAMETER, resolved_param_type);
+      if (!param_symbol || !symbol_table_declare(generator->symbol_table,
+                                                 param_symbol)) {
+        symbol_destroy(param_symbol);
+        ast_destroy_node(param_var_decl);
+        code_generator_set_error(generator,
+                                 "Failed to register parameter '%s'",
+                                 param_name ? param_name : "<unnamed>");
+        return;
+      }
+    } else if (!param_symbol->type) {
+      param_symbol->type = resolved_param_type;
     }
 
     // Determine if parameter is in register or on stack
@@ -519,7 +540,7 @@ void code_generator_register_function_parameters(
     int register_id = -1;
     int memory_offset = 0;
 
-    Type *param_type = param_symbol->type; // Assume type is set in symbol
+    Type *param_type = param_symbol->type;
     int is_float = code_generator_is_floating_point_type(param_type);
 
     if (is_float && float_param_reg_index < conv_spec->float_param_count) {
@@ -2457,6 +2478,14 @@ Type *code_generator_infer_expression_type(CodeGenerator *generator,
     return NULL;
   }
 
+  if (generator->type_checker) {
+    Type *semantic_type =
+        type_checker_infer_type(generator->type_checker, expression);
+    if (semantic_type) {
+      return semantic_type;
+    }
+  }
+
   // Create a basic type structure for return
   static Type int_type = {
       .kind = TYPE_INT32, .name = "int32", .size = 4, .alignment = 4};
@@ -2772,10 +2801,44 @@ void code_generator_generate_unary_operation(CodeGenerator *generator,
 
   code_generator_emit(generator, "    ; Unary operation: %s\n", op);
 
-  // Generate operand (result in RAX)
-  code_generator_generate_expression(generator, operand);
+  if (strcmp(op, "&") == 0) {
+    Type *target_type = NULL;
+    if (!code_generator_generate_lvalue_address(generator, operand,
+                                                &target_type)) {
+      return;
+    }
+  } else if (strcmp(op, "*") == 0) {
+    Type *operand_type = code_generator_infer_expression_type(generator, operand);
+    code_generator_generate_expression(generator, operand);
+    if (generator->has_error) {
+      return;
+    }
 
-  // Apply unary operation
+    if (!operand_type || operand_type->kind != TYPE_POINTER ||
+        !operand_type->base_type) {
+      code_generator_set_error(generator,
+                               "Dereference requires a pointer operand");
+      return;
+    }
+
+    if (operand_type->base_type->kind == TYPE_STRUCT ||
+        operand_type->base_type->kind == TYPE_ARRAY) {
+      code_generator_set_error(
+          generator,
+          "Aggregate dereference values are not supported in this context");
+      return;
+    }
+
+    int element_size = code_generator_get_type_storage_size(operand_type->base_type);
+    code_generator_emit_load_value_from_address(generator, element_size);
+  } else {
+    // Generate operand (result in RAX)
+    code_generator_generate_expression(generator, operand);
+    if (generator->has_error) {
+      return;
+    }
+  }
+
   if (strcmp(op, "-") == 0) {
     code_generator_emit(generator, "    neg rax            ; Negate\n");
   } else if (strcmp(op, "!") == 0) {
@@ -2788,6 +2851,8 @@ void code_generator_generate_unary_operation(CodeGenerator *generator,
   } else if (strcmp(op, "+") == 0) {
     // Unary plus - no operation needed
     code_generator_emit(generator, "    ; Unary plus (no-op)\n");
+  } else if (strcmp(op, "&") == 0 || strcmp(op, "*") == 0) {
+    // Already handled above.
   } else {
     code_generator_set_error(generator, "Unknown unary operator '%s'", op);
   }
@@ -2803,78 +2868,7 @@ void code_generator_generate_assignment_statement(CodeGenerator *generator,
     return;
   }
 
-  if (assign_data->target && assign_data->target->type == AST_MEMBER_ACCESS) {
-    // Struct field assignment: obj.field = expr
-    MemberAccess *access = (MemberAccess *)assign_data->target->data;
-    if (!access || !access->object || !access->member)
-      return;
-
-    code_generator_emit(generator, "    ; Field assignment: .%s = ...\n",
-                        access->member);
-
-    // Generate the value expression (result in RAX)
-    code_generator_generate_expression(generator, assign_data->value);
-    code_generator_emit(generator, "    push rax           ; Save value\n");
-
-    // Generate the object base address
-    code_generator_generate_expression(generator, access->object);
-    // RAX now has the base address of the struct
-
-    // Calculate field offset
-    int field_offset = -1;
-    Type *object_type = NULL;
-
-    if (access->object->type == AST_IDENTIFIER) {
-      Identifier *id_data = (Identifier *)access->object->data;
-      if (id_data && id_data->name) {
-        Symbol *object_symbol =
-            symbol_table_lookup(generator->symbol_table, id_data->name);
-        if (object_symbol && object_symbol->type &&
-            object_symbol->type->kind == TYPE_STRUCT) {
-          object_type = object_symbol->type;
-          field_offset = code_generator_get_field_offset(generator, object_type,
-                                                         access->member);
-        }
-      }
-    }
-
-    if (field_offset < 0) {
-      code_generator_set_error(
-          generator, "Cannot determine field offset for '%s' in assignment",
-          access->member);
-      return;
-    }
-
-    if (field_offset > 0) {
-      code_generator_emit(generator,
-                          "    add rax, %d       ; Add field offset\n",
-                          field_offset);
-    }
-
-    code_generator_emit(generator, "    pop rcx            ; Restore value\n");
-    code_generator_emit(generator,
-                        "    mov [rax], rcx     ; Store value to field\n");
-  } else if (assign_data->target &&
-             assign_data->target->type == AST_INDEX_EXPRESSION) {
-    ArrayIndexExpression *index_data =
-        (ArrayIndexExpression *)assign_data->target->data;
-    if (!index_data || !index_data->array || !index_data->index) {
-      code_generator_set_error(generator, "Invalid array assignment target");
-      return;
-    }
-
-    code_generator_generate_expression(generator, assign_data->value);
-    code_generator_emit(generator, "    push rax           ; Save assigned value\n");
-
-    int element_size = code_generator_generate_array_element_address(
-        generator, index_data->array, index_data->index);
-    if (generator->has_error) {
-      return;
-    }
-
-    code_generator_emit(generator, "    pop rcx            ; Restore value\n");
-    code_generator_emit_store_value_at_address(generator, element_size);
-  } else if (assign_data->variable_name) {
+  if (assign_data->variable_name) {
     // Simple variable assignment: name = expr
     code_generator_emit(generator, "    ; Assignment to %s\n",
                         assign_data->variable_name);
@@ -2884,6 +2878,32 @@ void code_generator_generate_assignment_statement(CodeGenerator *generator,
 
     // Store the result to the variable
     code_generator_store_variable(generator, assign_data->variable_name, "rax");
+  } else if (assign_data->target) {
+    Type *target_type = NULL;
+    code_generator_generate_expression(generator, assign_data->value);
+    if (generator->has_error) {
+      return;
+    }
+
+    code_generator_emit(generator, "    push rax           ; Save assigned value\n");
+    if (!code_generator_generate_lvalue_address(generator, assign_data->target,
+                                                &target_type)) {
+      return;
+    }
+
+    if (!target_type) {
+      code_generator_set_error(generator, "Unable to resolve assignment target type");
+      return;
+    }
+    if (target_type->kind == TYPE_STRUCT || target_type->kind == TYPE_ARRAY) {
+      code_generator_set_error(generator,
+                               "Aggregate assignment is not supported");
+      return;
+    }
+
+    int element_size = code_generator_get_type_storage_size(target_type);
+    code_generator_emit(generator, "    pop rcx            ; Restore value\n");
+    code_generator_emit_store_value_at_address(generator, element_size);
   } else {
     code_generator_set_error(generator, "Invalid assignment target");
   }
@@ -3223,54 +3243,24 @@ void code_generator_generate_member_access(CodeGenerator *generator,
     return;
   }
 
-  code_generator_emit(generator, "    ; Member access: .%s\n",
-                      access_data->member);
-
-  // Generate the object expression to get base address
-  code_generator_generate_expression(generator, access_data->object);
-
-  // Try to determine object type for proper field offset calculation
-  // This requires enhanced type information from semantic analysis
-  Type *object_type = NULL;
-
-  // If the object is an identifier, look up its type
-  if (access_data->object->type == AST_IDENTIFIER) {
-    Identifier *id_data = (Identifier *)access_data->object->data;
-    if (id_data && id_data->name) {
-      Symbol *object_symbol =
-          symbol_table_lookup(generator->symbol_table, id_data->name);
-      if (object_symbol && object_symbol->type) {
-        object_type = object_symbol->type;
-      }
-    }
+  Type *field_type = NULL;
+  if (!code_generator_generate_lvalue_address(generator, member_access,
+                                              &field_type)) {
+    return;
   }
-
-  int field_offset = -1;
-
-  // If we have type information, calculate proper field offset
-  if (object_type && object_type->kind == TYPE_STRUCT) {
-    field_offset = code_generator_get_field_offset(generator, object_type,
-                                                   access_data->member);
-  }
-
-  // If we couldn't determine the offset, use default values for testing
-  if (field_offset < 0) {
+  if (!field_type) {
     code_generator_set_error(generator,
-                             "Cannot determine field offset for '%s'",
-                             access_data->member);
+                             "Cannot resolve member access target type");
+    return;
+  }
+  if (field_type->kind == TYPE_STRUCT || field_type->kind == TYPE_ARRAY) {
+    code_generator_set_error(generator,
+                             "Aggregate member values are not supported");
     return;
   }
 
-  code_generator_emit(generator, "    ; Field offset for %s: %d\n",
-                      access_data->member, field_offset);
-
-  if (field_offset > 0) {
-    code_generator_emit(generator, "    add rax, %d       ; Add field offset\n",
-                        field_offset);
-  }
-
-  // Load the field value (assumes the field is a pointer-sized value)
-  code_generator_emit(generator, "    mov rax, [rax]    ; Load field value\n");
+  int field_size = code_generator_get_type_storage_size(field_type);
+  code_generator_emit_load_value_from_address(generator, field_size);
 }
 
 static int code_generator_get_type_storage_size(Type *type) {
@@ -3355,6 +3345,154 @@ static int code_generator_generate_array_element_address(
   return element_size;
 }
 
+static int code_generator_generate_lvalue_address(CodeGenerator *generator,
+                                                  ASTNode *target,
+                                                  Type **out_target_type) {
+  if (!generator || !target) {
+    return 0;
+  }
+
+  if (out_target_type) {
+    *out_target_type = NULL;
+  }
+
+  switch (target->type) {
+  case AST_IDENTIFIER: {
+    Identifier *id = (Identifier *)target->data;
+    if (!id || !id->name) {
+      code_generator_set_error(generator, "Invalid identifier lvalue");
+      return 0;
+    }
+
+    Symbol *symbol = symbol_table_lookup(generator->symbol_table, id->name);
+    if (!symbol ||
+        (symbol->kind != SYMBOL_VARIABLE && symbol->kind != SYMBOL_PARAMETER)) {
+      code_generator_set_error(generator,
+                               "Undefined lvalue identifier '%s'", id->name);
+      return 0;
+    }
+
+    if (out_target_type) {
+      *out_target_type = symbol->type;
+    }
+
+    if (symbol->data.variable.is_in_register) {
+      code_generator_set_error(
+          generator,
+          "Cannot take address of register-allocated variable '%s'", id->name);
+      return 0;
+    }
+
+    if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
+      code_generator_emit(generator,
+                          "    lea rax, [%s + rip]  ; Address of global\n",
+                          id->name);
+    } else {
+      int offset = symbol->data.variable.memory_offset;
+      code_generator_emit(generator,
+                          "    lea rax, [rbp - %d]  ; Address of local\n",
+                          offset);
+    }
+    return 1;
+  }
+
+  case AST_MEMBER_ACCESS: {
+    MemberAccess *access = (MemberAccess *)target->data;
+    if (!access || !access->object || !access->member) {
+      code_generator_set_error(generator, "Invalid member lvalue");
+      return 0;
+    }
+
+    Type *object_type = NULL;
+    if (!code_generator_generate_lvalue_address(generator, access->object,
+                                                &object_type)) {
+      return 0;
+    }
+    if (!object_type || object_type->kind != TYPE_STRUCT) {
+      code_generator_set_error(generator,
+                               "Member access requires struct object");
+      return 0;
+    }
+
+    int field_offset =
+        code_generator_get_field_offset(generator, object_type, access->member);
+    if (field_offset < 0) {
+      code_generator_set_error(generator,
+                               "Cannot determine field offset for '%s'",
+                               access->member);
+      return 0;
+    }
+    if (field_offset > 0) {
+      code_generator_emit(generator, "    add rax, %d       ; Field address\n",
+                          field_offset);
+    }
+
+    if (out_target_type) {
+      *out_target_type = type_get_field_type(object_type, access->member);
+    }
+    return 1;
+  }
+
+  case AST_INDEX_EXPRESSION: {
+    ArrayIndexExpression *idx = (ArrayIndexExpression *)target->data;
+    if (!idx || !idx->array || !idx->index) {
+      code_generator_set_error(generator, "Invalid index lvalue");
+      return 0;
+    }
+
+    Type *array_type = code_generator_infer_expression_type(generator, idx->array);
+    if (!array_type ||
+        (array_type->kind != TYPE_ARRAY && array_type->kind != TYPE_POINTER) ||
+        !array_type->base_type) {
+      code_generator_set_error(generator,
+                               "Indexing requires array or pointer type");
+      return 0;
+    }
+
+    code_generator_generate_array_element_address(generator, idx->array, idx->index);
+    if (generator->has_error) {
+      return 0;
+    }
+
+    if (out_target_type) {
+      *out_target_type = array_type->base_type;
+    }
+    return 1;
+  }
+
+  case AST_UNARY_EXPRESSION: {
+    UnaryExpression *unary = (UnaryExpression *)target->data;
+    if (!unary || !unary->operator || !unary->operand ||
+        strcmp(unary->operator, "*") != 0) {
+      code_generator_set_error(generator, "Invalid unary lvalue target");
+      return 0;
+    }
+
+    Type *operand_type = code_generator_infer_expression_type(generator, unary->operand);
+    if (!operand_type || operand_type->kind != TYPE_POINTER ||
+        !operand_type->base_type) {
+      code_generator_set_error(generator,
+                               "Dereference assignment requires pointer type");
+      return 0;
+    }
+
+    code_generator_generate_expression(generator, unary->operand);
+    if (generator->has_error) {
+      return 0;
+    }
+
+    if (out_target_type) {
+      *out_target_type = operand_type->base_type;
+    }
+    return 1;
+  }
+
+  default:
+    code_generator_set_error(generator, "Expression is not assignable");
+    return 0;
+  }
+}
+
 void code_generator_generate_array_index(CodeGenerator *generator,
                                          ASTNode *index_expression) {
   if (!generator || !index_expression ||
@@ -3369,13 +3507,22 @@ void code_generator_generate_array_index(CodeGenerator *generator,
     return;
   }
 
-  int element_size =
-      code_generator_generate_array_element_address(generator, idx->array,
-                                                    idx->index);
-  if (generator->has_error) {
+  Type *element_type = NULL;
+  if (!code_generator_generate_lvalue_address(generator, index_expression,
+                                              &element_type)) {
+    return;
+  }
+  if (!element_type) {
+    code_generator_set_error(generator, "Cannot resolve indexed element type");
+    return;
+  }
+  if (element_type->kind == TYPE_STRUCT || element_type->kind == TYPE_ARRAY) {
+    code_generator_set_error(generator,
+                             "Aggregate index values are not supported");
     return;
   }
 
+  int element_size = code_generator_get_type_storage_size(element_type);
   code_generator_emit_load_value_from_address(generator, element_size);
 }
 

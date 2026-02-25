@@ -1,0 +1,14 @@
+struct A {
+  x: int32;
+}
+
+struct B {
+  y: int32;
+}
+
+function main() -> int32 {
+  var a: A* = new A;
+  var b: B* = new B;
+  a = b;
+  return 0;
+}

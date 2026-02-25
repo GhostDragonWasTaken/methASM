@@ -1,0 +1,5 @@
+function main() -> int32 {
+  var x: int32 = 5;
+  var y: int32 = *x;
+  return y;
+}

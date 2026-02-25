@@ -1,0 +1,9 @@
+function main() -> int32 {
+  var p: int32* = 0;
+
+  if (p == 0) {
+    return 0;
+  }
+
+  return 1;
+}

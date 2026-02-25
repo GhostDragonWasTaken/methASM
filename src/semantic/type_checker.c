@@ -68,6 +68,107 @@ static Type *type_checker_parse_array_type(TypeChecker *checker,
   return array_type;
 }
 
+static Type *type_checker_parse_pointer_type(TypeChecker *checker,
+                                             const char *name) {
+  if (!checker || !name) {
+    return NULL;
+  }
+
+  size_t name_len = strlen(name);
+  size_t pointer_depth = 0;
+  while (name_len > 0 && name[name_len - 1] == '*') {
+    pointer_depth++;
+    name_len--;
+  }
+
+  if (pointer_depth == 0 || name_len == 0) {
+    return NULL;
+  }
+
+  char *base_name = malloc(name_len + 1);
+  if (!base_name) {
+    return NULL;
+  }
+  memcpy(base_name, name, name_len);
+  base_name[name_len] = '\0';
+
+  Type *base_type = type_checker_get_type_by_name(checker, base_name);
+  free(base_name);
+  if (!base_type) {
+    return NULL;
+  }
+
+  Type *current = base_type;
+  for (size_t i = 0; i < pointer_depth; i++) {
+    const char *current_name = current && current->name ? current->name : "ptr";
+    size_t pointer_name_len = strlen(current_name) + 2;
+    char *pointer_name = malloc(pointer_name_len);
+    if (!pointer_name) {
+      return NULL;
+    }
+    snprintf(pointer_name, pointer_name_len, "%s*", current_name);
+
+    Type *pointer_type = type_create(TYPE_POINTER, pointer_name);
+    free(pointer_name);
+    if (!pointer_type) {
+      return NULL;
+    }
+
+    pointer_type->base_type = current;
+    pointer_type->size = 8;
+    pointer_type->alignment = 8;
+    current = pointer_type;
+  }
+
+  return current;
+}
+
+static int type_checker_types_equal(const Type *lhs, const Type *rhs) {
+  if (lhs == rhs) {
+    return 1;
+  }
+  if (!lhs || !rhs) {
+    return 0;
+  }
+  if (lhs->kind != rhs->kind) {
+    return 0;
+  }
+
+  switch (lhs->kind) {
+  case TYPE_POINTER:
+    return type_checker_types_equal(lhs->base_type, rhs->base_type);
+  case TYPE_ARRAY:
+    return lhs->array_size == rhs->array_size &&
+           type_checker_types_equal(lhs->base_type, rhs->base_type);
+  case TYPE_STRUCT:
+    if (lhs->name && rhs->name) {
+      return strcmp(lhs->name, rhs->name) == 0;
+    }
+    return lhs->name == rhs->name;
+  default:
+    return 1;
+  }
+}
+
+static int type_checker_is_lvalue_expression(ASTNode *expression) {
+  if (!expression) {
+    return 0;
+  }
+
+  switch (expression->type) {
+  case AST_IDENTIFIER:
+  case AST_MEMBER_ACCESS:
+  case AST_INDEX_EXPRESSION:
+    return 1;
+  case AST_UNARY_EXPRESSION: {
+    UnaryExpression *unary = (UnaryExpression *)expression->data;
+    return unary && unary->operator && strcmp(unary->operator, "*") == 0;
+  }
+  default:
+    return 0;
+  }
+}
+
 static int type_checker_eval_integer_constant(ASTNode *expression,
                                               long long *out_value) {
   if (!expression || !out_value) {
@@ -146,6 +247,11 @@ static int type_checker_eval_integer_constant(ASTNode *expression,
   default:
     return 0;
   }
+}
+
+static int type_checker_is_null_pointer_constant(ASTNode *expression) {
+  long long value = 0;
+  return type_checker_eval_integer_constant(expression, &value) && value == 0;
 }
 
 TypeChecker *type_checker_create(SymbolTable *symbol_table) {
@@ -279,7 +385,79 @@ Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression) {
 
   case AST_UNARY_EXPRESSION: {
     UnaryExpression *unop = (UnaryExpression *)expression->data;
-    return type_checker_infer_type(checker, unop->operand);
+    if (!unop || !unop->operator || !unop->operand) {
+      type_checker_set_error_at_location(checker, expression->location,
+                                         "Invalid unary expression");
+      return NULL;
+    }
+
+    if (strcmp(unop->operator, "&") == 0) {
+      if (!type_checker_is_lvalue_expression(unop->operand)) {
+        type_checker_set_error_at_location(
+            checker, unop->operand->location,
+            "Address-of operator requires an assignable expression");
+        return NULL;
+      }
+
+      Type *operand_type = type_checker_infer_type(checker, unop->operand);
+      if (!operand_type) {
+        return NULL;
+      }
+
+      const char *operand_name =
+          operand_type->name ? operand_type->name : "unknown";
+      size_t pointer_name_len = strlen(operand_name) + 2;
+      char *pointer_name = malloc(pointer_name_len);
+      if (!pointer_name) {
+        type_checker_set_error_at_location(checker, expression->location,
+                                           "Memory allocation failed");
+        return NULL;
+      }
+      snprintf(pointer_name, pointer_name_len, "%s*", operand_name);
+
+      Type *pointer_type = type_checker_get_type_by_name(checker, pointer_name);
+      free(pointer_name);
+      if (!pointer_type) {
+        type_checker_set_error_at_location(checker, expression->location,
+                                           "Failed to resolve pointer type");
+        return NULL;
+      }
+
+      return pointer_type;
+    }
+
+    if (strcmp(unop->operator, "*") == 0) {
+      Type *operand_type = type_checker_infer_type(checker, unop->operand);
+      if (!operand_type) {
+        return NULL;
+      }
+      if (operand_type->kind != TYPE_POINTER || !operand_type->base_type) {
+        type_checker_set_error_at_location(
+            checker, expression->location,
+            "Dereference operator requires a pointer operand");
+        return NULL;
+      }
+      return operand_type->base_type;
+    }
+
+    Type *operand_type = type_checker_infer_type(checker, unop->operand);
+    if (!operand_type) {
+      return NULL;
+    }
+
+    if (strcmp(unop->operator, "+") == 0 || strcmp(unop->operator, "-") == 0) {
+      if (!type_checker_is_numeric_type(operand_type)) {
+        type_checker_report_type_mismatch(checker, unop->operand->location,
+                                          "numeric type", operand_type->name);
+        return NULL;
+      }
+      return operand_type;
+    }
+
+    type_checker_set_error_at_location(checker, expression->location,
+                                       "Unsupported unary operator '%s'",
+                                       unop->operator);
+    return NULL;
   }
 
   case AST_FUNCTION_CALL: {
@@ -327,7 +505,11 @@ Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression) {
       }
 
       Type *param_type = func_symbol->data.function.parameter_types[i];
-      if (!type_checker_is_assignable(checker, param_type, arg_type)) {
+      int is_null_pointer_arg =
+          (param_type && param_type->kind == TYPE_POINTER &&
+           type_checker_is_null_pointer_constant(call->arguments[i]));
+      if (!is_null_pointer_arg &&
+          !type_checker_is_assignable(checker, param_type, arg_type)) {
         type_checker_report_type_mismatch(checker, call->arguments[i]->location,
                                           param_type->name, arg_type->name);
         return NULL;
@@ -436,10 +618,24 @@ Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression) {
       return NULL;
     }
 
-    // Since our language doesn't have explicit pointer types yet (e.g. `Foo*`),
-    // `new Foo` returns a value typed as `Foo` acting as a reference heap
-    // object
-    return type_symbol->type;
+    size_t pointer_name_len = strlen(new_expr->type_name) + 2;
+    char *pointer_name = malloc(pointer_name_len);
+    if (!pointer_name) {
+      type_checker_set_error_at_location(checker, expression->location,
+                                         "Memory allocation failed");
+      return NULL;
+    }
+    snprintf(pointer_name, pointer_name_len, "%s*", new_expr->type_name);
+
+    Type *pointer_type = type_checker_get_type_by_name(checker, pointer_name);
+    free(pointer_name);
+    if (!pointer_type) {
+      type_checker_set_error_at_location(checker, expression->location,
+                                         "Failed to resolve pointer type");
+      return NULL;
+    }
+
+    return pointer_type;
   }
 
   default:
@@ -451,9 +647,14 @@ int type_checker_are_compatible(Type *type1, Type *type2) {
   if (!type1 || !type2)
     return 0;
 
-  // Exact type match
-  if (type1->kind == type2->kind) {
+  if (type_checker_types_equal(type1, type2)) {
     return 1;
+  }
+
+  if (type1->kind == TYPE_POINTER || type2->kind == TYPE_POINTER ||
+      type1->kind == TYPE_ARRAY || type2->kind == TYPE_ARRAY ||
+      type1->kind == TYPE_STRUCT || type2->kind == TYPE_STRUCT) {
+    return 0;
   }
 
   // Check for implicit numeric conversions
@@ -568,6 +769,13 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
     Type *array_type = type_checker_parse_array_type(checker, name);
     if (array_type) {
       return array_type;
+    }
+  }
+
+  if (strchr(name, '*')) {
+    Type *pointer_type = type_checker_parse_pointer_type(checker, name);
+    if (pointer_type) {
+      return pointer_type;
     }
   }
 
@@ -728,9 +936,14 @@ int type_checker_is_assignable(TypeChecker *checker, Type *dest_type,
   if (!checker || !dest_type || !src_type)
     return 0;
 
-  // Exact type match is always assignable
-  if (dest_type->kind == src_type->kind) {
+  if (type_checker_types_equal(dest_type, src_type)) {
     return 1;
+  }
+
+  if (dest_type->kind == TYPE_POINTER || src_type->kind == TYPE_POINTER ||
+      dest_type->kind == TYPE_ARRAY || src_type->kind == TYPE_ARRAY ||
+      dest_type->kind == TYPE_STRUCT || src_type->kind == TYPE_STRUCT) {
+    return 0;
   }
 
   // Check for safe implicit conversions
@@ -743,7 +956,7 @@ int type_checker_is_implicitly_convertible(Type *from_type, Type *to_type) {
 
   // Same type is always convertible
   if (from_type->kind == to_type->kind) {
-    return 1;
+    return type_checker_types_equal(from_type, to_type);
   }
 
   // Integer to integer conversions (with size constraints for safety)
@@ -802,7 +1015,11 @@ int type_checker_validate_function_call(TypeChecker *checker,
     }
 
     Type *param_type = func_symbol->data.function.parameter_types[i];
-    if (!type_checker_is_assignable(checker, param_type, arg_type)) {
+    int is_null_pointer_arg =
+        (param_type && param_type->kind == TYPE_POINTER &&
+         type_checker_is_null_pointer_constant(call->arguments[i]));
+    if (!is_null_pointer_arg &&
+        !type_checker_is_assignable(checker, param_type, arg_type)) {
       type_checker_set_error(
           checker,
           "Argument %zu in call to '%s': cannot convert from '%s' to '%s'",
@@ -825,6 +1042,11 @@ int type_checker_validate_assignment(TypeChecker *checker, Type *dest_type,
   if (!src_type) {
     type_checker_set_error(checker, "Cannot infer type of assignment value");
     return 0;
+  }
+
+  if (dest_type->kind == TYPE_POINTER &&
+      type_checker_is_null_pointer_constant(src_expr)) {
+    return 1;
   }
 
   if (!type_checker_is_assignable(checker, dest_type, src_type)) {
@@ -985,7 +1207,9 @@ int type_checker_process_declaration(TypeChecker *checker,
       }
       if (var_type) {
         // Type specified: validate assignment compatibility
-        if (!type_checker_is_assignable(checker, var_type, init_type)) {
+        if (!(var_type->kind == TYPE_POINTER &&
+              type_checker_is_null_pointer_constant(var_decl->initializer)) &&
+            !type_checker_is_assignable(checker, var_type, init_type)) {
           type_checker_report_type_mismatch(checker,
                                             var_decl->initializer->location,
                                             var_type->name, init_type->name);
@@ -1287,7 +1511,9 @@ int type_checker_process_declaration(TypeChecker *checker,
           return 0;
         }
 
-        if (!type_checker_is_assignable(checker, field_type, value_type)) {
+        if (!(field_type->kind == TYPE_POINTER &&
+              type_checker_is_null_pointer_constant(assignment->value)) &&
+            !type_checker_is_assignable(checker, field_type, value_type)) {
           type_checker_report_type_mismatch(checker, assignment->value->location,
                                             field_type->name, value_type->name);
           return 0;
@@ -1309,9 +1535,42 @@ int type_checker_process_declaration(TypeChecker *checker,
           return 0;
         }
 
-        if (!type_checker_is_assignable(checker, element_type, value_type)) {
+        if (!(element_type->kind == TYPE_POINTER &&
+              type_checker_is_null_pointer_constant(assignment->value)) &&
+            !type_checker_is_assignable(checker, element_type, value_type)) {
           type_checker_report_type_mismatch(checker, assignment->value->location,
                                             element_type->name, value_type->name);
+          return 0;
+        }
+
+        return 1;
+      } else if (assignment->target->type == AST_UNARY_EXPRESSION) {
+        UnaryExpression *target_unary = (UnaryExpression *)assignment->target->data;
+        if (!target_unary || !target_unary->operator ||
+            strcmp(target_unary->operator, "*") != 0) {
+          type_checker_set_error_at_location(checker, assignment->target->location,
+                                             "Invalid assignment target");
+          return 0;
+        }
+
+        Type *target_type = type_checker_infer_type(checker, assignment->target);
+        if (!target_type) {
+          return 0;
+        }
+
+        Type *value_type = type_checker_infer_type(checker, assignment->value);
+        if (!value_type) {
+          type_checker_set_error_at_location(
+              checker, assignment->value->location,
+              "Cannot infer type of assignment value");
+          return 0;
+        }
+
+        if (!(target_type->kind == TYPE_POINTER &&
+              type_checker_is_null_pointer_constant(assignment->value)) &&
+            !type_checker_is_assignable(checker, target_type, value_type)) {
+          type_checker_report_type_mismatch(checker, assignment->value->location,
+                                            target_type->name, value_type->name);
           return 0;
         }
 
@@ -1365,7 +1624,9 @@ int type_checker_process_declaration(TypeChecker *checker,
     }
 
     // Validate assignment compatibility
-    if (!type_checker_is_assignable(checker, var_symbol->type, value_type)) {
+    if (!(var_symbol->type->kind == TYPE_POINTER &&
+          type_checker_is_null_pointer_constant(assignment->value)) &&
+        !type_checker_is_assignable(checker, var_symbol->type, value_type)) {
       type_checker_report_type_mismatch(checker, assignment->value->location,
                                         var_symbol->type->name,
                                         value_type->name);
@@ -1571,7 +1832,9 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       if (checker->current_function) {
         Type *func_return_type =
             checker->current_function->data.function.return_type;
-        if (!type_checker_is_assignable(checker, func_return_type,
+        if (!(func_return_type->kind == TYPE_POINTER &&
+              type_checker_is_null_pointer_constant(ret_stmt->value)) &&
+            !type_checker_is_assignable(checker, func_return_type,
                                         value_type)) {
           type_checker_report_type_mismatch(checker, ret_stmt->value->location,
                                             func_return_type->name,
@@ -1961,6 +2224,36 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
   // Comparison operators
   if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 || strcmp(op, "<") == 0 ||
       strcmp(op, "<=") == 0 || strcmp(op, ">") == 0 || strcmp(op, ">=") == 0) {
+    int is_equality = (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0);
+    int left_is_pointer = left_type->kind == TYPE_POINTER;
+    int right_is_pointer = right_type->kind == TYPE_POINTER;
+
+    if (left_is_pointer || right_is_pointer) {
+      if (!is_equality) {
+        type_checker_set_error_at_location(
+            checker, location,
+            "Pointer ordering comparisons are not supported");
+        return NULL;
+      }
+
+      int left_is_null = type_checker_is_null_pointer_constant(binop->left);
+      int right_is_null = type_checker_is_null_pointer_constant(binop->right);
+      int comparable =
+          (left_is_pointer && right_is_pointer &&
+           type_checker_types_equal(left_type, right_type)) ||
+          (left_is_pointer && right_is_null) ||
+          (right_is_pointer && left_is_null);
+
+      if (!comparable) {
+        char error_msg[512];
+        snprintf(error_msg, sizeof(error_msg), "Cannot compare '%s' with '%s'",
+                 left_type->name, right_type->name);
+        type_checker_set_error_at_location(checker, location, error_msg);
+        return NULL;
+      }
+
+      return checker->builtin_int32;
+    }
 
     // Both operands should be comparable (same type or compatible)
     if (!type_checker_are_compatible(left_type, right_type)) {
