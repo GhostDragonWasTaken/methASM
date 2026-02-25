@@ -75,6 +75,17 @@ void code_generator_generate_function_call(CodeGenerator *generator,
       func_symbol->type) {
     return_type = func_symbol->type;
   }
+  const char *call_target =
+      code_generator_get_link_symbol_name(generator, call_data->function_name);
+  if (!call_target) {
+    code_generator_set_error(generator, "Invalid call target name");
+    return;
+  }
+  if (func_symbol && func_symbol->is_extern) {
+    if (!code_generator_emit_extern_symbol(generator, call_target)) {
+      return;
+    }
+  }
 
   // 1. Align stack for function call (x86-64 requires 16-byte alignment)
   code_generator_align_stack_for_call(generator, call_data->argument_count);
@@ -88,7 +99,7 @@ void code_generator_generate_function_call(CodeGenerator *generator,
                                             call_data->argument_count);
 
   // 4. Generate the call instruction
-  code_generator_emit(generator, "    call %s\n", call_data->function_name);
+  code_generator_emit(generator, "    call %s\n", call_target);
 
   // 5. Clean up stack if needed (for parameters passed on stack)
   code_generator_cleanup_stack_after_call(generator, call_data->arguments,

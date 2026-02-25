@@ -292,11 +292,26 @@ void code_generator_load_variable(CodeGenerator *generator,
   Symbol *symbol = symbol_table_lookup(generator->symbol_table, variable_name);
   if (symbol &&
       (symbol->kind == SYMBOL_VARIABLE || symbol->kind == SYMBOL_PARAMETER)) {
+    const char *resolved_name = variable_name;
+    if (symbol->is_extern) {
+      resolved_name =
+          code_generator_get_link_symbol_name(generator, variable_name);
+      if (!resolved_name) {
+        code_generator_set_error(generator,
+                                 "Invalid extern symbol name '%s'",
+                                 variable_name);
+        return;
+      }
+      if (!code_generator_emit_extern_symbol(generator, resolved_name)) {
+        return;
+      }
+    }
+
     if (symbol->type && symbol->type->kind == TYPE_ARRAY) {
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
         code_generator_emit(generator,
                             "    lea rax, [%s + rip]  ; Array base address\n",
-                            variable_name);
+                            resolved_name);
       } else {
         int offset = symbol->data.variable.memory_offset;
         code_generator_emit(
@@ -316,7 +331,7 @@ void code_generator_load_variable(CodeGenerator *generator,
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
         code_generator_emit(generator,
                             "    mov rax, [%s + rip]  ; From global memory\n",
-                            variable_name);
+                            resolved_name);
       } else {
         // Local variable or parameter on stack
         int offset = symbol->data.variable.memory_offset;
@@ -345,6 +360,21 @@ void code_generator_store_variable(CodeGenerator *generator,
   Symbol *symbol = symbol_table_lookup(generator->symbol_table, variable_name);
   if (symbol &&
       (symbol->kind == SYMBOL_VARIABLE || symbol->kind == SYMBOL_PARAMETER)) {
+    const char *resolved_name = variable_name;
+    if (symbol->is_extern) {
+      resolved_name =
+          code_generator_get_link_symbol_name(generator, variable_name);
+      if (!resolved_name) {
+        code_generator_set_error(generator,
+                                 "Invalid extern symbol name '%s'",
+                                 variable_name);
+        return;
+      }
+      if (!code_generator_emit_extern_symbol(generator, resolved_name)) {
+        return;
+      }
+    }
+
     if (symbol->type && symbol->type->kind == TYPE_ARRAY) {
       code_generator_set_error(generator,
                                "Cannot assign directly to array variable '%s'",
@@ -363,7 +393,7 @@ void code_generator_store_variable(CodeGenerator *generator,
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
         code_generator_emit(generator,
                             "    mov [%s + rip], %s  ; To global memory\n",
-                            variable_name, source_reg);
+                            resolved_name, source_reg);
       } else {
         // Local variable or parameter on stack
         int offset = symbol->data.variable.memory_offset;
@@ -777,9 +807,20 @@ static int code_generator_generate_lvalue_address(CodeGenerator *generator,
     }
 
     if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
+      const char *resolved_name =
+          code_generator_get_link_symbol_name(generator, id->name);
+      if (!resolved_name) {
+        code_generator_set_error(generator, "Invalid extern symbol name '%s'",
+                                 id->name);
+        return 0;
+      }
+      if (symbol->is_extern &&
+          !code_generator_emit_extern_symbol(generator, resolved_name)) {
+        return 0;
+      }
       code_generator_emit(generator,
                           "    lea rax, [%s + rip]  ; Address of global\n",
-                          id->name);
+                          resolved_name);
     } else {
       int offset = symbol->data.variable.memory_offset;
       code_generator_emit(

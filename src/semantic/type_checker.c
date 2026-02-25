@@ -254,6 +254,40 @@ static int type_checker_is_null_pointer_constant(ASTNode *expression) {
   return type_checker_eval_integer_constant(expression, &value) && value == 0;
 }
 
+static const char *type_checker_decl_link_name(const char *name, int is_extern,
+                                               const char *link_name) {
+  if (!is_extern) {
+    return name;
+  }
+  if (link_name && link_name[0] != '\0') {
+    return link_name;
+  }
+  return name;
+}
+
+static const char *type_checker_symbol_link_name(const Symbol *symbol) {
+  if (!symbol) {
+    return NULL;
+  }
+  if (symbol->is_extern && symbol->link_name && symbol->link_name[0] != '\0') {
+    return symbol->link_name;
+  }
+  return symbol->name;
+}
+
+static int type_checker_link_name_matches_symbol(const Symbol *symbol,
+                                                 const char *decl_name,
+                                                 int decl_is_extern,
+                                                 const char *decl_link_name) {
+  const char *existing = type_checker_symbol_link_name(symbol);
+  const char *incoming =
+      type_checker_decl_link_name(decl_name, decl_is_extern, decl_link_name);
+  if (!existing || !incoming) {
+    return existing == incoming;
+  }
+  return strcmp(existing, incoming) == 0;
+}
+
 TypeChecker *type_checker_create(SymbolTable *symbol_table) {
   return type_checker_create_with_error_reporter(symbol_table, NULL);
 }
@@ -285,6 +319,7 @@ type_checker_create_with_error_reporter(SymbolTable *symbol_table,
   checker->builtin_float32 = NULL;
   checker->builtin_float64 = NULL;
   checker->builtin_string = NULL;
+  checker->builtin_cstring = NULL;
   checker->builtin_void = NULL;
 
   // Initialize built-in types
@@ -307,6 +342,7 @@ void type_checker_destroy(TypeChecker *checker) {
     type_destroy(checker->builtin_float32);
     type_destroy(checker->builtin_float64);
     type_destroy(checker->builtin_string);
+    type_destroy(checker->builtin_cstring);
     type_destroy(checker->builtin_void);
 
     free(checker->error_message);
@@ -702,6 +738,14 @@ void type_checker_init_builtin_types(TypeChecker *checker) {
   checker->builtin_float32 = type_create(TYPE_FLOAT32, "float32");
   checker->builtin_float64 = type_create(TYPE_FLOAT64, "float64");
 
+  // C interop alias: cstring -> uint8*
+  checker->builtin_cstring = type_create(TYPE_POINTER, "cstring");
+  if (checker->builtin_cstring) {
+    checker->builtin_cstring->base_type = checker->builtin_uint8;
+    checker->builtin_cstring->size = 8;
+    checker->builtin_cstring->alignment = 8;
+  }
+
   // Create built-in string type backed by a uint8* and length
   checker->builtin_string = type_create(TYPE_STRING, "string");
   if (checker->builtin_string) {
@@ -795,6 +839,8 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
     return checker->builtin_float64;
   if (strcmp(name, "string") == 0)
     return checker->builtin_string;
+  if (strcmp(name, "cstring") == 0)
+    return checker->builtin_cstring;
   if (strcmp(name, "void") == 0)
     return checker->builtin_void;
 
@@ -1209,12 +1255,33 @@ int type_checker_process_declaration(TypeChecker *checker,
       return 0;
     }
 
-    // Check for duplicate declaration in current scope
-    Symbol *existing = symbol_table_lookup_current_scope(checker->symbol_table,
-                                                         var_decl->name);
-    if (existing) {
-      type_checker_report_duplicate_declaration(checker, declaration->location,
-                                                var_decl->name);
+    if (var_decl->link_name && !var_decl->is_extern) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "Link-name suffix is only allowed on extern declarations");
+      return 0;
+    }
+
+    Scope *current_scope = symbol_table_get_current_scope(checker->symbol_table);
+    if (var_decl->is_extern &&
+        (!current_scope || current_scope->type != SCOPE_GLOBAL)) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "Extern declarations are only allowed at top level");
+      return 0;
+    }
+
+    if (var_decl->is_extern && var_decl->initializer) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "Extern variable '%s' cannot have an initializer", var_decl->name);
+      return 0;
+    }
+    if (var_decl->is_extern && !var_decl->type_name) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "Extern variable '%s' requires an explicit type annotation",
+          var_decl->name);
       return 0;
     }
 
@@ -1264,6 +1331,47 @@ int type_checker_process_declaration(TypeChecker *checker,
       return 0;
     }
 
+    // Check for duplicate declaration in current scope.
+    Symbol *existing = symbol_table_lookup_current_scope(checker->symbol_table,
+                                                         var_decl->name);
+    if (existing) {
+      if (existing->kind != SYMBOL_VARIABLE) {
+        type_checker_report_duplicate_declaration(checker, declaration->location,
+                                                  var_decl->name);
+        return 0;
+      }
+      if (existing->is_extern != var_decl->is_extern) {
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "Variable '%s' redeclared with conflicting extern/non-extern "
+            "linkage",
+            var_decl->name);
+        return 0;
+      }
+      if (!var_decl->is_extern) {
+        type_checker_report_duplicate_declaration(checker, declaration->location,
+                                                  var_decl->name);
+        return 0;
+      }
+      if (!type_checker_types_equal(existing->type, var_type)) {
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "Extern variable '%s' redeclared with conflicting type",
+            var_decl->name);
+        return 0;
+      }
+      if (!type_checker_link_name_matches_symbol(existing, var_decl->name,
+                                                 var_decl->is_extern,
+                                                 var_decl->link_name)) {
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "Extern variable '%s' redeclared with conflicting link name",
+            var_decl->name);
+        return 0;
+      }
+      return 1;
+    }
+
     // Create and declare the symbol
     Symbol *var_symbol =
         symbol_create(var_decl->name, SYMBOL_VARIABLE, var_type);
@@ -1272,6 +1380,22 @@ int type_checker_process_declaration(TypeChecker *checker,
           checker, declaration->location,
           "Failed to create symbol for variable '%s'", var_decl->name);
       return 0;
+    }
+
+    var_symbol->is_extern = var_decl->is_extern;
+    if (var_decl->is_extern) {
+      const char *effective_link_name = type_checker_decl_link_name(
+          var_decl->name, var_decl->is_extern, var_decl->link_name);
+      var_symbol->link_name = effective_link_name ? strdup(effective_link_name)
+                                                  : NULL;
+      if (!var_symbol->link_name) {
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "Failed to allocate link name for extern variable '%s'",
+            var_decl->name);
+        symbol_destroy(var_symbol);
+        return 0;
+      }
     }
 
     if (!symbol_table_declare(checker->symbol_table, var_symbol)) {
@@ -1289,6 +1413,28 @@ int type_checker_process_declaration(TypeChecker *checker,
     if (!func_decl || !func_decl->name) {
       type_checker_set_error_at_location(checker, declaration->location,
                                          "Invalid function declaration");
+      return 0;
+    }
+
+    if (func_decl->link_name && !func_decl->is_extern) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "Link-name suffix is only allowed on extern declarations");
+      return 0;
+    }
+
+    Scope *current_scope = symbol_table_get_current_scope(checker->symbol_table);
+    if (func_decl->is_extern &&
+        (!current_scope || current_scope->type != SCOPE_GLOBAL)) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "Extern declarations are only allowed at top level");
+      return 0;
+    }
+    if (func_decl->is_extern && func_decl->body) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "Extern function '%s' must not have a body", func_decl->name);
       return 0;
     }
 
@@ -1395,12 +1541,57 @@ int type_checker_process_declaration(TypeChecker *checker,
     func_symbol->data.function.parameter_names = param_names_copy;
     func_symbol->data.function.parameter_types = param_types;
     func_symbol->data.function.return_type = return_type;
+    func_symbol->is_extern = func_decl->is_extern;
+    if (func_decl->is_extern) {
+      const char *effective_link_name = type_checker_decl_link_name(
+          func_decl->name, func_decl->is_extern, func_decl->link_name);
+      func_symbol->link_name = effective_link_name ? strdup(effective_link_name)
+                                                   : NULL;
+      if (!func_symbol->link_name) {
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "Failed to allocate link name for extern function '%s'",
+            func_decl->name);
+        symbol_destroy(func_symbol);
+        return 0;
+      }
+    }
 
     Symbol *existing_before = symbol_table_lookup_current_scope(
         checker->symbol_table, func_decl->name);
     int is_resolving_forward =
         (existing_before && existing_before->kind == SYMBOL_FUNCTION &&
          existing_before->is_forward_declaration);
+
+    if (existing_before && existing_before->kind != SYMBOL_FUNCTION) {
+      type_checker_report_duplicate_declaration(checker, declaration->location,
+                                                func_decl->name);
+      symbol_destroy(func_symbol);
+      return 0;
+    }
+
+    if (existing_before && existing_before->kind == SYMBOL_FUNCTION) {
+      if (existing_before->is_extern != func_decl->is_extern) {
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "Function '%s' redeclared with conflicting extern/non-extern "
+            "linkage",
+            func_decl->name);
+        symbol_destroy(func_symbol);
+        return 0;
+      }
+      if ((existing_before->is_extern || func_decl->is_extern) &&
+          !type_checker_link_name_matches_symbol(
+              existing_before, func_decl->name, func_decl->is_extern,
+              func_decl->link_name)) {
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "Function '%s' redeclared with conflicting link name",
+            func_decl->name);
+        symbol_destroy(func_symbol);
+        return 0;
+      }
+    }
 
     // Forward declaration: no body
     if (!func_decl->body) {
@@ -1412,6 +1603,9 @@ int type_checker_process_declaration(TypeChecker *checker,
             func_decl->name);
         symbol_destroy(func_symbol);
         return 0;
+      }
+      if (is_resolving_forward) {
+        symbol_destroy(func_symbol);
       }
       return 1;
     }

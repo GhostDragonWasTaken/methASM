@@ -27,7 +27,9 @@ function Write-CaseResult {
 
 function Test-AssemblyOutput {
   param(
-    [string]$AsmPath
+    [string]$AsmPath,
+    [string[]]$RequiredPatterns = @(),
+    [string[]]$ForbiddenPatterns = @()
   )
 
   if (-not (Test-Path $AsmPath)) {
@@ -49,6 +51,24 @@ function Test-AssemblyOutput {
 
   if ($asmText -notmatch "(?m)^\s*global\s+") {
     return @{ Passed = $false; Reason = "Missing global symbol in generated assembly" }
+  }
+
+  foreach ($pattern in $RequiredPatterns) {
+    if ([string]::IsNullOrWhiteSpace($pattern)) {
+      continue
+    }
+    if ($asmText -notmatch $pattern) {
+      return @{ Passed = $false; Reason = "Assembly missing required pattern '$pattern'" }
+    }
+  }
+
+  foreach ($pattern in $ForbiddenPatterns) {
+    if ([string]::IsNullOrWhiteSpace($pattern)) {
+      continue
+    }
+    if ($asmText -match $pattern) {
+      return @{ Passed = $false; Reason = "Assembly matched forbidden pattern '$pattern'" }
+    }
   }
 
   return @{ Passed = $true; Reason = "" }
@@ -81,8 +101,29 @@ $cases = @(
   @{ Name="nested_switch_loop"; Path="tests/test_nested_switch_loop.masm"; ShouldSucceed=$true },
   @{ Name="switch_const_expr"; Path="tests/test_switch_const_expr.masm"; ShouldSucceed=$true },
   @{ Name="switch_continue_loop"; Path="tests/test_switch_continue_loop.masm"; ShouldSucceed=$true },
-  @{ Name="forward_decl"; Path="tests/test_forward_decl.masm"; ShouldSucceed=$true },
+  @{
+    Name="forward_decl"
+    Path="tests/test_forward_decl.masm"
+    ShouldSucceed=$true
+    AsmMustMatch=@("(?m)^\s*add:\s*$")
+    AsmMustNotMatch=@("(?s)(?m)^\s*add:\s*.*^\s*add:\s*")
+  },
   @{ Name="forward_decl_pointer"; Path="tests/test_forward_decl_pointer.masm"; ShouldSucceed=$true },
+  @{
+    Name="extern_function_link_name"
+    Path="tests/test_extern_function_link_name.masm"
+    ShouldSucceed=$true
+    AsmMustMatch=@("(?m)^\s*extern\s+puts\b", "(?m)\bcall\s+puts\b")
+    AsmMustNotMatch=@("(?m)^\s*global\s+puts\b", "(?m)^\s*puts:\s*$")
+  },
+  @{
+    Name="extern_global_link_name"
+    Path="tests/test_extern_global_link_name.masm"
+    ShouldSucceed=$true
+    AsmMustMatch=@("(?m)^\s*extern\s+errno\b", "\[\s*errno\s*\+\s*rip\s*\]")
+    AsmMustNotMatch=@("(?m)^\s*global\s+errno\b", "(?m)^\s*errno:\s*$")
+  },
+  @{ Name="cstring_alias_type"; Path="tests/test_cstring_alias_type.masm"; ShouldSucceed=$true },
   @{ Name="gc_alloc"; Path="tests/test_gc_alloc.masm"; ShouldSucceed=$true },
   @{ Name="gc_alloc_fixed"; Path="tests/test_gc_alloc_fixed.masm"; ShouldSucceed=$true },
   @{ Name="pointers"; Path="tests/test_pointers.masm"; ShouldSucceed=$true },
@@ -103,6 +144,10 @@ $cases = @(
   @{ Name="err_switch_nonconst_case"; Path="tests/err_switch_nonconst_case.masm"; ShouldSucceed=$false; Pattern="compile-time integer constant expression" },
   @{ Name="err_forward_decl_mismatch"; Path="tests/err_forward_decl_mismatch.masm"; ShouldSucceed=$false; Pattern="does not match existing declaration" },
   @{ Name="err_forward_decl_pointer_mismatch"; Path="tests/err_forward_decl_pointer_mismatch.masm"; ShouldSucceed=$false; Pattern="does not match existing declaration" },
+  @{ Name="err_extern_var_initializer"; Path="tests/err_extern_var_initializer.masm"; ShouldSucceed=$false; Pattern="Extern variable declarations cannot have an initializer|Expected string literal link name after '='" },
+  @{ Name="err_extern_var_missing_type"; Path="tests/err_extern_var_missing_type.masm"; ShouldSucceed=$false; Pattern="Extern variable declarations require an explicit type" },
+  @{ Name="err_nonextern_link_name"; Path="tests/err_nonextern_link_name.masm"; ShouldSucceed=$false; Pattern="Link-name suffix is only allowed on extern declarations" },
+  @{ Name="err_extern_link_name_conflict"; Path="tests/err_extern_link_name_conflict.masm"; ShouldSucceed=$false; Pattern="conflicting link name" },
   @{ Name="err_deref_non_pointer"; Path="tests/err_deref_non_pointer.masm"; ShouldSucceed=$false; Pattern="Dereference operator requires a pointer operand" },
   @{ Name="err_address_of_non_lvalue"; Path="tests/err_address_of_non_lvalue.masm"; ShouldSucceed=$false; Pattern="Address-of operator requires an assignable expression" },
   @{ Name="err_pointer_type_mismatch"; Path="tests/err_pointer_type_mismatch.masm"; ShouldSucceed=$false; Pattern="Type mismatch" },
@@ -135,7 +180,18 @@ foreach ($case in $cases) {
       $passed = $false
       $reason = "Expected success, got exit code $exitCode"
     } else {
-      $asmCheck = Test-AssemblyOutput -AsmPath $outFile
+      $requiredAsmPatterns = @()
+      $forbiddenAsmPatterns = @()
+      if ($case.ContainsKey("AsmMustMatch") -and $case.AsmMustMatch) {
+        $requiredAsmPatterns = @($case.AsmMustMatch)
+      }
+      if ($case.ContainsKey("AsmMustNotMatch") -and $case.AsmMustNotMatch) {
+        $forbiddenAsmPatterns = @($case.AsmMustNotMatch)
+      }
+
+      $asmCheck = Test-AssemblyOutput -AsmPath $outFile `
+        -RequiredPatterns $requiredAsmPatterns `
+        -ForbiddenPatterns $forbiddenAsmPatterns
       if (-not $asmCheck.Passed) {
         $passed = $false
         $reason = $asmCheck.Reason

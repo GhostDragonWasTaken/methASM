@@ -15,6 +15,12 @@ void code_generator_generate_global_variable(CodeGenerator *generator,
   if (!var_data || !var_data->name) {
     return;
   }
+  if (var_data->is_extern) {
+    const char *extern_name =
+        code_generator_get_link_symbol_name(generator, var_data->name);
+    code_generator_emit_extern_symbol(generator, extern_name);
+    return;
+  }
 
   // Add debug symbol for global variable
   if (generator->generate_debug_info) {

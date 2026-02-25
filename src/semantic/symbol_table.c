@@ -5,6 +5,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+static const char *symbol_table_effective_link_name(const Symbol *symbol) {
+  if (!symbol) {
+    return NULL;
+  }
+  if (symbol->is_extern && symbol->link_name && symbol->link_name[0] != '\0') {
+    return symbol->link_name;
+  }
+  return symbol->name;
+}
+
+static int symbol_table_link_names_match(const Symbol *lhs, const Symbol *rhs) {
+  const char *lhs_name = symbol_table_effective_link_name(lhs);
+  const char *rhs_name = symbol_table_effective_link_name(rhs);
+  if (!lhs_name || !rhs_name) {
+    return lhs_name == rhs_name;
+  }
+  return strcmp(lhs_name, rhs_name) == 0;
+}
+
 static int symbol_table_types_compatible(const Type *lhs, const Type *rhs) {
   if (lhs == rhs) {
     return 1;
@@ -41,6 +60,14 @@ static int symbol_table_function_signatures_match(const Symbol *decl,
 
   if (decl->data.function.parameter_count !=
       defn->data.function.parameter_count) {
+    return 0;
+  }
+
+  if (decl->is_extern != defn->is_extern) {
+    return 0;
+  }
+  if ((decl->is_extern || defn->is_extern) &&
+      !symbol_table_link_names_match(decl, defn)) {
     return 0;
   }
 
@@ -100,6 +127,7 @@ static void scope_destroy(Scope *scope) {
     Symbol *symbol = scope->symbols[i];
     if (symbol) {
       free(symbol->name);
+      free(symbol->link_name);
       if (symbol->kind == SYMBOL_FUNCTION) {
         // Free function parameter names (strings we own)
         for (size_t j = 0; j < symbol->data.function.parameter_count; j++) {
@@ -349,6 +377,8 @@ Symbol *symbol_create(const char *name, SymbolKind kind, Type *type) {
   symbol->scope = NULL; // Will be set when declared
   symbol->is_initialized = 0;
   symbol->is_forward_declaration = 0;
+  symbol->is_extern = 0;
+  symbol->link_name = NULL;
 
   // Initialize union data based on symbol kind
   switch (kind) {
@@ -377,6 +407,7 @@ void symbol_destroy(Symbol *symbol) {
     return;
 
   free(symbol->name);
+  free(symbol->link_name);
 
   if (symbol->kind == SYMBOL_FUNCTION) {
     // Free function parameter names (strings we own)

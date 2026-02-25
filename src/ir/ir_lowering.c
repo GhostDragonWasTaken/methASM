@@ -1559,6 +1559,27 @@ IRProgram *ir_lower_program(ASTNode *program, TypeChecker *type_checker,
     if (!declaration || declaration->type != AST_FUNCTION_DECLARATION) {
       continue;
     }
+    FunctionDeclaration *function_data = (FunctionDeclaration *)declaration->data;
+    if (!function_data) {
+      ir_set_error(&context, "Malformed function declaration");
+      ir_program_destroy(ir_program);
+      for (size_t j = 0; j < context.control_count; j++) {
+        free(context.control_stack[j].break_label);
+        free(context.control_stack[j].continue_label);
+      }
+      free(context.control_stack);
+      if (error_message) {
+        *error_message = context.error_message
+                             ? context.error_message
+                             : ir_strdup_local("Unknown IR lowering error");
+      } else {
+        free(context.error_message);
+      }
+      return NULL;
+    }
+    if (!function_data->body) {
+      continue;
+    }
 
     IRFunction *function = ir_lower_function(&context, declaration);
     if (!function) {

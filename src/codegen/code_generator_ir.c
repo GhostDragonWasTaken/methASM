@@ -352,8 +352,17 @@ static int code_generator_emit_ir_address_of(CodeGenerator *generator,
   }
 
   if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
-    code_generator_emit(generator, "    lea rax, [%s + rip]\n",
-                        instruction->lhs.name);
+    const char *symbol_name =
+        code_generator_get_link_symbol_name(generator, instruction->lhs.name);
+    if (!symbol_name) {
+      code_generator_set_error(generator,
+                               "Invalid global symbol in IR addr_of");
+      return 0;
+    }
+    if (symbol->is_extern && !code_generator_emit_extern_symbol(generator, symbol_name)) {
+      return 0;
+    }
+    code_generator_emit(generator, "    lea rax, [%s + rip]\n", symbol_name);
   } else {
     code_generator_emit(generator, "    lea rax, [rbp - %d]\n",
                         symbol->data.variable.memory_offset);
@@ -600,8 +609,18 @@ code_generator_emit_ir_unary_fallback(CodeGenerator *generator,
         return 0;
       }
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
-        code_generator_emit(generator, "    lea rax, [%s + rip]\n",
-                            instruction->lhs.name);
+        const char *symbol_name = code_generator_get_link_symbol_name(
+            generator, instruction->lhs.name);
+        if (!symbol_name) {
+          code_generator_set_error(generator,
+                                   "Invalid global symbol in IR unary '&'");
+          return 0;
+        }
+        if (symbol->is_extern &&
+            !code_generator_emit_extern_symbol(generator, symbol_name)) {
+          return 0;
+        }
+        code_generator_emit(generator, "    lea rax, [%s + rip]\n", symbol_name);
       } else {
         code_generator_emit(generator, "    lea rax, [rbp - %d]\n",
                             symbol->data.variable.memory_offset);
@@ -707,6 +726,19 @@ static int code_generator_emit_ir_call(CodeGenerator *generator,
   if (!conv_spec) {
     code_generator_set_error(generator, "No calling convention configured");
     return 0;
+  }
+  Symbol *function_symbol =
+      symbol_table_lookup(generator->symbol_table, instruction->text);
+  const char *call_target =
+      code_generator_get_link_symbol_name(generator, instruction->text);
+  if (!call_target) {
+    code_generator_set_error(generator, "Invalid IR call target");
+    return 0;
+  }
+  if (function_symbol && function_symbol->is_extern) {
+    if (!code_generator_emit_extern_symbol(generator, call_target)) {
+      return 0;
+    }
   }
 
   size_t argument_count = instruction->argument_count;
@@ -818,7 +850,7 @@ static int code_generator_emit_ir_call(CodeGenerator *generator,
     }
   }
 
-  code_generator_emit(generator, "    call %s\n", instruction->text);
+  code_generator_emit(generator, "    call %s\n", call_target);
   code_generator_emit(generator, "    mov rcx, rax\n");
 
   if (stack_argument_count > 0) {
@@ -837,8 +869,6 @@ static int code_generator_emit_ir_call(CodeGenerator *generator,
   code_generator_restore_caller_saved_registers_selective(generator);
   code_generator_emit(generator, "    mov rax, rcx\n");
 
-  Symbol *function_symbol =
-      symbol_table_lookup(generator->symbol_table, instruction->text);
   Type *return_type = NULL;
   if (function_symbol && function_symbol->kind == SYMBOL_FUNCTION &&
       function_symbol->type) {
