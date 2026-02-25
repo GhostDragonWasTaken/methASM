@@ -39,14 +39,17 @@ static int symbol_table_function_signatures_match(const Symbol *decl,
     return 0;
   }
 
-  if (decl->data.function.parameter_count != defn->data.function.parameter_count) {
+  if (decl->data.function.parameter_count !=
+      defn->data.function.parameter_count) {
     return 0;
   }
 
-  Type *decl_return =
-      decl->data.function.return_type ? decl->data.function.return_type : decl->type;
-  Type *defn_return =
-      defn->data.function.return_type ? defn->data.function.return_type : defn->type;
+  Type *decl_return = decl->data.function.return_type
+                          ? decl->data.function.return_type
+                          : decl->type;
+  Type *defn_return = defn->data.function.return_type
+                          ? defn->data.function.return_type
+                          : defn->type;
   if (!symbol_table_types_compatible(decl_return, defn_return)) {
     return 0;
   }
@@ -184,7 +187,8 @@ int symbol_table_declare(SymbolTable *table, Symbol *symbol) {
         strcmp(table->current_scope->symbols[i]->name, symbol->name) == 0) {
       Symbol *existing = table->current_scope->symbols[i];
       // Allow forward declaration resolution for functions
-      if (symbol->kind == SYMBOL_FUNCTION && existing->kind == SYMBOL_FUNCTION &&
+      if (symbol->kind == SYMBOL_FUNCTION &&
+          existing->kind == SYMBOL_FUNCTION &&
           existing->is_forward_declaration) {
         if (!symbol_table_function_signatures_match(existing, symbol)) {
           return 0; // Mismatched function signature vs forward declaration
@@ -607,7 +611,9 @@ Type *type_create_struct(const char *name, char **field_names,
 }
 
 Type *type_get_field_type(Type *struct_type, const char *field_name) {
-  if (!struct_type || struct_type->kind != TYPE_STRUCT || !field_name) {
+  if (!struct_type ||
+      (struct_type->kind != TYPE_STRUCT && struct_type->kind != TYPE_STRING) ||
+      !field_name) {
     return NULL;
   }
 
@@ -621,7 +627,9 @@ Type *type_get_field_type(Type *struct_type, const char *field_name) {
 }
 
 size_t type_get_field_offset(Type *struct_type, const char *field_name) {
-  if (!struct_type || struct_type->kind != TYPE_STRUCT || !field_name) {
+  if (!struct_type ||
+      (struct_type->kind != TYPE_STRUCT && struct_type->kind != TYPE_STRING) ||
+      !field_name) {
     return 0;
   }
 
@@ -635,7 +643,9 @@ size_t type_get_field_offset(Type *struct_type, const char *field_name) {
 }
 
 int type_has_field(Type *struct_type, const char *field_name) {
-  if (!struct_type || struct_type->kind != TYPE_STRUCT || !field_name) {
+  if (!struct_type ||
+      (struct_type->kind != TYPE_STRUCT && struct_type->kind != TYPE_STRING) ||
+      !field_name) {
     return 0;
   }
 

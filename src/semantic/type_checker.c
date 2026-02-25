@@ -539,7 +539,8 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
   case AST_MEMBER_ACCESS: {
     MemberAccess *member = (MemberAccess *)expression->data;
     Type *object_type = type_checker_infer_type(checker, member->object);
-    if (object_type && object_type->kind == TYPE_STRUCT) {
+    if (object_type && (object_type->kind == TYPE_STRUCT ||
+                        object_type->kind == TYPE_STRING)) {
       // Look up the field type in the struct
       Type *field_type = type_get_field_type(object_type, member->member);
       if (field_type) {
@@ -549,7 +550,7 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
         SourceLocation location = expression->location;
         char error_msg[512];
         snprintf(error_msg, sizeof(error_msg),
-                 "Field '%s' not found in struct '%s'", member->member,
+                 "Field '%s' not found in type '%s'", member->member,
                  object_type->name);
         type_checker_set_error_at_location(checker, location, error_msg);
         return NULL;
@@ -701,12 +702,28 @@ void type_checker_init_builtin_types(TypeChecker *checker) {
   checker->builtin_float32 = type_create(TYPE_FLOAT32, "float32");
   checker->builtin_float64 = type_create(TYPE_FLOAT64, "float64");
 
-  // Create built-in string type
+  // Create built-in string type backed by a uint8* and length
   checker->builtin_string = type_create(TYPE_STRING, "string");
   if (checker->builtin_string) {
-    // String is essentially a pointer to char, but we treat it specially
-    checker->builtin_string->size = sizeof(void *); // Pointer size
-    checker->builtin_string->alignment = sizeof(void *);
+    checker->builtin_string->size = 16;
+    checker->builtin_string->alignment = 8;
+
+    checker->builtin_string->field_count = 2;
+    checker->builtin_string->field_names = malloc(2 * sizeof(char *));
+    checker->builtin_string->field_types = malloc(2 * sizeof(Type *));
+    checker->builtin_string->field_offsets = malloc(2 * sizeof(size_t));
+
+    checker->builtin_string->field_names[0] = strdup("chars");
+    checker->builtin_string->field_types[0] =
+        type_create(TYPE_POINTER, "uint8*");
+    checker->builtin_string->field_types[0]->base_type = checker->builtin_uint8;
+    checker->builtin_string->field_types[0]->size = 8;
+    checker->builtin_string->field_types[0]->alignment = 8;
+    checker->builtin_string->field_offsets[0] = 0;
+
+    checker->builtin_string->field_names[1] = strdup("length");
+    checker->builtin_string->field_types[1] = checker->builtin_uint64;
+    checker->builtin_string->field_offsets[1] = 8;
   }
 
   // Create built-in void type

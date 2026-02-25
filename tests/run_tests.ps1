@@ -1,7 +1,8 @@
 param(
   [string]$CompilerPath = ".\bin\methasm.exe",
   [switch]$BuildCompiler,
-  [switch]$SkipRuntime
+  [switch]$SkipRuntime,
+  [switch]$SkipDeterminism
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +23,35 @@ function Write-CaseResult {
       Write-Host "[FAIL] $Name"
     }
   }
+}
+
+function Test-AssemblyOutput {
+  param(
+    [string]$AsmPath
+  )
+
+  if (-not (Test-Path $AsmPath)) {
+    return @{ Passed = $false; Reason = "Output file not produced" }
+  }
+
+  $asmText = Get-Content -Path $AsmPath -Raw
+  if ([string]::IsNullOrWhiteSpace($asmText)) {
+    return @{ Passed = $false; Reason = "Output assembly is empty" }
+  }
+
+  if ($asmText -match "\%[a-z]{2,3}" -or $asmText -match "\$[0-9]+") {
+    return @{ Passed = $false; Reason = "Found AT&T-style syntax fragments in generated assembly" }
+  }
+
+  if ($asmText -notmatch "(?m)^\s*section\s+\.text\b") {
+    return @{ Passed = $false; Reason = "Missing text section in generated assembly" }
+  }
+
+  if ($asmText -notmatch "(?m)^\s*global\s+") {
+    return @{ Passed = $false; Reason = "Missing global symbol in generated assembly" }
+  }
+
+  return @{ Passed = $true; Reason = "" }
 }
 
 if ($BuildCompiler) {
@@ -45,8 +75,10 @@ if (-not (Test-Path $tmpDir)) {
 
 $cases = @(
   @{ Name="ok_global_int"; Path="tests/ok_global_int.masm"; ShouldSucceed=$true },
+  @{ Name="only_struct"; Path="tests/only_struct.masm"; ShouldSucceed=$true },
   @{ Name="array_index"; Path="tests/test_array_index.masm"; ShouldSucceed=$true },
   @{ Name="control_flow"; Path="tests/test_control_flow.masm"; ShouldSucceed=$true },
+  @{ Name="nested_switch_loop"; Path="tests/test_nested_switch_loop.masm"; ShouldSucceed=$true },
   @{ Name="switch_const_expr"; Path="tests/test_switch_const_expr.masm"; ShouldSucceed=$true },
   @{ Name="switch_continue_loop"; Path="tests/test_switch_continue_loop.masm"; ShouldSucceed=$true },
   @{ Name="forward_decl"; Path="tests/test_forward_decl.masm"; ShouldSucceed=$true },
@@ -56,6 +88,8 @@ $cases = @(
   @{ Name="pointers"; Path="tests/test_pointers.masm"; ShouldSucceed=$true },
   @{ Name="pointer_null"; Path="tests/test_pointer_null.masm"; ShouldSucceed=$true },
   @{ Name="pointer_param_address"; Path="tests/test_pointer_param_address.masm"; ShouldSucceed=$true },
+  @{ Name="call_many_args"; Path="tests/test_call_many_args.masm"; ShouldSucceed=$true },
+  @{ Name="stress_integrated"; Path="tests/test_stress_integrated.masm"; ShouldSucceed=$true },
 
   @{ Name="err_unknown_char"; Path="tests/err_unknown_char.masm"; ShouldSucceed=$false; Pattern="Lexical error|error" },
   @{ Name="err_invalid_hex"; Path="tests/err_invalid_hex.masm"; ShouldSucceed=$false; Pattern="Invalid hexadecimal literal" },
@@ -72,7 +106,12 @@ $cases = @(
   @{ Name="err_deref_non_pointer"; Path="tests/err_deref_non_pointer.masm"; ShouldSucceed=$false; Pattern="Dereference operator requires a pointer operand" },
   @{ Name="err_address_of_non_lvalue"; Path="tests/err_address_of_non_lvalue.masm"; ShouldSucceed=$false; Pattern="Address-of operator requires an assignable expression" },
   @{ Name="err_pointer_type_mismatch"; Path="tests/err_pointer_type_mismatch.masm"; ShouldSucceed=$false; Pattern="Type mismatch" },
-  @{ Name="err_codegen_member_expr"; Path="tests/err_codegen_member_expr.masm"; ShouldSucceed=$false }
+  @{ Name="err_codegen_member_expr"; Path="tests/err_codegen_member_expr.masm"; ShouldSucceed=$false },
+  @{ Name="err_function_arg_count"; Path="tests/err_function_arg_count.masm"; ShouldSucceed=$false; Pattern="expects .* arguments, got" },
+  @{ Name="err_function_arg_type"; Path="tests/err_function_arg_type.masm"; ShouldSucceed=$false; Pattern="Type mismatch" },
+  @{ Name="err_member_on_non_struct"; Path="tests/err_member_on_non_struct.masm"; ShouldSucceed=$false; Pattern="Cannot access field on non-struct type" },
+  @{ Name="err_switch_multiple_default"; Path="tests/err_switch_multiple_default.masm"; ShouldSucceed=$false; Pattern="Only one default case is allowed|only contain one default clause" },
+  @{ Name="err_return_type_mismatch"; Path="tests/err_return_type_mismatch.masm"; ShouldSucceed=$false; Pattern="Type mismatch" }
 )
 
 $total = 0
@@ -95,14 +134,33 @@ foreach ($case in $cases) {
     if ($exitCode -ne 0) {
       $passed = $false
       $reason = "Expected success, got exit code $exitCode"
-    } elseif (-not (Test-Path $outFile)) {
-      $passed = $false
-      $reason = "Output file not produced"
     } else {
-      $asmText = Get-Content -Path $outFile -Raw
-      if ($asmText -match "\%[a-z]{2,3}" -or $asmText -match "\$[0-9]+") {
+      $asmCheck = Test-AssemblyOutput -AsmPath $outFile
+      if (-not $asmCheck.Passed) {
         $passed = $false
-        $reason = "Found AT&T-style syntax fragments in generated assembly"
+        $reason = $asmCheck.Reason
+      } elseif (-not $SkipDeterminism) {
+        $outFile2 = Join-Path $tmpDir ("{0}.second.s" -f $case.Name)
+        if (Test-Path $outFile2) {
+          Remove-Item -Path $outFile2 -Force
+        }
+
+        $output2 = & $CompilerPath $case.Path -o $outFile2 2>&1 | Out-String
+        $exitCode2 = $LASTEXITCODE
+        if ($exitCode2 -ne 0) {
+          $passed = $false
+          $reason = "Determinism compile failed with exit code $exitCode2"
+          if ($output2) {
+            $output = $output + [Environment]::NewLine + $output2
+          }
+        } else {
+          $hash1 = (Get-FileHash -Algorithm SHA256 -Path $outFile).Hash
+          $hash2 = (Get-FileHash -Algorithm SHA256 -Path $outFile2).Hash
+          if ($hash1 -ne $hash2) {
+            $passed = $false
+            $reason = "Determinism check failed: outputs differ between identical runs"
+          }
+        }
       }
     }
   } else {

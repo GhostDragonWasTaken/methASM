@@ -361,9 +361,11 @@ static int ir_lower_lvalue_address(IRLoweringContext *context,
         return 0;
       }
     }
-    if (!object_type || object_type->kind != TYPE_STRUCT) {
+    if (!object_type || (object_type->kind != TYPE_STRUCT &&
+                         object_type->kind != TYPE_STRING)) {
       ir_operand_destroy(&object_address);
-      ir_set_error(context, "Member access requires struct lvalue object");
+      ir_set_error(context,
+                   "Member access requires struct or string lvalue object");
       return 0;
     }
 
