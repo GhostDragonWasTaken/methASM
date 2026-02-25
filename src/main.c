@@ -272,6 +272,7 @@ int compile_file(const char *input_filename, const char *output_filename,
     result = 1;
     goto cleanup;
   }
+  code_generator_set_ir_program(code_generator, ir_program);
 
   if (options->debug_mode || options->optimize) {
     char *ir_output = build_sidecar_filename(output_filename, ".ir");

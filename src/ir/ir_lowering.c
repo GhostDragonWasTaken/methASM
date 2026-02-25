@@ -219,6 +219,7 @@ static int ir_lower_call_expression(IRLoweringContext *context,
   instruction.text = call->function_name;
   instruction.arguments = arguments;
   instruction.argument_count = call->argument_count;
+  instruction.ast_ref = expression;
 
   if (!ir_emit(context, function, &instruction)) {
     for (size_t i = 0; i < call->argument_count; i++) {
@@ -328,6 +329,7 @@ static int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
     instruction.lhs = left;
     instruction.rhs = right;
     instruction.text = binary->operator;
+    instruction.ast_ref = expression;
 
     if (!ir_emit(context, function, &instruction)) {
       ir_operand_destroy(&destination);
@@ -374,6 +376,7 @@ static int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
     instruction.dest = destination;
     instruction.lhs = operand;
     instruction.text = unary->operator;
+    instruction.ast_ref = expression;
 
     if (!ir_emit(context, function, &instruction)) {
       ir_operand_destroy(&destination);
