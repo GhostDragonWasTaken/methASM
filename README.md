@@ -2,9 +2,9 @@
 
 MethASM is a compiler for a typed assembly-like language that targets x86-64 assembly.
 
-## Status
+## Project Status
 
-MethASM currently provides an end-to-end pipeline from `.masm` source to x86-64 assembly output:
+MethASM provides an end-to-end compilation pipeline from `.masm` source to x86-64 assembly output.
 
 - Lexing
 - Parsing
@@ -12,32 +12,28 @@ MethASM currently provides an end-to-end pipeline from `.masm` source to x86-64 
 - Code generation
 - Runtime garbage collector integration
 
-The project is under active development. Core features are implemented, tested, and usable for current language scenarios.
+Core compiler and runtime paths are implemented and currently validated by project tests.
 
-## Current Guarantees
+## Compiler Guarantees
 
-The compiler now uses strict fail-fast behavior across all major phases.
+The compiler uses fail-fast behavior across all major phases.
 
-- Lexical errors are reported with exact line and column and stop compilation.
-- Parser recovery is used for diagnostics, but compilation still fails if any parser error occurred.
-- Semantic errors are reported with location and suggestions where available.
-- Code generation no longer silently falls back on unsupported or unresolved constructs.
+- Lexical errors report precise line and column and stop compilation.
+- Parser recovery is used for diagnostics, but any parser error still causes final failure.
+- Semantic errors include source locations and block backend execution.
+- Code generation rejects unresolved symbols and unsupported constructs instead of emitting fallback output.
 - Unsupported top-level constructs are rejected explicitly.
 
-This design is intended to reduce both false negatives (missed errors) and false positives (incorrect phase fallout).
+This reduces silent failures and minimizes incorrect cascading diagnostics.
 
 ## Implemented Language Features
 
-- Variables with explicit types and initializer-based inference
-  - `var x: int32 = 42;`
-  - `var y = new Vector3;`
+- Variable declarations with explicit types and initializer-based inference
 - Functions and function calls
-  - Return type syntax supports both `->` and `:`
+- Function return type syntax with both `->` and `:`
 - Struct declarations
 - Struct member access and assignment
-  - `obj.field`
-  - `obj.field = expr`
-- `if` / `else`
+- `if` and `else`
 - `while`
 - `return`
 - Inline assembly blocks
@@ -46,35 +42,28 @@ This design is intended to reduce both false negatives (missed errors) and false
 
 - Built-in integer and floating-point types
 - Struct type registration and lookup
-- Assignment compatibility checks
-- Field assignment checks
-- Undefined symbol detection with source location
+- Assignment compatibility validation
+- Field assignment validation
+- Undefined symbol detection with source locations
 
 ## Code Generation
 
 - x86-64 assembly emission
 - Function prologue and epilogue generation
-- Expression and statement generation for supported AST nodes
-- Struct field offset based access and assignment
+- Statement and expression generation for supported AST nodes
+- Struct field offset-based access and assignment
 - `_start` entry emission that calls `main` when present
-- Hard error on unresolved symbols or unsupported generation paths
+- Hard failure on unresolved symbols or unsupported generation paths
 
 ## Garbage Collector Runtime
 
 - Heap allocation via `gc_alloc`
 - Conservative mark-and-sweep collection
-- Iterative mark traversal (worklist-based)
+- Iterative mark traversal using a worklist
 - Stack root scanning
-- Explicit root registration API
-  - `gc_register_root`
-  - `gc_unregister_root`
-- Collection control
-  - `gc_collect`
-  - `gc_collect_now`
-  - `gc_set_collection_threshold`
-  - `gc_get_collection_threshold`
-- Runtime shutdown and cleanup
-  - `gc_shutdown`
+- Root registration API: `gc_register_root`, `gc_unregister_root`
+- Collection controls: `gc_collect`, `gc_collect_now`, `gc_set_collection_threshold`, `gc_get_collection_threshold`
+- Runtime cleanup: `gc_shutdown`
 
 ## Build
 
@@ -84,16 +73,16 @@ This design is intended to reduce both false negatives (missed errors) and false
 .\build.bat
 ```
 
-### Linux/macOS
+### Linux and macOS
 
 ```bash
 make
 ```
 
-Output binary:
+Build output:
 
 - Windows: `bin\methasm.exe`
-- Linux/macOS: `bin/methasm`
+- Linux and macOS: `bin/methasm`
 
 ## Usage
 
@@ -101,7 +90,7 @@ Output binary:
 methasm [options] <input.masm>
 ```
 
-Common options:
+Options:
 
 - `-i <file>` input file
 - `-o <file>` output file
@@ -115,22 +104,22 @@ Example:
 ./bin/methasm tests/test_gc_alloc.masm -o out.s
 ```
 
-## Tests
+## Testing
 
-Runtime GC test:
+Run runtime and compiler tests with:
 
 ```bash
 make test
 ```
 
-Windows manual equivalent:
+Windows manual runtime test:
 
 ```powershell
 gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests\gc_runtime_test.c src\runtime\gc.c -o bin\gc_runtime_test.exe
 .\bin\gc_runtime_test.exe
 ```
 
-Compiler smoke tests:
+Windows compiler smoke tests:
 
 ```powershell
 .\bin\methasm.exe test_simple.masm -o out_simple.s
@@ -143,7 +132,7 @@ Compiler smoke tests:
 src/
   lexer/      Tokenization
   parser/     Parsing and AST creation
-  semantic/   Type checking, symbol table, register allocator
+  semantic/   Type checking, symbol table, register allocation
   codegen/    Assembly generation
   runtime/    Garbage collector runtime
   debug/      Debug information helpers
@@ -159,14 +148,12 @@ Makefile      Linux/macOS build and test targets
 
 - Optimization passes are limited.
 - Language surface area is still evolving.
-- Some advanced language and backend scenarios are not implemented yet.
+- Some advanced language and backend scenarios are not implemented.
 
 ## Contributing
 
-Contributions are welcome in:
+Contributions should include:
 
-- Language features
-- Diagnostics and recovery quality
-- Test coverage
-- Code generation correctness and performance
-- Runtime and garbage collector improvements
+- A clear problem statement
+- Tests that validate behavior changes
+- Notes on compatibility impact
