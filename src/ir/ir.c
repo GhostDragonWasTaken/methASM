@@ -161,8 +161,9 @@ int ir_function_append_instruction(IRFunction *function,
   }
 
   if (function->instruction_count >= function->instruction_capacity) {
-    size_t new_capacity =
-        function->instruction_capacity == 0 ? 64 : function->instruction_capacity * 2;
+    size_t new_capacity = function->instruction_capacity == 0
+                              ? 64
+                              : function->instruction_capacity * 2;
     IRInstruction *new_instructions =
         realloc(function->instructions, new_capacity * sizeof(IRInstruction));
     if (!new_instructions) {
@@ -179,6 +180,7 @@ int ir_function_append_instruction(IRFunction *function,
   slot->lhs = ir_operand_clone(&instruction->lhs);
   slot->rhs = ir_operand_clone(&instruction->rhs);
   slot->text = ir_strdup(instruction->text);
+  slot->is_float = instruction->is_float;
   slot->arguments = NULL;
   slot->argument_count = instruction->argument_count;
 
@@ -315,8 +317,7 @@ static void ir_format_operand(const IROperand *operand, char *buffer,
     snprintf(buffer, buffer_size, "%f", operand->float_value);
     break;
   case IR_OPERAND_STRING:
-    snprintf(buffer, buffer_size, "\"%s\"",
-             operand->name ? operand->name : "");
+    snprintf(buffer, buffer_size, "\"%s\"", operand->name ? operand->name : "");
     break;
   case IR_OPERAND_LABEL:
     snprintf(buffer, buffer_size, "%s", operand->name ? operand->name : "?");
@@ -389,12 +390,14 @@ int ir_program_dump(IRProgram *program, FILE *output) {
                 dest, lhs, rhs);
         break;
       case IR_OP_BINARY:
-        fprintf(output, "%s %s = %s %s %s\n", ir_opcode_name(instruction->op),
-                dest, lhs, instruction->text ? instruction->text : "?", rhs);
+        fprintf(output, "%s %s = %s %s%s %s\n", ir_opcode_name(instruction->op),
+                dest, lhs, instruction->text ? instruction->text : "?",
+                instruction->is_float ? " (float)" : "", rhs);
         break;
       case IR_OP_UNARY:
-        fprintf(output, "%s %s = %s%s\n", ir_opcode_name(instruction->op), dest,
-                instruction->text ? instruction->text : "?", lhs);
+        fprintf(output, "%s %s = %s%s%s\n", ir_opcode_name(instruction->op),
+                dest, instruction->text ? instruction->text : "?", lhs,
+                instruction->is_float ? " (float)" : "");
         break;
       case IR_OP_CALL:
         fprintf(output, "%s %s = %s(", ir_opcode_name(instruction->op), dest,
@@ -419,13 +422,12 @@ int ir_program_dump(IRProgram *program, FILE *output) {
                 instruction->text ? instruction->text : "");
         break;
       case IR_OP_EVAL_EXPR:
-      case IR_OP_AST_STMT:
-        {
-          int ast_type = instruction->ast_ref ? (int)instruction->ast_ref->type : -1;
+      case IR_OP_AST_STMT: {
+        int ast_type =
+            instruction->ast_ref ? (int)instruction->ast_ref->type : -1;
         fprintf(output, "%s ast=%d\n", ir_opcode_name(instruction->op),
                 ast_type);
-        }
-        break;
+      } break;
       case IR_OP_NOP:
       default:
         fprintf(output, "%s\n", ir_opcode_name(instruction->op));

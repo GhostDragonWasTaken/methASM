@@ -54,6 +54,7 @@ typedef struct {
   char *text;
   IROperand *arguments;
   size_t argument_count;
+  int is_float;
   ASTNode *ast_ref;
 } IRInstruction;
 
