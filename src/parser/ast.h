@@ -15,6 +15,11 @@ typedef enum {
   AST_RETURN_STATEMENT,
   AST_IF_STATEMENT,
   AST_WHILE_STATEMENT,
+  AST_FOR_STATEMENT,
+  AST_SWITCH_STATEMENT,
+  AST_CASE_CLAUSE,
+  AST_BREAK_STATEMENT,
+  AST_CONTINUE_STATEMENT,
   AST_INLINE_ASM,
   AST_IDENTIFIER,
   AST_NUMBER_LITERAL,
@@ -138,6 +143,25 @@ typedef struct {
 } WhileStatement;
 
 typedef struct {
+  ASTNode *initializer;
+  ASTNode *condition;
+  ASTNode *increment;
+  ASTNode *body;
+} ForStatement;
+
+typedef struct {
+  ASTNode *value;
+  ASTNode *body;
+  int is_default;
+} CaseClause;
+
+typedef struct {
+  ASTNode *expression;
+  ASTNode **cases;
+  size_t case_count;
+} SwitchStatement;
+
+typedef struct {
   ASTNode *value;
 } ReturnStatement;
 
@@ -186,5 +210,15 @@ ASTNode *ast_create_new_expression(const char *type_name,
                                    SourceLocation location);
 ASTNode *ast_create_field_assignment(ASTNode *target, ASTNode *value,
                                      SourceLocation location);
+ASTNode *ast_create_for_statement(ASTNode *initializer, ASTNode *condition,
+                                  ASTNode *increment, ASTNode *body,
+                                  SourceLocation location);
+ASTNode *ast_create_case_clause(ASTNode *value, ASTNode *body, int is_default,
+                                SourceLocation location);
+ASTNode *ast_create_switch_statement(ASTNode *expression, ASTNode **cases,
+                                     size_t case_count,
+                                     SourceLocation location);
+ASTNode *ast_create_break_statement(SourceLocation location);
+ASTNode *ast_create_continue_statement(SourceLocation location);
 
 #endif // AST_H

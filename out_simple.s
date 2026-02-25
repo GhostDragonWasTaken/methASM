@@ -5,7 +5,7 @@ section .text
 ; Code section
 
 ; First pass: processing 1 declarations
-; Declaration 0 type: 2 (AST_INLINE_ASM = 10)
+; Declaration 0 type: 2 (AST_INLINE_ASM = 15)
 
 global test
 

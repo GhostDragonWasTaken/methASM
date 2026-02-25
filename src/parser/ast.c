@@ -155,6 +155,28 @@ void ast_destroy_node(ASTNode *node) {
     }
     break;
   }
+  case AST_FOR_STATEMENT: {
+    ForStatement *for_stmt = (ForStatement *)node->data;
+    if (for_stmt) {
+      free(for_stmt);
+    }
+    break;
+  }
+  case AST_CASE_CLAUSE: {
+    CaseClause *case_clause = (CaseClause *)node->data;
+    if (case_clause) {
+      free(case_clause);
+    }
+    break;
+  }
+  case AST_SWITCH_STATEMENT: {
+    SwitchStatement *switch_stmt = (SwitchStatement *)node->data;
+    if (switch_stmt) {
+      free(switch_stmt->cases);
+      free(switch_stmt);
+    }
+    break;
+  }
   default:
     free(node->data);
     break;
@@ -641,4 +663,108 @@ ASTNode *ast_create_field_assignment(ASTNode *target, ASTNode *value,
   }
 
   return node;
+}
+
+ASTNode *ast_create_for_statement(ASTNode *initializer, ASTNode *condition,
+                                  ASTNode *increment, ASTNode *body,
+                                  SourceLocation location) {
+  ASTNode *node = ast_create_node(AST_FOR_STATEMENT, location);
+  if (!node)
+    return NULL;
+
+  ForStatement *for_stmt = malloc(sizeof(ForStatement));
+  if (!for_stmt) {
+    free(node);
+    return NULL;
+  }
+
+  for_stmt->initializer = initializer;
+  for_stmt->condition = condition;
+  for_stmt->increment = increment;
+  for_stmt->body = body;
+  node->data = for_stmt;
+
+  if (initializer)
+    ast_add_child(node, initializer);
+  if (condition)
+    ast_add_child(node, condition);
+  if (increment)
+    ast_add_child(node, increment);
+  if (body)
+    ast_add_child(node, body);
+
+  return node;
+}
+
+ASTNode *ast_create_case_clause(ASTNode *value, ASTNode *body, int is_default,
+                                SourceLocation location) {
+  ASTNode *node = ast_create_node(AST_CASE_CLAUSE, location);
+  if (!node)
+    return NULL;
+
+  CaseClause *case_clause = malloc(sizeof(CaseClause));
+  if (!case_clause) {
+    free(node);
+    return NULL;
+  }
+
+  case_clause->value = value;
+  case_clause->body = body;
+  case_clause->is_default = is_default;
+  node->data = case_clause;
+
+  if (value)
+    ast_add_child(node, value);
+  if (body)
+    ast_add_child(node, body);
+
+  return node;
+}
+
+ASTNode *ast_create_switch_statement(ASTNode *expression, ASTNode **cases,
+                                     size_t case_count,
+                                     SourceLocation location) {
+  ASTNode *node = ast_create_node(AST_SWITCH_STATEMENT, location);
+  if (!node)
+    return NULL;
+
+  SwitchStatement *switch_stmt = malloc(sizeof(SwitchStatement));
+  if (!switch_stmt) {
+    free(node);
+    return NULL;
+  }
+
+  switch_stmt->expression = expression;
+  switch_stmt->case_count = case_count;
+
+  if (case_count > 0) {
+    switch_stmt->cases = malloc(case_count * sizeof(ASTNode *));
+    if (!switch_stmt->cases) {
+      free(switch_stmt);
+      free(node);
+      return NULL;
+    }
+    for (size_t i = 0; i < case_count; i++) {
+      switch_stmt->cases[i] = cases[i];
+      if (cases[i])
+        ast_add_child(node, cases[i]);
+    }
+  } else {
+    switch_stmt->cases = NULL;
+  }
+
+  switch_stmt->expression = expression;
+  if (expression)
+    ast_add_child(node, expression);
+
+  node->data = switch_stmt;
+  return node;
+}
+
+ASTNode *ast_create_break_statement(SourceLocation location) {
+  return ast_create_node(AST_BREAK_STATEMENT, location);
+}
+
+ASTNode *ast_create_continue_statement(SourceLocation location) {
+  return ast_create_node(AST_CONTINUE_STATEMENT, location);
 }

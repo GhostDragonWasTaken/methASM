@@ -28,6 +28,10 @@ typedef struct {
     size_t global_variables_size;
     size_t global_variables_capacity;
     size_t current_assembly_line;
+    char** break_label_stack;
+    char** continue_label_stack;
+    size_t control_flow_stack_size;
+    size_t control_flow_stack_capacity;
     int generate_debug_info;
     int has_error;
     char* error_message;

@@ -125,6 +125,18 @@ static const char *token_type_to_string(TokenType type) {
     return "'else'";
   case TOKEN_WHILE:
     return "'while'";
+  case TOKEN_FOR:
+    return "'for'";
+  case TOKEN_SWITCH:
+    return "'switch'";
+  case TOKEN_CASE:
+    return "'case'";
+  case TOKEN_DEFAULT:
+    return "'default'";
+  case TOKEN_BREAK:
+    return "'break'";
+  case TOKEN_CONTINUE:
+    return "'continue'";
   case TOKEN_ASM:
     return "'asm'";
   case TOKEN_THIS:
@@ -302,6 +314,10 @@ void parser_synchronize(Parser *parser) {
     case TOKEN_RETURN:
     case TOKEN_IF:
     case TOKEN_WHILE:
+    case TOKEN_FOR:
+    case TOKEN_SWITCH:
+    case TOKEN_BREAK:
+    case TOKEN_CONTINUE:
     case TOKEN_RBRACE:
       return;
     default:
@@ -437,6 +453,14 @@ ASTNode *parser_parse_statement(Parser *parser) {
     return parser_parse_if_statement(parser);
   case TOKEN_WHILE:
     return parser_parse_while_statement(parser);
+  case TOKEN_FOR:
+    return parser_parse_for_statement(parser);
+  case TOKEN_SWITCH:
+    return parser_parse_switch_statement(parser);
+  case TOKEN_BREAK:
+    return parser_parse_break_statement(parser);
+  case TOKEN_CONTINUE:
+    return parser_parse_continue_statement(parser);
   case TOKEN_ASM:
     return parser_parse_inline_asm(parser);
   case TOKEN_IDENTIFIER:
@@ -567,6 +591,43 @@ static char *parser_parse_type_annotation(Parser *parser) {
   free(base_type);
   free(size_text);
   return full_type;
+}
+
+static ASTNode *parser_parse_for_initializer(Parser *parser) {
+  if (!parser)
+    return NULL;
+
+  if (parser->current_token.type == TOKEN_SEMICOLON) {
+    return NULL;
+  }
+
+  if (parser->current_token.type == TOKEN_VAR) {
+    return parser_parse_var_declaration(parser);
+  }
+
+  ASTNode *expr = parser_parse_expression(parser);
+  if (!expr)
+    return NULL;
+
+  if (parser->current_token.type == TOKEN_EQUALS &&
+      (expr->type == AST_IDENTIFIER || expr->type == AST_MEMBER_ACCESS ||
+       expr->type == AST_INDEX_EXPRESSION)) {
+    parser_advance(parser); // consume '='
+    ASTNode *value = parser_parse_expression(parser);
+    if (!value) {
+      ast_destroy_node(expr);
+      return NULL;
+    }
+    if (expr->type == AST_IDENTIFIER) {
+      Identifier *id = (Identifier *)expr->data;
+      ASTNode *assign = ast_create_assignment(id->name, value, expr->location);
+      ast_destroy_node(expr);
+      return assign;
+    }
+    return ast_create_field_assignment(expr, value, expr->location);
+  }
+
+  return expr;
 }
 
 ASTNode *parser_parse_primary_expression(Parser *parser) {
@@ -1526,6 +1587,298 @@ ASTNode *parser_parse_while_statement(Parser *parser) {
   ast_add_child(while_node, body);
 
   return while_node;
+}
+
+ASTNode *parser_parse_break_statement(Parser *parser) {
+  if (!parser)
+    return NULL;
+
+  SourceLocation location = {parser->current_token.line,
+                             parser->current_token.column};
+  if (!parser_expect(parser, TOKEN_BREAK)) {
+    return NULL;
+  }
+
+  parser_expect_statement_end(parser);
+  return ast_create_break_statement(location);
+}
+
+ASTNode *parser_parse_continue_statement(Parser *parser) {
+  if (!parser)
+    return NULL;
+
+  SourceLocation location = {parser->current_token.line,
+                             parser->current_token.column};
+  if (!parser_expect(parser, TOKEN_CONTINUE)) {
+    return NULL;
+  }
+
+  parser_expect_statement_end(parser);
+  return ast_create_continue_statement(location);
+}
+
+ASTNode *parser_parse_for_statement(Parser *parser) {
+  if (!parser)
+    return NULL;
+
+  SourceLocation location = {parser->current_token.line,
+                             parser->current_token.column};
+  if (!parser_expect(parser, TOKEN_FOR)) {
+    return NULL;
+  }
+
+  if (!parser_expect(parser, TOKEN_LPAREN)) {
+    parser_set_error(parser, "Expected '(' after 'for'");
+    return NULL;
+  }
+
+  ASTNode *initializer = parser_parse_for_initializer(parser);
+  if (parser->has_error) {
+    if (initializer)
+      ast_destroy_node(initializer);
+    return NULL;
+  }
+
+  if (parser->current_token.type == TOKEN_SEMICOLON) {
+    parser_advance(parser);
+  } else if (!initializer || initializer->type != AST_VAR_DECLARATION) {
+    parser_set_error(parser, "Expected ';' after for-loop initializer");
+    if (initializer)
+      ast_destroy_node(initializer);
+    return NULL;
+  }
+
+  ASTNode *condition = NULL;
+  if (parser->current_token.type != TOKEN_SEMICOLON) {
+    condition = parser_parse_expression(parser);
+    if (!condition) {
+      if (initializer)
+        ast_destroy_node(initializer);
+      return NULL;
+    }
+  }
+
+  if (!parser_expect(parser, TOKEN_SEMICOLON)) {
+    if (initializer)
+      ast_destroy_node(initializer);
+    if (condition)
+      ast_destroy_node(condition);
+    return NULL;
+  }
+
+  ASTNode *increment = NULL;
+  if (parser->current_token.type != TOKEN_RPAREN) {
+    ASTNode *expr = parser_parse_expression(parser);
+    if (!expr) {
+      if (initializer)
+        ast_destroy_node(initializer);
+      if (condition)
+        ast_destroy_node(condition);
+      return NULL;
+    }
+
+    if (parser->current_token.type == TOKEN_EQUALS &&
+        (expr->type == AST_IDENTIFIER || expr->type == AST_MEMBER_ACCESS ||
+         expr->type == AST_INDEX_EXPRESSION)) {
+      parser_advance(parser);
+      ASTNode *value = parser_parse_expression(parser);
+      if (!value) {
+        ast_destroy_node(expr);
+        if (initializer)
+          ast_destroy_node(initializer);
+        if (condition)
+          ast_destroy_node(condition);
+        return NULL;
+      }
+      if (expr->type == AST_IDENTIFIER) {
+        Identifier *id = (Identifier *)expr->data;
+        increment = ast_create_assignment(id->name, value, expr->location);
+        ast_destroy_node(expr);
+      } else {
+        increment = ast_create_field_assignment(expr, value, expr->location);
+      }
+    } else {
+      increment = expr;
+    }
+  }
+
+  if (!parser_expect(parser, TOKEN_RPAREN)) {
+    if (initializer)
+      ast_destroy_node(initializer);
+    if (condition)
+      ast_destroy_node(condition);
+    if (increment)
+      ast_destroy_node(increment);
+    return NULL;
+  }
+
+  ASTNode *body = (parser->current_token.type == TOKEN_LBRACE)
+                      ? parser_parse_block(parser)
+                      : parser_parse_statement(parser);
+  if (!body) {
+    if (initializer)
+      ast_destroy_node(initializer);
+    if (condition)
+      ast_destroy_node(condition);
+    if (increment)
+      ast_destroy_node(increment);
+    return NULL;
+  }
+
+  return ast_create_for_statement(initializer, condition, increment, body,
+                                  location);
+}
+
+ASTNode *parser_parse_switch_statement(Parser *parser) {
+  if (!parser)
+    return NULL;
+
+  SourceLocation location = {parser->current_token.line,
+                             parser->current_token.column};
+  if (!parser_expect(parser, TOKEN_SWITCH)) {
+    return NULL;
+  }
+
+  if (!parser_expect(parser, TOKEN_LPAREN)) {
+    parser_set_error(parser, "Expected '(' after 'switch'");
+    return NULL;
+  }
+
+  ASTNode *expression = parser_parse_expression(parser);
+  if (!expression) {
+    return NULL;
+  }
+
+  if (!parser_expect(parser, TOKEN_RPAREN)) {
+    ast_destroy_node(expression);
+    return NULL;
+  }
+
+  if (!parser_expect(parser, TOKEN_LBRACE)) {
+    ast_destroy_node(expression);
+    return NULL;
+  }
+
+  ASTNode **cases = NULL;
+  size_t case_count = 0;
+  int seen_default = 0;
+
+  while (parser->current_token.type != TOKEN_RBRACE &&
+         parser->current_token.type != TOKEN_EOF) {
+    while (parser->current_token.type == TOKEN_NEWLINE ||
+           parser->current_token.type == TOKEN_SEMICOLON) {
+      parser_advance(parser);
+    }
+
+    if (parser->current_token.type == TOKEN_RBRACE) {
+      break;
+    }
+
+    int is_default = 0;
+    ASTNode *case_value = NULL;
+    SourceLocation case_loc = {parser->current_token.line,
+                               parser->current_token.column};
+
+    if (parser->current_token.type == TOKEN_CASE) {
+      parser_advance(parser);
+      if (parser->current_token.type != TOKEN_NUMBER) {
+        parser_set_error(parser, "Switch case value must be a number literal");
+        break;
+      }
+      NumberLiteral tmp = {0};
+      if (strchr(parser->current_token.value, '.')) {
+        tmp.float_value = atof(parser->current_token.value);
+        tmp.is_float = 1;
+        case_value = ast_create_float_literal(tmp.float_value, case_loc);
+      } else {
+        tmp.int_value = atoll(parser->current_token.value);
+        tmp.is_float = 0;
+        case_value = ast_create_number_literal(tmp.int_value, case_loc);
+      }
+      parser_advance(parser);
+    } else if (parser->current_token.type == TOKEN_DEFAULT) {
+      if (seen_default) {
+        parser_set_error(parser, "Only one default case is allowed");
+        break;
+      }
+      seen_default = 1;
+      is_default = 1;
+      parser_advance(parser);
+    } else {
+      parser_set_error(parser, "Expected 'case' or 'default' in switch");
+      break;
+    }
+
+    if (!parser_expect(parser, TOKEN_COLON)) {
+      if (case_value)
+        ast_destroy_node(case_value);
+      break;
+    }
+
+    ASTNode *case_body = ast_create_program();
+    if (!case_body) {
+      if (case_value)
+        ast_destroy_node(case_value);
+      parser_set_error(parser, "Memory allocation failed for switch case");
+      break;
+    }
+
+    Program *body_prog = (Program *)case_body->data;
+    while (parser->current_token.type != TOKEN_EOF &&
+           parser->current_token.type != TOKEN_CASE &&
+           parser->current_token.type != TOKEN_DEFAULT &&
+           parser->current_token.type != TOKEN_RBRACE) {
+      if (parser->current_token.type == TOKEN_NEWLINE ||
+          parser->current_token.type == TOKEN_SEMICOLON) {
+        parser_advance(parser);
+        continue;
+      }
+
+      ASTNode *stmt = parser_parse_statement(parser);
+      if (!stmt) {
+        ast_destroy_node(case_body);
+        if (case_value)
+          ast_destroy_node(case_value);
+        for (size_t i = 0; i < case_count; i++)
+          ast_destroy_node(cases[i]);
+        free(cases);
+        ast_destroy_node(expression);
+        return NULL;
+      }
+
+      body_prog->declarations =
+          realloc(body_prog->declarations,
+                  (body_prog->declaration_count + 1) * sizeof(ASTNode *));
+      body_prog->declarations[body_prog->declaration_count++] = stmt;
+      ast_add_child(case_body, stmt);
+    }
+
+    ASTNode *case_node =
+        ast_create_case_clause(case_value, case_body, is_default, case_loc);
+    if (!case_node) {
+      ast_destroy_node(case_body);
+      if (case_value)
+        ast_destroy_node(case_value);
+      parser_set_error(parser, "Failed to create switch case clause");
+      break;
+    }
+
+    cases = realloc(cases, (case_count + 1) * sizeof(ASTNode *));
+    cases[case_count++] = case_node;
+  }
+
+  if (!parser_expect(parser, TOKEN_RBRACE)) {
+    for (size_t i = 0; i < case_count; i++)
+      ast_destroy_node(cases[i]);
+    free(cases);
+    ast_destroy_node(expression);
+    return NULL;
+  }
+
+  ASTNode *switch_node =
+      ast_create_switch_statement(expression, cases, case_count, location);
+  free(cases);
+  return switch_node;
 }
 
 ASTNode *parser_parse_block(Parser *parser) {

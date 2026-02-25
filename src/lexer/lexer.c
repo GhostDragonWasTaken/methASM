@@ -291,6 +291,18 @@ Token lexer_next_token(Lexer *lexer) {
       token.type = TOKEN_ELSE;
     else if (strcmp(token.value, "while") == 0)
       token.type = TOKEN_WHILE;
+    else if (strcmp(token.value, "for") == 0)
+      token.type = TOKEN_FOR;
+    else if (strcmp(token.value, "switch") == 0)
+      token.type = TOKEN_SWITCH;
+    else if (strcmp(token.value, "case") == 0)
+      token.type = TOKEN_CASE;
+    else if (strcmp(token.value, "default") == 0)
+      token.type = TOKEN_DEFAULT;
+    else if (strcmp(token.value, "break") == 0)
+      token.type = TOKEN_BREAK;
+    else if (strcmp(token.value, "continue") == 0)
+      token.type = TOKEN_CONTINUE;
     else if (strcmp(token.value, "asm") == 0)
       token.type = TOKEN_ASM;
     else if (strcmp(token.value, "this") == 0)

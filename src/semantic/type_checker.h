@@ -31,6 +31,8 @@ typedef struct {
     Type* builtin_string;
     Type* builtin_void;
     Symbol* current_function;
+    int loop_depth;
+    int switch_depth;
 } TypeChecker;
 
 // Function declarations

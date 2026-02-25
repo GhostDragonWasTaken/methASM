@@ -1,0 +1,22 @@
+function main() -> int32 {
+  var x: int32 = 0;
+  for (var i: int32 = 0; i < 8; i = i + 1) {
+    if (i == 2) {
+      continue;
+    }
+    switch (i) {
+      case 0:
+        x = x + 10;
+        break;
+      case 5:
+        x = x + 50;
+        break;
+      default:
+        x = x + 1;
+    }
+    if (i == 6) {
+      break;
+    }
+  }
+  return x;
+}

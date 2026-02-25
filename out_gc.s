@@ -5,8 +5,8 @@ section .text
 ; Code section
 
 ; First pass: processing 2 declarations
-; Declaration 0 type: 3 (AST_INLINE_ASM = 10)
-; Declaration 1 type: 2 (AST_INLINE_ASM = 10)
+; Declaration 0 type: 3 (AST_INLINE_ASM = 15)
+; Declaration 1 type: 2 (AST_INLINE_ASM = 15)
     ; Struct declaration: Vector3
     ; Struct Vector3: size=12, alignment=4
 

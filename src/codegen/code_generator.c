@@ -10,6 +10,14 @@ static void emit_to_global_buffer(CodeGenerator *generator, const char *format,
                                   ...);
 static void code_generator_set_error(CodeGenerator *generator,
                                      const char *format, ...);
+static int code_generator_push_control_labels(CodeGenerator *generator,
+                                              const char *break_label,
+                                              const char *continue_label);
+static void code_generator_pop_control_labels(CodeGenerator *generator);
+static const char *code_generator_current_break_label(
+    CodeGenerator *generator);
+static const char *code_generator_current_continue_label(
+    CodeGenerator *generator);
 static int code_generator_get_type_storage_size(Type *type);
 static void code_generator_emit_store_value_at_address(CodeGenerator *generator,
                                                        int element_size);
@@ -41,6 +49,10 @@ CodeGenerator *code_generator_create(SymbolTable *symbol_table,
   generator->global_variables_size = 0;
   generator->global_variables_capacity = 2048;
   generator->current_assembly_line = 1;
+  generator->break_label_stack = NULL;
+  generator->continue_label_stack = NULL;
+  generator->control_flow_stack_size = 0;
+  generator->control_flow_stack_capacity = 0;
   generator->generate_debug_info = 0;
   generator->has_error = 0;
   generator->error_message = NULL;
@@ -75,6 +87,12 @@ CodeGenerator *code_generator_create_with_debug(SymbolTable *symbol_table,
 
 void code_generator_destroy(CodeGenerator *generator) {
   if (generator) {
+    for (size_t i = 0; i < generator->control_flow_stack_size; i++) {
+      free(generator->break_label_stack[i]);
+      free(generator->continue_label_stack[i]);
+    }
+    free(generator->break_label_stack);
+    free(generator->continue_label_stack);
     free(generator->output_buffer);
     free(generator->current_function_name);
     free(generator->global_variables_buffer);
@@ -113,6 +131,76 @@ static void code_generator_set_error(CodeGenerator *generator,
   }
 
   va_end(args);
+}
+
+static int code_generator_push_control_labels(CodeGenerator *generator,
+                                              const char *break_label,
+                                              const char *continue_label) {
+  if (!generator) {
+    return 0;
+  }
+
+  if (generator->control_flow_stack_size >=
+      generator->control_flow_stack_capacity) {
+    size_t new_capacity = generator->control_flow_stack_capacity == 0
+                              ? 8
+                              : generator->control_flow_stack_capacity * 2;
+    char **new_break_stack = malloc(new_capacity * sizeof(char *));
+    char **new_continue_stack = malloc(new_capacity * sizeof(char *));
+    if (!new_break_stack || !new_continue_stack) {
+      free(new_break_stack);
+      free(new_continue_stack);
+      code_generator_set_error(generator,
+                               "Out of memory for control-flow label stack");
+      return 0;
+    }
+    for (size_t i = 0; i < generator->control_flow_stack_size; i++) {
+      new_break_stack[i] = generator->break_label_stack[i];
+      new_continue_stack[i] = generator->continue_label_stack[i];
+    }
+    free(generator->break_label_stack);
+    free(generator->continue_label_stack);
+    generator->break_label_stack = new_break_stack;
+    generator->continue_label_stack = new_continue_stack;
+    generator->control_flow_stack_capacity = new_capacity;
+  }
+
+  size_t slot = generator->control_flow_stack_size++;
+  generator->break_label_stack[slot] = break_label ? strdup(break_label) : NULL;
+  generator->continue_label_stack[slot] =
+      continue_label ? strdup(continue_label) : NULL;
+  return 1;
+}
+
+static void code_generator_pop_control_labels(CodeGenerator *generator) {
+  if (!generator || generator->control_flow_stack_size == 0) {
+    return;
+  }
+
+  size_t slot = generator->control_flow_stack_size - 1;
+  free(generator->break_label_stack[slot]);
+  free(generator->continue_label_stack[slot]);
+  generator->break_label_stack[slot] = NULL;
+  generator->continue_label_stack[slot] = NULL;
+  generator->control_flow_stack_size--;
+}
+
+static const char *code_generator_current_break_label(
+    CodeGenerator *generator) {
+  if (!generator || generator->control_flow_stack_size == 0) {
+    return NULL;
+  }
+  return generator
+      ->break_label_stack[generator->control_flow_stack_size - 1];
+}
+
+static const char *code_generator_current_continue_label(
+    CodeGenerator *generator) {
+  if (!generator || generator->control_flow_stack_size == 0) {
+    return NULL;
+  }
+  return generator
+      ->continue_label_stack[generator->control_flow_stack_size - 1];
 }
 
 int code_generator_generate_program(CodeGenerator *generator,
@@ -586,6 +674,12 @@ void code_generator_generate_statement(CodeGenerator *generator,
       if (!loop_start || !loop_end)
         break;
 
+      if (!code_generator_push_control_labels(generator, loop_end, loop_start)) {
+        free(loop_start);
+        free(loop_end);
+        break;
+      }
+
       code_generator_emit(generator, "%s:\n", loop_start);
       code_generator_generate_expression(generator, while_data->condition);
       code_generator_emit(generator,
@@ -598,11 +692,180 @@ void code_generator_generate_statement(CodeGenerator *generator,
                           loop_start);
 
       code_generator_emit(generator, "%s:\n", loop_end);
+      code_generator_pop_control_labels(generator);
       free(loop_start);
       free(loop_end);
     } else {
       code_generator_set_error(generator, "Malformed while statement");
     }
+  } break;
+
+  case AST_FOR_STATEMENT: {
+    ForStatement *for_data = (ForStatement *)statement->data;
+    if (!for_data || !for_data->body) {
+      code_generator_set_error(generator, "Malformed for statement");
+      break;
+    }
+
+    char *loop_cond = code_generator_generate_label(generator, "for_cond");
+    char *loop_step = code_generator_generate_label(generator, "for_step");
+    char *loop_end = code_generator_generate_label(generator, "for_end");
+    if (!loop_cond || !loop_step || !loop_end) {
+      free(loop_cond);
+      free(loop_step);
+      free(loop_end);
+      break;
+    }
+
+    if (!code_generator_push_control_labels(generator, loop_end, loop_step)) {
+      free(loop_cond);
+      free(loop_step);
+      free(loop_end);
+      break;
+    }
+
+    if (for_data->initializer) {
+      if (for_data->initializer->type == AST_VAR_DECLARATION ||
+          for_data->initializer->type == AST_ASSIGNMENT ||
+          for_data->initializer->type == AST_FUNCTION_CALL ||
+          for_data->initializer->type == AST_PROGRAM) {
+        code_generator_generate_statement(generator, for_data->initializer);
+      } else {
+        code_generator_generate_expression(generator, for_data->initializer);
+      }
+    }
+
+    code_generator_emit(generator, "%s:\n", loop_cond);
+    if (for_data->condition) {
+      code_generator_generate_expression(generator, for_data->condition);
+      code_generator_emit(generator,
+                          "    test rax, rax      ; Test for-loop condition\n");
+      code_generator_emit(generator,
+                          "    jz %s              ; Exit for-loop\n", loop_end);
+    }
+
+    code_generator_generate_statement(generator, for_data->body);
+
+    code_generator_emit(generator, "%s:\n", loop_step);
+    if (for_data->increment) {
+      if (for_data->increment->type == AST_ASSIGNMENT) {
+        code_generator_generate_statement(generator, for_data->increment);
+      } else {
+        code_generator_generate_expression(generator, for_data->increment);
+      }
+    }
+    code_generator_emit(generator, "    jmp %s              ; Next iteration\n",
+                        loop_cond);
+    code_generator_emit(generator, "%s:\n", loop_end);
+
+    code_generator_pop_control_labels(generator);
+    free(loop_cond);
+    free(loop_step);
+    free(loop_end);
+  } break;
+
+  case AST_SWITCH_STATEMENT: {
+    SwitchStatement *switch_data = (SwitchStatement *)statement->data;
+    if (!switch_data || !switch_data->expression) {
+      code_generator_set_error(generator, "Malformed switch statement");
+      break;
+    }
+
+    char *switch_end = code_generator_generate_label(generator, "switch_end");
+    if (!switch_end) {
+      break;
+    }
+    if (!code_generator_push_control_labels(generator, switch_end, NULL)) {
+      free(switch_end);
+      break;
+    }
+
+    code_generator_generate_expression(generator, switch_data->expression);
+    code_generator_emit(generator, "    mov rbx, rax       ; Save switch value\n");
+
+    char **case_labels = NULL;
+    size_t case_count = switch_data->case_count;
+    size_t default_index = (size_t)-1;
+    if (case_count > 0) {
+      case_labels = malloc(case_count * sizeof(char *));
+      if (!case_labels) {
+        code_generator_pop_control_labels(generator);
+        free(switch_end);
+        code_generator_set_error(generator,
+                                 "Out of memory while generating switch");
+        break;
+      }
+      for (size_t i = 0; i < case_count; i++) {
+        case_labels[i] = NULL;
+      }
+    }
+
+    for (size_t i = 0; i < case_count; i++) {
+      ASTNode *case_node = switch_data->cases ? switch_data->cases[i] : NULL;
+      CaseClause *case_clause = case_node ? (CaseClause *)case_node->data : NULL;
+      case_labels[i] = code_generator_generate_label(generator, "case");
+      if (!case_labels[i]) {
+        continue;
+      }
+      if (case_clause && case_clause->is_default) {
+        default_index = i;
+        continue;
+      }
+      if (case_clause && case_clause->value &&
+          case_clause->value->type == AST_NUMBER_LITERAL) {
+        NumberLiteral *num = (NumberLiteral *)case_clause->value->data;
+        long long value = num ? num->int_value : 0;
+        code_generator_emit(generator, "    cmp rbx, %lld\n", value);
+        code_generator_emit(generator, "    je %s\n", case_labels[i]);
+      }
+    }
+
+    if (default_index != (size_t)-1 && case_labels && case_labels[default_index]) {
+      code_generator_emit(generator, "    jmp %s\n",
+                          case_labels[default_index]);
+    } else {
+      code_generator_emit(generator, "    jmp %s\n", switch_end);
+    }
+
+    for (size_t i = 0; i < case_count; i++) {
+      ASTNode *case_node = switch_data->cases ? switch_data->cases[i] : NULL;
+      CaseClause *case_clause = case_node ? (CaseClause *)case_node->data : NULL;
+      if (!case_labels || !case_labels[i] || !case_clause || !case_clause->body) {
+        continue;
+      }
+      code_generator_emit(generator, "%s:\n", case_labels[i]);
+      code_generator_generate_statement(generator, case_clause->body);
+    }
+
+    code_generator_emit(generator, "%s:\n", switch_end);
+    code_generator_pop_control_labels(generator);
+    if (case_labels) {
+      for (size_t i = 0; i < case_count; i++) {
+        free(case_labels[i]);
+      }
+      free(case_labels);
+    }
+    free(switch_end);
+  } break;
+
+  case AST_BREAK_STATEMENT: {
+    const char *break_label = code_generator_current_break_label(generator);
+    if (!break_label) {
+      code_generator_set_error(generator,
+                               "'break' used outside loop/switch in codegen");
+      break;
+    }
+    code_generator_emit(generator, "    jmp %s\n", break_label);
+  } break;
+
+  case AST_CONTINUE_STATEMENT: {
+    const char *continue_label = code_generator_current_continue_label(generator);
+    if (!continue_label) {
+      code_generator_set_error(generator,
+                               "'continue' used outside loop in codegen");
+      break;
+    }
+    code_generator_emit(generator, "    jmp %s\n", continue_label);
   } break;
 
   default:

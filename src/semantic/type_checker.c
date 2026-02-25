@@ -84,6 +84,8 @@ type_checker_create_with_error_reporter(SymbolTable *symbol_table,
   checker->error_message = NULL;
   checker->error_reporter = error_reporter;
   checker->current_function = NULL;
+  checker->loop_depth = 0;
+  checker->switch_depth = 0;
 
   // Initialize built-in type pointers to NULL
   checker->builtin_int8 = NULL;
@@ -1506,14 +1508,154 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       return 0;
     }
 
-    // Check body
+    checker->loop_depth++;
     if (while_stmt->body &&
         !type_checker_check_statement(checker, while_stmt->body)) {
+      checker->loop_depth--;
       return 0;
     }
+    checker->loop_depth--;
 
     return 1;
   }
+
+  case AST_FOR_STATEMENT: {
+    ForStatement *for_stmt = (ForStatement *)statement->data;
+    if (!for_stmt) {
+      type_checker_set_error_at_location(checker, statement->location,
+                                         "Invalid for statement");
+      return 0;
+    }
+
+    symbol_table_enter_scope(checker->symbol_table, SCOPE_BLOCK);
+
+    if (for_stmt->initializer) {
+      int init_ok = 0;
+      if (for_stmt->initializer->type == AST_VAR_DECLARATION ||
+          for_stmt->initializer->type == AST_ASSIGNMENT ||
+          for_stmt->initializer->type == AST_FUNCTION_CALL) {
+        init_ok = type_checker_check_statement(checker, for_stmt->initializer);
+      } else {
+        init_ok = type_checker_check_expression(checker, for_stmt->initializer);
+      }
+      if (!init_ok) {
+        symbol_table_exit_scope(checker->symbol_table);
+        return 0;
+      }
+    }
+
+    if (for_stmt->condition) {
+      Type *cond_type = type_checker_infer_type(checker, for_stmt->condition);
+      if (!cond_type) {
+        symbol_table_exit_scope(checker->symbol_table);
+        return 0;
+      }
+      if (!type_checker_is_numeric_type(cond_type)) {
+        type_checker_report_type_mismatch(checker, for_stmt->condition->location,
+                                          "numeric type", cond_type->name);
+        symbol_table_exit_scope(checker->symbol_table);
+        return 0;
+      }
+    }
+
+    if (for_stmt->increment &&
+        !type_checker_check_expression(checker, for_stmt->increment)) {
+      symbol_table_exit_scope(checker->symbol_table);
+      return 0;
+    }
+
+    checker->loop_depth++;
+    if (for_stmt->body && !type_checker_check_statement(checker, for_stmt->body)) {
+      checker->loop_depth--;
+      symbol_table_exit_scope(checker->symbol_table);
+      return 0;
+    }
+    checker->loop_depth--;
+
+    symbol_table_exit_scope(checker->symbol_table);
+    return 1;
+  }
+
+  case AST_SWITCH_STATEMENT: {
+    SwitchStatement *switch_stmt = (SwitchStatement *)statement->data;
+    if (!switch_stmt || !switch_stmt->expression) {
+      type_checker_set_error_at_location(checker, statement->location,
+                                         "Invalid switch statement");
+      return 0;
+    }
+
+    Type *switch_type = type_checker_infer_type(checker, switch_stmt->expression);
+    if (!switch_type) {
+      return 0;
+    }
+    if (!type_checker_is_integer_type(switch_type)) {
+      type_checker_report_type_mismatch(checker, switch_stmt->expression->location,
+                                        "integer type", switch_type->name);
+      return 0;
+    }
+
+    checker->switch_depth++;
+    for (size_t i = 0; i < switch_stmt->case_count; i++) {
+      ASTNode *case_node = switch_stmt->cases ? switch_stmt->cases[i] : NULL;
+      if (!case_node || case_node->type != AST_CASE_CLAUSE) {
+        type_checker_set_error_at_location(checker, statement->location,
+                                           "Invalid case clause in switch");
+        checker->switch_depth--;
+        return 0;
+      }
+
+      CaseClause *case_clause = (CaseClause *)case_node->data;
+      if (!case_clause) {
+        type_checker_set_error_at_location(checker, case_node->location,
+                                           "Invalid case clause");
+        checker->switch_depth--;
+        return 0;
+      }
+
+      if (!case_clause->is_default) {
+        if (!case_clause->value || case_clause->value->type != AST_NUMBER_LITERAL) {
+          type_checker_set_error_at_location(checker, case_node->location,
+                                             "Case value must be a numeric literal");
+          checker->switch_depth--;
+          return 0;
+        }
+        Type *case_type = type_checker_infer_type(checker, case_clause->value);
+        if (!case_type || !type_checker_is_assignable(checker, switch_type, case_type)) {
+          type_checker_report_type_mismatch(checker, case_clause->value->location,
+                                            switch_type->name,
+                                            case_type ? case_type->name : "unknown");
+          checker->switch_depth--;
+          return 0;
+        }
+      }
+
+      if (case_clause->body &&
+          !type_checker_check_statement(checker, case_clause->body)) {
+        checker->switch_depth--;
+        return 0;
+      }
+    }
+    checker->switch_depth--;
+    return 1;
+  }
+
+  case AST_BREAK_STATEMENT:
+    if (checker->loop_depth <= 0 && checker->switch_depth <= 0) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "'break' can only be used inside a loop or switch");
+      return 0;
+    }
+    return 1;
+
+  case AST_CONTINUE_STATEMENT:
+    if (checker->loop_depth <= 0) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "'continue' can only be used inside a loop");
+      return 0;
+    }
+    return 1;
 
   case AST_INLINE_ASM:
     // Inline assembly is passed through without type checking
