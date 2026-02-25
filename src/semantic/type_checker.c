@@ -100,6 +100,9 @@ Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression) {
   if (!checker || !expression)
     return NULL;
 
+  printf("[Debug TypeChecker] Inferring type for AST kind: %d\n",
+         expression->type);
+
   switch (expression->type) {
   case AST_NUMBER_LITERAL: {
     NumberLiteral *literal = (NumberLiteral *)expression->data;
@@ -230,6 +233,38 @@ Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression) {
       return type_checker_infer_type(checker, assignment->value);
     }
     return NULL;
+  }
+
+  case AST_NEW_EXPRESSION: {
+    NewExpression *new_expr = (NewExpression *)expression->data;
+    if (!new_expr || !new_expr->type_name) {
+      type_checker_set_error_at_location(checker, expression->location,
+                                         "Invalid 'new' expression");
+      return NULL;
+    }
+
+    // Look up the type by name
+    Symbol *type_symbol =
+        symbol_table_lookup(checker->symbol_table, new_expr->type_name);
+    if (!type_symbol || type_symbol->kind != SYMBOL_STRUCT) {
+      printf("[Debug TypeChecker] Could not find type symbol '%s' for "
+             "AST_NEW_EXPRESSION\n",
+             new_expr->type_name);
+      char error_msg[512];
+      snprintf(error_msg, sizeof(error_msg),
+               "Struct type '%s' not found for allocation",
+               new_expr->type_name);
+      type_checker_set_error_at_location(checker, expression->location,
+                                         error_msg);
+      return NULL;
+    }
+
+    // Since our language doesn't have explicit pointer types yet (e.g. `Foo*`),
+    // `new Foo` returns a value typed as `Foo` acting as a reference heap
+    // object
+    printf("[TypeChecker] AST_NEW_EXPRESSION evaluated. Type assigned: %s\n",
+           type_symbol->type->name);
+    return type_symbol->type;
   }
 
   default:
@@ -725,6 +760,8 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
     return 0;
   }
 
+  printf("[Debug TypeChecker] Declared struct type '%s' into symbol table.\n",
+         decl->name);
   free(field_types);
   return 1;
 }
@@ -775,6 +812,8 @@ int type_checker_process_declaration(TypeChecker *checker,
             var_decl->name);
         return 0;
       }
+      printf("[Debug TypeChecker] Inferred init type %s for var %s\n",
+             init_type->name, var_decl->name);
 
       if (var_type) {
         // Type specified: validate assignment compatibility
@@ -966,7 +1005,73 @@ int type_checker_process_declaration(TypeChecker *checker,
 
   case AST_ASSIGNMENT: {
     Assignment *assignment = (Assignment *)declaration->data;
-    if (!assignment || !assignment->variable_name || !assignment->value) {
+    if (!assignment || !assignment->value) {
+      type_checker_set_error_at_location(checker, declaration->location,
+                                         "Invalid assignment statement");
+      return 0;
+    }
+
+    // Struct field assignment: obj.field = value
+    if (assignment->target) {
+      if (assignment->target->type != AST_MEMBER_ACCESS) {
+        type_checker_set_error_at_location(
+            checker, assignment->target->location,
+            "Invalid field assignment target");
+        return 0;
+      }
+
+      MemberAccess *member = (MemberAccess *)assignment->target->data;
+      if (!member || !member->object || !member->member) {
+        type_checker_set_error_at_location(checker, assignment->target->location,
+                                           "Invalid field assignment target");
+        return 0;
+      }
+
+      Type *object_type = type_checker_infer_type(checker, member->object);
+      if (!object_type) {
+        return 0;
+      }
+
+      if (object_type->kind != TYPE_STRUCT) {
+        char error_msg[512];
+        snprintf(error_msg, sizeof(error_msg),
+                 "Cannot assign field '%s' on non-struct type '%s'",
+                 member->member, object_type->name);
+        type_checker_set_error_at_location(checker, assignment->target->location,
+                                           error_msg);
+        return 0;
+      }
+
+      Type *field_type = type_get_field_type(object_type, member->member);
+      if (!field_type) {
+        char error_msg[512];
+        snprintf(error_msg, sizeof(error_msg),
+                 "Field '%s' not found in struct '%s'",
+                 member->member, object_type->name);
+        type_checker_set_error_at_location(checker, assignment->target->location,
+                                           error_msg);
+        return 0;
+      }
+
+      Type *value_type = type_checker_infer_type(checker, assignment->value);
+      if (!value_type) {
+        type_checker_set_error_at_location(
+            checker, assignment->value->location,
+            "Cannot infer type of assignment value");
+        return 0;
+      }
+
+      if (!type_checker_is_assignable(checker, field_type, value_type)) {
+        type_checker_report_type_mismatch(checker, assignment->value->location,
+                                          field_type->name, value_type->name);
+        return 0;
+      }
+
+      return 1;
+    }
+
+    // Simple variable assignment: name = value
+    if (!assignment->variable_name) {
       type_checker_set_error_at_location(checker, declaration->location,
                                          "Invalid assignment statement");
       return 0;

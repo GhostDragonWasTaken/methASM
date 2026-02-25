@@ -21,7 +21,8 @@ typedef enum {
   AST_STRING_LITERAL,
   AST_BINARY_EXPRESSION,
   AST_UNARY_EXPRESSION,
-  AST_MEMBER_ACCESS
+  AST_MEMBER_ACCESS,
+  AST_NEW_EXPRESSION
 } ASTNodeType;
 
 typedef struct {
@@ -100,6 +101,10 @@ typedef struct {
 } StringLiteral;
 
 typedef struct {
+  char *type_name; // The target struct or type name
+} NewExpression;
+
+typedef struct {
   ASTNode *left;
   ASTNode *right;
   char *operator;
@@ -169,6 +174,8 @@ ASTNode *ast_create_member_access(ASTNode *object, const char *member,
 ASTNode *ast_create_method_call(ASTNode *object, const char *method_name,
                                 ASTNode **arguments, size_t argument_count,
                                 SourceLocation location);
+ASTNode *ast_create_new_expression(const char *type_name,
+                                   SourceLocation location);
 ASTNode *ast_create_field_assignment(ASTNode *target, ASTNode *value,
                                      SourceLocation location);
 

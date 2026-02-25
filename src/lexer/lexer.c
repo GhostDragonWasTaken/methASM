@@ -281,6 +281,8 @@ Token lexer_next_token(Lexer *lexer) {
       token.type = TOKEN_ASM;
     else if (strcmp(token.value, "this") == 0)
       token.type = TOKEN_THIS;
+    else if (strcmp(token.value, "new") == 0)
+      token.type = TOKEN_NEW;
 
     // Type keywords
     else if (strcmp(token.value, "int8") == 0)

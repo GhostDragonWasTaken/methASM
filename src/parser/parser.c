@@ -285,8 +285,6 @@ int parser_get_operator_precedence(TokenType type) {
   case TOKEN_EQUALS_EQUALS:
   case TOKEN_NOT_EQUALS:
     return 4; // Equality
-  case TOKEN_EQUALS:
-    return 2; // Assignment (lowest precedence)
   default:
     return 0; // Not a binary operator
   }
@@ -298,7 +296,6 @@ int parser_is_binary_operator(TokenType type) {
   case TOKEN_MINUS:
   case TOKEN_MULTIPLY:
   case TOKEN_DIVIDE:
-  case TOKEN_EQUALS:
   case TOKEN_EQUALS_EQUALS:
   case TOKEN_NOT_EQUALS:
   case TOKEN_LESS_THAN:
@@ -353,8 +350,6 @@ ASTNode *parser_parse_program(Parser *parser) {
         ast_add_child(program, declaration);
       }
     }
-
-    parser_expect_statement_end(parser);
 
     if (parser->has_error) {
       parser_recover_from_error(parser);
@@ -425,6 +420,7 @@ ASTNode *parser_parse_statement(Parser *parser) {
     }
   case TOKEN_LBRACE:
     return parser_parse_block(parser);
+  case TOKEN_NEW:
   default:
     // Try to parse as expression statement
     return parser_parse_expression(parser);
@@ -502,6 +498,20 @@ ASTNode *parser_parse_primary_expression(Parser *parser) {
   case TOKEN_THIS: {
     parser_advance(parser);
     return ast_create_identifier("this", location);
+  }
+  case TOKEN_NEW: {
+    parser_advance(parser); // Built-in memory alloc handling
+    if (!parser_is_identifier_like(parser->current_token.type) &&
+        !parser_is_type_keyword(parser->current_token.type)) {
+      parser_set_error(parser, "Expected type name after 'new'");
+      return NULL;
+    }
+    char *type_name = strdup(parser->current_token.value);
+    parser_advance(parser); // consume type name
+
+    ASTNode *new_expr = ast_create_new_expression(type_name, location);
+    free(type_name);
+    return new_expr;
   }
   default:
     parser_set_error(parser, "Expected primary expression");
@@ -864,14 +874,15 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Optional return type: '-> type'
+  // Optional return type: '-> type' (or ': type' for compatibility)
   char *return_type = NULL;
-  if (parser->current_token.type == TOKEN_ARROW) {
-    parser_advance(parser); // consume '->'
+  if (parser->current_token.type == TOKEN_ARROW ||
+      parser->current_token.type == TOKEN_COLON) {
+    parser_advance(parser); // consume return separator
 
     if (!parser_is_type_keyword(parser->current_token.type) &&
         !parser_is_identifier_like(parser->current_token.type)) {
-      parser_set_error(parser, "Expected return type after '->'");
+      parser_set_error(parser, "Expected return type after return separator");
       // Clean up
       for (size_t i = 0; i < param_count; i++) {
         free(param_names[i]);
@@ -969,6 +980,13 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
 
   while (parser->current_token.type != TOKEN_RBRACE &&
          parser->current_token.type != TOKEN_EOF && !parser->has_error) {
+
+    // Allow blank lines and redundant separators inside struct bodies.
+    if (parser->current_token.type == TOKEN_NEWLINE ||
+        parser->current_token.type == TOKEN_SEMICOLON) {
+      parser_advance(parser);
+      continue;
+    }
 
     if (parser->current_token.type == TOKEN_METHOD) {
       // Parse method declaration
@@ -1086,6 +1104,8 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
       struct_name, field_names, field_types, field_count, methods, method_count,
       location);
 
+  // Keep a stable copy for debug output before freeing temporary buffers.
+  char *debug_struct_name = strdup(struct_name);
   // Clean up temporary strings
   free(struct_name);
   for (size_t i = 0; i < field_count; i++) {
@@ -1096,6 +1116,11 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
   free(field_types);
   // Note: methods array is now owned by the AST node, don't free it
 
+  if (debug_struct_name) {
+    printf("[Debug Parser] Parsed struct declaration '%s' successfully!\n",
+           debug_struct_name);
+    free(debug_struct_name);
+  }
   return struct_decl;
 }
 
@@ -1558,14 +1583,15 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Optional return type: '-> type'
+  // Optional return type: '-> type' (or ': type' for compatibility)
   char *return_type = NULL;
-  if (parser->current_token.type == TOKEN_ARROW) {
-    parser_advance(parser); // consume '->'
+  if (parser->current_token.type == TOKEN_ARROW ||
+      parser->current_token.type == TOKEN_COLON) {
+    parser_advance(parser); // consume return separator
 
     if (!parser_is_type_keyword(parser->current_token.type) &&
         !parser_is_identifier_like(parser->current_token.type)) {
-      parser_set_error(parser, "Expected return type after '->'");
+      parser_set_error(parser, "Expected return type after return separator");
       // Clean up
       for (size_t i = 0; i < param_count; i++) {
         free(param_names[i]);

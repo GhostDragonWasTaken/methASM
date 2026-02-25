@@ -17,6 +17,7 @@ if not exist obj\semantic mkdir obj\semantic
 if not exist obj\codegen mkdir obj\codegen
 if not exist obj\debug mkdir obj\debug
 if not exist obj\error mkdir obj\error
+if not exist obj\runtime mkdir obj\runtime
 if not exist bin mkdir bin
 
 REM Compile source files
@@ -49,6 +50,10 @@ echo Compiling debug info...
 gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE -c src\debug\debug_info.c -o obj\debug\debug_info.o
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
+echo Compiling gc runtime...
+gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE -c src\runtime\gc.c -o obj\runtime\gc.o
+if %ERRORLEVEL% NEQ 0 exit /b 1
+
 echo Compiling error reporter...
 gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE -c src\error\error_reporter.c -o obj\error\error_reporter.o
 if %ERRORLEVEL% NEQ 0 exit /b 1
@@ -58,7 +63,7 @@ gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE -c src\main.c -o obj\main.o
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
 echo Linking...
-gcc obj\lexer\lexer.o obj\parser\ast.o obj\parser\parser.o obj\semantic\symbol_table.o obj\semantic\type_checker.o obj\semantic\register_allocator.o obj\codegen\code_generator.o obj\debug\debug_info.o obj\error\error_reporter.o obj\main.o -o bin\methasm.exe
+gcc obj\lexer\lexer.o obj\parser\ast.o obj\parser\parser.o obj\semantic\symbol_table.o obj\semantic\type_checker.o obj\semantic\register_allocator.o obj\codegen\code_generator.o obj\debug\debug_info.o obj\runtime\gc.o obj\error\error_reporter.o obj\main.o -o bin\methasm.exe
 
 if %ERRORLEVEL% EQU 0 (
     echo Build successful! Executable created at bin\methasm.exe

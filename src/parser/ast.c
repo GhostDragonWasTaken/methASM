@@ -140,6 +140,14 @@ void ast_destroy_node(ASTNode *node) {
     }
     break;
   }
+  case AST_NEW_EXPRESSION: {
+    NewExpression *new_expr = (NewExpression *)node->data;
+    if (new_expr) {
+      free(new_expr->type_name);
+      free(new_expr);
+    }
+    break;
+  }
   default:
     free(node->data);
     break;
@@ -554,6 +562,24 @@ ASTNode *ast_create_method_call(ASTNode *object, const char *method_name,
   }
 
   node->data = call_expr;
+  return node;
+}
+
+ASTNode *ast_create_new_expression(const char *type_name,
+                                   SourceLocation location) {
+  ASTNode *node = ast_create_node(AST_NEW_EXPRESSION, location);
+  if (!node)
+    return NULL;
+
+  NewExpression *new_expr = malloc(sizeof(NewExpression));
+  if (!new_expr) {
+    free(node);
+    return NULL;
+  }
+
+  new_expr->type_name = type_name ? strdup(type_name) : NULL;
+  node->data = new_expr;
+
   return node;
 }
 

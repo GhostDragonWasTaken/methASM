@@ -12,8 +12,9 @@ CODEGEN_SOURCES = $(SRCDIR)/codegen/code_generator.c
 ERROR_SOURCES = $(SRCDIR)/error/error_reporter.c
 DEBUG_SOURCES = $(SRCDIR)/debug/debug_info.c
 MAIN_SOURCES = $(SRCDIR)/main.c
+RUNTIME_SOURCES = $(SRCDIR)/runtime/gc.c
 
-SOURCES = $(LEXER_SOURCES) $(PARSER_SOURCES) $(SEMANTIC_SOURCES) $(CODEGEN_SOURCES) $(ERROR_SOURCES) $(DEBUG_SOURCES) $(MAIN_SOURCES)
+SOURCES = $(LEXER_SOURCES) $(PARSER_SOURCES) $(SEMANTIC_SOURCES) $(CODEGEN_SOURCES) $(ERROR_SOURCES) $(DEBUG_SOURCES) $(RUNTIME_SOURCES) $(MAIN_SOURCES)
 OBJECTS = $(SOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 
 TARGET = $(BINDIR)/methasm
@@ -30,7 +31,7 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR):
-	mkdir -p $(OBJDIR)/lexer $(OBJDIR)/parser $(OBJDIR)/semantic $(OBJDIR)/codegen $(OBJDIR)/error $(OBJDIR)/debug
+	mkdir -p $(OBJDIR)/lexer $(OBJDIR)/parser $(OBJDIR)/semantic $(OBJDIR)/codegen $(OBJDIR)/error $(OBJDIR)/debug $(OBJDIR)/runtime
 
 $(BINDIR):
 	mkdir -p $(BINDIR)
@@ -39,8 +40,9 @@ clean:
 	rm -rf $(OBJDIR) $(BINDIR)
 
 test: $(TARGET)
-	@echo "Running tests..."
-	@echo "Test framework not yet implemented"
+	@echo "Running GC runtime tests..."
+	$(CC) $(CFLAGS) tests/gc_runtime_test.c src/runtime/gc.c -o $(BINDIR)/gc_runtime_test
+	@$(BINDIR)/gc_runtime_test
 
 install: $(TARGET)
 	cp $(TARGET) /usr/local/bin/

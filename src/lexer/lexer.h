@@ -21,6 +21,7 @@ typedef enum {
   TOKEN_WHILE,
   TOKEN_ASM,
   TOKEN_THIS,
+  TOKEN_NEW,
 
   // Type keywords
   TOKEN_INT8,

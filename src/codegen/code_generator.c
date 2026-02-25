@@ -154,13 +154,88 @@ int code_generator_generate_program(CodeGenerator *generator,
     }
   }
 
-  // Generate main entry point if no main function was found
+  int has_main = 0;
+  if (program_data) {
+    for (size_t i = 0; i < program_data->declaration_count; i++) {
+      ASTNode *declaration = program_data->declarations[i];
+      if (!declaration || declaration->type != AST_FUNCTION_DECLARATION) {
+        continue;
+      }
+
+      FunctionDeclaration *func_data = (FunctionDeclaration *)declaration->data;
+      if (func_data && func_data->name && strcmp(func_data->name, "main") == 0) {
+        has_main = 1;
+        break;
+      }
+    }
+  }
+
+  // Generate process entry point.
   code_generator_emit(generator, "\n; Default program entry point\n");
   code_generator_emit(generator, "global _start\n");
   code_generator_emit(generator, "_start:\n");
-  code_generator_emit(generator, "    ; Exit gracefully\n");
+  code_generator_emit(generator, "    ; Initialize garbage collector runtime\n");
+  code_generator_emit(generator, "    mov rdi, rsp\n");
+  code_generator_emit(generator, "    extern gc_init\n");
+  code_generator_emit(generator, "    call gc_init\n");
+
+  // Register global root slots for pointer-like globals.
+  if (program_data) {
+    int emitted_gc_root_extern = 0;
+    for (size_t i = 0; i < program_data->declaration_count; i++) {
+      ASTNode *declaration = program_data->declarations[i];
+      if (!declaration || declaration->type != AST_VAR_DECLARATION) {
+        continue;
+      }
+
+      VarDeclaration *var_data = (VarDeclaration *)declaration->data;
+      if (!var_data || !var_data->name) {
+        continue;
+      }
+
+      int should_register = 1;
+      Symbol *symbol = symbol_table_lookup(generator->symbol_table, var_data->name);
+      if (symbol && symbol->type) {
+        switch (symbol->type->kind) {
+        case TYPE_POINTER:
+        case TYPE_ARRAY:
+        case TYPE_STRING:
+        case TYPE_STRUCT:
+          should_register = 1;
+          break;
+        default:
+          should_register = 0;
+          break;
+        }
+      }
+
+      if (!should_register) {
+        continue;
+      }
+
+      if (!emitted_gc_root_extern) {
+        code_generator_emit(generator, "    extern gc_register_root\n");
+        emitted_gc_root_extern = 1;
+      }
+
+      code_generator_emit(generator, "    lea rdi, [%s + rip]\n", var_data->name);
+      code_generator_emit(generator, "    call gc_register_root\n");
+    }
+  }
+
+  if (has_main) {
+    code_generator_emit(generator, "    ; Call user main function\n");
+    code_generator_emit(generator, "    call main\n");
+    code_generator_emit(generator, "    push rax         ; Preserve main return code\n");
+    code_generator_emit(generator, "    extern gc_shutdown\n");
+    code_generator_emit(generator, "    call gc_shutdown\n");
+    code_generator_emit(generator, "    pop rdi          ; Use main return as exit code\n");
+  } else {
+    code_generator_emit(generator, "    extern gc_shutdown\n");
+    code_generator_emit(generator, "    call gc_shutdown\n");
+    code_generator_emit(generator, "    mov rdi, 0       ; Default exit status\n");
+  }
   code_generator_emit(generator, "    mov rax, 60    ; sys_exit\n");
-  code_generator_emit(generator, "    mov rdi, 0     ; exit status\n");
   code_generator_emit(generator, "    syscall\n");
 
   return 1;
@@ -280,17 +355,41 @@ void code_generator_generate_function(CodeGenerator *generator,
         if (stmt && stmt->type == AST_VAR_DECLARATION) {
           VarDeclaration *var_decl = (VarDeclaration *)stmt->data;
           if (var_decl) {
-            int var_size = code_generator_calculate_variable_size(
-                generator, var_decl->type_name);
+            Type *var_type = NULL;
+            if (var_decl->type_name) {
+              var_type = type_checker_get_type_by_name(generator->type_checker,
+                                                       var_decl->type_name);
+            } else if (var_decl->initializer) {
+              var_type = type_checker_infer_type(generator->type_checker,
+                                                 var_decl->initializer);
+            }
+            if (!var_type) {
+              var_type =
+                  type_checker_get_type_by_name(generator->type_checker, "int64");
+            }
+
+            int var_size = 0;
+            if (var_type && var_type->size > 0) {
+              var_size = (int)var_type->size;
+            } else {
+              var_size = code_generator_calculate_variable_size(
+                  generator, var_decl->type_name);
+            }
+            if (var_size <= 0) {
+              var_size = 8;
+            }
             stack_size += var_size;
 
-            // Register symbol without generating code yet
-            Symbol *var_symbol = symbol_create(
-                var_decl->name, SYMBOL_VARIABLE,
-                type_checker_get_type_by_name(generator->type_checker,
-                                              var_decl->type_name));
-            if (var_symbol) {
-              symbol_table_declare(generator->symbol_table, var_symbol);
+            // Register symbol without generating code yet.
+            Symbol *existing = symbol_table_lookup_current_scope(
+                generator->symbol_table, var_decl->name);
+            if (!existing) {
+              Symbol *var_symbol =
+                  symbol_create(var_decl->name, SYMBOL_VARIABLE, var_type);
+              if (var_symbol &&
+                  !symbol_table_declare(generator->symbol_table, var_symbol)) {
+                symbol_destroy(var_symbol);
+              }
             }
           }
         }
@@ -312,14 +411,8 @@ void code_generator_generate_function(CodeGenerator *generator,
   // Add a label for the function exit
   code_generator_emit(generator, "L%s_exit:\n", func_data->name);
 
-  if (strcmp(func_data->name, "main") == 0) {
-    code_generator_emit(generator, "    mov rax, 0\n");
-    code_generator_emit(generator, "    leave\n");
-    code_generator_emit(generator, "    ret\n");
-  } else {
-    // Generate function epilogue
-    code_generator_function_epilogue(generator);
-  }
+  // Generate function epilogue
+  code_generator_function_epilogue(generator);
 
   // Exit the function's scope
   symbol_table_exit_scope(generator->symbol_table);
@@ -530,6 +623,30 @@ void code_generator_generate_expression(CodeGenerator *generator,
   case AST_MEMBER_ACCESS: {
     // Member access (struct.field)
     code_generator_generate_member_access(generator, expression);
+  } break;
+
+  case AST_NEW_EXPRESSION: {
+    NewExpression *new_expr = (NewExpression *)expression->data;
+    if (new_expr && new_expr->type_name) {
+      code_generator_emit(generator, "    ; Heap allocation: new %s\n",
+                          new_expr->type_name);
+
+      // Determine the size of the type being allocated
+      int alloc_size = code_generator_calculate_variable_size(
+          generator, new_expr->type_name);
+      if (alloc_size <= 0) {
+        // Fallback size if lookup fails
+        alloc_size = 8;
+      }
+
+      // Call gc_alloc(alloc_size)
+      code_generator_emit(generator, "    mov rdi, %d      ; size in bytes\n",
+                          alloc_size);
+      code_generator_emit(generator, "    extern gc_alloc\n");
+      code_generator_emit(generator, "    call gc_alloc\n");
+      // The allocated memory pointer is returned in RAX,
+      // ready for variable assignments or immediate struct usage.
+    }
   } break;
 
   default:
@@ -936,16 +1053,53 @@ void code_generator_generate_local_variable(CodeGenerator *generator,
     return;
   }
 
+  Symbol *symbol = symbol_table_lookup(generator->symbol_table, var_data->name);
+  if (!symbol) {
+    Type *var_type = NULL;
+    if (var_data->type_name) {
+      var_type = type_checker_get_type_by_name(generator->type_checker,
+                                               var_data->type_name);
+    } else if (var_data->initializer) {
+      var_type = type_checker_infer_type(generator->type_checker,
+                                         var_data->initializer);
+    }
+    if (!var_type) {
+      var_type = type_checker_get_type_by_name(generator->type_checker, "int64");
+    }
+
+    Symbol *new_symbol = symbol_create(var_data->name, SYMBOL_VARIABLE, var_type);
+    if (new_symbol && symbol_table_declare(generator->symbol_table, new_symbol)) {
+      symbol = new_symbol;
+    } else {
+      symbol_destroy(new_symbol);
+      symbol = symbol_table_lookup(generator->symbol_table, var_data->name);
+    }
+  }
+
+  const char *resolved_type_name = var_data->type_name;
+  if ((!resolved_type_name || resolved_type_name[0] == '\0') && symbol &&
+      symbol->type && symbol->type->name) {
+    resolved_type_name = symbol->type->name;
+  }
+  if (!resolved_type_name) {
+    resolved_type_name = "unknown";
+  }
+
   // Add debug symbol for local variable
   if (generator->generate_debug_info) {
     code_generator_add_debug_symbol(
-        generator, var_data->name, DEBUG_SYMBOL_VARIABLE, var_data->type_name,
+        generator, var_data->name, DEBUG_SYMBOL_VARIABLE, resolved_type_name,
         var_declaration->location.line, var_declaration->location.column);
   }
 
   // Calculate variable size and allocate stack space
-  int var_size =
-      code_generator_calculate_variable_size(generator, var_data->type_name);
+  int var_size = 0;
+  if (symbol && symbol->type && symbol->type->size > 0) {
+    var_size = (int)symbol->type->size;
+  } else {
+    var_size =
+        code_generator_calculate_variable_size(generator, resolved_type_name);
+  }
   if (var_size <= 0) {
     var_size = 8; // Default to 8 bytes for unknown types
   }
@@ -956,13 +1110,11 @@ void code_generator_generate_local_variable(CodeGenerator *generator,
 
   code_generator_emit(
       generator, "    ; Local variable: %s (%s, %d bytes) at offset -%d\n",
-      var_data->name, var_data->type_name ? var_data->type_name : "unknown",
-      var_size, offset);
+      var_data->name, resolved_type_name, var_size, offset);
 
   // Update symbol table with memory offset if symbol exists
-  Symbol *symbol = symbol_table_lookup(generator->symbol_table, var_data->name);
   if (symbol && symbol->kind == SYMBOL_VARIABLE) {
-    symbol->data.variable.memory_offset = -offset; // Negative offset from rbp
+    symbol->data.variable.memory_offset = offset; // Positive offset for [rbp - offset]
     symbol->data.variable.is_in_register = 0;
 
     // Update debug symbol with stack offset
