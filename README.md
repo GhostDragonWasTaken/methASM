@@ -38,6 +38,7 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Variable declarations with explicit types and initializer-based inference
 - Fixed-size array type annotations (for example `int32[10]`)
 - Functions and function calls
+- Function forward declarations (e.g. `function add(a: int32, b: int32) -> int32;`)
 - Function return type syntax with both `->` and `:`
 - Struct declarations
 - Struct member access and assignment
@@ -68,7 +69,7 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 
 ## Code Generation
 
-- x86-64 assembly emission
+- x86-64 assembly emission (Intel/NASM-style syntax)
 - Function prologue and epilogue generation
 - Statement and expression generation for supported AST nodes
 - Struct field offset-based access and assignment
@@ -177,7 +178,6 @@ Makefile      Linux/macOS build and test targets
 - Optimization passes are limited.
 - Language surface area is still evolving.
 - Some advanced language and backend scenarios are not implemented.
-- Source-level forward declaration syntax is not fully exposed in the parser yet, even though symbol-table forward declaration compatibility checks are implemented.
 - `switch` case labels currently require compile-time integer constant expressions and do not yet support range-style cases.
 
 ## Contributing
