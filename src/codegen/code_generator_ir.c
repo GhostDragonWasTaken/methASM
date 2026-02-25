@@ -973,29 +973,6 @@ static int code_generator_emit_ir_instruction(CodeGenerator *generator,
     code_generator_restore_registers_after_inline_asm(generator);
     code_generator_emit(generator, "    ; End inline assembly block\n");
     return 1;
-
-  case IR_OP_EVAL_EXPR:
-    if (!instruction->ast_ref) {
-      code_generator_set_error(generator,
-                               "IR eval_expr without AST reference is invalid");
-      return 0;
-    }
-    code_generator_generate_expression(generator, instruction->ast_ref);
-    if (generator->has_error) {
-      return 0;
-    }
-    return code_generator_store_ir_destination(generator, &instruction->dest,
-                                               temp_table);
-
-  case IR_OP_AST_STMT:
-    if (!instruction->ast_ref) {
-      code_generator_set_error(generator,
-                               "IR ast_stmt without AST reference is invalid");
-      return 0;
-    }
-    code_generator_generate_statement(generator, instruction->ast_ref);
-    return !generator->has_error;
-
   default:
     code_generator_set_error(generator, "Unhandled IR opcode: %d",
                              instruction->op);

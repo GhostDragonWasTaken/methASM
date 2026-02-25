@@ -280,10 +280,6 @@ static const char *ir_opcode_name(IROpcode op) {
     return "return";
   case IR_OP_INLINE_ASM:
     return "inline_asm";
-  case IR_OP_EVAL_EXPR:
-    return "eval_expr";
-  case IR_OP_AST_STMT:
-    return "ast_stmt";
   default:
     return "unknown";
   }
@@ -421,13 +417,6 @@ int ir_program_dump(IRProgram *program, FILE *output) {
         fprintf(output, "%s \"%s\"\n", ir_opcode_name(instruction->op),
                 instruction->text ? instruction->text : "");
         break;
-      case IR_OP_EVAL_EXPR:
-      case IR_OP_AST_STMT: {
-        int ast_type =
-            instruction->ast_ref ? (int)instruction->ast_ref->type : -1;
-        fprintf(output, "%s ast=%d\n", ir_opcode_name(instruction->op),
-                ast_type);
-      } break;
       case IR_OP_NOP:
       default:
         fprintf(output, "%s\n", ir_opcode_name(instruction->op));

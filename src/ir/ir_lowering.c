@@ -54,14 +54,6 @@ static void ir_set_error(IRLoweringContext *context, const char *format, ...) {
   va_end(args);
 }
 
-static void ir_clear_error(IRLoweringContext *context) {
-  if (!context) {
-    return;
-  }
-  free(context->error_message);
-  context->error_message = NULL;
-}
-
 static char *ir_new_temp_name(IRLoweringContext *context) {
   char buffer[64];
   snprintf(buffer, sizeof(buffer), "t%d", context->next_temp_id++);
@@ -200,35 +192,18 @@ static int ir_make_temp_operand(IRLoweringContext *context,
   return 1;
 }
 
-static int ir_emit_eval_expression(IRLoweringContext *context,
-                                   IRFunction *function, ASTNode *expression,
-                                   IROperand *out_value) {
-  IROperand destination = ir_operand_none();
-  if (!ir_make_temp_operand(context, &destination)) {
-    return 0;
-  }
-
-  IRInstruction instruction = {0};
-  instruction.op = IR_OP_EVAL_EXPR;
-  instruction.location = expression->location;
-  instruction.dest = destination;
-  instruction.ast_ref = expression;
-
-  if (!ir_emit(context, function, &instruction)) {
-    ir_operand_destroy(&destination);
-    return 0;
-  }
-
-  *out_value = destination;
-  return 1;
-}
-
 static int ir_lower_call_expression(IRLoweringContext *context,
                                     IRFunction *function, ASTNode *expression,
                                     IROperand *out_value) {
   CallExpression *call = (CallExpression *)expression->data;
-  if (!call || !call->function_name || call->object) {
-    return ir_emit_eval_expression(context, function, expression, out_value);
+  if (!call || !call->function_name) {
+    ir_set_error(context, "Malformed call expression");
+    return 0;
+  }
+  if (call->object) {
+    ir_set_error(context, "Method calls should be mangled directly, unresolved "
+                          "method object in lower pass");
+    return 0;
   }
 
   IROperand destination = ir_operand_none();
@@ -602,7 +577,8 @@ static int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
   case AST_BINARY_EXPRESSION: {
     BinaryExpression *binary = (BinaryExpression *)expression->data;
     if (!binary || !binary->left || !binary->right || !binary->operator) {
-      return ir_emit_eval_expression(context, function, expression, out_value);
+      ir_set_error(context, "Malformed binary expression");
+      return 0;
     }
 
     IROperand left = ir_operand_none();
@@ -646,16 +622,15 @@ static int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
   case AST_UNARY_EXPRESSION: {
     UnaryExpression *unary = (UnaryExpression *)expression->data;
     if (!unary || !unary->operator || !unary->operand) {
-      return ir_emit_eval_expression(context, function, expression, out_value);
+      ir_set_error(context, "Malformed unary expression");
+      return 0;
     }
 
     if (strcmp(unary->operator, "&") == 0) {
       Type *target_type = NULL;
       if (!ir_lower_lvalue_address(context, function, unary->operand, out_value,
                                    &target_type)) {
-        ir_clear_error(context);
-        return ir_emit_eval_expression(context, function, expression,
-                                       out_value);
+        return 0;
       }
       return 1;
     }
@@ -665,9 +640,7 @@ static int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
       Type *target_type = NULL;
       if (!ir_lower_lvalue_address(context, function, expression, &address,
                                    &target_type)) {
-        ir_clear_error(context);
-        return ir_emit_eval_expression(context, function, expression,
-                                       out_value);
+        return 0;
       }
       if (!target_type) {
         ir_operand_destroy(&address);

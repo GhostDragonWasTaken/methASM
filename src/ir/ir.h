@@ -40,9 +40,7 @@ typedef enum {
   IR_OP_CALL,
   IR_OP_NEW,
   IR_OP_RETURN,
-  IR_OP_INLINE_ASM,
-  IR_OP_EVAL_EXPR,
-  IR_OP_AST_STMT
+  IR_OP_INLINE_ASM
 } IROpcode;
 
 typedef struct {
