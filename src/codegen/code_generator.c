@@ -484,7 +484,8 @@ void code_generator_generate_statement(CodeGenerator *generator,
                                        ASTNode *statement);
 
 void code_generator_register_function_parameters(
-    CodeGenerator *generator, FunctionDeclaration *func_data) {
+    CodeGenerator *generator, FunctionDeclaration *func_data,
+    int parameter_home_size) {
   if (!generator || !func_data) {
     return;
   }
@@ -512,12 +513,6 @@ void code_generator_register_function_parameters(
           type_checker_get_type_by_name(generator->type_checker, "int64");
     }
 
-    // Create a temporary variable declaration AST node for the parameter
-    ASTNode *param_var_decl = ast_create_var_declaration(
-        param_name, type_name, NULL, (SourceLocation){0, 0});
-    if (!param_var_decl)
-      continue;
-
     Symbol *param_symbol =
         symbol_table_lookup_current_scope(generator->symbol_table, param_name);
     if (!param_symbol) {
@@ -525,7 +520,6 @@ void code_generator_register_function_parameters(
       if (!param_symbol || !symbol_table_declare(generator->symbol_table,
                                                  param_symbol)) {
         symbol_destroy(param_symbol);
-        ast_destroy_node(param_var_decl);
         code_generator_set_error(generator,
                                  "Failed to register parameter '%s'",
                                  param_name ? param_name : "<unnamed>");
@@ -538,7 +532,7 @@ void code_generator_register_function_parameters(
     // Determine if parameter is in register or on stack
     int is_in_register = 0;
     int register_id = -1;
-    int memory_offset = 0;
+    int incoming_stack_offset = 0;
 
     Type *param_type = param_symbol->type;
     int is_float = code_generator_is_floating_point_type(param_type);
@@ -551,24 +545,61 @@ void code_generator_register_function_parameters(
       register_id = conv_spec->int_param_registers[int_param_reg_index++];
     } else {
       // Parameter is on the stack
-      memory_offset = stack_offset;
+      incoming_stack_offset = stack_offset;
       stack_offset += 8; // Assuming 8-byte parameters
     }
 
-    param_symbol->data.variable.is_in_register = is_in_register;
-    if (is_in_register) {
-      param_symbol->data.variable.register_id = register_id;
-      code_generator_emit(generator, "    ; Parameter '%s' in register %s\n",
-                          param_name,
-                          code_generator_get_register_name(register_id));
-    } else {
-      param_symbol->data.variable.memory_offset = memory_offset;
-      code_generator_emit(generator,
-                          "    ; Parameter '%s' on stack at [rbp + %d]\n",
-                          param_name, memory_offset);
+    // Materialize all parameters into stable stack homes so '&param' is valid.
+    int home_offset = (int)((i + 1) * 8);
+    if (home_offset > parameter_home_size) {
+      code_generator_set_error(generator,
+                               "Parameter home slot overflow for '%s'",
+                               param_name ? param_name : "<unnamed>");
+      return;
     }
 
-    ast_destroy_node(param_var_decl);
+    param_symbol->data.variable.is_in_register = 0;
+    param_symbol->data.variable.memory_offset = home_offset;
+
+    if (is_in_register) {
+      const char *reg_name = code_generator_get_register_name((x86Register)register_id);
+      if (!reg_name) {
+        code_generator_set_error(generator,
+                                 "Invalid register for parameter '%s'",
+                                 param_name ? param_name : "<unnamed>");
+        return;
+      }
+
+      if (is_float) {
+        if (param_type && param_type->size == 4) {
+          code_generator_emit(generator,
+                              "    movss [rbp - %d], %s  ; Home param '%s'\n",
+                              home_offset, reg_name, param_name);
+        } else {
+          code_generator_emit(generator,
+                              "    movsd [rbp - %d], %s  ; Home param '%s'\n",
+                              home_offset, reg_name, param_name);
+        }
+      } else {
+        code_generator_emit(generator,
+                            "    mov [rbp - %d], %s  ; Home param '%s'\n",
+                            home_offset, reg_name, param_name);
+      }
+
+      code_generator_emit(generator,
+                          "    ; Parameter '%s' arrived in register %s\n",
+                          param_name, reg_name);
+    } else {
+      code_generator_emit(generator,
+                          "    mov rax, [rbp + %d]  ; Load stack param '%s'\n",
+                          incoming_stack_offset, param_name);
+      code_generator_emit(generator,
+                          "    mov [rbp - %d], rax  ; Home param '%s'\n",
+                          home_offset, param_name);
+      code_generator_emit(generator,
+                          "    ; Parameter '%s' arrived on stack [rbp + %d]\n",
+                          param_name, incoming_stack_offset);
+    }
   }
 }
 
@@ -603,6 +634,19 @@ void code_generator_generate_function(CodeGenerator *generator,
 
   // Pre-pass to register all local variables and calculate stack size
   int stack_size = 0;
+  int parameter_home_size = 0;
+  if (func_data->parameter_count > 0) {
+    if (func_data->parameter_count > (size_t)(INT_MAX / 8)) {
+      code_generator_set_error(generator,
+                               "Too many parameters in function '%s'",
+                               func_data->name);
+      symbol_table_exit_scope(generator->symbol_table);
+      return;
+    }
+    parameter_home_size = (int)(func_data->parameter_count * 8);
+    stack_size += parameter_home_size;
+  }
+
   if (func_data->body) {
     Program *body_prog = (Program *)func_data->body->data;
     if (body_prog) {
@@ -656,8 +700,12 @@ void code_generator_generate_function(CodeGenerator *generator,
   // Generate function prologue
   code_generator_function_prologue(generator, func_data->name, stack_size);
 
+  // Reserve lower stack slots for parameter homes.
+  generator->current_stack_offset = parameter_home_size;
+
   // Register parameters in symbol table
-  code_generator_register_function_parameters(generator, func_data);
+  code_generator_register_function_parameters(generator, func_data,
+                                              parameter_home_size);
 
   // Generate function body
   if (func_data->body) {

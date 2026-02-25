@@ -1040,7 +1040,9 @@ int type_checker_validate_assignment(TypeChecker *checker, Type *dest_type,
 
   Type *src_type = type_checker_infer_type(checker, src_expr);
   if (!src_type) {
-    type_checker_set_error(checker, "Cannot infer type of assignment value");
+    if (!checker->has_error) {
+      type_checker_set_error(checker, "Cannot infer type of assignment value");
+    }
     return 0;
   }
 
@@ -1199,10 +1201,12 @@ int type_checker_process_declaration(TypeChecker *checker,
     if (var_decl->initializer) {
       Type *init_type = type_checker_infer_type(checker, var_decl->initializer);
       if (!init_type) {
-        type_checker_set_error_at_location(
-            checker, var_decl->initializer->location,
-            "Cannot infer type of initializer for variable '%s'",
-            var_decl->name);
+        if (!checker->has_error) {
+          type_checker_set_error_at_location(
+              checker, var_decl->initializer->location,
+              "Cannot infer type of initializer for variable '%s'",
+              var_decl->name);
+        }
         return 0;
       }
       if (var_type) {
@@ -1505,9 +1509,11 @@ int type_checker_process_declaration(TypeChecker *checker,
 
         Type *value_type = type_checker_infer_type(checker, assignment->value);
         if (!value_type) {
-          type_checker_set_error_at_location(
-              checker, assignment->value->location,
-              "Cannot infer type of assignment value");
+          if (!checker->has_error) {
+            type_checker_set_error_at_location(
+                checker, assignment->value->location,
+                "Cannot infer type of assignment value");
+          }
           return 0;
         }
 
@@ -1529,9 +1535,11 @@ int type_checker_process_declaration(TypeChecker *checker,
 
         Type *value_type = type_checker_infer_type(checker, assignment->value);
         if (!value_type) {
-          type_checker_set_error_at_location(
-              checker, assignment->value->location,
-              "Cannot infer type of assignment value");
+          if (!checker->has_error) {
+            type_checker_set_error_at_location(
+                checker, assignment->value->location,
+                "Cannot infer type of assignment value");
+          }
           return 0;
         }
 
@@ -1560,9 +1568,11 @@ int type_checker_process_declaration(TypeChecker *checker,
 
         Type *value_type = type_checker_infer_type(checker, assignment->value);
         if (!value_type) {
-          type_checker_set_error_at_location(
-              checker, assignment->value->location,
-              "Cannot infer type of assignment value");
+          if (!checker->has_error) {
+            type_checker_set_error_at_location(
+                checker, assignment->value->location,
+                "Cannot infer type of assignment value");
+          }
           return 0;
         }
 
@@ -1617,9 +1627,11 @@ int type_checker_process_declaration(TypeChecker *checker,
     // Infer the type of the assignment value
     Type *value_type = type_checker_infer_type(checker, assignment->value);
     if (!value_type) {
-      type_checker_set_error_at_location(
-          checker, assignment->value->location,
-          "Cannot infer type of assignment value");
+      if (!checker->has_error) {
+        type_checker_set_error_at_location(
+            checker, assignment->value->location,
+            "Cannot infer type of assignment value");
+      }
       return 0;
     }
 

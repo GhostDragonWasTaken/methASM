@@ -18,7 +18,7 @@ Current implementation status:
 
 - Core language front-end and backend pipeline are operational.
 - Fail-fast diagnostics are enforced across lexer, parser, semantic analysis, and codegen.
-- Arrays, structured types, and major control-flow constructs are implemented.
+- Arrays, pointers, structured types, and major control-flow constructs are implemented.
 - Runtime GC integration is compiled and exercised by runtime tests.
 
 ## Compiler Guarantees
@@ -36,6 +36,9 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 ## Implemented Language Features
 
 - Variable declarations with explicit types and initializer-based inference
+- Pointer type annotations (e.g. `int32*`, `Pair*`, `int32**`)
+- Dereference (`*p`) and address-of (`&x`) operators
+- Pointer-to-struct arrow notation (`p->field`)
 - Fixed-size array type annotations (for example `int32[10]`)
 - Functions and function calls
 - Function forward declarations (e.g. `function add(a: int32, b: int32) -> int32;`)
@@ -43,7 +46,7 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Struct declarations
 - Struct member access and assignment
 - Struct methods and method calls (`obj.method(args)`)
-- Array indexing and indexed assignment (`arr[i]`, `arr[i] = value`)
+- Array and pointer indexing (`arr[i]`, `ptr[i]`) and indexed assignment
 - `if` and `else`
 - `while`
 - `for`
@@ -55,9 +58,12 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 ## Type and Semantic Analysis
 
 - Built-in integer and floating-point types
+- Pointer type resolution (multi-level `T*`, `T**`, etc.) and base-type inference
+- Null pointer constant handling (`0` as valid pointer initializer and in comparisons)
 - Fixed-size array type resolution and element type inference
 - Struct type registration and lookup
 - Method call validation
+- Pointer type compatibility (same base type, or pointer vs null)
 - Assignment compatibility validation
 - Field assignment validation
 - Array index expression validation (index type and target type checks)
@@ -74,7 +80,8 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Statement and expression generation for supported AST nodes
 - Struct field offset-based access and assignment
 - Method call emission (mangled names, `this` as first parameter)
-- Array element address calculation and typed indexed load/store emission
+- Pointer dereference and address-of code generation
+- Array and pointer element address calculation and typed indexed load/store emission
 - Code generation for `if`, `while`, `for`, and `switch` control flow
 - Nested control-flow label management for `break` and `continue`
 - `_start` entry emission that calls `main` when present
@@ -86,7 +93,7 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Conservative mark-and-sweep collection
 - Iterative mark traversal using a worklist
 - Stack root scanning
-- Root registration API: `gc_register_root`, `gc_unregister_root`
+- Root registration API: `gc_register_root`, `gc_unregister_root` (pointer globals auto-registered)
 - Collection controls: `gc_collect`, `gc_collect_now`, `gc_set_collection_threshold`, `gc_get_collection_threshold`
 - Runtime cleanup: `gc_shutdown`
 
@@ -153,6 +160,9 @@ Windows compiler smoke tests:
 .\bin\methasm.exe tests\test_control_flow.masm -o out_control_flow.s
 .\bin\methasm.exe tests\test_switch_const_expr.masm -o out_switch_const_expr.s
 .\bin\methasm.exe tests\test_switch_continue_loop.masm -o out_switch_continue_loop.s
+.\bin\methasm.exe tests\test_pointers.masm -o out_pointers.s
+.\bin\methasm.exe tests\test_pointer_null.masm -o out_pointer_null.s
+.\bin\methasm.exe tests\test_forward_decl_pointer.masm -o out_forward_decl_pointer.s
 ```
 
 ## Repository Layout
