@@ -20,6 +20,7 @@ Current implementation status:
 - Fail-fast diagnostics are enforced across lexer, parser, semantic analysis, and codegen.
 - Arrays, pointers, structured types, and major control-flow constructs are implemented.
 - Runtime GC integration is compiled and exercised by runtime tests.
+- Automated compiler/runtime regression suite is available under `tests/run_tests.ps1`.
 
 ## Compiler Guarantees
 
@@ -144,6 +145,23 @@ Run runtime and compiler tests with:
 make test
 ```
 
+Automated Windows suite (compiler positives, compiler negatives, assembly syntax checks, GC runtime):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_tests.ps1
+```
+
+Windows convenience wrapper:
+
+```powershell
+tests\run_tests.bat
+```
+
+Suite options:
+
+- `-BuildCompiler` rebuilds `bin\methasm.exe` before running tests
+- `-SkipRuntime` skips the GC runtime executable test
+
 Windows manual runtime test:
 
 ```powershell
@@ -163,6 +181,7 @@ Windows compiler smoke tests:
 .\bin\methasm.exe tests\test_pointers.masm -o out_pointers.s
 .\bin\methasm.exe tests\test_pointer_null.masm -o out_pointer_null.s
 .\bin\methasm.exe tests\test_forward_decl_pointer.masm -o out_forward_decl_pointer.s
+.\bin\methasm.exe tests\test_pointer_param_address.masm -o out_pointer_param_address.s
 ```
 
 ## Repository Layout
@@ -179,6 +198,8 @@ src/
   main.c      CLI entry and compilation flow
 
 tests/        Language and runtime tests
+  run_tests.ps1   Automated compiler/runtime test suite
+  run_tests.bat   Windows wrapper for run_tests.ps1
 build.bat     Windows build
 Makefile      Linux/macOS build and test targets
 ```
