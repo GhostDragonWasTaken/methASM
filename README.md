@@ -14,6 +14,13 @@ MethASM provides an end-to-end compilation pipeline from `.masm` source to x86-6
 
 Core compiler and runtime paths are implemented and currently validated by project tests.
 
+Current implementation status:
+
+- Core language front-end and backend pipeline are operational.
+- Fail-fast diagnostics are enforced across lexer, parser, semantic analysis, and codegen.
+- Arrays, structured types, and major control-flow constructs are implemented.
+- Runtime GC integration is compiled and exercised by runtime tests.
+
 ## Compiler Guarantees
 
 The compiler uses fail-fast behavior across all major phases.
@@ -37,6 +44,9 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Array indexing and indexed assignment (`arr[i]`, `arr[i] = value`)
 - `if` and `else`
 - `while`
+- `for`
+- `switch`, `case`, `default`
+- `break` and `continue`
 - `return`
 - Inline assembly blocks
 
@@ -48,6 +58,8 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Assignment compatibility validation
 - Field assignment validation
 - Array index expression validation (index type and target type checks)
+- Loop/switch context checks for `break` and `continue`
+- Switch expression and case value validation
 - Undefined symbol detection with source locations
 - Forward declaration signature compatibility checks in symbol resolution
 
@@ -58,6 +70,8 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Statement and expression generation for supported AST nodes
 - Struct field offset-based access and assignment
 - Array element address calculation and typed indexed load/store emission
+- Code generation for `if`, `while`, `for`, and `switch` control flow
+- Nested control-flow label management for `break` and `continue`
 - `_start` entry emission that calls `main` when present
 - Hard failure on unresolved symbols or unsupported generation paths
 
@@ -131,6 +145,7 @@ Windows compiler smoke tests:
 .\bin\methasm.exe test_simple.masm -o out_simple.s
 .\bin\methasm.exe tests\test_gc_alloc.masm -o out_gc.s
 .\bin\methasm.exe tests\test_array_index.masm -o out_array.s
+.\bin\methasm.exe tests\test_control_flow.masm -o out_control_flow.s
 ```
 
 ## Repository Layout
@@ -157,6 +172,7 @@ Makefile      Linux/macOS build and test targets
 - Language surface area is still evolving.
 - Some advanced language and backend scenarios are not implemented.
 - Source-level forward declaration syntax is not fully exposed in the parser yet, even though symbol-table forward declaration compatibility checks are implemented.
+- `switch` currently expects numeric literal case values.
 
 ## Contributing
 
