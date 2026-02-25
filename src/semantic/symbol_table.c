@@ -5,6 +5,67 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int symbol_table_types_compatible(const Type *lhs, const Type *rhs) {
+  if (lhs == rhs) {
+    return 1;
+  }
+  if (!lhs || !rhs) {
+    return 0;
+  }
+  if (lhs->kind != rhs->kind) {
+    return 0;
+  }
+
+  switch (lhs->kind) {
+  case TYPE_ARRAY:
+    return lhs->array_size == rhs->array_size &&
+           symbol_table_types_compatible(lhs->base_type, rhs->base_type);
+  case TYPE_POINTER:
+    return symbol_table_types_compatible(lhs->base_type, rhs->base_type);
+  case TYPE_STRUCT:
+    if (lhs->name && rhs->name) {
+      return strcmp(lhs->name, rhs->name) == 0;
+    }
+    return lhs->name == rhs->name;
+  default:
+    return 1;
+  }
+}
+
+static int symbol_table_function_signatures_match(const Symbol *decl,
+                                                  const Symbol *defn) {
+  if (!decl || !defn || decl->kind != SYMBOL_FUNCTION ||
+      defn->kind != SYMBOL_FUNCTION) {
+    return 0;
+  }
+
+  if (decl->data.function.parameter_count != defn->data.function.parameter_count) {
+    return 0;
+  }
+
+  Type *decl_return =
+      decl->data.function.return_type ? decl->data.function.return_type : decl->type;
+  Type *defn_return =
+      defn->data.function.return_type ? defn->data.function.return_type : defn->type;
+  if (!symbol_table_types_compatible(decl_return, defn_return)) {
+    return 0;
+  }
+
+  for (size_t i = 0; i < decl->data.function.parameter_count; i++) {
+    Type *decl_param = decl->data.function.parameter_types
+                           ? decl->data.function.parameter_types[i]
+                           : NULL;
+    Type *defn_param = defn->data.function.parameter_types
+                           ? defn->data.function.parameter_types[i]
+                           : NULL;
+    if (!symbol_table_types_compatible(decl_param, defn_param)) {
+      return 0;
+    }
+  }
+
+  return 1;
+}
+
 SymbolTable *symbol_table_create(void) {
   SymbolTable *table = malloc(sizeof(SymbolTable));
   if (!table)
@@ -121,12 +182,16 @@ int symbol_table_declare(SymbolTable *table, Symbol *symbol) {
   for (size_t i = 0; i < table->current_scope->symbol_count; i++) {
     if (table->current_scope->symbols[i] &&
         strcmp(table->current_scope->symbols[i]->name, symbol->name) == 0) {
+      Symbol *existing = table->current_scope->symbols[i];
       // Allow forward declaration resolution for functions
-      if (symbol->kind == SYMBOL_FUNCTION &&
-          table->current_scope->symbols[i]->is_forward_declaration) {
+      if (symbol->kind == SYMBOL_FUNCTION && existing->kind == SYMBOL_FUNCTION &&
+          existing->is_forward_declaration) {
+        if (!symbol_table_function_signatures_match(existing, symbol)) {
+          return 0; // Mismatched function signature vs forward declaration
+        }
         // Resolve the forward declaration
-        table->current_scope->symbols[i]->is_forward_declaration = 0;
-        table->current_scope->symbols[i]->is_initialized = 1;
+        existing->is_forward_declaration = 0;
+        existing->is_initialized = 1;
         return 1; // Successfully resolved forward declaration
       }
       return 0; // Duplicate declaration
@@ -385,9 +450,8 @@ int symbol_table_declare_forward(SymbolTable *table, Symbol *symbol) {
   Symbol *existing = symbol_table_lookup_current_scope(table, symbol->name);
   if (existing) {
     // If it's already a forward declaration, check compatibility
-    if (existing->is_forward_declaration) {
-      // TODO: Check function signature compatibility
-      return 1; // Compatible forward declaration
+    if (existing->kind == SYMBOL_FUNCTION && existing->is_forward_declaration) {
+      return symbol_table_function_signatures_match(existing, symbol);
     } else {
       return 0; // Already defined
     }
@@ -408,12 +472,18 @@ int symbol_table_resolve_forward_declaration(SymbolTable *table,
 
   // Look for existing forward declaration
   Symbol *existing = symbol_table_lookup_current_scope(table, symbol->name);
-  if (existing && existing->is_forward_declaration) {
-    // TODO: Check function signature compatibility
-    // For now, just mark the existing symbol as no longer forward
+  if (existing && existing->kind == SYMBOL_FUNCTION &&
+      existing->is_forward_declaration) {
+    if (!symbol_table_function_signatures_match(existing, symbol)) {
+      return 0; // Forward declaration and definition signatures differ
+    }
     existing->is_forward_declaration = 0;
     existing->is_initialized = 1;
     return 1; // Successfully resolved
+  }
+
+  if (existing) {
+    return 0; // Already defined in this scope
   }
 
   // No forward declaration found, declare normally
@@ -460,8 +530,9 @@ int symbol_table_validate_declaration(SymbolTable *table, Symbol *symbol) {
   Symbol *existing = symbol_table_lookup_current_scope(table, symbol->name);
   if (existing) {
     // Allow forward declaration resolution for functions
-    if (symbol->kind == SYMBOL_FUNCTION && existing->is_forward_declaration) {
-      return 1; // Valid forward declaration resolution
+    if (symbol->kind == SYMBOL_FUNCTION && existing->kind == SYMBOL_FUNCTION &&
+        existing->is_forward_declaration) {
+      return symbol_table_function_signatures_match(existing, symbol);
     }
     return 0; // Duplicate declaration
   }
