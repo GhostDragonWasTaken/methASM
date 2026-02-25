@@ -59,7 +59,8 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Field assignment validation
 - Array index expression validation (index type and target type checks)
 - Loop/switch context checks for `break` and `continue`
-- Switch expression and case value validation
+- Switch expression validation and compile-time case constant evaluation
+- Duplicate `case` detection and default-clause uniqueness checks
 - Undefined symbol detection with source locations
 - Forward declaration signature compatibility checks in symbol resolution
 
@@ -146,6 +147,8 @@ Windows compiler smoke tests:
 .\bin\methasm.exe tests\test_gc_alloc.masm -o out_gc.s
 .\bin\methasm.exe tests\test_array_index.masm -o out_array.s
 .\bin\methasm.exe tests\test_control_flow.masm -o out_control_flow.s
+.\bin\methasm.exe tests\test_switch_const_expr.masm -o out_switch_const_expr.s
+.\bin\methasm.exe tests\test_switch_continue_loop.masm -o out_switch_continue_loop.s
 ```
 
 ## Repository Layout
@@ -172,7 +175,7 @@ Makefile      Linux/macOS build and test targets
 - Language surface area is still evolving.
 - Some advanced language and backend scenarios are not implemented.
 - Source-level forward declaration syntax is not fully exposed in the parser yet, even though symbol-table forward declaration compatibility checks are implemented.
-- `switch` currently expects numeric literal case values.
+- `switch` case labels currently require compile-time integer constant expressions and do not yet support range-style cases.
 
 ## Contributing
 
