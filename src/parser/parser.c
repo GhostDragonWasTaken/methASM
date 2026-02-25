@@ -1091,7 +1091,7 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     }
   }
 
-  // Parse function body (block)
+  // Parse function body (block) or allow forward declaration terminator
   ASTNode *body = NULL;
   if (parser->current_token.type == TOKEN_LBRACE) {
     body = parser_parse_block(parser);
@@ -1107,8 +1107,11 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
       free(return_type);
       return NULL;
     }
+  } else if (parser->current_token.type == TOKEN_SEMICOLON ||
+             parser->current_token.type == TOKEN_NEWLINE) {
+    parser_expect_statement_end(parser);
   } else {
-    parser_set_error(parser, "Expected function body ('{')");
+    parser_set_error(parser, "Expected function body ('{') or declaration terminator");
     // Clean up
     for (size_t i = 0; i < param_count; i++) {
       free(param_names[i]);

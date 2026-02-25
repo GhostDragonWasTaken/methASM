@@ -41,6 +41,7 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Function return type syntax with both `->` and `:`
 - Struct declarations
 - Struct member access and assignment
+- Struct methods and method calls (`obj.method(args)`)
 - Array indexing and indexed assignment (`arr[i]`, `arr[i] = value`)
 - `if` and `else`
 - `while`
@@ -55,6 +56,7 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Built-in integer and floating-point types
 - Fixed-size array type resolution and element type inference
 - Struct type registration and lookup
+- Method call validation
 - Assignment compatibility validation
 - Field assignment validation
 - Array index expression validation (index type and target type checks)
@@ -70,6 +72,7 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Function prologue and epilogue generation
 - Statement and expression generation for supported AST nodes
 - Struct field offset-based access and assignment
+- Method call emission (mangled names, `this` as first parameter)
 - Array element address calculation and typed indexed load/store emission
 - Code generation for `if`, `while`, `for`, and `switch` control flow
 - Nested control-flow label management for `break` and `continue`

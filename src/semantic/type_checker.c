@@ -1031,15 +1031,6 @@ int type_checker_process_declaration(TypeChecker *checker,
       return 0;
     }
 
-    // Check for duplicate declaration in current scope
-    Symbol *existing = symbol_table_lookup_current_scope(checker->symbol_table,
-                                                         func_decl->name);
-    if (existing) {
-      type_checker_report_duplicate_declaration(checker, declaration->location,
-                                                func_decl->name);
-      return 0;
-    }
-
     // Resolve return type
     Type *return_type = NULL;
     if (func_decl->return_type) {
@@ -1091,6 +1082,35 @@ int type_checker_process_declaration(TypeChecker *checker,
       }
     }
 
+    // Copy parameter names so function symbols own their metadata.
+    char **param_names_copy = NULL;
+    if (func_decl->parameter_count > 0) {
+      param_names_copy = malloc(func_decl->parameter_count * sizeof(char *));
+      if (!param_names_copy) {
+        if (param_types)
+          free(param_types);
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "Memory allocation failed for function parameter names");
+        return 0;
+      }
+      for (size_t i = 0; i < func_decl->parameter_count; i++) {
+        param_names_copy[i] = strdup(func_decl->parameter_names[i]);
+        if (!param_names_copy[i]) {
+          for (size_t j = 0; j < i; j++) {
+            free(param_names_copy[j]);
+          }
+          free(param_names_copy);
+          if (param_types)
+            free(param_types);
+          type_checker_set_error_at_location(
+              checker, declaration->location,
+              "Memory allocation failed for parameter name copy");
+          return 0;
+        }
+      }
+    }
+
     // Create function symbol
     Symbol *func_symbol =
         symbol_create(func_decl->name, SYMBOL_FUNCTION, return_type);
@@ -1098,6 +1118,12 @@ int type_checker_process_declaration(TypeChecker *checker,
       type_checker_set_error_at_location(
           checker, declaration->location,
           "Memory allocation failed for function symbol");
+      if (param_names_copy) {
+        for (size_t i = 0; i < func_decl->parameter_count; i++) {
+          free(param_names_copy[i]);
+        }
+        free(param_names_copy);
+      }
       if (param_types)
         free(param_types);
       return 0;
@@ -1105,29 +1131,62 @@ int type_checker_process_declaration(TypeChecker *checker,
 
     // Set function-specific data
     func_symbol->data.function.parameter_count = func_decl->parameter_count;
-    func_symbol->data.function.parameter_names = func_decl->parameter_names;
+    func_symbol->data.function.parameter_names = param_names_copy;
     func_symbol->data.function.parameter_types = param_types;
     func_symbol->data.function.return_type = return_type;
 
-    // Set the current function in the type checker
-    checker->current_function = func_symbol;
+    Symbol *existing_before =
+        symbol_table_lookup_current_scope(checker->symbol_table, func_decl->name);
+    int is_resolving_forward =
+        (existing_before && existing_before->kind == SYMBOL_FUNCTION &&
+         existing_before->is_forward_declaration);
 
-    // Declare function in the parent scope
-    if (!symbol_table_declare(checker->symbol_table, func_symbol)) {
-      type_checker_report_duplicate_declaration(checker, declaration->location,
-                                                func_decl->name);
+    // Forward declaration: no body
+    if (!func_decl->body) {
+      func_symbol->is_initialized = 0;
+      if (!symbol_table_declare_forward(checker->symbol_table, func_symbol)) {
+        type_checker_set_error_at_location(
+            checker, declaration->location,
+            "Invalid or conflicting forward declaration for function '%s'",
+            func_decl->name);
+        symbol_destroy(func_symbol);
+        return 0;
+      }
+      return 1;
+    }
+
+    func_symbol->is_initialized = 1;
+    if (!symbol_table_resolve_forward_declaration(checker->symbol_table,
+                                                  func_symbol)) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "Function definition for '%s' does not match existing declaration",
+          func_decl->name);
       symbol_destroy(func_symbol);
       return 0;
+    }
+
+    if (is_resolving_forward) {
+      checker->current_function = existing_before;
+      symbol_destroy(func_symbol); // not inserted, existing symbol was updated
+      func_symbol = existing_before;
+    } else {
+      checker->current_function = func_symbol;
     }
 
     // Enter a new scope for the function body
     symbol_table_enter_scope(checker->symbol_table, SCOPE_FUNCTION);
 
     // Add parameters to the new scope
+    Type **active_param_types =
+        checker->current_function->data.function.parameter_types;
     if (func_decl->parameter_count > 0) {
       for (size_t i = 0; i < func_decl->parameter_count; i++) {
         Symbol *param_symbol = symbol_create(func_decl->parameter_names[i],
-                                             SYMBOL_VARIABLE, param_types[i]);
+                                             SYMBOL_VARIABLE,
+                                             active_param_types
+                                                 ? active_param_types[i]
+                                                 : NULL);
         if (!param_symbol) {
           type_checker_set_error_at_location(
               checker, declaration->location,

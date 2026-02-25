@@ -700,7 +700,7 @@ void code_generator_generate_statement(CodeGenerator *generator,
       // Generate the return value expression
       code_generator_generate_expression(generator, return_data->value);
       // Result is already in RAX (the return register for integers)
-      code_generator_emit(generator, "    ; Return value in %rax\n");
+      code_generator_emit(generator, "    ; Return value in rax\n");
     } else {
       // Void return - no value to return
       code_generator_emit(generator, "    ; Void return\n");
@@ -1091,7 +1091,7 @@ void code_generator_generate_expression(CodeGenerator *generator,
 
       // Call gc_alloc(alloc_size)
       code_generator_emit(generator,
-                          "    mov $%d, %%rdi      ; size in bytes\n",
+                          "    mov rdi, %d      ; size in bytes\n",
                           alloc_size);
       code_generator_emit(generator, "    extern gc_alloc\n");
       code_generator_emit(generator, "    call gc_alloc\n");
@@ -1228,7 +1228,7 @@ void code_generator_function_prologue(CodeGenerator *generator,
     aligned_stack_size = (aligned_stack_size + 15) & ~15;
     code_generator_emit(
         generator,
-        "    sub $%d, %rsp    ; Allocate %d bytes on stack (aligned)\n",
+        "    sub rsp, %d    ; Allocate %d bytes on stack (aligned)\n",
         aligned_stack_size, aligned_stack_size);
     generator->function_stack_size = aligned_stack_size;
   }
@@ -1238,10 +1238,10 @@ void code_generator_function_prologue(CodeGenerator *generator,
     code_generator_emit(generator,
                         "    ; Zero-initialize local variable space\n");
     code_generator_emit(generator,
-                        "    mov %rsp, %rdi  ; Destination for memset\n");
+                        "    mov rdi, rsp  ; Destination for memset\n");
     code_generator_emit(generator,
-                        "    mov $0, %rax     ; Value to set (zero)\n");
-    code_generator_emit(generator, "    mov $%d, %rcx    ; Number of bytes\n",
+                        "    mov rax, 0     ; Value to set (zero)\n");
+    code_generator_emit(generator, "    mov rcx, %d    ; Number of bytes\n",
                         aligned_stack_size);
     code_generator_emit(generator,
                         "    rep stosb         ; Zero-fill the stack space\n");
@@ -1648,38 +1648,38 @@ void code_generator_generate_variable_initialization(CodeGenerator *generator,
         // Floating-point types - use XMM registers
         if (symbol->type->size == 4) {
           code_generator_emit(generator,
-                              "    movss %xmm0, %d(%rbp)  ; Store float32\n",
+                              "    movss [rbp - %d], xmm0  ; Store float32\n",
                               offset);
         } else {
           code_generator_emit(generator,
-                              "    movsd %xmm0, %d(%rbp)  ; Store float64\n",
+                              "    movsd [rbp - %d], xmm0  ; Store float64\n",
                               offset);
         }
       } else if (symbol->type->kind == TYPE_STRING) {
         // String type - store pointer
         code_generator_emit(
-            generator, "    mov %rax, %d(%rbp)     ; Store string pointer\n",
+            generator, "    mov [rbp - %d], rax     ; Store string pointer\n",
             offset);
       } else {
         // Integer types - use appropriate register size
         if (symbol->type->size == 1) {
           code_generator_emit(
-              generator, "    mov %al, %d(%rbp)      ; Store int8\n", offset);
+              generator, "    mov [rbp - %d], al      ; Store int8\n", offset);
         } else if (symbol->type->size == 2) {
           code_generator_emit(
-              generator, "    mov %ax, %d(%rbp)      ; Store int16\n", offset);
+              generator, "    mov [rbp - %d], ax      ; Store int16\n", offset);
         } else if (symbol->type->size == 4) {
           code_generator_emit(
-              generator, "    mov %eax, %d(%rbp)     ; Store int32\n", offset);
+              generator, "    mov [rbp - %d], eax     ; Store int32\n", offset);
         } else {
           code_generator_emit(
-              generator, "    mov %rax, %d(%rbp)     ; Store int64\n", offset);
+              generator, "    mov [rbp - %d], rax     ; Store int64\n", offset);
         }
       }
     } else {
       // Fallback for unknown types
       code_generator_emit(generator,
-                          "    mov %rax, %d(%rbp)     ; Store (unknown type)\n",
+                          "    mov [rbp - %d], rax     ; Store (unknown type)\n",
                           offset);
     }
   }
@@ -1728,34 +1728,34 @@ void code_generator_generate_variable_zero_initialization(
         // Zero floating-point variable
         if (symbol->type->size == 4) {
           code_generator_emit(generator,
-                              "    movl $0, %d(%rbp)       ; Zero float32\n",
+                              "    mov dword [rbp - %d], 0       ; Zero float32\n",
                               offset);
         } else {
           code_generator_emit(generator,
-                              "    movq $0, %d(%rbp)       ; Zero float64\n",
+                              "    mov qword [rbp - %d], 0       ; Zero float64\n",
                               offset);
         }
       } else {
         // Zero integer or pointer variable
         if (symbol->type->size == 1) {
           code_generator_emit(
-              generator, "    movb $0, %d(%rbp)       ; Zero int8\n", offset);
+              generator, "    mov byte [rbp - %d], 0       ; Zero int8\n", offset);
         } else if (symbol->type->size == 2) {
           code_generator_emit(
-              generator, "    movw $0, %d(%rbp)       ; Zero int16\n", offset);
+              generator, "    mov word [rbp - %d], 0       ; Zero int16\n", offset);
         } else if (symbol->type->size == 4) {
           code_generator_emit(
-              generator, "    movl $0, %d(%rbp)       ; Zero int32\n", offset);
+              generator, "    mov dword [rbp - %d], 0       ; Zero int32\n", offset);
         } else {
           code_generator_emit(
-              generator, "    movq $0, %d(%rbp)       ; Zero int64/pointer\n",
+              generator, "    mov qword [rbp - %d], 0       ; Zero int64/pointer\n",
               offset);
         }
       }
     } else {
       // Default zero initialization
       code_generator_emit(generator,
-                          "    movq $0, %d(%rbp)       ; Zero (unknown type)\n",
+                          "    mov qword [rbp - %d], 0       ; Zero (unknown type)\n",
                           offset);
     }
   }
@@ -1964,11 +1964,11 @@ void code_generator_generate_function_call(CodeGenerator *generator,
 
   // 8. Return value is now properly positioned
   if (return_type && code_generator_is_floating_point_type(return_type)) {
-    code_generator_emit(generator, "    ; Return value in %xmm0 (float)\n");
+    code_generator_emit(generator, "    ; Return value in xmm0 (float)\n");
   } else if (return_type && return_type->name &&
              strcmp(return_type->name, "void") != 0) {
     code_generator_emit(generator,
-                        "    ; Return value in %rax (integer/pointer)\n");
+                        "    ; Return value in rax (integer/pointer)\n");
   } else {
     code_generator_emit(generator, "    ; Void function - no return value\n");
   }
@@ -2143,9 +2143,9 @@ void code_generator_generate_parameter(CodeGenerator *generator,
       // Parameter goes on stack
       code_generator_emit(
           generator,
-          "    sub $8, %rsp        ; Allocate stack space for float\n");
+          "    sub rsp, 8        ; Allocate stack space for float\n");
       code_generator_emit(
-          generator, "    movsd %xmm0, (%rsp) ; Float parameter %d on stack\n",
+          generator, "    movsd [rsp], xmm0 ; Float parameter %d on stack\n",
           param_index + 1);
     }
   } else {
@@ -2187,14 +2187,12 @@ void code_generator_generate_parameter(CodeGenerator *generator,
       if (param_type && param_type->size <= 4) {
         // 32-bit or smaller - push as 64-bit for alignment
         code_generator_emit(
-            generator,
-            "    push %rax          ; Integer parameter %d on stack\n",
+            generator, "    push rax          ; Integer parameter %d on stack\n",
             param_index + 1);
       } else {
         // 64-bit parameter
         code_generator_emit(
-            generator,
-            "    push %rax          ; Integer parameter %d on stack\n",
+            generator, "    push rax          ; Integer parameter %d on stack\n",
             param_index + 1);
       }
     }
@@ -2221,12 +2219,12 @@ void code_generator_save_caller_saved_registers(CodeGenerator *generator) {
 
   // RAX is always caller-saved and not used for parameters (it's the return
   // register)
-  code_generator_emit(generator, "    push %rax\n");
+  code_generator_emit(generator, "    push rax\n");
 
   // R10, R11 are caller-saved and not used for parameters in either calling
   // convention
-  code_generator_emit(generator, "    push %r10\n");
-  code_generator_emit(generator, "    push %r11\n");
+  code_generator_emit(generator, "    push r10\n");
+  code_generator_emit(generator, "    push r11\n");
 }
 
 void code_generator_restore_caller_saved_registers(CodeGenerator *generator) {
@@ -2238,9 +2236,9 @@ void code_generator_restore_caller_saved_registers(CodeGenerator *generator) {
                       "    ; Restore caller-saved registers (non-parameter)\n");
 
   // Restore in reverse order
-  code_generator_emit(generator, "    pop %r11\n");
-  code_generator_emit(generator, "    pop %r10\n");
-  code_generator_emit(generator, "    pop %rax\n");
+  code_generator_emit(generator, "    pop r11\n");
+  code_generator_emit(generator, "    pop r10\n");
+  code_generator_emit(generator, "    pop rax\n");
 }
 
 // Selective register saving - only save registers that are actually in use
@@ -2263,20 +2261,20 @@ void code_generator_save_caller_saved_registers_selective(
   // and are currently in use by the register allocator
 
   // Always save RAX as it might contain a value and is not used for parameters
-  code_generator_emit(generator, "    push %rax\n");
+  code_generator_emit(generator, "    push rax\n");
 
   // Save R10, R11 which are caller-saved but not parameter registers
-  code_generator_emit(generator, "    push %r10\n");
-  code_generator_emit(generator, "    push %r11\n");
+  code_generator_emit(generator, "    push r10\n");
+  code_generator_emit(generator, "    push r11\n");
 
   // For floating-point calls, save XMM registers that are caller-saved
   // but not used for parameters (XMM8-XMM15 on System V, XMM4-XMM15 on Windows)
   int float_param_regs = (int)conv_spec->float_param_count;
   for (int i = float_param_regs; i < 8; i++) {
     if (i >= 4 || conv_spec->convention == CALLING_CONV_SYSV) {
-      code_generator_emit(generator, "    sub $16, %rsp\n");
+      code_generator_emit(generator, "    sub rsp, 16\n");
       code_generator_emit(generator,
-                          "    movdqu %xmm%d, (%rsp)  ; Save XMM%d\n", i, i);
+                          "    movdqu [rsp], xmm%d  ; Save XMM%d\n", i, i);
     }
   }
 }
@@ -2301,15 +2299,15 @@ void code_generator_restore_caller_saved_registers_selective(
   for (int i = 7; i >= float_param_regs; i--) {
     if (i >= 4 || conv_spec->convention == CALLING_CONV_SYSV) {
       code_generator_emit(generator,
-                          "    movdqu (%rsp), %xmm%d  ; Restore XMM%d\n", i, i);
-      code_generator_emit(generator, "    add $16, %rsp\n");
+                          "    movdqu xmm%d, [rsp]  ; Restore XMM%d\n", i, i);
+      code_generator_emit(generator, "    add rsp, 16\n");
     }
   }
 
   // Restore general-purpose registers in reverse order
-  code_generator_emit(generator, "    pop %r11\n");
-  code_generator_emit(generator, "    pop %r10\n");
-  code_generator_emit(generator, "    pop %rax\n");
+  code_generator_emit(generator, "    pop r11\n");
+  code_generator_emit(generator, "    pop r10\n");
+  code_generator_emit(generator, "    pop rax\n");
 }
 
 // Clean up stack after function call
@@ -2355,7 +2353,7 @@ void code_generator_cleanup_stack_after_call(CodeGenerator *generator,
   if (stack_bytes > 0) {
     code_generator_emit(
         generator,
-        "    add $%d, %rsp    ; Clean up %d bytes of stack parameters\n",
+        "    add rsp, %d    ; Clean up %d bytes of stack parameters\n",
         stack_bytes, stack_bytes);
   }
 
@@ -2363,7 +2361,7 @@ void code_generator_cleanup_stack_after_call(CodeGenerator *generator,
   if (conv_spec->convention == CALLING_CONV_MS_X64 &&
       conv_spec->shadow_space_size > 0) {
     code_generator_emit(generator,
-                        "    add $%d, %rsp      ; Clean up shadow space\n",
+                        "    add rsp, %d      ; Clean up shadow space\n",
                         conv_spec->shadow_space_size);
   }
 
@@ -3155,7 +3153,7 @@ void code_generator_generate_method_call(CodeGenerator *generator,
 
   // Save "this" pointer as first parameter
   code_generator_emit(generator,
-                      "    push %rax           ; Save 'this' pointer\n");
+                      "    push rax           ; Save 'this' pointer\n");
 
   // Get calling convention for parameter passing
   CallingConventionSpec *conv_spec =
@@ -3208,7 +3206,7 @@ void code_generator_generate_method_call(CodeGenerator *generator,
 
   // Generate the actual method call with mangled name
   code_generator_emit(generator, "    call %s\n", mangled_name);
-  code_generator_emit(generator, "    ; Return value in %rax\n");
+  code_generator_emit(generator, "    ; Return value in rax\n");
 }
 
 void code_generator_generate_member_access(CodeGenerator *generator,

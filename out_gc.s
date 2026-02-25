@@ -21,11 +21,11 @@ main:
     push r13         ; Save callee-saved register
     push r14         ; Save callee-saved register
     push r15         ; Save callee-saved register
-    sub $32, %rsp    ; Allocate 32 bytes on stack (aligned)
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
     ; Zero-initialize local variable space
-    mov %rsp, %rdi  ; Destination for memset
-    mov $0, %rax     ; Value to set (zero)
-    mov $32, %rcx    ; Number of bytes
+    mov rdi, rsp  ; Destination for memset
+    mov rax, 0     ; Value to set (zero)
+    mov rcx, 32    ; Number of bytes
     rep stosb         ; Zero-fill the stack space
     ; Registering 0 function parameters
     ; Added 4 bytes padding for 16-byte alignment
@@ -35,7 +35,7 @@ main:
     mov rdi, 12      ; size in bytes
     extern gc_alloc
     call gc_alloc
-    mov %rax, 12(%rbp)     ; Store int64
+    mov [rbp - 12], rax     ; Store int64
     ; Field assignment: .x = ...
     ; Integer literal: 10
     mov rax, 10
@@ -60,7 +60,7 @@ main:
     mov rdi, 12      ; size in bytes
     extern gc_alloc
     call gc_alloc
-    mov %rax, 28(%rbp)     ; Store int64
+    mov [rbp - 28], rax     ; Store int64
     ; Field assignment: .z = ...
     ; Integer literal: 30
     mov rax, 30
@@ -98,7 +98,7 @@ main:
     mov rbx, rax     ; Move right operand to RBX
     pop rax            ; Restore left operand
     add rax, rbx      ; + operation
-    ; Return value in %rax
+    ; Return value in rax
     jmp Lmain_exit
 Lmain_exit:
     ; Function epilogue
