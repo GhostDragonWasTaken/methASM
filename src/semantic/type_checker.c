@@ -1,10 +1,72 @@
 #include "type_checker.h"
 #include "../error/error_reporter.h"
 #include "symbol_table.h"
+#include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static Type *type_checker_parse_array_type(TypeChecker *checker,
+                                           const char *name) {
+  if (!checker || !name)
+    return NULL;
+
+  const char *lbracket = strchr(name, '[');
+  const char *rbracket = lbracket ? strchr(lbracket, ']') : NULL;
+  if (!lbracket || !rbracket || rbracket[1] != '\0') {
+    return NULL;
+  }
+
+  size_t base_len = (size_t)(lbracket - name);
+  if (base_len == 0) {
+    return NULL;
+  }
+
+  char *base_name = malloc(base_len + 1);
+  if (!base_name) {
+    return NULL;
+  }
+  memcpy(base_name, name, base_len);
+  base_name[base_len] = '\0';
+
+  Type *base_type = type_checker_get_type_by_name(checker, base_name);
+  free(base_name);
+  if (!base_type) {
+    return NULL;
+  }
+
+  const char *size_start = lbracket + 1;
+  if (size_start == rbracket) {
+    return NULL;
+  }
+
+  errno = 0;
+  char *end_ptr = NULL;
+  unsigned long long array_size_ull = strtoull(size_start, &end_ptr, 10);
+  if (errno != 0 || !end_ptr || end_ptr != rbracket || array_size_ull == 0 ||
+      array_size_ull > SIZE_MAX) {
+    return NULL;
+  }
+
+  size_t array_size = (size_t)array_size_ull;
+  if (base_type->size > 0 && array_size > SIZE_MAX / base_type->size) {
+    return NULL;
+  }
+
+  Type *array_type = type_create(TYPE_ARRAY, name);
+  if (!array_type) {
+    return NULL;
+  }
+
+  array_type->base_type = base_type;
+  array_type->array_size = array_size;
+  array_type->size = base_type->size * array_size;
+  array_type->alignment = base_type->alignment;
+
+  return array_type;
+}
 
 TypeChecker *type_checker_create(SymbolTable *symbol_table) {
   return type_checker_create_with_error_reporter(symbol_table, NULL);
@@ -224,6 +286,45 @@ Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression) {
     return NULL;
   }
 
+  case AST_INDEX_EXPRESSION: {
+    ArrayIndexExpression *idx = (ArrayIndexExpression *)expression->data;
+    if (!idx || !idx->array || !idx->index) {
+      type_checker_set_error_at_location(checker, expression->location,
+                                         "Invalid array indexing expression");
+      return NULL;
+    }
+
+    Type *array_type = type_checker_infer_type(checker, idx->array);
+    if (!array_type) {
+      return NULL;
+    }
+
+    Type *index_type = type_checker_infer_type(checker, idx->index);
+    if (!index_type) {
+      return NULL;
+    }
+
+    if (!type_checker_is_integer_type(index_type)) {
+      type_checker_report_type_mismatch(checker, idx->index->location,
+                                        "integer type", index_type->name);
+      return NULL;
+    }
+
+    if (array_type->kind == TYPE_ARRAY || array_type->kind == TYPE_POINTER) {
+      if (!array_type->base_type) {
+        type_checker_set_error_at_location(checker, expression->location,
+                                           "Indexed type has no element type");
+        return NULL;
+      }
+      return array_type->base_type;
+    }
+
+    type_checker_set_error_at_location(
+        checker, expression->location,
+        "Cannot index non-array type '%s'", array_type->name);
+    return NULL;
+  }
+
   case AST_ASSIGNMENT: {
     Assignment *assignment = (Assignment *)expression->data;
     if (assignment && assignment->value) {
@@ -380,6 +481,13 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
     return checker->builtin_string;
   if (strcmp(name, "void") == 0)
     return checker->builtin_void;
+
+  if (strchr(name, '[') && strchr(name, ']')) {
+    Type *array_type = type_checker_parse_array_type(checker, name);
+    if (array_type) {
+      return array_type;
+    }
+  }
 
   // Check for user-defined struct types in symbol table
   Symbol *struct_symbol = symbol_table_lookup(checker->symbol_table, name);
@@ -993,63 +1101,85 @@ int type_checker_process_declaration(TypeChecker *checker,
       return 0;
     }
 
-    // Struct field assignment: obj.field = value
+    // Complex assignment target: obj.field = value or arr[i] = value
     if (assignment->target) {
-      if (assignment->target->type != AST_MEMBER_ACCESS) {
-        type_checker_set_error_at_location(
-            checker, assignment->target->location,
-            "Invalid field assignment target");
-        return 0;
+      if (assignment->target->type == AST_MEMBER_ACCESS) {
+        MemberAccess *member = (MemberAccess *)assignment->target->data;
+        if (!member || !member->object || !member->member) {
+          type_checker_set_error_at_location(
+              checker, assignment->target->location,
+              "Invalid field assignment target");
+          return 0;
+        }
+
+        Type *object_type = type_checker_infer_type(checker, member->object);
+        if (!object_type) {
+          return 0;
+        }
+
+        if (object_type->kind != TYPE_STRUCT) {
+          char error_msg[512];
+          snprintf(error_msg, sizeof(error_msg),
+                   "Cannot assign field '%s' on non-struct type '%s'",
+                   member->member, object_type->name);
+          type_checker_set_error_at_location(checker, assignment->target->location,
+                                             error_msg);
+          return 0;
+        }
+
+        Type *field_type = type_get_field_type(object_type, member->member);
+        if (!field_type) {
+          char error_msg[512];
+          snprintf(error_msg, sizeof(error_msg),
+                   "Field '%s' not found in struct '%s'",
+                   member->member, object_type->name);
+          type_checker_set_error_at_location(checker, assignment->target->location,
+                                             error_msg);
+          return 0;
+        }
+
+        Type *value_type = type_checker_infer_type(checker, assignment->value);
+        if (!value_type) {
+          type_checker_set_error_at_location(
+              checker, assignment->value->location,
+              "Cannot infer type of assignment value");
+          return 0;
+        }
+
+        if (!type_checker_is_assignable(checker, field_type, value_type)) {
+          type_checker_report_type_mismatch(checker, assignment->value->location,
+                                            field_type->name, value_type->name);
+          return 0;
+        }
+
+        return 1;
+      } else if (assignment->target->type == AST_INDEX_EXPRESSION) {
+        Type *element_type =
+            type_checker_infer_type(checker, assignment->target);
+        if (!element_type) {
+          return 0;
+        }
+
+        Type *value_type = type_checker_infer_type(checker, assignment->value);
+        if (!value_type) {
+          type_checker_set_error_at_location(
+              checker, assignment->value->location,
+              "Cannot infer type of assignment value");
+          return 0;
+        }
+
+        if (!type_checker_is_assignable(checker, element_type, value_type)) {
+          type_checker_report_type_mismatch(checker, assignment->value->location,
+                                            element_type->name, value_type->name);
+          return 0;
+        }
+
+        return 1;
       }
 
-      MemberAccess *member = (MemberAccess *)assignment->target->data;
-      if (!member || !member->object || !member->member) {
-        type_checker_set_error_at_location(checker, assignment->target->location,
-                                           "Invalid field assignment target");
-        return 0;
-      }
-
-      Type *object_type = type_checker_infer_type(checker, member->object);
-      if (!object_type) {
-        return 0;
-      }
-
-      if (object_type->kind != TYPE_STRUCT) {
-        char error_msg[512];
-        snprintf(error_msg, sizeof(error_msg),
-                 "Cannot assign field '%s' on non-struct type '%s'",
-                 member->member, object_type->name);
-        type_checker_set_error_at_location(checker, assignment->target->location,
-                                           error_msg);
-        return 0;
-      }
-
-      Type *field_type = type_get_field_type(object_type, member->member);
-      if (!field_type) {
-        char error_msg[512];
-        snprintf(error_msg, sizeof(error_msg),
-                 "Field '%s' not found in struct '%s'",
-                 member->member, object_type->name);
-        type_checker_set_error_at_location(checker, assignment->target->location,
-                                           error_msg);
-        return 0;
-      }
-
-      Type *value_type = type_checker_infer_type(checker, assignment->value);
-      if (!value_type) {
-        type_checker_set_error_at_location(
-            checker, assignment->value->location,
-            "Cannot infer type of assignment value");
-        return 0;
-      }
-
-      if (!type_checker_is_assignable(checker, field_type, value_type)) {
-        type_checker_report_type_mismatch(checker, assignment->value->location,
-                                          field_type->name, value_type->name);
-        return 0;
-      }
-
-      return 1;
+      type_checker_set_error_at_location(checker, assignment->target->location,
+                                         "Invalid assignment target");
+      return 0;
     }
 
     // Simple variable assignment: name = value

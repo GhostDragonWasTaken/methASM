@@ -140,6 +140,13 @@ void ast_destroy_node(ASTNode *node) {
     }
     break;
   }
+  case AST_INDEX_EXPRESSION: {
+    ArrayIndexExpression *index_expr = (ArrayIndexExpression *)node->data;
+    if (index_expr) {
+      free(index_expr);
+    }
+    break;
+  }
   case AST_NEW_EXPRESSION: {
     NewExpression *new_expr = (NewExpression *)node->data;
     if (new_expr) {
@@ -522,6 +529,32 @@ ASTNode *ast_create_member_access(ASTNode *object, const char *member,
 
   if (object) {
     ast_add_child(node, object);
+  }
+
+  return node;
+}
+
+ASTNode *ast_create_array_index_expression(ASTNode *array, ASTNode *index,
+                                           SourceLocation location) {
+  ASTNode *node = ast_create_node(AST_INDEX_EXPRESSION, location);
+  if (!node)
+    return NULL;
+
+  ArrayIndexExpression *index_expr = malloc(sizeof(ArrayIndexExpression));
+  if (!index_expr) {
+    free(node);
+    return NULL;
+  }
+
+  index_expr->array = array;
+  index_expr->index = index;
+  node->data = index_expr;
+
+  if (array) {
+    ast_add_child(node, array);
+  }
+  if (index) {
+    ast_add_child(node, index);
   }
 
   return node;

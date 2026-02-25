@@ -22,6 +22,7 @@ typedef enum {
   AST_BINARY_EXPRESSION,
   AST_UNARY_EXPRESSION,
   AST_MEMBER_ACCESS,
+  AST_INDEX_EXPRESSION,
   AST_NEW_EXPRESSION
 } ASTNodeType;
 
@@ -121,6 +122,11 @@ typedef struct {
 } MemberAccess;
 
 typedef struct {
+  ASTNode *array;
+  ASTNode *index;
+} ArrayIndexExpression;
+
+typedef struct {
   ASTNode *condition;
   ASTNode *then_branch;
   ASTNode *else_branch;
@@ -171,6 +177,8 @@ ASTNode *ast_create_unary_expression(const char *operator, ASTNode * operand,
                                      SourceLocation location);
 ASTNode *ast_create_member_access(ASTNode *object, const char *member,
                                   SourceLocation location);
+ASTNode *ast_create_array_index_expression(ASTNode *array, ASTNode *index,
+                                           SourceLocation location);
 ASTNode *ast_create_method_call(ASTNode *object, const char *method_name,
                                 ASTNode **arguments, size_t argument_count,
                                 SourceLocation location);

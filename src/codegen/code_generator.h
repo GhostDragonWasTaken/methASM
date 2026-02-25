@@ -102,6 +102,7 @@ const char* code_generator_get_arithmetic_instruction(const char* op, int is_flo
 void code_generator_generate_struct_declaration(CodeGenerator* generator, ASTNode* struct_declaration);
 void code_generator_generate_method_call(CodeGenerator* generator, ASTNode* method_call, ASTNode* object);
 void code_generator_generate_member_access(CodeGenerator* generator, ASTNode* member_access);
+void code_generator_generate_array_index(CodeGenerator* generator, ASTNode* index_expression);
 void code_generator_calculate_struct_layout(CodeGenerator* generator, Type* struct_type);
 int code_generator_get_field_offset(CodeGenerator* generator, Type* struct_type, const char* field_name);
 int code_generator_calculate_struct_alignment(int field_size);

@@ -1,5 +1,6 @@
 #include "code_generator.h"
 #include "../semantic/symbol_table.h"
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,13 @@ static void emit_to_global_buffer(CodeGenerator *generator, const char *format,
                                   ...);
 static void code_generator_set_error(CodeGenerator *generator,
                                      const char *format, ...);
+static int code_generator_get_type_storage_size(Type *type);
+static void code_generator_emit_store_value_at_address(CodeGenerator *generator,
+                                                       int element_size);
+static void code_generator_emit_load_value_from_address(CodeGenerator *generator,
+                                                        int element_size);
+static int code_generator_generate_array_element_address(
+    CodeGenerator *generator, ASTNode *array_expr, ASTNode *index_expr);
 
 CodeGenerator *code_generator_create(SymbolTable *symbol_table,
                                      TypeChecker *type_checker,
@@ -692,6 +700,10 @@ void code_generator_generate_expression(CodeGenerator *generator,
     code_generator_generate_member_access(generator, expression);
   } break;
 
+  case AST_INDEX_EXPRESSION: {
+    code_generator_generate_array_index(generator, expression);
+  } break;
+
   case AST_NEW_EXPRESSION: {
     NewExpression *new_expr = (NewExpression *)expression->data;
     if (new_expr && new_expr->type_name) {
@@ -1013,8 +1025,14 @@ void code_generator_generate_global_variable(CodeGenerator *generator,
   }
 
   // Calculate variable size
-  int var_size =
-      code_generator_calculate_variable_size(generator, var_data->type_name);
+  int var_size = 0;
+  Symbol *symbol = symbol_table_lookup(generator->symbol_table, var_data->name);
+  if (symbol && symbol->type && symbol->type->size > 0) {
+    var_size = (int)symbol->type->size;
+  } else {
+    var_size =
+        code_generator_calculate_variable_size(generator, var_data->type_name);
+  }
   if (var_size <= 0) {
     var_size = 8; // Default to 8 bytes for unknown types
   }
@@ -1324,6 +1342,15 @@ void code_generator_generate_variable_zero_initialization(
     int offset = symbol->data.variable.memory_offset;
 
     if (symbol->type) {
+      if (symbol->type->kind == TYPE_ARRAY && symbol->type->size > 0) {
+        code_generator_emit(generator, "    lea rdi, [rbp - %d]  ; Array start\n",
+                            offset);
+        code_generator_emit(generator, "    xor eax, eax\n");
+        code_generator_emit(generator, "    mov rcx, %zu\n", symbol->type->size);
+        code_generator_emit(generator, "    rep stosb\n");
+        return;
+      }
+
       if (symbol->type->kind >= TYPE_FLOAT32 &&
           symbol->type->kind <= TYPE_FLOAT64) {
         // Zero floating-point variable
@@ -1393,8 +1420,24 @@ int code_generator_calculate_variable_size(CodeGenerator *generator,
   } else if (strstr(type_name, "*") != NULL) {
     return 8; // All pointers are 8 bytes on x86-64
   } else if (strstr(type_name, "[") != NULL) {
-    // Array type - would need more complex parsing
-    // For now, assume it's a pointer to the array
+    const char *lbracket = strchr(type_name, '[');
+    const char *rbracket = lbracket ? strchr(lbracket, ']') : NULL;
+    if (lbracket && rbracket && rbracket > lbracket + 1) {
+      size_t base_len = (size_t)(lbracket - type_name);
+      char base_type[128];
+      if (base_len > 0 && base_len < sizeof(base_type)) {
+        memcpy(base_type, type_name, base_len);
+        base_type[base_len] = '\0';
+        long long count = atoll(lbracket + 1);
+        if (count > 0) {
+          int base_size =
+              code_generator_calculate_variable_size(generator, base_type);
+          if (base_size > 0 && count <= (LLONG_MAX / base_size)) {
+            return (int)(base_size * count);
+          }
+        }
+      }
+    }
     return 8;
   }
 
@@ -2101,6 +2144,20 @@ Type *code_generator_infer_expression_type(CodeGenerator *generator,
     return &int_type;
   }
 
+  case AST_INDEX_EXPRESSION: {
+    ArrayIndexExpression *index_expr = (ArrayIndexExpression *)expression->data;
+    if (index_expr && index_expr->array) {
+      Type *array_type =
+          code_generator_infer_expression_type(generator, index_expr->array);
+      if (array_type &&
+          (array_type->kind == TYPE_ARRAY || array_type->kind == TYPE_POINTER) &&
+          array_type->base_type) {
+        return array_type->base_type;
+      }
+    }
+    return &int_type;
+  }
+
   default:
     return &int_type; // Default fallback
   }
@@ -2427,6 +2484,26 @@ void code_generator_generate_assignment_statement(CodeGenerator *generator,
     code_generator_emit(generator, "    pop rcx            ; Restore value\n");
     code_generator_emit(generator,
                         "    mov [rax], rcx     ; Store value to field\n");
+  } else if (assign_data->target &&
+             assign_data->target->type == AST_INDEX_EXPRESSION) {
+    ArrayIndexExpression *index_data =
+        (ArrayIndexExpression *)assign_data->target->data;
+    if (!index_data || !index_data->array || !index_data->index) {
+      code_generator_set_error(generator, "Invalid array assignment target");
+      return;
+    }
+
+    code_generator_generate_expression(generator, assign_data->value);
+    code_generator_emit(generator, "    push rax           ; Save assigned value\n");
+
+    int element_size = code_generator_generate_array_element_address(
+        generator, index_data->array, index_data->index);
+    if (generator->has_error) {
+      return;
+    }
+
+    code_generator_emit(generator, "    pop rcx            ; Restore value\n");
+    code_generator_emit_store_value_at_address(generator, element_size);
   } else if (assign_data->variable_name) {
     // Simple variable assignment: name = expr
     code_generator_emit(generator, "    ; Assignment to %s\n",
@@ -2451,7 +2528,21 @@ void code_generator_load_variable(CodeGenerator *generator,
   code_generator_emit(generator, "    ; Load variable: %s\n", variable_name);
 
   Symbol *symbol = symbol_table_lookup(generator->symbol_table, variable_name);
-  if (symbol && symbol->kind == SYMBOL_VARIABLE) {
+  if (symbol && (symbol->kind == SYMBOL_VARIABLE || symbol->kind == SYMBOL_PARAMETER)) {
+    if (symbol->type && symbol->type->kind == TYPE_ARRAY) {
+      if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
+        code_generator_emit(generator,
+                            "    lea rax, [%s + rip]  ; Array base address\n",
+                            variable_name);
+      } else {
+        int offset = symbol->data.variable.memory_offset;
+        code_generator_emit(generator,
+                            "    lea rax, [rbp - %d]  ; Local array base\n",
+                            offset);
+      }
+      return;
+    }
+
     if (symbol->data.variable.is_in_register) {
       x86Register reg = (x86Register)symbol->data.variable.register_id;
       const char *reg_name = code_generator_get_register_name(reg);
@@ -2490,7 +2581,14 @@ void code_generator_store_variable(CodeGenerator *generator,
                       variable_name);
 
   Symbol *symbol = symbol_table_lookup(generator->symbol_table, variable_name);
-  if (symbol && symbol->kind == SYMBOL_VARIABLE) {
+  if (symbol && (symbol->kind == SYMBOL_VARIABLE || symbol->kind == SYMBOL_PARAMETER)) {
+    if (symbol->type && symbol->type->kind == TYPE_ARRAY) {
+      code_generator_set_error(generator,
+                               "Cannot assign directly to array variable '%s'",
+                               variable_name);
+      return;
+    }
+
     if (symbol->data.variable.is_in_register) {
       x86Register reg = (x86Register)symbol->data.variable.register_id;
       const char *reg_name = code_generator_get_register_name(reg);
@@ -2803,6 +2901,112 @@ void code_generator_generate_member_access(CodeGenerator *generator,
 
   // Load the field value (assumes the field is a pointer-sized value)
   code_generator_emit(generator, "    mov rax, [rax]    ; Load field value\n");
+}
+
+static int code_generator_get_type_storage_size(Type *type) {
+  if (!type || type->size == 0) {
+    return 8;
+  }
+  if (type->size == 1 || type->size == 2 || type->size == 4 || type->size == 8) {
+    return (int)type->size;
+  }
+  return 8;
+}
+
+static void code_generator_emit_store_value_at_address(CodeGenerator *generator,
+                                                       int element_size) {
+  if (!generator) {
+    return;
+  }
+
+  switch (element_size) {
+  case 1:
+    code_generator_emit(generator, "    mov byte [rax], cl\n");
+    break;
+  case 2:
+    code_generator_emit(generator, "    mov word [rax], cx\n");
+    break;
+  case 4:
+    code_generator_emit(generator, "    mov dword [rax], ecx\n");
+    break;
+  default:
+    code_generator_emit(generator, "    mov qword [rax], rcx\n");
+    break;
+  }
+}
+
+static void code_generator_emit_load_value_from_address(CodeGenerator *generator,
+                                                        int element_size) {
+  if (!generator) {
+    return;
+  }
+
+  switch (element_size) {
+  case 1:
+    code_generator_emit(generator, "    movzx rax, byte [rax]\n");
+    break;
+  case 2:
+    code_generator_emit(generator, "    movzx rax, word [rax]\n");
+    break;
+  case 4:
+    code_generator_emit(generator, "    mov eax, dword [rax]\n");
+    break;
+  default:
+    code_generator_emit(generator, "    mov rax, qword [rax]\n");
+    break;
+  }
+}
+
+static int code_generator_generate_array_element_address(
+    CodeGenerator *generator, ASTNode *array_expr, ASTNode *index_expr) {
+  if (!generator || !array_expr || !index_expr) {
+    return 0;
+  }
+
+  Type *array_type = code_generator_infer_expression_type(generator, array_expr);
+  if (!array_type ||
+      (array_type->kind != TYPE_ARRAY && array_type->kind != TYPE_POINTER) ||
+      !array_type->base_type) {
+    code_generator_set_error(generator, "Indexing requires an array or pointer");
+    return 0;
+  }
+
+  int element_size = code_generator_get_type_storage_size(array_type->base_type);
+
+  code_generator_generate_expression(generator, array_expr);
+  code_generator_emit(generator, "    push rax           ; Save array base\n");
+  code_generator_generate_expression(generator, index_expr);
+  code_generator_emit(generator, "    pop rcx            ; Restore array base\n");
+  if (element_size > 1) {
+    code_generator_emit(generator, "    imul rax, rax, %d\n", element_size);
+  }
+  code_generator_emit(generator, "    add rax, rcx       ; Element address\n");
+
+  return element_size;
+}
+
+void code_generator_generate_array_index(CodeGenerator *generator,
+                                         ASTNode *index_expression) {
+  if (!generator || !index_expression ||
+      index_expression->type != AST_INDEX_EXPRESSION) {
+    code_generator_set_error(generator, "Invalid array index AST node");
+    return;
+  }
+
+  ArrayIndexExpression *idx = (ArrayIndexExpression *)index_expression->data;
+  if (!idx || !idx->array || !idx->index) {
+    code_generator_set_error(generator, "Malformed array index expression");
+    return;
+  }
+
+  int element_size =
+      code_generator_generate_array_element_address(generator, idx->array,
+                                                    idx->index);
+  if (generator->has_error) {
+    return;
+  }
+
+  code_generator_emit_load_value_from_address(generator, element_size);
 }
 
 void code_generator_calculate_struct_layout(CodeGenerator *generator,

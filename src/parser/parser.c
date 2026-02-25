@@ -443,7 +443,8 @@ ASTNode *parser_parse_statement(Parser *parser) {
     // Could be assignment, field assignment, or function call
     if (parser->peek_token.type == TOKEN_EQUALS) {
       return parser_parse_assignment(parser);
-    } else if (parser->peek_token.type == TOKEN_DOT) {
+    } else if (parser->peek_token.type == TOKEN_DOT ||
+               parser->peek_token.type == TOKEN_LBRACKET) {
       // Could be field assignment (obj.field = expr) or method call/field
       // access
       ASTNode *lhs = parser_parse_expression(parser);
@@ -451,12 +452,25 @@ ASTNode *parser_parse_statement(Parser *parser) {
         return NULL;
       // Check if followed by '=' — this is a field assignment
       if (parser->current_token.type == TOKEN_EQUALS &&
-          lhs->type == AST_MEMBER_ACCESS) {
+          (lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_INDEX_EXPRESSION ||
+           lhs->type == AST_IDENTIFIER)) {
         parser_advance(parser); // consume '='
         ASTNode *value = parser_parse_expression(parser);
         if (!value) {
           ast_destroy_node(lhs);
           return NULL;
+        }
+        if (lhs->type == AST_IDENTIFIER) {
+          Identifier *id = (Identifier *)lhs->data;
+          if (!id || !id->name) {
+            ast_destroy_node(lhs);
+            ast_destroy_node(value);
+            parser_set_error(parser, "Invalid assignment target");
+            return NULL;
+          }
+          ASTNode *assign = ast_create_assignment(id->name, value, lhs->location);
+          ast_destroy_node(lhs);
+          return assign;
         }
         return ast_create_field_assignment(lhs, value, lhs->location);
       }
@@ -497,6 +511,62 @@ int parser_is_identifier_like(TokenType type) {
 int parser_is_type_keyword(TokenType type) {
   // Check if token is a built-in type keyword
   return (type >= TOKEN_INT8 && type <= TOKEN_STRING_TYPE);
+}
+
+static char *parser_parse_type_annotation(Parser *parser) {
+  if (!parser)
+    return NULL;
+
+  if (!parser_is_type_keyword(parser->current_token.type) &&
+      !parser_is_identifier_like(parser->current_token.type)) {
+    return NULL;
+  }
+
+  char *base_type = strdup(parser->current_token.value);
+  parser_advance(parser);
+
+  if (!base_type) {
+    return NULL;
+  }
+
+  if (parser->current_token.type != TOKEN_LBRACKET) {
+    return base_type;
+  }
+
+  parser_advance(parser); // consume '['
+
+  if (parser->current_token.type != TOKEN_NUMBER) {
+    free(base_type);
+    parser_set_error(parser, "Expected array size after '['");
+    return NULL;
+  }
+
+  char *size_text = strdup(parser->current_token.value);
+  parser_advance(parser);
+
+  if (!size_text) {
+    free(base_type);
+    return NULL;
+  }
+
+  if (!parser_expect(parser, TOKEN_RBRACKET)) {
+    free(base_type);
+    free(size_text);
+    return NULL;
+  }
+
+  size_t full_len = strlen(base_type) + strlen(size_text) + 3;
+  char *full_type = malloc(full_len);
+  if (!full_type) {
+    free(base_type);
+    free(size_text);
+    return NULL;
+  }
+
+  snprintf(full_type, full_len, "%s[%s]", base_type, size_text);
+  free(base_type);
+  free(size_text);
+  return full_type;
 }
 
 ASTNode *parser_parse_primary_expression(Parser *parser) {
@@ -686,6 +756,23 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
       expr = ast_create_member_access(expr, member, location);
       free(member);
 
+    } else if (parser->current_token.type == TOKEN_LBRACKET) {
+      parser_advance(parser); // consume '['
+
+      ASTNode *index_expr = parser_parse_expression(parser);
+      if (!index_expr) {
+        ast_destroy_node(expr);
+        return NULL;
+      }
+
+      if (!parser_expect(parser, TOKEN_RBRACKET)) {
+        ast_destroy_node(index_expr);
+        ast_destroy_node(expr);
+        return NULL;
+      }
+
+      expr = ast_create_array_index_expression(expr, index_expr, location);
+
     } else {
       break;
     }
@@ -756,15 +843,14 @@ ASTNode *parser_parse_var_declaration(Parser *parser) {
   if (parser->current_token.type == TOKEN_COLON) {
     parser_advance(parser); // consume ':'
 
-    if (!parser_is_type_keyword(parser->current_token.type) &&
-        !parser_is_identifier_like(parser->current_token.type)) {
-      parser_set_error(parser, "Expected type after ':'");
+    type_name = parser_parse_type_annotation(parser);
+    if (!type_name) {
+      if (!parser->has_error) {
+        parser_set_error(parser, "Expected type after ':'");
+      }
       free(var_name);
       return NULL;
     }
-
-    type_name = strdup(parser->current_token.value);
-    parser_advance(parser);
   }
 
   // Optional initializer: '= expression'
@@ -870,9 +956,11 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
       }
 
       // Parse parameter type
-      if (!parser_is_type_keyword(parser->current_token.type) &&
-          !parser_is_identifier_like(parser->current_token.type)) {
-        parser_set_error(parser, "Expected parameter type");
+      param_types[param_count] = parser_parse_type_annotation(parser);
+      if (!param_types[param_count]) {
+        if (!parser->has_error) {
+          parser_set_error(parser, "Expected parameter type");
+        }
         // Clean up
         for (size_t i = 0; i <= param_count; i++) {
           free(param_names[i]);
@@ -884,9 +972,6 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
         free(func_name);
         return NULL;
       }
-
-      param_types[param_count] = strdup(parser->current_token.value);
-      parser_advance(parser);
       param_count++;
 
       // Check for comma (more parameters) or end of parameter list
@@ -928,9 +1013,11 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
       parser->current_token.type == TOKEN_COLON) {
     parser_advance(parser); // consume return separator
 
-    if (!parser_is_type_keyword(parser->current_token.type) &&
-        !parser_is_identifier_like(parser->current_token.type)) {
-      parser_set_error(parser, "Expected return type after return separator");
+    return_type = parser_parse_type_annotation(parser);
+    if (!return_type) {
+      if (!parser->has_error) {
+        parser_set_error(parser, "Expected return type after return separator");
+      }
       // Clean up
       for (size_t i = 0; i < param_count; i++) {
         free(param_names[i]);
@@ -941,9 +1028,6 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
       free(func_name);
       return NULL;
     }
-
-    return_type = strdup(parser->current_token.value);
-    parser_advance(parser);
   }
 
   // Parse function body (block)
@@ -1103,9 +1187,11 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
       }
 
       // Parse field type
-      if (!parser_is_type_keyword(parser->current_token.type) &&
-          !parser_is_identifier_like(parser->current_token.type)) {
-        parser_set_error(parser, "Expected field type");
+      field_types[field_count] = parser_parse_type_annotation(parser);
+      if (!field_types[field_count]) {
+        if (!parser->has_error) {
+          parser_set_error(parser, "Expected field type");
+        }
         // Clean up
         for (size_t i = 0; i <= field_count; i++) {
           free(field_names[i]);
@@ -1121,9 +1207,6 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
         free(struct_name);
         return NULL;
       }
-
-      field_types[field_count] = strdup(parser->current_token.value);
-      parser_advance(parser);
       field_count++;
 
       // Expect a newline or semicolon to end the declaration
@@ -1575,9 +1658,11 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
       }
 
       // Parse parameter type
-      if (!parser_is_type_keyword(parser->current_token.type) &&
-          !parser_is_identifier_like(parser->current_token.type)) {
-        parser_set_error(parser, "Expected parameter type");
+      param_types[param_count] = parser_parse_type_annotation(parser);
+      if (!param_types[param_count]) {
+        if (!parser->has_error) {
+          parser_set_error(parser, "Expected parameter type");
+        }
         // Clean up
         for (size_t i = 0; i <= param_count; i++) {
           free(param_names[i]);
@@ -1589,9 +1674,6 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
         free(method_name);
         return NULL;
       }
-
-      param_types[param_count] = strdup(parser->current_token.value);
-      parser_advance(parser);
       param_count++;
 
       // Check for comma (more parameters) or end of parameter list
@@ -1633,9 +1715,11 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
       parser->current_token.type == TOKEN_COLON) {
     parser_advance(parser); // consume return separator
 
-    if (!parser_is_type_keyword(parser->current_token.type) &&
-        !parser_is_identifier_like(parser->current_token.type)) {
-      parser_set_error(parser, "Expected return type after return separator");
+    return_type = parser_parse_type_annotation(parser);
+    if (!return_type) {
+      if (!parser->has_error) {
+        parser_set_error(parser, "Expected return type after return separator");
+      }
       // Clean up
       for (size_t i = 0; i < param_count; i++) {
         free(param_names[i]);
@@ -1646,9 +1730,6 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
       free(method_name);
       return NULL;
     }
-
-    return_type = strdup(parser->current_token.value);
-    parser_advance(parser);
   }
 
   // Parse method body (block)
