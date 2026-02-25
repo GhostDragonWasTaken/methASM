@@ -49,6 +49,25 @@ static int validate_lexical_phase(const char *source, ErrorReporter *reporter) {
   return !has_lexical_error;
 }
 
+static char *build_sidecar_filename(const char *base_filename,
+                                    const char *suffix) {
+  if (!base_filename || !suffix) {
+    return NULL;
+  }
+
+  size_t base_len = strlen(base_filename);
+  size_t suffix_len = strlen(suffix);
+  char *path = malloc(base_len + suffix_len + 1);
+  if (!path) {
+    return NULL;
+  }
+
+  memcpy(path, base_filename, base_len);
+  memcpy(path + base_len, suffix, suffix_len);
+  path[base_len + suffix_len] = '\0';
+  return path;
+}
+
 int main(int argc, char *argv[]) {
   CompilerOptions options = {0};
   options.output_filename = "output.s"; // Default output filename
@@ -266,7 +285,63 @@ int compile_file(const char *input_filename, const char *output_filename,
 
   // Generate debug information files if requested
   if (debug_info) {
-    // ... (debug info generation)
+    if (options->debug_mode || options->generate_debug_symbols ||
+        options->generate_line_mapping) {
+      const char *format =
+          (options->debug_format && options->debug_format[0] != '\0')
+              ? options->debug_format
+              : "dwarf";
+      const char *suffix = ".dwarf";
+
+      if (strcasecmp(format, "stabs") == 0) {
+        suffix = ".stabs";
+      } else if (strcasecmp(format, "map") == 0) {
+        suffix = ".map";
+      } else if (strcasecmp(format, "dwarf") != 0) {
+        fprintf(stderr,
+                "Warning: Unknown debug format '%s', defaulting to dwarf\n",
+                format);
+      }
+
+      char *debug_output = build_sidecar_filename(output_filename, suffix);
+      if (!debug_output) {
+        fprintf(stderr,
+                "Error: Failed to allocate debug output filename for '%s'\n",
+                output_filename);
+        result = 1;
+        goto cleanup;
+      }
+
+      if (strcasecmp(format, "stabs") == 0) {
+        debug_info_generate_stabs(debug_info, debug_output);
+      } else if (strcasecmp(format, "map") == 0) {
+        debug_info_generate_debug_map(debug_info, debug_output);
+      } else {
+        debug_info_generate_dwarf(debug_info, debug_output);
+      }
+
+      if (options->debug_mode) {
+        printf("Generated debug info: %s\n", debug_output);
+      }
+      free(debug_output);
+    }
+
+    if (options->generate_stack_trace_support) {
+      char *stack_trace_output =
+          build_sidecar_filename(output_filename, ".stacktrace.s");
+      if (!stack_trace_output) {
+        fprintf(stderr,
+                "Error: Failed to allocate stack trace output filename for '%s'\n",
+                output_filename);
+        result = 1;
+        goto cleanup;
+      }
+      debug_info_generate_stack_trace_code(debug_info, stack_trace_output);
+      if (options->debug_mode) {
+        printf("Generated stack trace support: %s\n", stack_trace_output);
+      }
+      free(stack_trace_output);
+    }
   }
 
   if (options->debug_mode) {

@@ -1090,7 +1090,8 @@ void code_generator_generate_expression(CodeGenerator *generator,
       }
 
       // Call gc_alloc(alloc_size)
-      code_generator_emit(generator, "    mov rdi, %d      ; size in bytes\n",
+      code_generator_emit(generator,
+                          "    mov $%d, %%rdi      ; size in bytes\n",
                           alloc_size);
       code_generator_emit(generator, "    extern gc_alloc\n");
       code_generator_emit(generator, "    call gc_alloc\n");
