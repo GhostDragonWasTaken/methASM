@@ -2,61 +2,78 @@
 
 MethASM is a compiler for a typed assembly-like language that targets x86-64 assembly.
 
-## Project Status
+## Status
 
-The project currently has a working front end and code generation pipeline:
+MethASM currently provides an end-to-end pipeline from `.masm` source to x86-64 assembly output:
 
-- Lexing and parsing for core language constructs
-- AST generation and semantic checks
-- x86-64 assembly output generation
-- Runtime garbage collector integration for `new` allocations
+- Lexing
+- Parsing
+- Semantic and type analysis
+- Code generation
+- Runtime garbage collector integration
 
-This is an active development codebase. Several parts are implemented and tested, and several parts are still incomplete.
+The project is under active development. Core features are implemented, tested, and usable for current language scenarios.
 
-## Implemented Features
+## Current Guarantees
 
-### Language
+The compiler now uses strict fail-fast behavior across all major phases.
 
-- Variable declarations with explicit types and initializer-based type inference
+- Lexical errors are reported with exact line and column and stop compilation.
+- Parser recovery is used for diagnostics, but compilation still fails if any parser error occurred.
+- Semantic errors are reported with location and suggestions where available.
+- Code generation no longer silently falls back on unsupported or unresolved constructs.
+- Unsupported top-level constructs are rejected explicitly.
+
+This design is intended to reduce both false negatives (missed errors) and false positives (incorrect phase fallout).
+
+## Implemented Language Features
+
+- Variables with explicit types and initializer-based inference
   - `var x: int32 = 42;`
   - `var y = new Vector3;`
-- Function declarations and calls
+- Functions and function calls
   - Return type syntax supports both `->` and `:`
 - Struct declarations
-- Struct field access and field assignment
+- Struct member access and assignment
   - `obj.field`
   - `obj.field = expr`
-- `if` / `else` and `while`
+- `if` / `else`
+- `while`
 - `return`
 - Inline assembly blocks
 
-### Type and Semantic Analysis
+## Type and Semantic Analysis
 
-- Built-in integer and floating types
+- Built-in integer and floating-point types
 - Struct type registration and lookup
 - Assignment compatibility checks
-- Field assignment semantic checks
+- Field assignment checks
+- Undefined symbol detection with source location
 
-### Code Generation
+## Code Generation
 
 - x86-64 assembly emission
 - Function prologue and epilogue generation
-- Expression and statement code generation for implemented AST nodes
+- Expression and statement generation for supported AST nodes
 - Struct field offset based access and assignment
-- Process entry generation (`_start`) that calls `main` when present
+- `_start` entry emission that calls `main` when present
+- Hard error on unresolved symbols or unsupported generation paths
 
-### Garbage Collector Runtime
+## Garbage Collector Runtime
 
 - Heap allocation via `gc_alloc`
 - Conservative mark-and-sweep collection
-- Stack scanning roots
+- Iterative mark traversal (worklist-based)
+- Stack root scanning
 - Explicit root registration API
   - `gc_register_root`
   - `gc_unregister_root`
-- Auto-collection threshold controls
+- Collection control
+  - `gc_collect`
+  - `gc_collect_now`
   - `gc_set_collection_threshold`
   - `gc_get_collection_threshold`
-- Runtime cleanup
+- Runtime shutdown and cleanup
   - `gc_shutdown`
 
 ## Build
@@ -67,7 +84,7 @@ This is an active development codebase. Several parts are implemented and tested
 .\build.bat
 ```
 
-### Linux or macOS
+### Linux/macOS
 
 ```bash
 make
@@ -76,7 +93,7 @@ make
 Output binary:
 
 - Windows: `bin\methasm.exe`
-- Linux or macOS: `bin/methasm`
+- Linux/macOS: `bin/methasm`
 
 ## Usage
 
@@ -86,11 +103,11 @@ methasm [options] <input.masm>
 
 Common options:
 
-- `-i <file>`: input file
-- `-o <file>`: output assembly file
-- `-d`, `--debug`: enable debug mode
-- `-O`, `--optimize`: enable optimization flag (framework exists, passes are limited)
-- `-h`, `--help`: show help
+- `-i <file>` input file
+- `-o <file>` output file
+- `-d`, `--debug` enable debug mode
+- `-O`, `--optimize` enable optimization flag
+- `-h`, `--help` print usage
 
 Example:
 
@@ -106,7 +123,7 @@ Runtime GC test:
 make test
 ```
 
-On Windows, equivalent manual command:
+Windows manual equivalent:
 
 ```powershell
 gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests\gc_runtime_test.c src\runtime\gc.c -o bin\gc_runtime_test.exe
@@ -140,16 +157,16 @@ Makefile      Linux/macOS build and test targets
 
 ## Known Limitations
 
-- Optimization framework exists, but optimization passes are limited.
-- The language and runtime are still evolving; syntax and behavior may change.
-- Coverage is strongest for currently used test scenarios and core language paths.
+- Optimization passes are limited.
+- Language surface area is still evolving.
+- Some advanced language and backend scenarios are not implemented yet.
 
 ## Contributing
 
-Contributions are welcome. Useful contribution areas include:
+Contributions are welcome in:
 
-- Additional language features
-- Better diagnostics and error recovery
-- More test coverage
+- Language features
+- Diagnostics and recovery quality
+- Test coverage
 - Code generation correctness and performance
-- Runtime and GC improvements
+- Runtime and garbage collector improvements
