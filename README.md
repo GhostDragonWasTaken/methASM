@@ -29,10 +29,12 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 ## Implemented Language Features
 
 - Variable declarations with explicit types and initializer-based inference
+- Fixed-size array type annotations (for example `int32[10]`)
 - Functions and function calls
 - Function return type syntax with both `->` and `:`
 - Struct declarations
 - Struct member access and assignment
+- Array indexing and indexed assignment (`arr[i]`, `arr[i] = value`)
 - `if` and `else`
 - `while`
 - `return`
@@ -41,10 +43,13 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 ## Type and Semantic Analysis
 
 - Built-in integer and floating-point types
+- Fixed-size array type resolution and element type inference
 - Struct type registration and lookup
 - Assignment compatibility validation
 - Field assignment validation
+- Array index expression validation (index type and target type checks)
 - Undefined symbol detection with source locations
+- Forward declaration signature compatibility checks in symbol resolution
 
 ## Code Generation
 
@@ -52,6 +57,7 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Function prologue and epilogue generation
 - Statement and expression generation for supported AST nodes
 - Struct field offset-based access and assignment
+- Array element address calculation and typed indexed load/store emission
 - `_start` entry emission that calls `main` when present
 - Hard failure on unresolved symbols or unsupported generation paths
 
@@ -124,6 +130,7 @@ Windows compiler smoke tests:
 ```powershell
 .\bin\methasm.exe test_simple.masm -o out_simple.s
 .\bin\methasm.exe tests\test_gc_alloc.masm -o out_gc.s
+.\bin\methasm.exe tests\test_array_index.masm -o out_array.s
 ```
 
 ## Repository Layout
@@ -149,6 +156,7 @@ Makefile      Linux/macOS build and test targets
 - Optimization passes are limited.
 - Language surface area is still evolving.
 - Some advanced language and backend scenarios are not implemented.
+- Source-level forward declaration syntax is not fully exposed in the parser yet, even though symbol-table forward declaration compatibility checks are implemented.
 
 ## Contributing
 
