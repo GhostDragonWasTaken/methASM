@@ -2,9 +2,52 @@
 #define _GNU_SOURCE
 #endif
 #include "main.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static int validate_lexical_phase(const char *source, ErrorReporter *reporter) {
+  if (!source) {
+    return 0;
+  }
+
+  Lexer *lexer = lexer_create(source);
+  if (!lexer) {
+    if (reporter) {
+      error_reporter_add_error(reporter, ERROR_INTERNAL,
+                               source_location_create(0, 0),
+                               "Failed to initialize lexer for lexical "
+                               "validation");
+    }
+    return 0;
+  }
+
+  int has_lexical_error = 0;
+
+  while (1) {
+    Token token = lexer_next_token(lexer);
+    if (token.type == TOKEN_ERROR) {
+      has_lexical_error = 1;
+      if (reporter) {
+        SourceLocation location = source_location_create(token.line, token.column);
+        error_reporter_add_error(
+            reporter, ERROR_LEXICAL, location,
+            token.value ? token.value : "Unknown lexical error");
+      }
+    }
+
+    if (token.type == TOKEN_EOF) {
+      token_destroy(&token);
+      break;
+    }
+
+    token_destroy(&token);
+  }
+
+  lexer_destroy(lexer);
+  return !has_lexical_error;
+}
 
 int main(int argc, char *argv[]) {
   CompilerOptions options = {0};
@@ -66,20 +109,86 @@ int compile_file(const char *input_filename, const char *output_filename,
     return 1;
   }
 
+  ErrorReporter *error_reporter =
+      error_reporter_create(input_filename, source);
+  if (!error_reporter) {
+    fprintf(stderr, "Error: Could not initialize error reporter\n");
+    free(source);
+    return 1;
+  }
+
+  if (!validate_lexical_phase(source, error_reporter)) {
+    error_reporter_print_errors(error_reporter);
+    error_reporter_destroy(error_reporter);
+    free(source);
+    return 1;
+  }
+
   // Initialize compiler components
   Lexer *lexer = lexer_create(source);
-  Parser *parser = parser_create(lexer);
+  Parser *parser = NULL;
   SymbolTable *symbol_table = symbol_table_create();
-  TypeChecker *type_checker = type_checker_create(symbol_table);
+  TypeChecker *type_checker = NULL;
   RegisterAllocator *register_allocator = register_allocator_create();
+  ASTNode *program = NULL;
 
   // Initialize debug info if debug mode is enabled
   DebugInfo *debug_info = NULL;
   CodeGenerator *code_generator = NULL;
 
+  if (!lexer || !symbol_table || !register_allocator) {
+    error_reporter_add_error(error_reporter, ERROR_INTERNAL,
+                             source_location_create(0, 0),
+                             "Failed to initialize compiler components");
+    error_reporter_print_errors(error_reporter);
+    if (lexer)
+      lexer_destroy(lexer);
+    if (symbol_table)
+      symbol_table_destroy(symbol_table);
+    if (register_allocator)
+      register_allocator_destroy(register_allocator);
+    error_reporter_destroy(error_reporter);
+    free(source);
+    return 1;
+  }
+
+  parser = parser_create_with_error_reporter(lexer, error_reporter);
+  type_checker =
+      type_checker_create_with_error_reporter(symbol_table, error_reporter);
+  if (!parser || !type_checker) {
+    error_reporter_add_error(error_reporter, ERROR_INTERNAL,
+                             source_location_create(0, 0),
+                             "Failed to initialize parser or type checker");
+    error_reporter_print_errors(error_reporter);
+    if (parser)
+      parser_destroy(parser);
+    if (type_checker)
+      type_checker_destroy(type_checker);
+    register_allocator_destroy(register_allocator);
+    symbol_table_destroy(symbol_table);
+    lexer_destroy(lexer);
+    error_reporter_destroy(error_reporter);
+    free(source);
+    return 1;
+  }
+
   if (options->debug_mode || options->generate_debug_symbols ||
       options->generate_line_mapping || options->generate_stack_trace_support) {
     debug_info = debug_info_create(input_filename, output_filename);
+    if (!debug_info) {
+      error_reporter_add_error(error_reporter, ERROR_INTERNAL,
+                               source_location_create(0, 0),
+                               "Failed to initialize debug information");
+      error_reporter_print_errors(error_reporter);
+      parser_destroy(parser);
+      type_checker_destroy(type_checker);
+      register_allocator_destroy(register_allocator);
+      symbol_table_destroy(symbol_table);
+      lexer_destroy(lexer);
+      error_reporter_destroy(error_reporter);
+      free(source);
+      return 1;
+    }
     code_generator = code_generator_create_with_debug(
         symbol_table, type_checker, register_allocator, debug_info);
   } else {
@@ -87,29 +196,57 @@ int compile_file(const char *input_filename, const char *output_filename,
         code_generator_create(symbol_table, type_checker, register_allocator);
   }
 
+  if (!code_generator) {
+    error_reporter_add_error(error_reporter, ERROR_INTERNAL,
+                             source_location_create(0, 0),
+                             "Failed to initialize code generator");
+    error_reporter_print_errors(error_reporter);
+    parser_destroy(parser);
+    type_checker_destroy(type_checker);
+    register_allocator_destroy(register_allocator);
+    symbol_table_destroy(symbol_table);
+    lexer_destroy(lexer);
+    if (debug_info)
+      debug_info_destroy(debug_info);
+    error_reporter_destroy(error_reporter);
+    free(source);
+    return 1;
+  }
+
   int result = 0;
 
   // Parse the source code
-  ASTNode *program = parser_parse_program(parser);
-  if (!program || parser->has_error) {
-    fprintf(stderr, "Parse error: %s\n",
-            parser->error_message ? parser->error_message : "Unknown error");
+  program = parser_parse_program(parser);
+  if (!program || parser->had_error || error_reporter_has_errors(error_reporter)) {
+    if (error_reporter_has_errors(error_reporter)) {
+      error_reporter_print_errors(error_reporter);
+    } else {
+      fprintf(stderr, "Parse error: %s\n",
+              parser->error_message ? parser->error_message : "Unknown error");
+    }
     result = 1;
     goto cleanup;
   }
 
   // Type checking
   if (!type_checker_check_program(type_checker, program)) {
-    fprintf(stderr, "Type error: %s\n",
-            type_checker->error_message ? type_checker->error_message
-                                        : "Unknown error");
+    if (error_reporter_has_errors(error_reporter)) {
+      error_reporter_print_errors(error_reporter);
+    } else {
+      fprintf(stderr, "Type error: %s\n",
+              type_checker->error_message ? type_checker->error_message
+                                          : "Unknown error");
+    }
     result = 1;
     goto cleanup;
   }
 
   // Generate code
   if (!code_generator_generate_program(code_generator, program)) {
-    fprintf(stderr, "Code generation error\n");
+    fprintf(stderr, "Code generation error: %s\n",
+            (code_generator && code_generator->error_message)
+                ? code_generator->error_message
+                : "Unknown error");
     result = 1;
     goto cleanup;
   }
@@ -117,8 +254,8 @@ int compile_file(const char *input_filename, const char *output_filename,
   // Write output file
   FILE *output_file = fopen(output_filename, "w");
   if (!output_file) {
-    fprintf(stderr, "Error: Could not create output file '%s'\n",
-            output_filename);
+    fprintf(stderr, "Error: Could not create output file '%s': %s\n",
+            output_filename, strerror(errno));
     result = 1;
     goto cleanup;
   }
@@ -149,6 +286,7 @@ cleanup:
   lexer_destroy(lexer);
   if (debug_info)
     debug_info_destroy(debug_info);
+  error_reporter_destroy(error_reporter);
   free(source);
 
   return result;
@@ -176,9 +314,19 @@ char *read_file(const char *filename) {
   }
 
   // Get file size
-  fseek(file, 0, SEEK_END);
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return NULL;
+  }
   long size = ftell(file);
-  fseek(file, 0, SEEK_SET);
+  if (size < 0) {
+    fclose(file);
+    return NULL;
+  }
+  if (fseek(file, 0, SEEK_SET) != 0) {
+    fclose(file);
+    return NULL;
+  }
 
   // Allocate buffer and read file
   char *buffer = malloc(size + 1);
@@ -188,6 +336,11 @@ char *read_file(const char *filename) {
   }
 
   size_t bytes_read = fread(buffer, 1, size, file);
+  if (bytes_read < (size_t)size && ferror(file)) {
+    free(buffer);
+    fclose(file);
+    return NULL;
+  }
   buffer[bytes_read] = '\0';
 
   fclose(file);

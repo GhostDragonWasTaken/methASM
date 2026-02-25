@@ -1,0 +1,2 @@
+function main() -> int32 {
+  var x: int32 = 1;

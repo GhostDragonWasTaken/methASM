@@ -100,9 +100,6 @@ Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression) {
   if (!checker || !expression)
     return NULL;
 
-  printf("[Debug TypeChecker] Inferring type for AST kind: %d\n",
-         expression->type);
-
   switch (expression->type) {
   case AST_NUMBER_LITERAL: {
     NumberLiteral *literal = (NumberLiteral *)expression->data;
@@ -247,9 +244,6 @@ Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression) {
     Symbol *type_symbol =
         symbol_table_lookup(checker->symbol_table, new_expr->type_name);
     if (!type_symbol || type_symbol->kind != SYMBOL_STRUCT) {
-      printf("[Debug TypeChecker] Could not find type symbol '%s' for "
-             "AST_NEW_EXPRESSION\n",
-             new_expr->type_name);
       char error_msg[512];
       snprintf(error_msg, sizeof(error_msg),
                "Struct type '%s' not found for allocation",
@@ -262,8 +256,6 @@ Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression) {
     // Since our language doesn't have explicit pointer types yet (e.g. `Foo*`),
     // `new Foo` returns a value typed as `Foo` acting as a reference heap
     // object
-    printf("[TypeChecker] AST_NEW_EXPRESSION evaluated. Type assigned: %s\n",
-           type_symbol->type->name);
     return type_symbol->type;
   }
 
@@ -323,15 +315,6 @@ void type_checker_init_builtin_types(TypeChecker *checker) {
     checker->builtin_void->alignment = 1;
   }
 
-  // Create 'Point' struct type
-  char *point_field_names[] = {"x", "y"};
-  Type *point_field_types[] = {checker->builtin_int32, checker->builtin_int32};
-  Type *point_type =
-      type_create_struct("Point", point_field_names, point_field_types, 2);
-
-  // Register 'Point' struct in the symbol table
-  Symbol *point_symbol = symbol_create("Point", SYMBOL_STRUCT, point_type);
-  symbol_table_declare(checker->symbol_table, point_symbol);
 }
 
 Type *type_checker_get_builtin_type(TypeChecker *checker, TypeKind kind) {
@@ -760,8 +743,6 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
     return 0;
   }
 
-  printf("[Debug TypeChecker] Declared struct type '%s' into symbol table.\n",
-         decl->name);
   free(field_types);
   return 1;
 }
@@ -812,9 +793,6 @@ int type_checker_process_declaration(TypeChecker *checker,
             var_decl->name);
         return 0;
       }
-      printf("[Debug TypeChecker] Inferred init type %s for var %s\n",
-             init_type->name, var_decl->name);
-
       if (var_type) {
         // Type specified: validate assignment compatibility
         if (!type_checker_is_assignable(checker, var_type, init_type)) {
@@ -1003,6 +981,10 @@ int type_checker_process_declaration(TypeChecker *checker,
     // This case shouldn't normally be reached during standalone processing
     return 1;
 
+  case AST_INLINE_ASM:
+    // Top-level inline assembly is permitted.
+    return 1;
+
   case AST_ASSIGNMENT: {
     Assignment *assignment = (Assignment *)declaration->data;
     if (!assignment || !assignment->value) {
@@ -1123,8 +1105,10 @@ int type_checker_process_declaration(TypeChecker *checker,
   }
 
   default:
-    // Unknown declaration type - just accept it for now
-    return 1;
+    type_checker_set_error_at_location(
+        checker, declaration->location,
+        "Unsupported top-level construct in declaration context");
+    return 0;
   }
 }
 

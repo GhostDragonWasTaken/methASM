@@ -11,6 +11,8 @@ typedef struct {
     Token current_token;
     Token peek_token;
     int has_error;
+    int had_error;
+    size_t error_count;
     char* error_message;
     ErrorReporter* error_reporter;
     int error_recovery_mode;

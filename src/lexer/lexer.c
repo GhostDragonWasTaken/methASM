@@ -208,10 +208,17 @@ Token lexer_next_token(Lexer *lexer) {
          lexer->source[lexer->position + 1] == 'X')) {
       lexer->position += 2; // Skip "0x"
       lexer->column += 2;
+      size_t digits_start = lexer->position;
       while (lexer->position < lexer->length &&
              isxdigit(lexer->source[lexer->position])) {
         lexer->position++;
         lexer->column++;
+      }
+      if (lexer->position == digits_start) {
+        token.type = TOKEN_ERROR;
+        token.value = strdup("Invalid hexadecimal literal");
+        lexer_set_error(lexer, token.value);
+        return token;
       }
     }
     // Handle binary numbers (0b or 0B prefix)
@@ -220,11 +227,18 @@ Token lexer_next_token(Lexer *lexer) {
               lexer->source[lexer->position + 1] == 'B')) {
       lexer->position += 2; // Skip "0b"
       lexer->column += 2;
+      size_t digits_start = lexer->position;
       while (lexer->position < lexer->length &&
              (lexer->source[lexer->position] == '0' ||
               lexer->source[lexer->position] == '1')) {
         lexer->position++;
         lexer->column++;
+      }
+      if (lexer->position == digits_start) {
+        token.type = TOKEN_ERROR;
+        token.value = strdup("Invalid binary literal");
+        lexer_set_error(lexer, token.value);
+        return token;
       }
     }
     // Handle decimal numbers (including floating point)
@@ -427,6 +441,7 @@ Token lexer_next_token(Lexer *lexer) {
     if (!buffer) {
       token.type = TOKEN_ERROR;
       token.value = strdup("Memory allocation failed");
+      lexer_set_error(lexer, token.value);
       return token;
     }
 
@@ -479,6 +494,7 @@ Token lexer_next_token(Lexer *lexer) {
       free(buffer);
       token.type = TOKEN_ERROR;
       token.value = strdup("Unterminated string literal");
+      lexer_set_error(lexer, token.value);
       return token;
     }
 
@@ -494,7 +510,13 @@ Token lexer_next_token(Lexer *lexer) {
   // Unknown character
   token.type = TOKEN_ERROR;
   token.value = malloc(32);
-  snprintf(token.value, 32, "Unknown character: %c", current);
+  if (token.value) {
+    snprintf(token.value, 32, "Unknown character: %c", current);
+    lexer_set_error(lexer, token.value);
+  } else {
+    token.value = strdup("Unknown character");
+    lexer_set_error(lexer, "Unknown character");
+  }
   lexer->position++;
   lexer->column++;
 

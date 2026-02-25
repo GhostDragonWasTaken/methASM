@@ -29,6 +29,8 @@ typedef struct {
     size_t global_variables_capacity;
     size_t current_assembly_line;
     int generate_debug_info;
+    int has_error;
+    char* error_message;
 } CodeGenerator;
 
 // Function declarations

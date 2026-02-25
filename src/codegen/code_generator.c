@@ -7,6 +7,8 @@
 
 static void emit_to_global_buffer(CodeGenerator *generator, const char *format,
                                   ...);
+static void code_generator_set_error(CodeGenerator *generator,
+                                     const char *format, ...);
 
 CodeGenerator *code_generator_create(SymbolTable *symbol_table,
                                      TypeChecker *type_checker,
@@ -32,6 +34,8 @@ CodeGenerator *code_generator_create(SymbolTable *symbol_table,
   generator->global_variables_capacity = 2048;
   generator->current_assembly_line = 1;
   generator->generate_debug_info = 0;
+  generator->has_error = 0;
+  generator->error_message = NULL;
 
   if (!generator->output_buffer || !generator->global_variables_buffer) {
     free(generator->output_buffer);
@@ -66,8 +70,41 @@ void code_generator_destroy(CodeGenerator *generator) {
     free(generator->output_buffer);
     free(generator->current_function_name);
     free(generator->global_variables_buffer);
+    free(generator->error_message);
     free(generator);
   }
+}
+
+static void code_generator_set_error(CodeGenerator *generator,
+                                     const char *format, ...) {
+  if (!generator || !format) {
+    return;
+  }
+
+  if (generator->has_error) {
+    return;
+  }
+
+  generator->has_error = 1;
+  free(generator->error_message);
+  generator->error_message = NULL;
+
+  va_list args;
+  va_start(args, format);
+
+  va_list args_copy;
+  va_copy(args_copy, args);
+  int size = vsnprintf(NULL, 0, format, args_copy);
+  va_end(args_copy);
+
+  if (size > 0) {
+    generator->error_message = malloc((size_t)size + 1);
+    if (generator->error_message) {
+      vsnprintf(generator->error_message, (size_t)size + 1, format, args);
+    }
+  }
+
+  va_end(args);
 }
 
 int code_generator_generate_program(CodeGenerator *generator,
@@ -77,6 +114,7 @@ int code_generator_generate_program(CodeGenerator *generator,
   }
 
   if (program->type != AST_PROGRAM) {
+    code_generator_set_error(generator, "Expected AST_PROGRAM root node");
     return 0;
   }
 
@@ -116,6 +154,10 @@ int code_generator_generate_program(CodeGenerator *generator,
                               "; Inline assembly node but no data\n");
         }
       }
+
+      if (generator->has_error) {
+        return 0;
+      }
     }
   } else {
     code_generator_emit(generator, "; No program data found\n");
@@ -150,6 +192,10 @@ int code_generator_generate_program(CodeGenerator *generator,
       default:
         // Other declarations
         break;
+      }
+
+      if (generator->has_error) {
+        return 0;
       }
     }
   }
@@ -193,7 +239,7 @@ int code_generator_generate_program(CodeGenerator *generator,
         continue;
       }
 
-      int should_register = 1;
+      int should_register = 0;
       Symbol *symbol = symbol_table_lookup(generator->symbol_table, var_data->name);
       if (symbol && symbol->type) {
         switch (symbol->type->kind) {
@@ -207,6 +253,13 @@ int code_generator_generate_program(CodeGenerator *generator,
           should_register = 0;
           break;
         }
+      } else {
+        code_generator_set_error(
+            generator,
+            "Global variable '%s' is missing type information during "
+            "root-registration",
+            var_data->name);
+        return 0;
       }
 
       if (!should_register) {
@@ -238,7 +291,7 @@ int code_generator_generate_program(CodeGenerator *generator,
   code_generator_emit(generator, "    mov rax, 60    ; sys_exit\n");
   code_generator_emit(generator, "    syscall\n");
 
-  return 1;
+  return generator->has_error ? 0 : 1;
 }
 
 // Forward declaration
@@ -420,7 +473,7 @@ void code_generator_generate_function(CodeGenerator *generator,
 
 void code_generator_generate_statement(CodeGenerator *generator,
                                        ASTNode *statement) {
-  if (!generator || !statement) {
+  if (!generator || !statement || generator->has_error) {
     return;
   }
 
@@ -512,6 +565,8 @@ void code_generator_generate_statement(CodeGenerator *generator,
       code_generator_emit(generator, "%s:\n", end_label);
       free(else_label);
       free(end_label);
+    } else {
+      code_generator_set_error(generator, "Malformed if statement");
     }
   } break;
 
@@ -537,19 +592,21 @@ void code_generator_generate_statement(CodeGenerator *generator,
       code_generator_emit(generator, "%s:\n", loop_end);
       free(loop_start);
       free(loop_end);
+    } else {
+      code_generator_set_error(generator, "Malformed while statement");
     }
   } break;
 
   default:
-    code_generator_emit(generator, "    ; Unhandled statement type: %d\n",
-                        statement->type);
+    code_generator_set_error(generator, "Unhandled statement type: %d",
+                             statement->type);
     break;
   }
 }
 
 void code_generator_generate_expression(CodeGenerator *generator,
                                         ASTNode *expression) {
-  if (!generator || !expression) {
+  if (!generator || !expression || generator->has_error) {
     return;
   }
 
@@ -582,6 +639,8 @@ void code_generator_generate_expression(CodeGenerator *generator,
         code_generator_emit(generator, "    mov rax, %lld\n",
                             num_data->int_value);
       }
+    } else {
+      code_generator_set_error(generator, "Malformed number literal");
     }
   } break;
 
@@ -589,6 +648,8 @@ void code_generator_generate_expression(CodeGenerator *generator,
     StringLiteral *str_data = (StringLiteral *)expression->data;
     if (str_data && str_data->value) {
       code_generator_load_string_literal(generator, str_data->value);
+    } else {
+      code_generator_set_error(generator, "Malformed string literal");
     }
   } break;
 
@@ -596,6 +657,8 @@ void code_generator_generate_expression(CodeGenerator *generator,
     Identifier *id_data = (Identifier *)expression->data;
     if (id_data && id_data->name) {
       code_generator_load_variable(generator, id_data->name);
+    } else {
+      code_generator_set_error(generator, "Malformed identifier expression");
     }
   } break;
 
@@ -604,6 +667,8 @@ void code_generator_generate_expression(CodeGenerator *generator,
     if (bin_data && bin_data->left && bin_data->right && bin_data->operator) {
       code_generator_generate_binary_operation(
           generator, bin_data->left, bin_data->operator, bin_data->right);
+    } else {
+      code_generator_set_error(generator, "Malformed binary expression");
     }
   } break;
 
@@ -612,6 +677,8 @@ void code_generator_generate_expression(CodeGenerator *generator,
     if (unary_data && unary_data->operand && unary_data->operator) {
       code_generator_generate_unary_operation(generator, unary_data->operator,
                                               unary_data->operand);
+    } else {
+      code_generator_set_error(generator, "Malformed unary expression");
     }
   } break;
 
@@ -646,17 +713,23 @@ void code_generator_generate_expression(CodeGenerator *generator,
       code_generator_emit(generator, "    call gc_alloc\n");
       // The allocated memory pointer is returned in RAX,
       // ready for variable assignments or immediate struct usage.
+    } else {
+      code_generator_set_error(generator, "Malformed new-expression");
     }
   } break;
 
   default:
-    code_generator_emit(generator, "    ; Unhandled expression type: %d\n",
-                        expression->type);
+    code_generator_set_error(generator, "Unhandled expression type: %d",
+                             expression->type);
     break;
   }
 }
 
 void code_generator_emit(CodeGenerator *generator, const char *format, ...) {
+  if (!generator || !format || generator->has_error) {
+    return;
+  }
+
   va_list args;
   va_start(args, format);
 
@@ -675,6 +748,8 @@ void code_generator_emit(CodeGenerator *generator, const char *format, ...) {
 
     char *new_buffer = realloc(generator->output_buffer, new_capacity);
     if (!new_buffer) {
+      code_generator_set_error(generator,
+                               "Out of memory while expanding output buffer");
       va_end(args);
       return;
     }
@@ -869,6 +944,10 @@ void code_generator_emit_instruction(CodeGenerator *generator,
 // Helper function to emit to global variables buffer
 static void emit_to_global_buffer(CodeGenerator *generator, const char *format,
                                   ...) {
+  if (!generator || !format || generator->has_error) {
+    return;
+  }
+
   va_list args;
   va_start(args, format);
 
@@ -890,6 +969,8 @@ static void emit_to_global_buffer(CodeGenerator *generator, const char *format,
     char *new_buffer =
         realloc(generator->global_variables_buffer, new_capacity);
     if (!new_buffer) {
+      code_generator_set_error(
+          generator, "Out of memory while expanding global buffer");
       va_end(args);
       return;
     }
@@ -1373,11 +1454,13 @@ void code_generator_generate_function_call(CodeGenerator *generator,
                                            ASTNode *call_expression) {
   if (!generator || !call_expression ||
       call_expression->type != AST_FUNCTION_CALL) {
+    code_generator_set_error(generator, "Invalid function call AST node");
     return;
   }
 
   CallExpression *call_data = (CallExpression *)call_expression->data;
   if (!call_data || !call_data->function_name) {
+    code_generator_set_error(generator, "Malformed function call expression");
     return;
   }
 
@@ -1427,7 +1510,7 @@ void code_generator_generate_function_call(CodeGenerator *generator,
   CallingConventionSpec *conv_spec =
       generator->register_allocator->calling_convention;
   if (!conv_spec) {
-    code_generator_emit(generator, "    ; Error: No calling convention set\n");
+    code_generator_set_error(generator, "No calling convention configured");
     return;
   }
 
@@ -2111,6 +2194,7 @@ void code_generator_generate_binary_operation(CodeGenerator *generator,
                                               ASTNode *left, const char *op,
                                               ASTNode *right) {
   if (!generator || !left || !op || !right) {
+    code_generator_set_error(generator, "Malformed binary operation");
     return;
   }
 
@@ -2171,8 +2255,9 @@ void code_generator_generate_binary_operation(CodeGenerator *generator,
         code_generator_emit(generator,
                             "    movzx rax, al     ; Zero-extend AL to RAX\n");
       } else {
-        code_generator_emit(generator, "    ; Unsupported float operator: %s\n",
-                            op);
+        code_generator_set_error(generator,
+                                 "Unsupported floating-point operator '%s'",
+                                 op);
       }
     }
   } else {
@@ -2246,7 +2331,7 @@ void code_generator_generate_binary_operation(CodeGenerator *generator,
         code_generator_emit(generator,
                             "    movzx rax, al    ; Zero-extend AL to RAX\n");
       } else {
-        code_generator_emit(generator, "    ; Unknown operator: %s\n", op);
+        code_generator_set_error(generator, "Unknown binary operator '%s'", op);
       }
     }
   }
@@ -2254,6 +2339,7 @@ void code_generator_generate_binary_operation(CodeGenerator *generator,
 void code_generator_generate_unary_operation(CodeGenerator *generator,
                                              const char *op, ASTNode *operand) {
   if (!generator || !op || !operand) {
+    code_generator_set_error(generator, "Malformed unary operation");
     return;
   }
 
@@ -2276,7 +2362,7 @@ void code_generator_generate_unary_operation(CodeGenerator *generator,
     // Unary plus - no operation needed
     code_generator_emit(generator, "    ; Unary plus (no-op)\n");
   } else {
-    code_generator_emit(generator, "    ; Unknown unary operator: %s\n", op);
+    code_generator_set_error(generator, "Unknown unary operator '%s'", op);
   }
 }
 void code_generator_generate_assignment_statement(CodeGenerator *generator,
@@ -2326,21 +2412,10 @@ void code_generator_generate_assignment_statement(CodeGenerator *generator,
     }
 
     if (field_offset < 0) {
-      code_generator_emit(
-          generator, "    ; Warning: Could not determine field offset for %s\n",
+      code_generator_set_error(
+          generator, "Cannot determine field offset for '%s' in assignment",
           access->member);
-      if (strcmp(access->member, "x") == 0 ||
-          strcmp(access->member, "field1") == 0) {
-        field_offset = 0;
-      } else if (strcmp(access->member, "y") == 0 ||
-                 strcmp(access->member, "field2") == 0) {
-        field_offset = 8;
-      } else if (strcmp(access->member, "z") == 0 ||
-                 strcmp(access->member, "field3") == 0) {
-        field_offset = 16;
-      } else {
-        field_offset = 0;
-      }
+      return;
     }
 
     if (field_offset > 0) {
@@ -2362,6 +2437,8 @@ void code_generator_generate_assignment_statement(CodeGenerator *generator,
 
     // Store the result to the variable
     code_generator_store_variable(generator, assign_data->variable_name, "rax");
+  } else {
+    code_generator_set_error(generator, "Invalid assignment target");
   }
 }
 
@@ -2396,10 +2473,9 @@ void code_generator_load_variable(CodeGenerator *generator,
       }
     }
   } else {
-    code_generator_emit(
-        generator, "    ; Warning: Variable %s not found in symbol table\n",
-        variable_name);
-    code_generator_emit(generator, "    mov rax, 0        ; Default to 0\n");
+    code_generator_set_error(generator,
+                             "Undefined variable '%s' during code generation",
+                             variable_name);
   }
 }
 
@@ -2436,9 +2512,9 @@ void code_generator_store_variable(CodeGenerator *generator,
       }
     }
   } else {
-    code_generator_emit(generator,
-                        "    ; Error: Cannot store to undefined variable %s\n",
-                        variable_name);
+    code_generator_set_error(generator,
+                             "Cannot store to undefined variable '%s'",
+                             variable_name);
   }
 }
 void code_generator_load_string_literal(CodeGenerator *generator,
@@ -2579,9 +2655,9 @@ void code_generator_generate_struct_declaration(CodeGenerator *generator,
       }
     }
   } else {
-    code_generator_emit(
-        generator, "    ; Warning: Struct type %s not found in symbol table\n",
-        struct_data->name);
+    code_generator_set_error(
+        generator, "Struct type '%s' not found during code generation",
+        struct_data->name ? struct_data->name : "<unknown>");
   }
 }
 
@@ -2589,12 +2665,14 @@ void code_generator_generate_method_call(CodeGenerator *generator,
                                          ASTNode *method_call,
                                          ASTNode *object) {
   if (!generator || !method_call || !object) {
+    code_generator_set_error(generator, "Invalid method call AST node");
     return;
   }
 
   // Method calls are handled as special function calls with implicit "this"
   CallExpression *call_data = (CallExpression *)method_call->data;
   if (!call_data) {
+    code_generator_set_error(generator, "Malformed method call expression");
     return;
   }
 
@@ -2667,11 +2745,13 @@ void code_generator_generate_member_access(CodeGenerator *generator,
                                            ASTNode *member_access) {
   if (!generator || !member_access ||
       member_access->type != AST_MEMBER_ACCESS) {
+    code_generator_set_error(generator, "Invalid member access AST node");
     return;
   }
 
   MemberAccess *access_data = (MemberAccess *)member_access->data;
   if (!access_data || !access_data->object || !access_data->member) {
+    code_generator_set_error(generator, "Malformed member access expression");
     return;
   }
 
@@ -2707,22 +2787,10 @@ void code_generator_generate_member_access(CodeGenerator *generator,
 
   // If we couldn't determine the offset, use default values for testing
   if (field_offset < 0) {
-    code_generator_emit(
-        generator, "    ; Warning: Could not determine field offset for %s\n",
-        access_data->member);
-    // Use simple default offsets for common field names
-    if (strcmp(access_data->member, "x") == 0 ||
-        strcmp(access_data->member, "field1") == 0) {
-      field_offset = 0;
-    } else if (strcmp(access_data->member, "y") == 0 ||
-               strcmp(access_data->member, "field2") == 0) {
-      field_offset = 8;
-    } else if (strcmp(access_data->member, "z") == 0 ||
-               strcmp(access_data->member, "field3") == 0) {
-      field_offset = 16;
-    } else {
-      field_offset = 0; // Default to offset 0
-    }
+    code_generator_set_error(generator,
+                             "Cannot determine field offset for '%s'",
+                             access_data->member);
+    return;
   }
 
   code_generator_emit(generator, "    ; Field offset for %s: %d\n",

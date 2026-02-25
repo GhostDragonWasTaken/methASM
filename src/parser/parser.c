@@ -5,12 +5,41 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void parser_report_lexer_token_error(Parser *parser, const Token *token) {
+  if (!parser || !token || token->type != TOKEN_ERROR) {
+    return;
+  }
+
+  const char *message =
+      (token->value && token->value[0] != '\0') ? token->value
+                                                : "Invalid token";
+  char error_msg[512];
+  snprintf(error_msg, sizeof(error_msg), "Lexical error: %s", message);
+
+  parser->has_error = 1;
+  parser->had_error = 1;
+  parser->error_count++;
+  free(parser->error_message);
+  parser->error_message = strdup(error_msg);
+
+  if (parser->error_reporter) {
+    SourceLocation location =
+        source_location_create(token->line, token->column);
+    error_reporter_add_error(parser->error_reporter, ERROR_LEXICAL, location,
+                             error_msg);
+  }
+}
+
 Parser *parser_create(Lexer *lexer) {
   return parser_create_with_error_reporter(lexer, NULL);
 }
 
 Parser *parser_create_with_error_reporter(Lexer *lexer,
                                           ErrorReporter *error_reporter) {
+  if (!lexer) {
+    return NULL;
+  }
+
   Parser *parser = malloc(sizeof(Parser));
   if (!parser)
     return NULL;
@@ -19,9 +48,17 @@ Parser *parser_create_with_error_reporter(Lexer *lexer,
   parser->current_token = lexer_next_token(lexer);
   parser->peek_token = lexer_next_token(lexer);
   parser->has_error = 0;
+  parser->had_error = 0;
+  parser->error_count = 0;
   parser->error_message = NULL;
   parser->error_reporter = error_reporter;
   parser->error_recovery_mode = 0;
+
+  if (parser->current_token.type == TOKEN_ERROR) {
+    parser_report_lexer_token_error(parser, &parser->current_token);
+  } else if (parser->peek_token.type == TOKEN_ERROR) {
+    parser_report_lexer_token_error(parser, &parser->peek_token);
+  }
 
   return parser;
 }
@@ -50,6 +87,10 @@ void parser_advance(Parser *parser) {
 
   // Get new peek token
   parser->peek_token = lexer_next_token(parser->lexer);
+
+  if (parser->current_token.type == TOKEN_ERROR) {
+    parser_report_lexer_token_error(parser, &parser->current_token);
+  }
 }
 
 int parser_match(Parser *parser, TokenType type) {
@@ -122,6 +163,8 @@ static const char *token_type_to_string(TokenType type) {
     return "'.'";
   case TOKEN_NEWLINE:
     return "newline";
+  case TOKEN_ERROR:
+    return "lexical error";
   default:
     return "unknown token";
   }
@@ -194,6 +237,8 @@ void parser_set_error_with_suggestion(Parser *parser, const char *message,
     return;
 
   parser->has_error = 1;
+  parser->had_error = 1;
+  parser->error_count++;
   free(parser->error_message);
   parser->error_message = strdup(message);
 
@@ -349,6 +394,9 @@ ASTNode *parser_parse_program(Parser *parser) {
         prog_data->declaration_count++;
         ast_add_child(program, declaration);
       }
+    } else if (!parser->has_error) {
+      parser_set_error(parser, "Failed to parse declaration");
+      parser_advance(parser);
     }
 
     if (parser->has_error) {
@@ -1116,11 +1164,7 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
   free(field_types);
   // Note: methods array is now owned by the AST node, don't free it
 
-  if (debug_struct_name) {
-    printf("[Debug Parser] Parsed struct declaration '%s' successfully!\n",
-           debug_struct_name);
-    free(debug_struct_name);
-  }
+  free(debug_struct_name);
   return struct_decl;
 }
 
