@@ -246,6 +246,69 @@ int code_generator_emit_extern_symbol(CodeGenerator *generator,
   return !generator->has_error;
 }
 
+int code_generator_emit_escaped_string_bytes(CodeGenerator *generator,
+                                             const char *value,
+                                             int include_null_terminator) {
+  if (!generator || !value) {
+    return 0;
+  }
+
+  code_generator_emit_to_global_buffer(generator, "    db ");
+
+  int emitted_component = 0;
+  int in_quoted_segment = 0;
+
+  const unsigned char *bytes = (const unsigned char *)value;
+  while (*bytes) {
+    unsigned char c = *bytes++;
+    int is_printable_safe = (c >= 32 && c <= 126 && c != '"' && c != '\\');
+
+    if (is_printable_safe) {
+      if (!in_quoted_segment) {
+        if (emitted_component) {
+          code_generator_emit_to_global_buffer(generator, ", ");
+        }
+        code_generator_emit_to_global_buffer(generator, "\"");
+        in_quoted_segment = 1;
+      }
+      code_generator_emit_to_global_buffer(generator, "%c", c);
+      emitted_component = 1;
+      continue;
+    }
+
+    if (in_quoted_segment) {
+      code_generator_emit_to_global_buffer(generator, "\"");
+      in_quoted_segment = 0;
+    }
+
+    if (emitted_component) {
+      code_generator_emit_to_global_buffer(generator, ", ");
+    }
+    code_generator_emit_to_global_buffer(generator, "%u", (unsigned int)c);
+    emitted_component = 1;
+  }
+
+  if (in_quoted_segment) {
+    code_generator_emit_to_global_buffer(generator, "\"");
+  }
+
+  if (include_null_terminator) {
+    if (emitted_component) {
+      code_generator_emit_to_global_buffer(generator, ", ");
+    }
+    code_generator_emit_to_global_buffer(generator, "0");
+    emitted_component = 1;
+  }
+
+  if (!emitted_component) {
+    // Empty non-terminated strings are still emitted as a zero byte.
+    code_generator_emit_to_global_buffer(generator, "0");
+  }
+
+  code_generator_emit_to_global_buffer(generator, "\n");
+  return !generator->has_error;
+}
+
 
 char *code_generator_generate_label(CodeGenerator *generator,
                                     const char *prefix) {

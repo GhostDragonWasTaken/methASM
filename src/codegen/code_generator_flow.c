@@ -248,6 +248,10 @@ int code_generator_generate_program(CodeGenerator *generator,
     code_generator_emit(generator, "%s", generator->global_variables_buffer);
   }
 
+  // Ensure all emitted functions and entrypoint stubs are placed in executable
+  // code section even when globals switched the active section to .data/.bss.
+  code_generator_emit(generator, "\nsection .text\n");
+
   // Second pass: process functions and other declarations
   if (program_data) {
     for (size_t i = 0; i < program_data->declaration_count; i++) {
@@ -350,7 +354,6 @@ int code_generator_generate_program(CodeGenerator *generator,
     // Microsoft x64: use mainCRTStartup as entry symbol
     code_generator_emit(generator, "global mainCRTStartup\n");
     code_generator_emit(generator, "mainCRTStartup:\n");
-    // Align stack to 16 bytes (Windows ABI requirement)
     code_generator_emit(generator,
                         "    sub rsp, 40      ; Shadow space + alignment\n");
   } else {
@@ -361,7 +364,12 @@ int code_generator_generate_program(CodeGenerator *generator,
 
   code_generator_emit(generator,
                       "    ; Initialize garbage collector runtime\n");
-  code_generator_emit(generator, "    mov %s, rsp\n", first_param_reg);
+  if (is_ms_x64) {
+    // Anchor GC to the caller-visible stack top (before our 40-byte reserve).
+    code_generator_emit(generator, "    lea %s, [rsp + 40]\n", first_param_reg);
+  } else {
+    code_generator_emit(generator, "    mov %s, rsp\n", first_param_reg);
+  }
   code_generator_emit(generator, "    extern gc_init\n");
   code_generator_emit(generator, "    call gc_init\n");
 
@@ -415,7 +423,7 @@ int code_generator_generate_program(CodeGenerator *generator,
         emitted_gc_root_extern = 1;
       }
 
-      code_generator_emit(generator, "    lea %s, [%s + rip]\n",
+      code_generator_emit(generator, "    lea %s, [rel %s]\n",
                           first_param_reg, var_data->name);
       code_generator_emit(generator, "    call gc_register_root\n");
     }
@@ -424,13 +432,18 @@ int code_generator_generate_program(CodeGenerator *generator,
   if (has_main) {
     code_generator_emit(generator, "    ; Call user main function\n");
     code_generator_emit(generator, "    call main\n");
-    code_generator_emit(generator,
-                        "    push rax         ; Preserve main return code\n");
+    if (is_ms_x64) {
+      code_generator_emit(
+          generator, "    mov [rsp + 32], rax ; Preserve main return code\n");
+    } else {
+      code_generator_emit(generator,
+                          "    push rax         ; Preserve main return code\n");
+    }
     code_generator_emit(generator, "    extern gc_shutdown\n");
     code_generator_emit(generator, "    call gc_shutdown\n");
     if (is_ms_x64) {
       code_generator_emit(
-          generator, "    pop %s          ; Use main return as exit code\n",
+          generator, "    mov %s, [rsp + 32] ; Use main return as exit code\n",
           first_param_reg);
     } else {
       code_generator_emit(
@@ -917,7 +930,7 @@ void code_generator_generate_statement(CodeGenerator *generator,
 
     code_generator_generate_expression(generator, switch_data->expression);
     code_generator_emit(generator,
-                        "    mov rbx, rax       ; Save switch value\n");
+                        "    mov r10, rax       ; Save switch value\n");
 
     char **case_labels = NULL;
     size_t case_count = switch_data->case_count;
@@ -958,7 +971,7 @@ void code_generator_generate_statement(CodeGenerator *generator,
           break;
         }
 
-        code_generator_emit(generator, "    cmp rbx, %lld\n", value);
+        code_generator_emit(generator, "    cmp r10, %lld\n", value);
         code_generator_emit(generator, "    je %s\n", case_labels[i]);
       } else {
         code_generator_set_error(generator, "Malformed switch case");
@@ -1053,10 +1066,10 @@ void code_generator_generate_expression(CodeGenerator *generator,
         // Load float value into XMM0 register
         char *float_label = code_generator_generate_label(generator, "float");
         if (float_label) {
-          code_generator_emit(
-              generator,
-              "    movsd xmm0, [%s + rip]  ; Load float from memory\n",
-              float_label);
+          code_generator_emit(generator,
+                              "    movsd xmm0, [rel %s]  ; Load float from "
+                              "memory\n",
+                              float_label);
 
           // Add the float literal to the global data section
           code_generator_emit_to_global_buffer(generator, "%s:\n", float_label);

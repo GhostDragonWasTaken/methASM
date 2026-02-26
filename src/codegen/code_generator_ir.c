@@ -201,7 +201,7 @@ static int code_generator_load_ir_operand(CodeGenerator *generator,
       code_generator_set_error(generator, "Malformed IR label operand");
       return 0;
     }
-    code_generator_emit(generator, "    lea rax, [%s + rip]\n", operand->name);
+    code_generator_emit(generator, "    lea rax, [rel %s]\n", operand->name);
     return 1;
 
   default:
@@ -362,7 +362,7 @@ static int code_generator_emit_ir_address_of(CodeGenerator *generator,
     if (symbol->is_extern && !code_generator_emit_extern_symbol(generator, symbol_name)) {
       return 0;
     }
-    code_generator_emit(generator, "    lea rax, [%s + rip]\n", symbol_name);
+    code_generator_emit(generator, "    lea rax, [rel %s]\n", symbol_name);
   } else {
     code_generator_emit(generator, "    lea rax, [rbp - %d]\n",
                         symbol->data.variable.memory_offset);
@@ -484,13 +484,13 @@ code_generator_emit_ir_binary_fallback(CodeGenerator *generator,
                                       temp_table)) {
     return 0;
   }
-  code_generator_emit(generator, "    mov rbx, rax\n");
+  code_generator_emit(generator, "    mov r10, rax\n");
   code_generator_emit(generator, "    pop rax\n");
 
   const char *op = instruction->text;
   if (instruction->is_float) {
     code_generator_emit(generator, "    movq xmm0, rax\n");
-    code_generator_emit(generator, "    movq xmm1, rbx\n");
+    code_generator_emit(generator, "    movq xmm1, r10\n");
 
     if (strcmp(op, "+") == 0) {
       code_generator_emit(generator, "    addsd xmm0, xmm1\n");
@@ -539,18 +539,18 @@ code_generator_emit_ir_binary_fallback(CodeGenerator *generator,
   if (arith) {
     if (strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
       code_generator_emit(generator, "    cqo\n");
-      code_generator_emit(generator, "    idiv rbx\n");
+      code_generator_emit(generator, "    idiv r10\n");
       if (strcmp(op, "%") == 0) {
         code_generator_emit(generator, "    mov rax, rdx\n");
       }
     } else {
-      code_generator_emit(generator, "    %s rax, rbx\n", arith);
+      code_generator_emit(generator, "    %s rax, r10\n", arith);
     }
     return code_generator_store_ir_destination(generator, &instruction->dest,
                                                temp_table);
   }
 
-  code_generator_emit(generator, "    cmp rax, rbx\n");
+  code_generator_emit(generator, "    cmp rax, r10\n");
   if (strcmp(op, "==") == 0) {
     code_generator_emit(generator, "    sete al\n");
   } else if (strcmp(op, "!=") == 0) {
@@ -564,18 +564,18 @@ code_generator_emit_ir_binary_fallback(CodeGenerator *generator,
   } else if (strcmp(op, ">=") == 0) {
     code_generator_emit(generator, "    setge al\n");
   } else if (strcmp(op, "&&") == 0) {
-    code_generator_emit(generator, "    and rax, rbx\n");
+    code_generator_emit(generator, "    and rax, r10\n");
     code_generator_emit(generator, "    setne al\n");
   } else if (strcmp(op, "||") == 0) {
-    code_generator_emit(generator, "    or rax, rbx\n");
+    code_generator_emit(generator, "    or rax, r10\n");
     code_generator_emit(generator, "    setne al\n");
   } else if (strcmp(op, "<<") == 0) {
-    code_generator_emit(generator, "    mov rcx, rbx\n");
+    code_generator_emit(generator, "    mov rcx, r10\n");
     code_generator_emit(generator, "    shl rax, cl\n");
     return code_generator_store_ir_destination(generator, &instruction->dest,
                                                temp_table);
   } else if (strcmp(op, ">>") == 0) {
-    code_generator_emit(generator, "    mov rcx, rbx\n");
+    code_generator_emit(generator, "    mov rcx, r10\n");
     code_generator_emit(generator, "    sar rax, cl\n");
     return code_generator_store_ir_destination(generator, &instruction->dest,
                                                temp_table);
@@ -620,7 +620,7 @@ code_generator_emit_ir_unary_fallback(CodeGenerator *generator,
             !code_generator_emit_extern_symbol(generator, symbol_name)) {
           return 0;
         }
-        code_generator_emit(generator, "    lea rax, [%s + rip]\n", symbol_name);
+        code_generator_emit(generator, "    lea rax, [rel %s]\n", symbol_name);
       } else {
         code_generator_emit(generator, "    lea rax, [rbp - %d]\n",
                             symbol->data.variable.memory_offset);
@@ -684,11 +684,12 @@ static int code_generator_ir_operand_is_float(const IROperand *operand) {
 
 static int code_generator_emit_ir_call_argument_stack(CodeGenerator *generator,
                                                       const IROperand *operand,
-                                                      IRTempTable *temp_table) {
+                                                      IRTempTable *temp_table,
+                                                      int stack_slot_offset) {
   if (!code_generator_load_ir_operand(generator, operand, temp_table)) {
     return 0;
   }
-  code_generator_emit(generator, "    push rax\n");
+  code_generator_emit(generator, "    mov [rsp + %d], rax\n", stack_slot_offset);
   return 1;
 }
 
@@ -782,27 +783,33 @@ static int code_generator_emit_ir_call(CodeGenerator *generator,
   code_generator_emit(generator, "    ; IR call: %s (%zu args)\n",
                       instruction->text, argument_count);
 
-  int alignment_stack_params = 0;
-  if ((int)argument_count > (int)conv_spec->int_param_count) {
-    alignment_stack_params =
-        (int)argument_count - (int)conv_spec->int_param_count;
+  int shadow_space =
+      (conv_spec->convention == CALLING_CONV_MS_X64)
+          ? conv_spec->shadow_space_size
+          : 0;
+  int stack_arg_space = stack_argument_count * 8;
+  int call_stack_total = shadow_space + stack_arg_space;
+  if ((call_stack_total % 16) != 0) {
+    call_stack_total += 8;
   }
-  int alignment_padding_bytes = ((3 + alignment_stack_params) % 2 != 0) ? 8 : 0;
+  if (call_stack_total > 0) {
+    code_generator_emit(generator, "    sub rsp, %d\n", call_stack_total);
+  }
 
-  code_generator_align_stack_for_call(generator, (int)argument_count);
-  code_generator_save_caller_saved_registers_selective(generator);
-
-  // Push stack arguments right-to-left.
-  for (int i = (int)argument_count - 1; i >= 0; i--) {
+  // Materialize stack arguments into ABI-defined stack slots.
+  int stack_arg_index = 0;
+  for (size_t i = 0; i < argument_count; i++) {
     if (!goes_on_stack || !goes_on_stack[i]) {
       continue;
     }
+    int slot_offset = shadow_space + (stack_arg_index * 8);
     if (!code_generator_emit_ir_call_argument_stack(
-            generator, &instruction->arguments[i], temp_table)) {
+            generator, &instruction->arguments[i], temp_table, slot_offset)) {
       free(is_float);
       free(goes_on_stack);
       return 0;
     }
+    stack_arg_index++;
   }
 
   // Fill register arguments left-to-right.
@@ -853,20 +860,9 @@ static int code_generator_emit_ir_call(CodeGenerator *generator,
   code_generator_emit(generator, "    call %s\n", call_target);
   code_generator_emit(generator, "    mov rcx, rax\n");
 
-  if (stack_argument_count > 0) {
-    code_generator_emit(generator, "    add rsp, %d\n",
-                        stack_argument_count * 8);
+  if (call_stack_total > 0) {
+    code_generator_emit(generator, "    add rsp, %d\n", call_stack_total);
   }
-  if (conv_spec->convention == CALLING_CONV_MS_X64 &&
-      conv_spec->shadow_space_size > 0) {
-    code_generator_emit(generator, "    add rsp, %d\n",
-                        conv_spec->shadow_space_size);
-  }
-  if (alignment_padding_bytes > 0) {
-    code_generator_emit(generator, "    add rsp, %d\n",
-                        alignment_padding_bytes);
-  }
-  code_generator_restore_caller_saved_registers_selective(generator);
   code_generator_emit(generator, "    mov rax, rcx\n");
 
   Type *return_type = NULL;
@@ -923,9 +919,9 @@ static int code_generator_emit_ir_instruction(CodeGenerator *generator,
                                         temp_table)) {
       return 0;
     }
-    code_generator_emit(generator, "    mov rbx, rax\n");
+    code_generator_emit(generator, "    mov r10, rax\n");
     code_generator_emit(generator, "    pop rax\n");
-    code_generator_emit(generator, "    cmp rax, rbx\n");
+    code_generator_emit(generator, "    cmp rax, r10\n");
     code_generator_emit(generator, "    je %s\n",
                         instruction->text ? instruction->text : "ir_missing");
     return 1;

@@ -16,5 +16,8 @@ int code_generator_emit_extern_symbol(CodeGenerator *generator,
                                       const char *symbol_name);
 const char *code_generator_get_link_symbol_name(CodeGenerator *generator,
                                                 const char *symbol_name);
+int code_generator_emit_escaped_string_bytes(CodeGenerator *generator,
+                                             const char *value,
+                                             int include_null_terminator);
 
 #endif // CODE_GENERATOR_INTERNAL_H

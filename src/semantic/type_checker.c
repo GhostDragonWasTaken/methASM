@@ -1038,15 +1038,10 @@ int type_checker_is_implicitly_convertible(Type *from_type, Type *to_type) {
     return type_checker_types_equal(from_type, to_type);
   }
 
-  // Integer to integer conversions (with size constraints for safety)
+  // Integer to integer conversions, including narrowing.
   if (type_checker_is_integer_type(from_type) &&
       type_checker_is_integer_type(to_type)) {
-    // Allow conversions to larger or equal size types
-    // Also allow signed to unsigned of same size (common in systems
-    // programming)
-    int from_rank = type_checker_get_type_rank(from_type);
-    int to_rank = type_checker_get_type_rank(to_type);
-    return from_rank <= to_rank;
+    return 1;
   }
 
   // Integer to floating point conversions
@@ -1055,12 +1050,10 @@ int type_checker_is_implicitly_convertible(Type *from_type, Type *to_type) {
     return 1; // Generally safe
   }
 
-  // Floating point to floating point conversions (to larger precision)
+  // Floating point to floating point conversions, including narrowing.
   if (type_checker_is_floating_type(from_type) &&
       type_checker_is_floating_type(to_type)) {
-    int from_rank = type_checker_get_type_rank(from_type);
-    int to_rank = type_checker_get_type_rank(to_type);
-    return from_rank <= to_rank;
+    return 1;
   }
 
   // No other implicit conversions are allowed

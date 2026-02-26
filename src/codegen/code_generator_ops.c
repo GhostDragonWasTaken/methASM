@@ -92,7 +92,7 @@ void code_generator_generate_binary_operation(CodeGenerator *generator,
 
     code_generator_generate_expression(generator, right);
     code_generator_emit(generator,
-                        "    mov rbx, rax     ; Move right operand to RBX\n");
+                        "    mov r10, rax     ; Move right operand to R10\n");
 
     code_generator_emit(generator,
                         "    pop rax            ; Restore left operand\n");
@@ -104,22 +104,22 @@ void code_generator_generate_binary_operation(CodeGenerator *generator,
             generator,
             "    cqo                  ; Sign-extend RAX to RDX:RAX\n");
         code_generator_emit(generator,
-                            "    idiv rbx           ; Divide RDX:RAX by RBX\n");
+                            "    idiv r10           ; Divide RDX:RAX by R10\n");
       } else if (strcmp(op, "%") == 0) {
         code_generator_emit(
             generator,
             "    cqo                  ; Sign-extend RAX to RDX:RAX\n");
         code_generator_emit(generator,
-                            "    idiv rbx           ; Divide RDX:RAX by RBX\n");
+                            "    idiv r10           ; Divide RDX:RAX by R10\n");
         code_generator_emit(generator,
                             "    mov rax, rdx     ; Move remainder to RAX\n");
       } else {
-        code_generator_emit(generator, "    %s rax, rbx      ; %s operation\n",
+        code_generator_emit(generator, "    %s rax, r10      ; %s operation\n",
                             instruction, op);
       }
     } else {
       // Handle comparison and logical operators
-      code_generator_emit(generator, "    cmp rax, rbx     ; Compare\n");
+      code_generator_emit(generator, "    cmp rax, r10     ; Compare\n");
       const char *set_instruction = "nop";
       if (strcmp(op, "==") == 0)
         set_instruction = "sete";
@@ -141,14 +141,14 @@ void code_generator_generate_binary_operation(CodeGenerator *generator,
         code_generator_emit(generator,
                             "    movzx rax, al    ; Zero-extend AL to RAX\n");
       } else if (strcmp(op, "&&") == 0) {
-        code_generator_emit(generator, "    and rax, rbx     ; Logical AND\n");
+        code_generator_emit(generator, "    and rax, r10     ; Logical AND\n");
         code_generator_emit(
             generator,
             "    setne al           ; Set AL if result is not zero\n");
         code_generator_emit(generator,
                             "    movzx rax, al    ; Zero-extend AL to RAX\n");
       } else if (strcmp(op, "||") == 0) {
-        code_generator_emit(generator, "    or rax, rbx      ; Logical OR\n");
+        code_generator_emit(generator, "    or rax, r10      ; Logical OR\n");
         code_generator_emit(
             generator,
             "    setne al           ; Set AL if result is not zero\n");
@@ -310,7 +310,7 @@ void code_generator_load_variable(CodeGenerator *generator,
     if (symbol->type && symbol->type->kind == TYPE_ARRAY) {
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
         code_generator_emit(generator,
-                            "    lea rax, [%s + rip]  ; Array base address\n",
+                            "    lea rax, [rel %s]  ; Array base address\n",
                             resolved_name);
       } else {
         int offset = symbol->data.variable.memory_offset;
@@ -318,6 +318,11 @@ void code_generator_load_variable(CodeGenerator *generator,
             generator, "    lea rax, [rbp - %d]  ; Local array base\n", offset);
       }
       return;
+    }
+
+    int value_size = 8;
+    if (symbol->type && symbol->type->size > 0 && symbol->type->size <= 8) {
+      value_size = (int)symbol->type->size;
     }
 
     if (symbol->data.variable.is_in_register) {
@@ -329,15 +334,47 @@ void code_generator_load_variable(CodeGenerator *generator,
       }
     } else {
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
-        code_generator_emit(generator,
-                            "    mov rax, [%s + rip]  ; From global memory\n",
-                            resolved_name);
+        if (value_size == 1) {
+          code_generator_emit(
+              generator, "    movzx rax, byte [rel %s]  ; From global memory\n",
+              resolved_name);
+        } else if (value_size == 2) {
+          code_generator_emit(
+              generator, "    movzx rax, word [rel %s]  ; From global memory\n",
+              resolved_name);
+        } else if (value_size == 4) {
+          code_generator_emit(
+              generator, "    mov eax, dword [rel %s]  ; From global memory\n",
+              resolved_name);
+        } else {
+          code_generator_emit(
+              generator, "    mov rax, qword [rel %s]  ; From global memory\n",
+              resolved_name);
+        }
       } else {
         // Local variable or parameter on stack
         int offset = symbol->data.variable.memory_offset;
-        code_generator_emit(
-            generator, "    mov rax, [rbp - %d]  ; From stack [rbp - %d]\n",
-            offset, offset);
+        if (value_size == 1) {
+          code_generator_emit(generator,
+                              "    movzx rax, byte [rbp - %d]  ; From stack "
+                              "[rbp - %d]\n",
+                              offset, offset);
+        } else if (value_size == 2) {
+          code_generator_emit(generator,
+                              "    movzx rax, word [rbp - %d]  ; From stack "
+                              "[rbp - %d]\n",
+                              offset, offset);
+        } else if (value_size == 4) {
+          code_generator_emit(generator,
+                              "    mov eax, dword [rbp - %d]  ; From stack "
+                              "[rbp - %d]\n",
+                              offset, offset);
+        } else {
+          code_generator_emit(generator,
+                              "    mov rax, qword [rbp - %d]  ; From stack "
+                              "[rbp - %d]\n",
+                              offset, offset);
+        }
       }
     }
   } else {
@@ -382,6 +419,16 @@ void code_generator_store_variable(CodeGenerator *generator,
       return;
     }
 
+    int value_size = 8;
+    if (symbol->type && symbol->type->size > 0 && symbol->type->size <= 8) {
+      value_size = (int)symbol->type->size;
+    }
+
+    if (strcmp(source_reg, "rax") != 0) {
+      code_generator_emit(generator, "    mov rax, %s\n", source_reg);
+      source_reg = "rax";
+    }
+
     if (symbol->data.variable.is_in_register) {
       x86Register reg = (x86Register)symbol->data.variable.register_id;
       const char *reg_name = code_generator_get_register_name(reg);
@@ -391,15 +438,45 @@ void code_generator_store_variable(CodeGenerator *generator,
       }
     } else {
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
-        code_generator_emit(generator,
-                            "    mov [%s + rip], %s  ; To global memory\n",
-                            resolved_name, source_reg);
+        if (value_size == 1) {
+          code_generator_emit(
+              generator, "    mov byte [rel %s], al  ; To global memory\n",
+              resolved_name);
+        } else if (value_size == 2) {
+          code_generator_emit(
+              generator, "    mov word [rel %s], ax  ; To global memory\n",
+              resolved_name);
+        } else if (value_size == 4) {
+          code_generator_emit(
+              generator, "    mov dword [rel %s], eax  ; To global memory\n",
+              resolved_name);
+        } else {
+          code_generator_emit(
+              generator, "    mov qword [rel %s], rax  ; To global memory\n",
+              resolved_name);
+        }
       } else {
         // Local variable or parameter on stack
         int offset = symbol->data.variable.memory_offset;
-        code_generator_emit(generator,
-                            "    mov [rbp - %d], %s  ; To stack [rbp - %d]\n",
-                            offset, source_reg, offset);
+        if (value_size == 1) {
+          code_generator_emit(
+              generator, "    mov byte [rbp - %d], al  ; To stack [rbp - %d]\n",
+              offset, offset);
+        } else if (value_size == 2) {
+          code_generator_emit(
+              generator, "    mov word [rbp - %d], ax  ; To stack [rbp - %d]\n",
+              offset, offset);
+        } else if (value_size == 4) {
+          code_generator_emit(generator,
+                              "    mov dword [rbp - %d], eax  ; To stack [rbp - "
+                              "%d]\n",
+                              offset, offset);
+        } else {
+          code_generator_emit(generator,
+                              "    mov qword [rbp - %d], rax  ; To stack [rbp - "
+                              "%d]\n",
+                              offset, offset);
+        }
       }
     }
   } else {
@@ -413,8 +490,8 @@ void code_generator_load_string_literal(CodeGenerator *generator,
     return;
   }
 
-  code_generator_emit(generator, "    ; String literal: \"%s\"\n",
-                      string_value);
+  code_generator_emit(generator, "    ; String literal (%zu bytes)\n",
+                      strlen(string_value));
 
   // Generate a unique label for this string
   char *label = code_generator_generate_label(generator, "str_chars");
@@ -422,13 +499,16 @@ void code_generator_load_string_literal(CodeGenerator *generator,
   if (label && label_struct) {
     // Load string address into RAX
     code_generator_emit(
-        generator, "    lea rax, [%s + rip]  ; Load string struct address\n",
+        generator, "    lea rax, [rel %s]  ; Load string struct address\n",
         label_struct);
 
     // Add string to global variables buffer for data section
     code_generator_emit_to_global_buffer(generator, "%s:\n", label);
-    code_generator_emit_to_global_buffer(generator, "    db \"%s\", 0\n",
-                                         string_value);
+    if (!code_generator_emit_escaped_string_bytes(generator, string_value, 1)) {
+      free(label);
+      free(label_struct);
+      return;
+    }
 
     code_generator_emit_to_global_buffer(generator, "    align 8\n");
     code_generator_emit_to_global_buffer(generator, "%s:\n", label_struct);
@@ -819,7 +899,7 @@ static int code_generator_generate_lvalue_address(CodeGenerator *generator,
         return 0;
       }
       code_generator_emit(generator,
-                          "    lea rax, [%s + rip]  ; Address of global\n",
+                          "    lea rax, [rel %s]  ; Address of global\n",
                           resolved_name);
     } else {
       int offset = symbol->data.variable.memory_offset;

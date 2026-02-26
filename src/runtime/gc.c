@@ -12,11 +12,6 @@ typedef struct GCAllocation {
   // Payload follows immediately after this struct
 } GCAllocation;
 
-typedef struct GCRoot {
-  void **slot;
-  struct GCRoot *next;
-} GCRoot;
-
 typedef struct GCMarkStack {
   GCAllocation **items;
   size_t count;
@@ -25,7 +20,8 @@ typedef struct GCMarkStack {
 
 static void *g_stack_base = NULL;
 static GCAllocation *g_allocations = NULL;
-static GCRoot *g_roots = NULL;
+static void **g_root_slots[4096];
+static size_t g_root_count = 0;
 static size_t g_allocation_count = 0;
 static size_t g_allocated_bytes = 0;
 static uintptr_t g_heap_min = UINTPTR_MAX;
@@ -175,23 +171,17 @@ void gc_register_root(void **root_slot) {
     return;
   }
 
-  GCRoot *current = g_roots;
-  while (current) {
-    if (current->slot == root_slot) {
+  for (size_t i = 0; i < g_root_count; i++) {
+    if (g_root_slots[i] == root_slot) {
       return; // Already registered
     }
-    current = current->next;
   }
 
-  GCRoot *root = (GCRoot *)malloc(sizeof(GCRoot));
-  if (!root) {
-    fprintf(stderr, "Fatal error: Out of memory during gc_register_root\n");
+  if (g_root_count >= (sizeof(g_root_slots) / sizeof(g_root_slots[0]))) {
+    fprintf(stderr, "Fatal error: Exceeded maximum GC root slots\n");
     exit(1);
   }
-
-  root->slot = root_slot;
-  root->next = g_roots;
-  g_roots = root;
+  g_root_slots[g_root_count++] = root_slot;
 }
 
 void gc_unregister_root(void **root_slot) {
@@ -199,16 +189,13 @@ void gc_unregister_root(void **root_slot) {
     return;
   }
 
-  GCRoot **prev = &g_roots;
-  GCRoot *current = g_roots;
-  while (current) {
-    if (current->slot == root_slot) {
-      *prev = current->next;
-      free(current);
+  for (size_t i = 0; i < g_root_count; i++) {
+    if (g_root_slots[i] == root_slot) {
+      g_root_count--;
+      g_root_slots[i] = g_root_slots[g_root_count];
+      g_root_slots[g_root_count] = NULL;
       return;
     }
-    prev = &current->next;
-    current = current->next;
   }
 }
 
@@ -352,12 +339,11 @@ void gc_collect(void *current_rsp) {
 
   // 2. MARK PHASE (Conservative stack scanning)
   // Mark registered explicit roots first (globals, external runtime roots).
-  GCRoot *root = g_roots;
-  while (root) {
-    if (root->slot) {
-      mark_pointer(*root->slot, &mark_stack);
+  for (size_t i = 0; i < g_root_count; i++) {
+    void **slot = g_root_slots[i];
+    if (slot) {
+      mark_pointer(*slot, &mark_stack);
     }
-    root = root->next;
   }
 
   // Conservative stack scanning.
@@ -428,13 +414,10 @@ void gc_shutdown(void) {
 
   g_allocations = NULL;
 
-  GCRoot *root = g_roots;
-  while (root) {
-    GCRoot *next = root->next;
-    free(root);
-    root = next;
+  for (size_t i = 0; i < g_root_count; i++) {
+    g_root_slots[i] = NULL;
   }
-  g_roots = NULL;
+  g_root_count = 0;
 
   g_allocation_count = 0;
   g_allocated_bytes = 0;

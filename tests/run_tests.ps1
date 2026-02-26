@@ -130,6 +130,13 @@ $cases = @(
   @{ Name="pointer_null"; Path="tests/test_pointer_null.masm"; ShouldSucceed=$true },
   @{ Name="pointer_param_address"; Path="tests/test_pointer_param_address.masm"; ShouldSucceed=$true },
   @{ Name="call_many_args"; Path="tests/test_call_many_args.masm"; ShouldSucceed=$true },
+  @{
+    Name="string_escape_codegen"
+    Path="tests/test_string_escape_codegen.masm"
+    ShouldSucceed=$true
+    AsmMustMatch=@("(?m)^\s*db .*13,\s*10.*$", "(?m)^\s*db .*9.*34.*92.*$")
+  },
+  @{ Name="narrowing_conversions"; Path="tests/test_narrowing_conversions.masm"; ShouldSucceed=$true },
   @{ Name="stress_integrated"; Path="tests/test_stress_integrated.masm"; ShouldSucceed=$true },
 
   @{ Name="err_unknown_char"; Path="tests/err_unknown_char.masm"; ShouldSucceed=$false; Pattern="Lexical error|error" },
