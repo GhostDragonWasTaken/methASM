@@ -280,6 +280,9 @@ static int is_declaration_exported(ASTNode *decl) {
   if (decl->type == AST_STRUCT_DECLARATION) {
     return ((StructDeclaration *)decl->data)->is_exported;
   }
+  if (decl->type == AST_ENUM_DECLARATION) {
+    return ((EnumDeclaration *)decl->data)->is_exported;
+  }
   return 0;
 }
 
@@ -296,7 +299,8 @@ static int add_visited_file(ImportContext *ctx, const char *path) {
 
   if (ctx->count >= ctx->capacity) {
     size_t new_capacity = ctx->capacity == 0 ? 8 : ctx->capacity * 2;
-    char **new_files = realloc(ctx->visited_files, new_capacity * sizeof(char *));
+    char **new_files =
+        realloc(ctx->visited_files, new_capacity * sizeof(char *));
     if (!new_files) {
       return 0;
     }
@@ -318,8 +322,10 @@ static int push_import_chain(ImportContext *ctx, const char *path) {
   }
 
   if (ctx->chain_depth >= ctx->chain_capacity) {
-    size_t new_capacity = ctx->chain_capacity == 0 ? 8 : ctx->chain_capacity * 2;
-    char **new_chain = realloc(ctx->import_chain, new_capacity * sizeof(char *));
+    size_t new_capacity =
+        ctx->chain_capacity == 0 ? 8 : ctx->chain_capacity * 2;
+    char **new_chain =
+        realloc(ctx->import_chain, new_capacity * sizeof(char *));
     if (!new_chain) {
       return 0;
     }
@@ -389,8 +395,8 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
   do {                                                                         \
     if (new_declaration_count >= new_capacity) {                               \
       size_t grown_capacity = new_capacity == 0 ? 16 : new_capacity * 2;       \
-      ASTNode **grown = realloc(new_declarations,                              \
-                                grown_capacity * sizeof(ASTNode *));           \
+      ASTNode **grown =                                                        \
+          realloc(new_declarations, grown_capacity * sizeof(ASTNode *));       \
       if (!grown) {                                                            \
         *had_error = 1;                                                        \
         goto process_imports_cleanup;                                          \

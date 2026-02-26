@@ -445,6 +445,8 @@ ASTNode *parser_parse_declaration(Parser *parser) {
   switch (parser->current_token.type) {
   case TOKEN_IMPORT:
     return parser_parse_import_declaration(parser);
+  case TOKEN_ENUM:
+    return parser_parse_enum_declaration(parser);
   case TOKEN_EXTERN: {
     parser_advance(parser); // consume 'extern'
     if (parser->current_token.type == TOKEN_FUNCTION) {
@@ -479,6 +481,11 @@ ASTNode *parser_parse_declaration(Parser *parser) {
       if (decl && decl->data) {
         ((StructDeclaration *)decl->data)->is_exported = 1;
       }
+    } else if (parser->current_token.type == TOKEN_ENUM) {
+      decl = parser_parse_enum_declaration(parser);
+      if (decl && decl->data) {
+        ((EnumDeclaration *)decl->data)->is_exported = 1;
+      }
     } else if (parser->current_token.type == TOKEN_EXTERN) {
       parser_advance(parser); // consume 'extern'
       if (parser->current_token.type == TOKEN_FUNCTION) {
@@ -505,7 +512,8 @@ ASTNode *parser_parse_declaration(Parser *parser) {
       }
     } else {
       parser_set_error(
-          parser, "Expected 'function', 'struct', or 'extern' after 'export'");
+          parser,
+          "Expected 'function', 'struct', 'enum', or 'extern' after 'export'");
       return NULL;
     }
     return decl;
@@ -1429,6 +1437,100 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
   free(param_types);
 
   return func_decl;
+}
+
+ASTNode *parser_parse_enum_declaration(Parser *parser) {
+  if (!parser)
+    return NULL;
+
+  SourceLocation location = {parser->current_token.line,
+                             parser->current_token.column};
+  if (!parser_expect(parser, TOKEN_ENUM))
+    return NULL;
+
+  if (!parser_is_identifier_like(parser->current_token.type)) {
+    parser_set_error(parser, "Expected enum name after 'enum'");
+    return NULL;
+  }
+  char *enum_name = strdup(parser->current_token.value);
+  parser_advance(parser);
+
+  if (!parser_expect(parser, TOKEN_LBRACE)) {
+    free(enum_name);
+    return NULL;
+  }
+
+  EnumVariant *variants = NULL;
+  size_t variant_count = 0;
+
+  while (parser->current_token.type != TOKEN_RBRACE &&
+         parser->current_token.type != TOKEN_EOF && !parser->has_error) {
+    if (parser->current_token.type == TOKEN_NEWLINE ||
+        parser->current_token.type == TOKEN_COMMA) {
+      parser_advance(parser);
+      continue;
+    }
+
+    if (!parser_is_identifier_like(parser->current_token.type)) {
+      parser_set_error(parser, "Expected enum variant name");
+      break;
+    }
+    char *variant_name = strdup(parser->current_token.value);
+    parser_advance(parser);
+
+    ASTNode *value = NULL;
+    if (parser->current_token.type == TOKEN_EQUALS) {
+      parser_advance(parser);
+      value = parser_parse_expression(parser);
+      if (!value) {
+        if (!parser->has_error)
+          parser_set_error(parser, "Expected expression after '='");
+        free(variant_name);
+        break;
+      }
+    }
+
+    variants = realloc(variants, (variant_count + 1) * sizeof(EnumVariant));
+    variants[variant_count].name = variant_name;
+    variants[variant_count].value = value;
+    variant_count++;
+
+    if (parser->current_token.type == TOKEN_COMMA ||
+        parser->current_token.type == TOKEN_NEWLINE) {
+      parser_advance(parser);
+    }
+  }
+
+  if (parser->has_error) {
+    for (size_t i = 0; i < variant_count; i++) {
+      free(variants[i].name);
+      ast_destroy_node(variants[i].value);
+    }
+    free(variants);
+    free(enum_name);
+    return NULL;
+  }
+
+  if (!parser_expect(parser, TOKEN_RBRACE)) {
+    for (size_t i = 0; i < variant_count; i++) {
+      free(variants[i].name);
+      ast_destroy_node(variants[i].value);
+    }
+    free(variants);
+    free(enum_name);
+    return NULL;
+  }
+
+  ASTNode *node =
+      ast_create_enum_declaration(enum_name, variants, variant_count, location);
+
+  free(enum_name);
+  for (size_t i = 0; i < variant_count; i++) {
+    free(variants[i].name);
+  }
+  free(variants);
+
+  return node;
 }
 
 ASTNode *parser_parse_struct_declaration(Parser *parser) {

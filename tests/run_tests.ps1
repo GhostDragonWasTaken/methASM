@@ -141,6 +141,7 @@ $cases = @(
   },
   @{ Name = "import_std_core"; Path = "tests/test_import_std_core.masm"; ShouldSucceed = $true },
   @{ Name = "std_io"; Path = "tests/test_std_io.masm"; ShouldSucceed = $true },
+  @{ Name = "enum"; Path = "tests/test_enum.masm"; ShouldSucceed = $true },
   @{ Name = "prelude"; Path = "tests/test_prelude.masm"; ShouldSucceed = $true },
   @{
     Name          = "string_escape_codegen"

@@ -328,6 +328,12 @@ static int ir_lower_lvalue_address(IRLoweringContext *context,
           context->symbol_table
               ? symbol_table_lookup(context->symbol_table, identifier->name)
               : NULL;
+
+      if (symbol && symbol->kind == SYMBOL_CONSTANT) {
+        ir_set_error(context, "Cannot take address of constant");
+        return 0;
+      }
+
       if (symbol && (symbol->kind == SYMBOL_VARIABLE ||
                      symbol->kind == SYMBOL_PARAMETER)) {
         *out_type = symbol->type;
@@ -568,6 +574,15 @@ static int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
       ir_set_error(context, "Malformed identifier expression");
       return 0;
     }
+    Symbol *symbol =
+        context->symbol_table
+            ? symbol_table_lookup(context->symbol_table, identifier->name)
+            : NULL;
+    if (symbol && symbol->kind == SYMBOL_CONSTANT) {
+      *out_value = ir_operand_int(symbol->data.constant.value);
+      return 1;
+    }
+
     *out_value = ir_operand_symbol(identifier->name);
     if (!out_value->name) {
       ir_set_error(context, "Out of memory while lowering identifier");
@@ -1559,7 +1574,8 @@ IRProgram *ir_lower_program(ASTNode *program, TypeChecker *type_checker,
     if (!declaration || declaration->type != AST_FUNCTION_DECLARATION) {
       continue;
     }
-    FunctionDeclaration *function_data = (FunctionDeclaration *)declaration->data;
+    FunctionDeclaration *function_data =
+        (FunctionDeclaration *)declaration->data;
     if (!function_data) {
       ir_set_error(&context, "Malformed function declaration");
       ir_program_destroy(ir_program);

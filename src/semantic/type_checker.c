@@ -359,12 +359,16 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
   if (!prog)
     return 0;
 
-  // First pass: Process struct declarations to register struct types
+  // First pass: Process struct and enum declarations to register types
   for (size_t i = 0; i < prog->declaration_count; i++) {
     ASTNode *decl = prog->declarations[i];
     if (decl && decl->type == AST_STRUCT_DECLARATION) {
       if (!type_checker_process_struct_declaration(checker, decl)) {
         return 0; // Error in struct declaration
+      }
+    } else if (decl && decl->type == AST_ENUM_DECLARATION) {
+      if (!type_checker_process_enum_declaration(checker, decl)) {
+        return 0;
       }
     }
   }
@@ -372,7 +376,8 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
   // Second pass: Process other declarations and type check them
   for (size_t i = 0; i < prog->declaration_count; i++) {
     ASTNode *decl = prog->declarations[i];
-    if (decl && decl->type != AST_STRUCT_DECLARATION) {
+    if (decl && decl->type != AST_STRUCT_DECLARATION &&
+        decl->type != AST_ENUM_DECLARATION) {
       if (!type_checker_process_declaration(checker, decl)) {
         return 0; // Error in declaration
       }
@@ -858,9 +863,10 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
     }
   }
 
-  // Check for user-defined struct types in symbol table
+  // Check for user-defined types in symbol table
   Symbol *struct_symbol = symbol_table_lookup(checker->symbol_table, name);
-  if (struct_symbol && struct_symbol->kind == SYMBOL_STRUCT) {
+  if (struct_symbol && (struct_symbol->kind == SYMBOL_STRUCT ||
+                        struct_symbol->kind == SYMBOL_ENUM)) {
     return struct_symbol->type;
   }
 
@@ -880,6 +886,7 @@ int type_checker_is_integer_type(Type *type) {
   case TYPE_UINT16:
   case TYPE_UINT32:
   case TYPE_UINT64:
+  case TYPE_ENUM:
     return 1;
   default:
     return 0;
@@ -1233,6 +1240,96 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
   return 1;
 }
 
+int type_checker_process_enum_declaration(TypeChecker *checker,
+                                          ASTNode *enum_decl_node) {
+  if (!checker || !enum_decl_node ||
+      enum_decl_node->type != AST_ENUM_DECLARATION) {
+    return 0;
+  }
+
+  EnumDeclaration *enum_decl = (EnumDeclaration *)enum_decl_node->data;
+  if (!enum_decl || !enum_decl->name) {
+    type_checker_set_error_at_location(checker, enum_decl_node->location,
+                                       "Invalid enum declaration");
+    return 0;
+  }
+
+  // Check for duplicate type declaration
+  if (type_checker_get_type_by_name(checker, enum_decl->name)) {
+    type_checker_set_error_at_location(checker, enum_decl_node->location,
+                                       "Type '%s' already declared",
+                                       enum_decl->name);
+    return 0;
+  }
+
+  // Create enum type (aliased to INT64 for simplicity in MethASM)
+  Type *new_enum_type = type_create(TYPE_ENUM, enum_decl->name);
+  if (!new_enum_type) {
+    type_checker_set_error_at_location(checker, enum_decl_node->location,
+                                       "Failed to create enum type");
+    return 0;
+  }
+
+  // Create and register the enum type symbol
+  Symbol *enum_symbol =
+      symbol_create(enum_decl->name, SYMBOL_ENUM, new_enum_type);
+  if (!enum_symbol) {
+    type_destroy(new_enum_type);
+    return 0;
+  }
+
+  if (!symbol_table_declare(checker->symbol_table, enum_symbol)) {
+    symbol_destroy(enum_symbol);
+    return 0;
+  }
+
+  long long current_val = 0;
+
+  for (size_t i = 0; i < enum_decl->variant_count; i++) {
+    EnumVariant *variant = &enum_decl->variants[i];
+
+    if (variant->value) {
+      ASTNode *val_node = variant->value;
+      if (val_node->type == AST_NUMBER_LITERAL) {
+        current_val = ((NumberLiteral *)val_node->data)->int_value;
+      } else if (val_node->type == AST_UNARY_EXPRESSION &&
+                 ((UnaryExpression *)val_node->data)->operand->type ==
+                     AST_NUMBER_LITERAL &&
+                 strcmp(((UnaryExpression *)val_node->data)->operator, "-") ==
+                     0) {
+        current_val = -((NumberLiteral *)((UnaryExpression *)val_node->data)
+                            ->operand->data)
+                           ->int_value;
+      } else {
+        type_checker_set_error_at_location(
+            checker, val_node->location,
+            "Enum variant initializer must be a constant integer");
+        return 0;
+      }
+    }
+
+    // Check if variant name is already taken
+    if (symbol_table_lookup_current_scope(checker->symbol_table,
+                                          variant->name)) {
+      type_checker_report_duplicate_declaration(
+          checker, enum_decl_node->location, variant->name);
+      return 0;
+    }
+
+    Symbol *sym = symbol_create(variant->name, SYMBOL_CONSTANT, new_enum_type);
+    if (!sym) {
+      return 0;
+    }
+    sym->data.constant.value = current_val;
+    sym->is_initialized = 1;
+    symbol_table_insert(checker->symbol_table, sym);
+
+    current_val++;
+  }
+
+  return 1;
+}
+
 int type_checker_process_declaration(TypeChecker *checker,
                                      ASTNode *declaration) {
   if (!checker || !declaration) {
@@ -1255,7 +1352,8 @@ int type_checker_process_declaration(TypeChecker *checker,
       return 0;
     }
 
-    Scope *current_scope = symbol_table_get_current_scope(checker->symbol_table);
+    Scope *current_scope =
+        symbol_table_get_current_scope(checker->symbol_table);
     if (var_decl->is_extern &&
         (!current_scope || current_scope->type != SCOPE_GLOBAL)) {
       type_checker_set_error_at_location(
@@ -1329,8 +1427,8 @@ int type_checker_process_declaration(TypeChecker *checker,
                                                          var_decl->name);
     if (existing) {
       if (existing->kind != SYMBOL_VARIABLE) {
-        type_checker_report_duplicate_declaration(checker, declaration->location,
-                                                  var_decl->name);
+        type_checker_report_duplicate_declaration(
+            checker, declaration->location, var_decl->name);
         return 0;
       }
       if (existing->is_extern != var_decl->is_extern) {
@@ -1342,8 +1440,8 @@ int type_checker_process_declaration(TypeChecker *checker,
         return 0;
       }
       if (!var_decl->is_extern) {
-        type_checker_report_duplicate_declaration(checker, declaration->location,
-                                                  var_decl->name);
+        type_checker_report_duplicate_declaration(
+            checker, declaration->location, var_decl->name);
         return 0;
       }
       if (!type_checker_types_equal(existing->type, var_type)) {
@@ -1379,8 +1477,8 @@ int type_checker_process_declaration(TypeChecker *checker,
     if (var_decl->is_extern) {
       const char *effective_link_name = type_checker_decl_link_name(
           var_decl->name, var_decl->is_extern, var_decl->link_name);
-      var_symbol->link_name = effective_link_name ? strdup(effective_link_name)
-                                                  : NULL;
+      var_symbol->link_name =
+          effective_link_name ? strdup(effective_link_name) : NULL;
       if (!var_symbol->link_name) {
         type_checker_set_error_at_location(
             checker, declaration->location,
@@ -1416,7 +1514,8 @@ int type_checker_process_declaration(TypeChecker *checker,
       return 0;
     }
 
-    Scope *current_scope = symbol_table_get_current_scope(checker->symbol_table);
+    Scope *current_scope =
+        symbol_table_get_current_scope(checker->symbol_table);
     if (func_decl->is_extern &&
         (!current_scope || current_scope->type != SCOPE_GLOBAL)) {
       type_checker_set_error_at_location(
@@ -1538,8 +1637,8 @@ int type_checker_process_declaration(TypeChecker *checker,
     if (func_decl->is_extern) {
       const char *effective_link_name = type_checker_decl_link_name(
           func_decl->name, func_decl->is_extern, func_decl->link_name);
-      func_symbol->link_name = effective_link_name ? strdup(effective_link_name)
-                                                   : NULL;
+      func_symbol->link_name =
+          effective_link_name ? strdup(effective_link_name) : NULL;
       if (!func_symbol->link_name) {
         type_checker_set_error_at_location(
             checker, declaration->location,

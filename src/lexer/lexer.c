@@ -290,6 +290,8 @@ Token lexer_next_token(Lexer *lexer) {
       token.type = TOKEN_FUNCTION;
     else if (strcmp(token.value, "struct") == 0)
       token.type = TOKEN_STRUCT;
+    else if (strcmp(token.value, "enum") == 0)
+      token.type = TOKEN_ENUM;
     else if (strcmp(token.value, "method") == 0)
       token.type = TOKEN_METHOD;
     else if (strcmp(token.value, "return") == 0)

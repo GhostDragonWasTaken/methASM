@@ -86,6 +86,22 @@ void ast_destroy_node(ASTNode *node) {
     }
     break;
   }
+  case AST_ENUM_DECLARATION: {
+    EnumDeclaration *enum_decl = (EnumDeclaration *)node->data;
+    if (enum_decl) {
+      free(enum_decl->name);
+      if (enum_decl->variants) {
+        for (size_t i = 0; i < enum_decl->variant_count; i++) {
+          free(enum_decl->variants[i].name);
+          // the 'value' node is a child of the enum decl node, so it's freed
+          // automatically
+        }
+        free(enum_decl->variants);
+      }
+      free(enum_decl);
+    }
+    break;
+  }
   case AST_FUNCTION_CALL: {
     CallExpression *call_expr = (CallExpression *)node->data;
     if (call_expr) {
@@ -368,6 +384,48 @@ ASTNode *ast_create_struct_declaration(const char *name, char **field_names,
 
   node->data = struct_decl;
 
+  return node;
+}
+
+ASTNode *ast_create_enum_declaration(const char *name, EnumVariant *variants,
+                                     size_t variant_count,
+                                     SourceLocation location) {
+  ASTNode *node = ast_create_node(AST_ENUM_DECLARATION, location);
+  if (!node)
+    return NULL;
+
+  EnumDeclaration *enum_decl = malloc(sizeof(EnumDeclaration));
+  if (!enum_decl) {
+    free(node);
+    return NULL;
+  }
+
+  enum_decl->name = name ? strdup(name) : NULL;
+  enum_decl->is_exported = 0;
+  enum_decl->variant_count = variant_count;
+
+  if (variant_count > 0 && variants) {
+    enum_decl->variants = malloc(variant_count * sizeof(EnumVariant));
+    if (!enum_decl->variants) {
+      if (enum_decl->name)
+        free(enum_decl->name);
+      free(enum_decl);
+      free(node);
+      return NULL;
+    }
+    for (size_t i = 0; i < variant_count; i++) {
+      enum_decl->variants[i].name =
+          variants[i].name ? strdup(variants[i].name) : NULL;
+      enum_decl->variants[i].value = variants[i].value;
+      if (variants[i].value) {
+        ast_add_child(node, variants[i].value);
+      }
+    }
+  } else {
+    enum_decl->variants = NULL;
+  }
+
+  node->data = enum_decl;
   return node;
 }
 

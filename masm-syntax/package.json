@@ -1,8 +1,8 @@
 {
   "name": "masm-syntax",
   "displayName": "MethASM Syntax Highlighting",
-  "description": "Syntax highlighting for MethASM (.masm) files",
-  "version": "0.1.0",
+  "description": "Syntax highlighting, folding, and editor support for MethASM (.masm) files",
+  "version": "0.2.0",
   "publisher": "methasm",
   "engines": {
     "vscode": "^1.74.0"
