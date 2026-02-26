@@ -1629,6 +1629,15 @@ int type_checker_process_declaration(TypeChecker *checker,
   }
 
   switch (declaration->type) {
+  case AST_DEFER_STATEMENT:
+    type_checker_set_error_at_location(checker, declaration->location,
+                                       "Defer statement outside of a function");
+    return 0;
+
+  case AST_ERRDEFER_STATEMENT:
+    type_checker_set_error_at_location(checker, declaration->location,
+                                       "Errdefer statement outside of a function");
+    return 0;
   case AST_VAR_DECLARATION: {
     VarDeclaration *var_decl = (VarDeclaration *)declaration->data;
     if (!var_decl || !var_decl->name) {
@@ -2378,8 +2387,9 @@ void type_checker_set_error_at_location(TypeChecker *checker,
   // If we have an error reporter, add the error to it
   if (checker->error_reporter) {
     char *message = checker->error_message;
-    error_reporter_add_error(checker->error_reporter, ERROR_SEMANTIC, location,
-                             message);
+    SourceSpan span = source_span_from_location(location, 1);
+    error_reporter_add_error_with_span(checker->error_reporter, ERROR_SEMANTIC,
+                                       span, message);
   }
 
   va_end(args);
@@ -2403,12 +2413,13 @@ void type_checker_report_type_mismatch(TypeChecker *checker,
   if (checker->error_reporter) {
     const char *suggestion =
         error_reporter_suggest_for_type_mismatch(expected, actual);
+    SourceSpan span = source_span_from_location(location, 1);
     if (suggestion) {
-      error_reporter_add_error_with_suggestion(
-          checker->error_reporter, ERROR_TYPE, location, error_msg, suggestion);
+      error_reporter_add_error_with_span_and_suggestion(
+          checker->error_reporter, ERROR_TYPE, span, error_msg, suggestion);
     } else {
-      error_reporter_add_error(checker->error_reporter, ERROR_TYPE, location,
-                               error_msg);
+      error_reporter_add_error_with_span(checker->error_reporter, ERROR_TYPE,
+                                         span, error_msg);
     }
   }
 }
@@ -2432,9 +2443,9 @@ void type_checker_report_undefined_symbol(TypeChecker *checker,
     char suggestion[256];
     snprintf(suggestion, sizeof(suggestion), "declare '%s' before using it",
              symbol_name);
-    error_reporter_add_error_with_suggestion(checker->error_reporter,
-                                             ERROR_SEMANTIC, location,
-                                             error_msg, suggestion);
+    SourceSpan span = source_span_from_location(location, strlen(symbol_name));
+    error_reporter_add_error_with_span_and_suggestion(
+        checker->error_reporter, ERROR_SEMANTIC, span, error_msg, suggestion);
   }
 }
 
@@ -2456,9 +2467,9 @@ void type_checker_report_duplicate_declaration(TypeChecker *checker,
     char suggestion[256];
     snprintf(suggestion, sizeof(suggestion),
              "use a different name or remove the duplicate declaration");
-    error_reporter_add_error_with_suggestion(checker->error_reporter,
-                                             ERROR_SEMANTIC, location,
-                                             error_msg, suggestion);
+    SourceSpan span = source_span_from_location(location, strlen(symbol_name));
+    error_reporter_add_error_with_span_and_suggestion(
+        checker->error_reporter, ERROR_SEMANTIC, span, error_msg, suggestion);
   }
 }
 
@@ -2490,8 +2501,9 @@ void type_checker_report_scope_violation(TypeChecker *checker,
       snprintf(suggestion, sizeof(suggestion), "check the scope rules for '%s'",
                symbol_name);
     }
-    error_reporter_add_error_with_suggestion(
-        checker->error_reporter, ERROR_SCOPE, location, error_msg, suggestion);
+    SourceSpan span = source_span_from_location(location, strlen(symbol_name));
+    error_reporter_add_error_with_span_and_suggestion(
+        checker->error_reporter, ERROR_SCOPE, span, error_msg, suggestion);
   }
 }
 
@@ -2504,6 +2516,63 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
     return 0;
 
   switch (statement->type) {
+  case AST_DEFER_STATEMENT: {
+    if (!checker->current_function) {
+      type_checker_set_error_at_location(checker, statement->location,
+                                         "Defer statement outside of a function");
+      return 0;
+    }
+
+    DeferStatement *defer_stmt = (DeferStatement *)statement->data;
+    if (!defer_stmt || !defer_stmt->statement) {
+      type_checker_set_error_at_location(checker, statement->location,
+                                         "Invalid defer statement");
+      return 0;
+    }
+
+    switch (defer_stmt->statement->type) {
+    case AST_FUNCTION_CALL:
+    case AST_ASSIGNMENT:
+    case AST_PROGRAM:
+      break;
+    default:
+      type_checker_set_error_at_location(
+          checker, defer_stmt->statement->location,
+          "Deferred statement must be a function call, assignment, or block");
+      return 0;
+    }
+
+    return type_checker_check_statement(checker, defer_stmt->statement);
+  }
+
+  case AST_ERRDEFER_STATEMENT: {
+    if (!checker->current_function) {
+      type_checker_set_error_at_location(checker, statement->location,
+                                         "Errdefer statement outside of a function");
+      return 0;
+    }
+
+    DeferStatement *defer_stmt = (DeferStatement *)statement->data;
+    if (!defer_stmt || !defer_stmt->statement) {
+      type_checker_set_error_at_location(checker, statement->location,
+                                         "Invalid errdefer statement");
+      return 0;
+    }
+
+    switch (defer_stmt->statement->type) {
+    case AST_FUNCTION_CALL:
+    case AST_ASSIGNMENT:
+    case AST_PROGRAM:
+      break;
+    default:
+      type_checker_set_error_at_location(
+          checker, defer_stmt->statement->location,
+          "Errdeferred statement must be a function call, assignment, or block");
+      return 0;
+    }
+
+    return type_checker_check_statement(checker, defer_stmt->statement);
+  }
   case AST_VAR_DECLARATION:
   case AST_FUNCTION_DECLARATION:
   case AST_STRUCT_DECLARATION:

@@ -25,11 +25,15 @@ No compound assignment (`+=`, `-=`, `*=`, `/=`). Use `x = x + 1` instead of `x +
 
 No labeled `break` or `continue` (e.g. `break outer`). Use flags or restructure nested loops.
 
+Deferred calls capture variables by reference, not by value. In loops, copy the current value into a temporary first if the deferred call should see the declaration-time value.
+
+`errdefer` is function-only and convention-based. It is valid only inside functions, and any non-zero explicit return value is treated as an error.
+
 Unreachable code analysis is currently block-local and conservative; some dead paths in complex control-flow may not be diagnosed yet.
 
 No function pointers. Functions cannot be passed as arguments or stored in variables. For callbacks, use C externs.
 
-No string concatenation with `+`. Allocate a buffer and copy bytes manually.
+String concatenation via `+` is now supported, but it allocates via the GC runtime (`gc_alloc`). Link `gc.c` and initialize the runtime before using `string + string`.
 
 No conditional imports. All `import` directives are unconditional; there is no platform or flag-based import.
 

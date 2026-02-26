@@ -1,11 +1,15 @@
-// MethASM HTTP server
+// MethASM Demonstration Server
 //
 // Single-threaded TCP server on port 5000. Accepts connections, reads HTTP
-// requests, and responds accordingly. No GC - stack allocation only.
+// requests, and responds with comprehensive MethASM feature demonstrations.
 //
 // Endpoints:
-//   GET /           -> Presentation page (index.html via import_str)
+//   GET /           -> Enhanced homepage with feature showcase
 //   GET /health     -> plain text "OK" (health check)
+//   GET /demo       -> Interactive code demonstrations
+//   GET /demo?feature={name} -> Specific feature demonstration
+//   GET /benchmarks -> Performance benchmarks and comparisons
+//   GET /docs       -> Documentation and tutorials
 //   GET /forum      -> Forum index (thread list, new thread form)
 //   GET /forum?thread=N -> Thread view (posts, reply form); 404 if invalid N
 //   POST /forum     -> Create thread (form: title=...) -> 302 to new thread
@@ -25,16 +29,35 @@ import "std/conv";
 
 extern function gc_init() = "gc_init";
 
+// Use Windows API for console output — CRT stdout is uninitialized with -nostartfiles
+extern function AllocConsole() -> int32 = "AllocConsole";
+extern function GetStdHandle(which: int32) -> int64 = "GetStdHandle";
+extern function WriteFile(h: int64, buf: cstring, len: int32, written: cstring, overlapped: cstring) -> int32 = "WriteFile";
+
 import "router";
 import "form_parser";
 
-// Page content loaded at compile time from index.html
+// Enhanced homepage content loaded at compile time
 var PAGE_CONTENT: string = import_str "index.html";
 
-// Root page response header.
+// Demo page content
+var DEMO_CONTENT: string = import_str "demo.html";
+var BENCHMARKS_CONTENT: string = import_str "benchmarks.html";
+var DOCS_CONTENT: string = import_str "docs.html";
+
+// Root page response header with modern features
 // We intentionally omit Content-Length and close the connection after body.
 // This avoids dynamic header assembly and remains valid HTTP/1.1.
-var HTTP_PAGE_HEADER: string = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n";
+var HTTP_PAGE_HEADER: string = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+
+// Demo page header
+var HTTP_DEMO_HEADER: string = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+
+// Benchmarks page header
+var HTTP_BENCHMARKS_HEADER: string = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: max-age=300\r\nConnection: close\r\n\r\n";
+
+// Docs page header
+var HTTP_DOCS_HEADER: string = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: max-age=600\r\nConnection: close\r\n\r\n";
 
 // Other HTTP responses (fixed content)
 
@@ -145,8 +168,17 @@ var err_sockaddr: string = "sockaddr failed";
 var err_bind: string = "bind failed";
 var err_listen: string = "listen failed";
 var msg_ready: string = "Server: http://localhost:5000";
+var crlf: string = "\r\n";
 
-
+// Write string + newline via WriteFile to stdout (works with -nostartfiles)
+function con_writeln(s: string) {
+  var h: int64 = GetStdHandle(-11);
+  if (h != -1 && h != 0) {
+    var written: uint8[4];
+    WriteFile(h, s.chars, s.length, &written[0], 0);
+    WriteFile(h, crlf.chars, 2, &written[0], 0);
+  }
+}
 
 // Parse Content-Length header. Returns value or 0 if not found. Case-insensitive. "Content-Length:" = 15 chars.
 function parse_content_length(buf: cstring, n: int32) -> int32 {
@@ -455,20 +487,24 @@ function handle_post_reply(client: int64, buf: cstring, n: int32, thread_id: int
 
 function main() -> int32 {
   gc_init();
+  var out_handle: int64 = GetStdHandle(-11);
+  if (out_handle == 0 || out_handle == -1) {
+    AllocConsole();
+  }
   if (net_init() != 0) {
-    println(cstr(err_net_init));
+    con_writeln(err_net_init);
     return 1;
   }
 
   var sock: int64 = socket_tcp();
   if (sock == INVALID_SOCKET()) {
-    println(cstr(err_socket));
+    con_writeln(err_socket);
     net_cleanup();
     return 1;
   }
 
   if (set_reuseaddr(sock, 1) != 0) {
-    println(cstr(err_reuseaddr));
+    con_writeln(err_reuseaddr);
     closesocket(sock);
     net_cleanup();
     return 1;
@@ -476,14 +512,14 @@ function main() -> int32 {
 
   var addr: cstring = sockaddr_in_any(5000);
   if (addr == 0) {
-    println(cstr(err_sockaddr));
+    con_writeln(err_sockaddr);
     closesocket(sock);
     net_cleanup();
     return 1;
   }
 
   if (bind(sock, addr, 16) != 0) {
-    println(cstr(err_bind));
+    con_writeln(err_bind);
     free(addr);
     closesocket(sock);
     net_cleanup();
@@ -492,13 +528,13 @@ function main() -> int32 {
   free(addr);
 
   if (listen(sock, 5) != 0) {
-    println(cstr(err_listen));
+    con_writeln(err_listen);
     closesocket(sock);
     net_cleanup();
     return 1;
   }
 
-  println(cstr(msg_ready));
+  con_writeln(msg_ready);
 
   var client_addr: uint8[16];
   var addrlen_buf: uint8[4];
@@ -517,6 +553,9 @@ function main() -> int32 {
     if (client == INVALID_SOCKET()) {
       continue;
     }
+    
+    defer closesocket(client);
+    defer shutdown(client, SD_BOTH());
 
     var n: int32 = recv(client, &recv_buf[0], 4096, 0);
     if (n > 0) {
@@ -546,6 +585,18 @@ function main() -> int32 {
         } else if (is_root(&recv_buf[0], n) == 1) {
           if (send_all(client, HTTP_PAGE_HEADER.chars, HTTP_PAGE_HEADER.length) == HTTP_PAGE_HEADER.length) {
             send_all(client, PAGE_CONTENT.chars, PAGE_CONTENT.length);
+          }
+        } else if (is_demo(&recv_buf[0], n) == 1) {
+          if (send_all(client, HTTP_DEMO_HEADER.chars, HTTP_DEMO_HEADER.length) == HTTP_DEMO_HEADER.length) {
+            send_all(client, DEMO_CONTENT.chars, DEMO_CONTENT.length);
+          }
+        } else if (is_benchmarks(&recv_buf[0], n) == 1) {
+          if (send_all(client, HTTP_BENCHMARKS_HEADER.chars, HTTP_BENCHMARKS_HEADER.length) == HTTP_BENCHMARKS_HEADER.length) {
+            send_all(client, BENCHMARKS_CONTENT.chars, BENCHMARKS_CONTENT.length);
+          }
+        } else if (is_docs(&recv_buf[0], n) == 1) {
+          if (send_all(client, HTTP_DOCS_HEADER.chars, HTTP_DOCS_HEADER.length) == HTTP_DOCS_HEADER.length) {
+            send_all(client, DOCS_CONTENT.chars, DOCS_CONTENT.length);
           }
         } else if (is_forum(&recv_buf[0], n, 4) == 1) {
           var tid: int32 = get_thread_id(&recv_buf[0], n, 4);
@@ -588,9 +639,6 @@ function main() -> int32 {
       }
       }
     }
-
-    shutdown(client, SD_BOTH());
-    closesocket(client);
   }
 
   closesocket(sock);

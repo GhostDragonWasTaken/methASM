@@ -440,6 +440,10 @@ Token lexer_next_token(Lexer *lexer) {
       token.type = TOKEN_BREAK;
     else if (strcmp(token.value, "continue") == 0)
       token.type = TOKEN_CONTINUE;
+    else if (strcmp(token.value, "defer") == 0)
+      token.type = TOKEN_DEFER;
+    else if (strcmp(token.value, "errdefer") == 0)
+      token.type = TOKEN_ERRDEFER;
     else if (strcmp(token.value, "asm") == 0)
       token.type = TOKEN_ASM;
     else if (strcmp(token.value, "this") == 0)

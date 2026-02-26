@@ -352,7 +352,86 @@ $cases = @(
   @{ Name = "stress_integrated"; Path = "tests/test_stress_integrated.masm"; ShouldSucceed = $true },
   @{ Name = "bitwise"; Path = "tests/test_bitwise.masm"; ShouldSucceed = $true },
   @{ Name = "string_concat"; Path = "tests/test_string_concat.masm"; ShouldSucceed = $true },
+  @{ Name = "defer_single"; Path = "tests/test_defer_single.masm"; ShouldSucceed = $true },
+  @{ Name = "defer_lifo"; Path = "tests/test_defer_lifo.masm"; ShouldSucceed = $true },
+  @{ Name = "defer_nested"; Path = "tests/test_defer_nested_control_flow.masm"; ShouldSucceed = $true },
+  @{ Name = "defer_early_return"; Path = "tests/test_defer_early_return.masm"; ShouldSucceed = $true },
+  @{
+    Name          = "defer_block_exit"
+    Path          = "tests/test_defer_block_exit.masm"
+    ShouldSucceed = $true
+    AsmMustMatch  = @("(?s)global main.*?main:.*?; IR call: inner_defer.*?; IR call: after_block.*?; IR call: outer_defer")
+  },
+  @{
+    Name          = "defer_if_else_branch_exit"
+    Path          = "tests/test_defer_if_else_branch_exit.masm"
+    ShouldSucceed = $true
+    AsmMustMatch  = @(
+      "(?s); IR call: then_body.*?; IR call: then_defer",
+      "(?s); IR call: else_body.*?; IR call: else_defer",
+      "(?s); IR call: after_if"
+    )
+  },
+  @{
+    Name          = "defer_loop_iteration"
+    Path          = "tests/test_defer_loop_iteration.masm"
+    ShouldSucceed = $true
+    AsmMustMatch  = @(
+      "(?s); IR call: iter_body.*?; IR call: iter_defer.*?\bjmp\b"
+    )
+  },
+  @{
+    Name          = "errdefer_runs_on_error"
+    Path          = "tests/test_errdefer_runs_on_error.masm"
+    ShouldSucceed = $true
+    AsmMustMatch  = @(
+      "(?s)global main\s*(\r\n|\n)\s*(\r\n|\n)main:.*?ir_errdefer_ok_\d+:",
+      "(?s)global main\s*(\r\n|\n)\s*(\r\n|\n)main:.*?; IR call: err \(0 args\).*?ir_errdefer_ok_\d+:",
+      "(?s)global main\s*(\r\n|\n)\s*(\r\n|\n)main:.*?; IR call: ok \(0 args\).*?ir_errdefer_ok_\d+:"
+    )
+  },
+  @{
+    Name          = "errdefer_skipped_on_success"
+    Path          = "tests/test_errdefer_skipped_on_success.masm"
+    ShouldSucceed = $true
+    AsmMustMatch  = @(
+      "(?s)global main\s*(\r\n|\n)\s*(\r\n|\n)main:.*?ir_errdefer_ok_\d+:.*?; IR call: ok \(0 args\)"
+    )
+    AsmMustNotMatch = @(
+      "(?s)global main\s*(\r\n|\n)\s*(\r\n|\n)main:.*?ir_errdefer_ok_\d+:.*?; IR call: err \(0 args\)"
+    )
+  },
+  @{
+    Name          = "errdefer_multiple_returns"
+    Path          = "tests/test_errdefer_multiple_returns.masm"
+    ShouldSucceed = $true
+    AsmMustMatch  = @(
+      "(?s); IR call: err.*?; IR call: ok",
+      "(?s)errdefer_ok.*?; IR call: ok"
+    )
+  },
   @{ Name = "web_server_import"; Path = "web/server.masm"; ShouldSucceed = $true },
+
+  # New errdefer tests
+  @{ Name = "errdefer_interleaved_with_defer"; Path = "tests/test_errdefer_interleaved_with_defer.masm"; ShouldSucceed = $true },
+  @{ Name = "errdefer_block_exit"; Path = "tests/test_errdefer_block_exit.masm"; ShouldSucceed = $true },
+  @{ Name = "errdefer_nested_if_else"; Path = "tests/test_errdefer_nested_if_else.masm"; ShouldSucceed = $true },
+  @{ Name = "errdefer_loop_with_break_continue"; Path = "tests/test_errdefer_loop_with_break_continue.masm"; ShouldSucceed = $true },
+  @{ Name = "errdefer_top_level"; Path = "tests/test_errdefer_top_level.masm"; ShouldSucceed = $false; Pattern = "Defer statement outside of a function|Errdefer statement outside of a function" },
+  @{ Name = "defer_block_statement"; Path = "tests/test_defer_block_statement.masm"; ShouldSucceed = $true },
+  @{ Name = "errdefer_assignment_statement"; Path = "tests/test_errdefer_assignment_statement.masm"; ShouldSucceed = $true },
+  @{
+    Name          = "errdefer_implicit_fallthrough"
+    Path          = "tests/test_errdefer_implicit_fallthrough.masm"
+    ShouldSucceed = $true
+    AsmMustMatch  = @(
+      "\bcall ok\b"
+    )
+    AsmMustNotMatch = @(
+      "\bcall err\b"
+    )
+  },
+  @{ Name = "defer_complex_interleaving"; Path = "tests/test_defer_complex_interleaving.masm"; ShouldSucceed = $true },
 
   @{ Name = "err_unknown_char"; Path = "tests/err_unknown_char.masm"; ShouldSucceed = $false; Pattern = "Lexical error|error" },
   @{ Name = "err_invalid_hex"; Path = "tests/err_invalid_hex.masm"; ShouldSucceed = $false; Pattern = "Invalid hexadecimal literal" },
@@ -382,6 +461,7 @@ $cases = @(
   @{ Name = "err_member_on_non_struct"; Path = "tests/err_member_on_non_struct.masm"; ShouldSucceed = $false; Pattern = "Cannot access field on non-struct type" },
   @{ Name = "err_switch_multiple_default"; Path = "tests/err_switch_multiple_default.masm"; ShouldSucceed = $false; Pattern = "Only one default case is allowed|only contain one default clause" },
   @{ Name = "err_return_type_mismatch"; Path = "tests/err_return_type_mismatch.masm"; ShouldSucceed = $false; Pattern = "Type mismatch" },
+  @{ Name = "err_defer_top_level"; Path = "tests/err_defer_top_level.masm"; ShouldSucceed = $false; Pattern = "Defer statement outside of a function" },
   @{
     Name          = "err_import_private"
     Path          = "tests/err_import_private.masm"

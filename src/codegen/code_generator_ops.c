@@ -435,12 +435,17 @@ void code_generator_load_variable(CodeGenerator *generator,
     }
 
     if (symbol->type && symbol->type->kind == TYPE_STRING) {
-      // Strings are 16-byte records {chars, length}; expression values are
-      // pointers to that record.
+      // Strings are represented as pointers to {chars, length} records in
+      // expressions. Globals and locals differ in storage layout.
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
         code_generator_emit(
             generator, "    lea rax, [rel %s]  ; Address of global string\n",
             resolved_name);
+      } else if (symbol->kind == SYMBOL_PARAMETER) {
+        // String parameters are currently homed as pointers to string records.
+        code_generator_emit(
+            generator, "    mov rax, qword [rbp - %d]  ; String param ptr\n",
+            symbol->data.variable.memory_offset);
       } else {
         int offset = symbol->data.variable.memory_offset;
         code_generator_emit(
@@ -591,6 +596,14 @@ void code_generator_store_variable(CodeGenerator *generator,
     }
 
     if (symbol->type && symbol->type->kind == TYPE_STRING) {
+      if (symbol->kind == SYMBOL_PARAMETER) {
+        // Parameters store a pointer to a string record in their home slot.
+        code_generator_emit(generator,
+                            "    mov qword [rbp - %d], rax  ; String param ptr\n",
+                            symbol->data.variable.memory_offset);
+        return;
+      }
+
       // Source value in rax is a pointer to {chars, length}; copy the full
       // 16-byte record into destination storage.
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
@@ -945,6 +958,36 @@ void code_generator_generate_member_access(CodeGenerator *generator,
     return;
   }
 
+  Type *object_type =
+      code_generator_infer_expression_type(generator, access_data->object);
+  if (object_type && object_type->kind == TYPE_STRING) {
+    int field_offset = code_generator_get_field_offset(generator, object_type,
+                                                       access_data->member);
+    if (field_offset < 0) {
+      code_generator_set_error(generator,
+                               "Cannot determine field offset for '%s'",
+                               access_data->member);
+      return;
+    }
+    Type *field_type = type_get_field_type(object_type, access_data->member);
+    if (!field_type) {
+      code_generator_set_error(generator,
+                               "Cannot resolve member access target type");
+      return;
+    }
+    int field_size = code_generator_get_type_storage_size(field_type);
+    code_generator_generate_expression(generator, access_data->object);
+    if (generator->has_error) {
+      return;
+    }
+    if (field_offset > 0) {
+      code_generator_emit(generator, "    add rax, %d       ; String field\n",
+                          field_offset);
+    }
+    code_generator_emit_load_value_from_address(generator, field_size);
+    return;
+  }
+
   Type *field_type = NULL;
   if (!code_generator_generate_lvalue_address(generator, member_access,
                                               &field_type)) {
@@ -1108,8 +1151,16 @@ static int code_generator_generate_lvalue_address(CodeGenerator *generator,
                           resolved_name);
     } else {
       int offset = symbol->data.variable.memory_offset;
-      code_generator_emit(
-          generator, "    lea rax, [rbp - %d]  ; Address of local\n", offset);
+      if (symbol->kind == SYMBOL_PARAMETER && symbol->type &&
+          symbol->type->kind == TYPE_STRING) {
+        // String parameters are homed as pointers to string records.
+        code_generator_emit(generator,
+                            "    mov rax, qword [rbp - %d]  ; String param record ptr\n",
+                            offset);
+      } else {
+        code_generator_emit(
+            generator, "    lea rax, [rbp - %d]  ; Address of local\n", offset);
+      }
     }
     return 1;
   }
@@ -1122,6 +1173,19 @@ static int code_generator_generate_lvalue_address(CodeGenerator *generator,
     }
 
     Type *object_type = NULL;
+    int object_is_string_param = 0;
+    if (access->object && access->object->type == AST_IDENTIFIER) {
+      Identifier *obj_id = (Identifier *)access->object->data;
+      if (obj_id && obj_id->name) {
+        Symbol *obj_symbol =
+            symbol_table_lookup(generator->symbol_table, obj_id->name);
+        if (obj_symbol && obj_symbol->kind == SYMBOL_PARAMETER &&
+            obj_symbol->type && obj_symbol->type->kind == TYPE_STRING) {
+          object_is_string_param = 1;
+        }
+      }
+    }
+
     if (!code_generator_generate_lvalue_address(generator, access->object,
                                                 &object_type)) {
       return 0;
@@ -1131,6 +1195,13 @@ static int code_generator_generate_lvalue_address(CodeGenerator *generator,
       code_generator_set_error(
           generator, "Member access requires struct or string object");
       return 0;
+    }
+
+    if (object_is_string_param) {
+      // String parameters are homed as pointers to string records, so member
+      // access needs one dereference before applying field offsets.
+      code_generator_emit(
+          generator, "    mov rax, qword [rax]  ; Deref string param record\n");
     }
 
     int field_offset =

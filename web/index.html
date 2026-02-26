@@ -3,11 +3,11 @@
 <head>
 <meta charset='UTF-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<meta name='description' content='MethASM - A typed, assembly-inspired language compiling to x86-64 NASM with advanced features.'>
+<meta name='description' content='MethASM - A typed, assembly-inspired language compiling to x86-64 NASM with advanced features like garbage collection, C interop, and modules.'>
 <title>MethASM — Premium Typed Assembly Language</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg-color: #05050A;
@@ -16,8 +16,13 @@
     --accent-1: #6366F1;
     --accent-2: #8B5CF6;
     --accent-3: #EC4899;
+    --accent-4: #10B981;
     --glass-bg: rgba(255, 255, 255, 0.03);
     --glass-border: rgba(255, 255, 255, 0.08);
+    --code-bg: #0D1117;
+    --success: #10B981;
+    --warning: #F59E0B;
+    --error: #EF4444;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -49,9 +54,36 @@
   }
 
   .container {
-    max-width: 1000px;
+    max-width: 1200px;
     margin: 0 auto;
-    padding: 4rem 2rem;
+    padding: 2rem;
+  }
+
+  /* Navigation */
+  nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 0;
+    margin-bottom: 3rem;
+    border-bottom: 1px solid var(--glass-border);
+  }
+
+  .nav-links {
+    display: flex;
+    gap: 2rem;
+    align-items: center;
+  }
+
+  .nav-link {
+    color: var(--text-muted);
+    text-decoration: none;
+    font-weight: 500;
+    transition: color 0.3s ease;
+  }
+
+  .nav-link:hover {
+    color: var(--accent-1);
   }
 
   /* Hero Section */
@@ -62,20 +94,22 @@
   }
 
   .hero h1 {
-    font-size: 4.5rem;
+    font-size: clamp(2.5rem, 8vw, 5rem);
     font-weight: 700;
-    margin-bottom: 1rem;
-    background: linear-gradient(135deg, var(--text-main) 0%, var(--accent-1) 50%, var(--accent-3) 100%);
+    margin-bottom: 1.5rem;
+    background: linear-gradient(135deg, var(--text-main) 0%, var(--accent-1) 30%, var(--accent-3) 70%, var(--accent-4) 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    letter-spacing: -1px;
+    letter-spacing: -2px;
+    line-height: 0.9;
   }
 
-  .hero p {
-    font-size: 1.25rem;
+  .hero .subtitle {
+    font-size: 1.4rem;
     color: var(--text-muted);
-    max-width: 600px;
-    margin: 0 auto 2rem;
+    max-width: 700px;
+    margin: 0 auto 3rem;
+    font-weight: 400;
   }
 
   .badges {
@@ -83,15 +117,15 @@
     justify-content: center;
     flex-wrap: wrap;
     gap: 0.75rem;
-    margin-bottom: 2.5rem;
+    margin-bottom: 3rem;
   }
 
   .badge {
     background: var(--glass-bg);
     border: 1px solid var(--glass-border);
-    padding: 0.4rem 1rem;
-    border-radius: 20px;
-    font-size: 0.85rem;
+    padding: 0.5rem 1.2rem;
+    border-radius: 25px;
+    font-size: 0.9rem;
     font-weight: 500;
     color: #C7D2FE;
     backdrop-filter: blur(10px);
@@ -108,15 +142,17 @@
     display: flex;
     justify-content: center;
     gap: 1rem;
+    flex-wrap: wrap;
   }
 
   .btn {
     display: inline-block;
-    padding: 0.8rem 2rem;
-    border-radius: 8px;
+    padding: 1rem 2.5rem;
+    border-radius: 12px;
     text-decoration: none;
     font-weight: 600;
     transition: all 0.3s ease;
+    font-size: 1rem;
   }
 
   .btn-primary {
@@ -142,100 +178,218 @@
     border-color: rgba(255, 255, 255, 0.2);
   }
 
-  /* Grid layout for features */
+  /* Features Grid */
+  .features-section {
+    margin-bottom: 5rem;
+  }
+
+  .section-title {
+    text-align: center;
+    font-size: 2.5rem;
+    font-weight: 700;
+    margin-bottom: 3rem;
+    background: linear-gradient(135deg, var(--text-main) 0%, var(--accent-1) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
     gap: 2rem;
-    margin-bottom: 4rem;
+    margin-bottom: 3rem;
   }
 
   .card {
     background: var(--glass-bg);
     border: 1px solid var(--glass-border);
-    border-radius: 16px;
-    padding: 2rem;
+    border-radius: 20px;
+    padding: 2.5rem;
     backdrop-filter: blur(10px);
     transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
     animation: fadeUp 0.8s ease-out backwards;
+    position: relative;
+    overflow: hidden;
   }
 
-  .card:nth-child(2) { animation-delay: 0.1s; }
-  .card:nth-child(3) { animation-delay: 0.2s; }
-  .card:nth-child(4) { animation-delay: 0.3s; }
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--accent-1), var(--accent-2), var(--accent-3));
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+
+  .card:hover::before {
+    opacity: 1;
+  }
+
+  .card:nth-child(1) { animation-delay: 0.1s; }
+  .card:nth-child(2) { animation-delay: 0.2s; }
+  .card:nth-child(3) { animation-delay: 0.3s; }
+  .card:nth-child(4) { animation-delay: 0.4s; }
+  .card:nth-child(5) { animation-delay: 0.5s; }
+  .card:nth-child(6) { animation-delay: 0.6s; }
 
   .card:hover {
-    transform: translateY(-5px);
+    transform: translateY(-8px);
     border-color: rgba(139, 92, 246, 0.5);
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 15px rgba(139, 92, 246, 0.2);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), 0 0 20px rgba(139, 92, 246, 0.2);
+  }
+
+  .card-icon {
+    font-size: 2.5rem;
+    margin-bottom: 1.5rem;
+    display: block;
   }
 
   .card h3 {
-    font-size: 1.3rem;
+    font-size: 1.5rem;
     margin-bottom: 1rem;
     color: white;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
+    font-weight: 600;
   }
 
   .card p {
     color: var(--text-muted);
-    font-size: 0.95rem;
+    font-size: 1rem;
+    line-height: 1.7;
   }
 
-  /* Terminal Window */
-  .terminal {
-    background: #0D1117;
+  /* Code Showcase */
+  .code-showcase {
+    background: var(--code-bg);
     border: 1px solid #30363D;
-    border-radius: 12px;
+    border-radius: 16px;
     overflow: hidden;
-    margin-bottom: 4rem;
+    margin-bottom: 5rem;
     box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
   }
 
-  .terminal-header {
+  .showcase-header {
     background: #161B22;
-    padding: 0.75rem 1rem;
+    padding: 1rem 1.5rem;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    justify-content: space-between;
     border-bottom: 1px solid #30363D;
   }
 
-  .dot {
-    width: 12px; height: 12px;
-    border-radius: 50%;
+  .showcase-title {
+    color: var(--text-main);
+    font-weight: 600;
+    font-size: 1.1rem;
   }
 
-  .dot.red { background: #FF5A52; }
-  .dot.yellow { background: #E6C029; }
-  .dot.green { background: #52C22B; }
+  .showcase-tabs {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .tab {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+  }
+
+  .tab.active {
+    background: var(--accent-1);
+    color: white;
+    border-color: var(--accent-1);
+  }
+
+  .code-content {
+    display: none;
+  }
+
+  .code-content.active {
+    display: block;
+  }
 
   pre {
-    padding: 1.5rem;
+    padding: 2rem;
     overflow-x: auto;
+    margin: 0;
   }
 
   code {
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.9rem;
+    line-height: 1.6;
   }
 
-  /* Syntax Highlighting Mock */
-  .k { color: #FF7B72; } /* Keyword */
-  .f { color: #D2A8FF; } /* Function */
+  /* Syntax Highlighting */
+  .k { color: #FF7B72; font-weight: 500; } /* Keyword */
+  .f { color: #D2A8FF; font-weight: 500; } /* Function */
   .s { color: #A5D6FF; } /* String */
-  .c { color: #8B949E; } /* Comment */
+  .c { color: #8B949E; font-style: italic; } /* Comment */
+  .t { color: #FFA657; } /* Type */
+  .n { color: #79C0FF; } /* Number */
 
+  /* Stats Section */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 2rem;
+    margin-bottom: 5rem;
+  }
+
+  .stat-card {
+    text-align: center;
+    padding: 2rem;
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    backdrop-filter: blur(10px);
+  }
+
+  .stat-number {
+    font-size: 3rem;
+    font-weight: 700;
+    color: var(--accent-1);
+    margin-bottom: 0.5rem;
+  }
+
+  .stat-label {
+    color: var(--text-muted);
+    font-size: 1rem;
+  }
+
+  /* Footer */
   footer {
     text-align: center;
-    padding-top: 2rem;
+    padding: 3rem 0;
     border-top: 1px solid var(--glass-border);
     color: var(--text-muted);
-    font-size: 0.9rem;
   }
 
+  .footer-links {
+    display: flex;
+    justify-content: center;
+    gap: 2rem;
+    margin-bottom: 2rem;
+  }
+
+  .footer-link {
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.3s ease;
+  }
+
+  .footer-link:hover {
+    color: var(--accent-1);
+  }
+
+  /* Animations */
   @keyframes slideUp {
     from { opacity: 0; transform: translateY(30px); }
     to { opacity: 1; transform: translateY(0); }
@@ -245,72 +399,225 @@
     from { opacity: 0; transform: translateY(20px); }
     to { opacity: 1; transform: translateY(0); }
   }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .nav-links {
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .hero h1 {
+      font-size: 3rem;
+    }
+
+    .grid {
+      grid-template-columns: 1fr;
+    }
+
+    .stats {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
 </style>
 </head>
 <body>
   <div class="bg-mesh"></div>
   
   <div class="container">
+    <nav>
+      <div class="nav-links">
+        <a href="/" class="nav-link">Home</a>
+        <a href="/demo" class="nav-link">Demo</a>
+        <a href="/benchmarks" class="nav-link">Benchmarks</a>
+        <a href="/docs" class="nav-link">Docs</a>
+        <a href="/forum" class="nav-link">Forum</a>
+      </div>
+    </nav>
+
     <header class="hero">
       <h1>MethASM</h1>
-      <p>A typed, assembly-inspired language with C interop and garbage collection, compiling to x86-64 NASM assembly.</p>
+      <p class="subtitle">A typed, assembly-inspired language with C interop and garbage collection, compiling to high-performance x86-64 NASM assembly.</p>
       
       <div class="badges">
-        <span class="badge">Statically Typed</span>
-        <span class="badge">Low-level Control</span>
-        <span class="badge">C Interop</span>
-        <span class="badge">Module System</span>
-        <span class="badge">Built-in GC</span>
+        <span class="badge">🔒 Statically Typed</span>
+        <span class="badge">⚡ Zero-Cost Abstractions</span>
+        <span class="badge">🔗 Native C Interop</span>
+        <span class="badge">📦 Module System</span>
+        <span class="badge">🗑️ Conservative GC</span>
+        <span class="badge">🎯 x86-64 Native</span>
       </div>
 
       <div class="cta-buttons">
-        <a href="#features" class="btn btn-secondary">Explore Features</a>
-        <a href="/forum" class="btn btn-primary">Join the Forum</a>
+        <a href="/demo" class="btn btn-primary">Try Interactive Demo</a>
+        <a href="/docs" class="btn btn-secondary">Read Documentation</a>
       </div>
     </header>
 
-    <div class="terminal">
-      <div class="terminal-header">
-        <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
+    <section class="features-section">
+      <h2 class="section-title">Language Features</h2>
+      <div class="grid">
+        <div class="card">
+          <span class="card-icon">⚡</span>
+          <h3>Explicit Control</h3>
+          <p>No hidden magic. All variables and parameters have explicit types. Structured control flow with <code>if</code>, <code>while</code>, <code>for</code>, and <code>switch</code> statements. Compile to efficient x86-64 assembly.</p>
+        </div>
+        
+        <div class="card">
+          <span class="card-icon">🛡️</span>
+          <h3>Memory Management</h3>
+          <p>Leverage the built-in conservative garbage collection via <code>new T</code> for heap allocation, or manage it yourself with C <code>malloc</code> when you need precise control.</p>
+        </div>
+
+        <div class="card">
+          <span class="card-icon">🔗</span>
+          <h3>Seamless FFI</h3>
+          <p>First-class C interoperability. Declare <code>extern function</code> and <code>extern var</code> to effortlessly interface with external libraries like Winsock2 and the MSVC runtime.</p>
+        </div>
+
+        <div class="card">
+          <span class="card-icon">📦</span>
+          <h3>Module System</h3>
+          <p>Organize your codebase efficiently. Import standard libraries or your own modules to keep namespaces clean and dependency resolution robust.</p>
+        </div>
+
+        <div class="card">
+          <span class="card-icon">🎯</span>
+          <h3>Performance</h3>
+          <p>Compiles directly to x86-64 NASM assembly. No runtime overhead beyond what you explicitly use. Perfect for systems programming and performance-critical applications.</p>
+        </div>
+
+        <div class="card">
+          <span class="card-icon">🔧</span>
+          <h3>Rich Type System</h3>
+          <p>Comprehensive primitive types (int8-int64, uint8-uint64, float32/64), structs, enums, pointers, arrays, and strings with proper memory layout for C interop.</p>
+        </div>
       </div>
-      <pre><code><span class="k">import</span> <span class="s">"std/io"</span>;
-<span class="k">import</span> <span class="s">"std/net"</span>;
+    </section>
 
-<span class="k">function</span> <span class="f">main</span>() -> <span class="k">int32</span> {
-  <span class="f">println</span>(<span class="s">"Hello, MethASM!"</span>);
-  <span class="k">var</span> sock: <span class="k">int64</span> = <span class="f">socket_tcp</span>();
-  
-  <span class="c">// Bind, listen, accept connections...</span>
-  
-  <span class="k">return</span> <span class="k">0</span>;
-}</code></pre>
-    </div>
-
-    <section id="features" class="grid">
-      <div class="card">
-        <h3>⚡ Explicit Control</h3>
-        <p>No hidden magic. All variables and parameters have explicit types. Structured control flow with <code>if</code>, <code>while</code>, <code>for</code>, and <code>switch</code> statements.</p>
+    <section class="code-showcase">
+      <div class="showcase-header">
+        <div class="showcase-title">Code Examples</div>
+        <div class="showcase-tabs">
+          <div class="tab active" onclick="showTab('basics')">Basics</div>
+          <div class="tab" onclick="showTab('structs')">Structs</div>
+          <div class="tab" onclick="showTab('networking')">Networking</div>
+        </div>
       </div>
       
-      <div class="card">
-        <h3>🛡️ Memory Management</h3>
-        <p>Leverage the built-in conservative garbage collection via <code>new T</code> for heap allocation, or manage it yourself when linking without the GC runtime.</p>
+      <div id="basics" class="code-content active">
+        <pre><code><span class="k">import</span> <span class="s">"std/io"</span>;
+<span class="k">import</span> <span class="s">"std/math"</span>;
+
+<span class="k">function</span> <span class="f">factorial</span>(n: <span class="t">int32</span>) -> <span class="t">int32</span> {
+  <span class="k">if</span> (n <= <span class="n">1</span>) {
+    <span class="k">return</span> <span class="n">1</span>;
+  }
+  <span class="k">return</span> n * <span class="f">factorial</span>(n - <span class="n">1</span>);
+}
+
+<span class="k">function</span> <span class="f">main</span>() -> <span class="t">int32</span> {
+  <span class="k">var</span> result: <span class="t">int32</span> = <span class="f">factorial</span>(<span class="n">10</span>);
+  <span class="f">println_int</span>(result);
+  <span class="k">return</span> <span class="n">0</span>;
+}</code></pre>
       </div>
 
-      <div class="card">
-        <h3>🔗 Seamless FFI</h3>
-        <p>First-class C interoperability. Declare <code>extern function</code> and <code>extern var</code> to effortlessly interface with external libraries like Winsock2 and the MSVC runtime.</p>
+      <div id="structs" class="code-content">
+        <pre><code><span class="k">struct</span> <span class="t">Point</span> {
+  x: <span class="t">float64</span>;
+  y: <span class="t">float64</span>;
+  
+  <span class="k">function</span> <span class="f">distance</span>(other: <span class="t">Point</span>*) -> <span class="t">float64</span> {
+    <span class="k">var</span> dx: <span class="t">float64</span> = <span class="k">this</span>.x - other->x;
+    <span class="k">var</span> dy: <span class="t">float64</span> = <span class="k">this</span>.y - other->y;
+    <span class="k">return</span> <span class="f">sqrt</span>(dx*dx + dy*dy);
+  }
+}
+
+<span class="k">function</span> <span class="f">main</span>() -> <span class="t">int32</span> {
+  <span class="k">var</span> p1: <span class="t">Point</span> = {<span class="n">0.0</span>, <span class="n">0.0</span>};
+  <span class="k">var</span> p2: <span class="t">Point</span> = {<span class="n">3.0</span>, <span class="n">4.0</span>};
+  <span class="k">var</span> dist: <span class="t">float64</span> = <span class="f">p1.distance</span>(&p2);
+  <span class="k">return</span> <span class="n">0</span>;
+}</code></pre>
       </div>
 
-      <div class="card">
-        <h3>📦 Module System</h3>
-        <p>Organize your codebase efficiently. Import standard libraries or your own modules to keep namespaces clean and dependency resolution robust.</p>
+      <div id="networking" class="code-content">
+        <pre><code><span class="k">import</span> <span class="s">"std/net"</span>;
+<span class="k">import</span> <span class="s">"std/io"</span>;
+
+<span class="k">function</span> <span class="f">main</span>() -> <span class="t">int32</span> {
+  <span class="k">if</span> (<span class="f">net_init</span>() != <span class="n">0</span>) {
+    <span class="f">puts</span>(<span class="s">"Failed to initialize network"</span>);
+    <span class="k">return</span> <span class="n">1</span>;
+  }
+  
+  <span class="k">var</span> sock: <span class="t">int64</span> = <span class="f">socket_tcp</span>();
+  <span class="k">var</span> addr: <span class="t">cstring</span> = <span class="f">sockaddr_in_any</span>(<span class="n">8080</span>);
+  
+  <span class="k">if</span> (<span class="f">bind</span>(sock, addr, <span class="n">16</span>) != <span class="n">0</span>) {
+    <span class="f">puts</span>(<span class="s">"Bind failed"</span>);
+    <span class="k">return</span> <span class="n">1</span>;
+  }
+  
+  <span class="f">listen</span>(sock, <span class="n">5</span>);
+  <span class="f">puts</span>(<span class="s">"Server listening on port 8080"</span>);
+  
+  <span class="c">// Accept loop...</span>
+  <span class="k">return</span> <span class="n">0</span>;
+}</code></pre>
+      </div>
+    </section>
+
+    <section class="stats">
+      <div class="stat-card">
+        <div class="stat-number">x86-64</div>
+        <div class="stat-label">Target Architecture</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">NASM</div>
+        <div class="stat-label">Assembly Output</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">Zero</div>
+        <div class="stat-label">Runtime Overhead</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">C</div>
+        <div class="stat-label">ABI Compatible</div>
       </div>
     </section>
 
     <footer>
-      <p>MethASM Compiler generates x86-64 executable binaries via NASM and the platform linker.</p>
+      <div class="footer-links">
+        <a href="/demo" class="footer-link">Interactive Demo</a>
+        <a href="/benchmarks" class="footer-link">Benchmarks</a>
+        <a href="/docs" class="footer-link">Documentation</a>
+        <a href="/forum" class="footer-link">Community Forum</a>
+      </div>
+      <p>&copy; 2024 MethASM. Compiles to high-performance x86-64 assembly.</p>
     </footer>
   </div>
+
+  <script>
+    function showTab(tabName) {
+      // Hide all content
+      document.querySelectorAll('.code-content').forEach(content => {
+        content.classList.remove('active');
+      });
+      
+      // Remove active from all tabs
+      document.querySelectorAll('.tab').forEach(tab => {
+        tab.classList.remove('active');
+      });
+      
+      // Show selected content
+      document.getElementById(tabName).classList.add('active');
+      
+      // Add active to clicked tab
+      event.target.classList.add('active');
+    }
+  </script>
 </body>
 </html>
