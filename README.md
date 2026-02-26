@@ -2,6 +2,8 @@
 
 MethASM is a compiler for a typed assembly-like language that targets x86-64 assembly.
 
+[Language Reference](docs/LANGUAGE.md): Index and links to lexical structure, types, declarations, expressions, control flow, modules, standard library, C interop, compilation, and quick reference.
+
 ## Project Status
 
 MethASM provides an end-to-end compilation pipeline from `.masm` source to x86-64 assembly output.

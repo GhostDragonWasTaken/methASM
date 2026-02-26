@@ -1,0 +1,21 @@
+// MethASM socket module - Winsock externs and types
+// Imported by server.masm to test the import system.
+
+extern function WSAStartup(wVersionRequested: int32, lpWSAData: uint8*) -> int32 = "WSAStartup";
+extern function WSACleanup() -> int32 = "WSACleanup";
+extern function socket(af: int32, type: int32, protocol: int32) -> int64 = "socket";
+extern function bind(s: int64, addr: SockAddrIn*, namelen: int32) -> int32 = "bind";
+extern function listen(s: int64, backlog: int32) -> int32 = "listen";
+extern function accept(s: int64, addr: uint8*, addrlen: uint8*) -> int64 = "accept";
+extern function recv(s: int64, buf: uint8*, len: int32, flags: int32) -> int32 = "recv";
+extern function send(s: int64, buf: uint8*, len: int32, flags: int32) -> int32 = "send";
+extern function closesocket(s: int64) -> int32 = "closesocket";
+extern function setsockopt(s: int64, level: int32, optname: int32, optval: uint8*, optlen: int32) -> int32 = "setsockopt";
+extern function htons(hostshort: uint16) -> uint16 = "htons";
+
+struct SockAddrIn {
+  sin_family: int16;
+  sin_port: uint16;
+  sin_addr: uint32;
+  sin_zero: uint8[8];
+}

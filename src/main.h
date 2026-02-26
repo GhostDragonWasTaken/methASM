@@ -23,7 +23,7 @@ typedef struct {
   const char **import_directories;
   size_t import_directory_count;
   const char *stdlib_directory;
-  int no_prelude;
+  int prelude;
 } CompilerOptions;
 
 // Function declarations

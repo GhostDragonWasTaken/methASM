@@ -1,4 +1,4 @@
-// Test that the prelude is automatically available without explicit imports.
+// Test that the prelude works when --prelude is passed. Uses std/io, std/math, std/conv.
 // print, println, cstr, min, max, clamp, exit, etc. should all be usable.
 
 function main() -> int32 {

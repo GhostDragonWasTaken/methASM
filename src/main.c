@@ -135,8 +135,8 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[i], "-O") == 0 ||
                strcmp(argv[i], "--optimize") == 0) {
       options.optimize = 1;
-    } else if (strcmp(argv[i], "--no-prelude") == 0) {
-      options.no_prelude = 1;
+    } else if (strcmp(argv[i], "--prelude") == 0) {
+      options.prelude = 1;
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       print_usage(argv[0]);
       return 0;
@@ -305,8 +305,8 @@ int compile_file(const char *input_filename, const char *output_filename,
     import_options.stdlib_directory = "stdlib";
   }
 
-  // Auto-inject the standard prelude unless --no-prelude was specified.
-  if (!options->no_prelude) {
+  // Auto-inject the standard prelude only when --prelude was specified.
+  if (options->prelude) {
     Program *prog_data = (Program *)program->data;
     SourceLocation prelude_loc = {0, 0};
     ASTNode *prelude_import =
@@ -523,7 +523,7 @@ void print_usage(const char *program_name) {
   printf("  --debug-format <fmt> Debug format: dwarf, stabs, or map (default: "
          "dwarf)\n");
   printf("  -O, --optimize      Enable optimizations\n");
-  printf("  --no-prelude        Do not auto-import the standard prelude\n");
+  printf("  --prelude           Auto-import the standard prelude (std/io, std/net, etc.)\n");
   printf("  -h, --help          Show this help message\n");
 }
 

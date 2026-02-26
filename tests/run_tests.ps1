@@ -142,7 +142,12 @@ $cases = @(
   @{ Name = "import_std_core"; Path = "tests/test_import_std_core.masm"; ShouldSucceed = $true },
   @{ Name = "std_io"; Path = "tests/test_std_io.masm"; ShouldSucceed = $true },
   @{ Name = "enum"; Path = "tests/test_enum.masm"; ShouldSucceed = $true },
-  @{ Name = "prelude"; Path = "tests/test_prelude.masm"; ShouldSucceed = $true },
+  @{
+    Name          = "prelude"
+    Path          = "tests/test_prelude.masm"
+    ShouldSucceed = $true
+    Args          = @("--prelude")
+  },
   @{
     Name          = "string_escape_codegen"
     Path          = "tests/test_string_escape_codegen.masm"
@@ -151,6 +156,7 @@ $cases = @(
   },
   @{ Name = "narrowing_conversions"; Path = "tests/test_narrowing_conversions.masm"; ShouldSucceed = $true },
   @{ Name = "stress_integrated"; Path = "tests/test_stress_integrated.masm"; ShouldSucceed = $true },
+  @{ Name = "web_server_import"; Path = "web/server.masm"; ShouldSucceed = $true },
 
   @{ Name = "err_unknown_char"; Path = "tests/err_unknown_char.masm"; ShouldSucceed = $false; Pattern = "Lexical error|error" },
   @{ Name = "err_invalid_hex"; Path = "tests/err_invalid_hex.masm"; ShouldSucceed = $false; Pattern = "Invalid hexadecimal literal" },
