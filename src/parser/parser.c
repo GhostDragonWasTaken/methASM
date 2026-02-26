@@ -182,6 +182,16 @@ static const char *token_type_to_string(TokenType type) {
     return "'*'";
   case TOKEN_AMPERSAND:
     return "'&'";
+  case TOKEN_PIPE:
+    return "'|'";
+  case TOKEN_CARET:
+    return "'^'";
+  case TOKEN_LSHIFT:
+    return "'<<'";
+  case TOKEN_RSHIFT:
+    return "'>>'";
+  case TOKEN_TILDE:
+    return "'~'";
   case TOKEN_AND_AND:
     return "'&&'";
   case TOKEN_OR_OR:
@@ -348,21 +358,30 @@ void parser_synchronize(Parser *parser) {
 int parser_get_operator_precedence(TokenType type) {
   switch (type) {
   case TOKEN_DOT:
-    return 9; // Member access (highest precedence)
+    return 13; // Member access (highest precedence)
   case TOKEN_MULTIPLY:
   case TOKEN_DIVIDE:
-    return 7; // Multiplicative
+    return 11; // Multiplicative
   case TOKEN_PLUS:
   case TOKEN_MINUS:
-    return 6; // Additive
+    return 10; // Additive
+  case TOKEN_LSHIFT:
+  case TOKEN_RSHIFT:
+    return 9; // Shift
   case TOKEN_LESS_THAN:
   case TOKEN_LESS_EQUALS:
   case TOKEN_GREATER_THAN:
   case TOKEN_GREATER_EQUALS:
-    return 5; // Relational
+    return 8; // Relational
   case TOKEN_EQUALS_EQUALS:
   case TOKEN_NOT_EQUALS:
-    return 4; // Equality
+    return 7; // Equality
+  case TOKEN_AMPERSAND:
+    return 6; // Bitwise AND
+  case TOKEN_CARET:
+    return 5; // Bitwise XOR
+  case TOKEN_PIPE:
+    return 4; // Bitwise OR
   case TOKEN_AND_AND:
     return 3; // Logical AND
   case TOKEN_OR_OR:
@@ -386,6 +405,11 @@ int parser_is_binary_operator(TokenType type) {
   case TOKEN_GREATER_EQUALS:
   case TOKEN_AND_AND:
   case TOKEN_OR_OR:
+  case TOKEN_AMPERSAND:
+  case TOKEN_PIPE:
+  case TOKEN_CARET:
+  case TOKEN_LSHIFT:
+  case TOKEN_RSHIFT:
   case TOKEN_DOT:
     return 1;
   default:
@@ -399,6 +423,7 @@ int parser_is_unary_operator(TokenType type) {
   case TOKEN_PLUS:
   case TOKEN_MULTIPLY:
   case TOKEN_AMPERSAND:
+  case TOKEN_TILDE:
     return 1;
   default:
     return 0;
@@ -528,9 +553,8 @@ ASTNode *parser_parse_declaration(Parser *parser) {
         return NULL;
       }
     } else {
-      parser_set_error(
-          parser,
-          "Expected 'function', 'var', 'struct', 'enum', or 'extern' after 'export'");
+      parser_set_error(parser, "Expected 'function', 'var', 'struct', 'enum', "
+                               "or 'extern' after 'export'");
       return NULL;
     }
     return decl;

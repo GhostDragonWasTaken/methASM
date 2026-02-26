@@ -598,6 +598,33 @@ static int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
       return 0;
     }
 
+    // Keep string concatenation in AST form for codegen. The current IR binary
+    // fallback models '+' as integer arithmetic, which is invalid for string
+    // records.
+    if (strcmp(binary->operator, "+") == 0) {
+      Type *expr_type = ir_infer_expression_type(context, expression);
+      if (expr_type && expr_type->kind == TYPE_STRING) {
+        IROperand destination = ir_operand_none();
+        if (!ir_make_temp_operand(context, &destination)) {
+          return 0;
+        }
+
+        IRInstruction instruction = {0};
+        instruction.op = IR_OP_BINARY;
+        instruction.location = expression->location;
+        instruction.dest = destination;
+        instruction.text = binary->operator;
+        instruction.ast_ref = expression;
+        if (!ir_emit(context, function, &instruction)) {
+          ir_operand_destroy(&destination);
+          return 0;
+        }
+
+        *out_value = destination;
+        return 1;
+      }
+    }
+
     if (strcmp(binary->operator, "&&") == 0 || strcmp(binary->operator, "||") == 0) {
       int is_and = strcmp(binary->operator, "&&") == 0;
       IROperand destination = ir_operand_none();

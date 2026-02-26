@@ -274,11 +274,13 @@ static int type_checker_init_tracker_ensure_var_capacity(TypeChecker *checker) {
     return 1;
   }
 
-  size_t new_capacity =
-      checker->tracked_var_capacity == 0 ? 16 : checker->tracked_var_capacity * 2;
-  char **new_names = realloc(checker->tracked_var_names, new_capacity * sizeof(char *));
-  unsigned char *new_initialized =
-      realloc(checker->tracked_var_initialized, new_capacity * sizeof(unsigned char));
+  size_t new_capacity = checker->tracked_var_capacity == 0
+                            ? 16
+                            : checker->tracked_var_capacity * 2;
+  char **new_names =
+      realloc(checker->tracked_var_names, new_capacity * sizeof(char *));
+  unsigned char *new_initialized = realloc(
+      checker->tracked_var_initialized, new_capacity * sizeof(unsigned char));
   int *new_depths =
       realloc(checker->tracked_var_scope_depth, new_capacity * sizeof(int));
   if (!new_names || !new_initialized || !new_depths) {
@@ -295,7 +297,8 @@ static int type_checker_init_tracker_ensure_var_capacity(TypeChecker *checker) {
   return 1;
 }
 
-static int type_checker_init_tracker_ensure_scope_capacity(TypeChecker *checker) {
+static int
+type_checker_init_tracker_ensure_scope_capacity(TypeChecker *checker) {
   if (!checker) {
     return 0;
   }
@@ -422,7 +425,8 @@ static unsigned char *type_checker_init_tracker_capture(TypeChecker *checker,
     return NULL;
   }
 
-  unsigned char *snapshot = malloc(checker->tracked_var_count * sizeof(unsigned char));
+  unsigned char *snapshot =
+      malloc(checker->tracked_var_count * sizeof(unsigned char));
   if (!snapshot) {
     return NULL;
   }
@@ -437,8 +441,10 @@ static void type_checker_init_tracker_restore(TypeChecker *checker,
   if (!checker || !snapshot) {
     return;
   }
-  size_t limit = count < checker->tracked_var_count ? count : checker->tracked_var_count;
-  memcpy(checker->tracked_var_initialized, snapshot, limit * sizeof(unsigned char));
+  size_t limit =
+      count < checker->tracked_var_count ? count : checker->tracked_var_count;
+  memcpy(checker->tracked_var_initialized, snapshot,
+         limit * sizeof(unsigned char));
 }
 
 static int type_checker_statement_guarantees_termination(ASTNode *statement) {
@@ -470,7 +476,8 @@ static int type_checker_statement_guarantees_termination(ASTNode *statement) {
   }
   case AST_PROGRAM: {
     for (size_t i = 0; i < statement->child_count; i++) {
-      if (type_checker_statement_guarantees_termination(statement->children[i])) {
+      if (type_checker_statement_guarantees_termination(
+              statement->children[i])) {
         return 1;
       }
     }
@@ -680,12 +687,12 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
         (symbol->kind == SYMBOL_VARIABLE || symbol->kind == SYMBOL_PARAMETER) &&
         symbol->scope && symbol->scope->type != SCOPE_GLOBAL) {
       int skip_uninit_check =
-          symbol->type &&
-          (symbol->type->kind == TYPE_ARRAY || symbol->type->kind == TYPE_STRUCT ||
-           symbol->type->kind == TYPE_STRING);
+          symbol->type && (symbol->type->kind == TYPE_ARRAY ||
+                           symbol->type->kind == TYPE_STRUCT ||
+                           symbol->type->kind == TYPE_STRING);
       int known = 0;
-      int initialized = type_checker_init_tracker_is_initialized(
-          checker, id->name, &known);
+      int initialized =
+          type_checker_init_tracker_is_initialized(checker, id->name, &known);
       if (!skip_uninit_check && known && !initialized) {
         type_checker_set_error_at_location(
             checker, expression->location,
@@ -768,6 +775,15 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
       if (!type_checker_is_numeric_type(operand_type)) {
         type_checker_report_type_mismatch(checker, unop->operand->location,
                                           "numeric type", operand_type->name);
+        return NULL;
+      }
+      return operand_type;
+    }
+
+    if (strcmp(unop->operator, "~") == 0) {
+      if (!type_checker_is_integer_type(operand_type)) {
+        type_checker_report_type_mismatch(checker, unop->operand->location,
+                                          "integer type", operand_type->name);
         return NULL;
       }
       return operand_type;
@@ -909,8 +925,7 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
             type_checker_set_error_at_location(
                 checker, idx->index->location,
                 "Array index %lld is out of bounds for '%s' (size %zu)",
-                constant_index,
-                array_type->name ? array_type->name : "array",
+                constant_index, array_type->name ? array_type->name : "array",
                 array_type->array_size);
             return NULL;
           }
@@ -1774,15 +1789,16 @@ int type_checker_process_declaration(TypeChecker *checker,
     }
 
     if (checker->current_function && !var_decl->is_extern) {
-      Scope *declare_scope = symbol_table_get_current_scope(checker->symbol_table);
+      Scope *declare_scope =
+          symbol_table_get_current_scope(checker->symbol_table);
       if (declare_scope && declare_scope->type != SCOPE_GLOBAL) {
         int track_definite_init =
-            !(var_type && (var_type->kind == TYPE_ARRAY ||
-                           var_type->kind == TYPE_STRUCT ||
-                           var_type->kind == TYPE_STRING));
+            !(var_type &&
+              (var_type->kind == TYPE_ARRAY || var_type->kind == TYPE_STRUCT ||
+               var_type->kind == TYPE_STRING));
         if (track_definite_init) {
-          if (!type_checker_init_tracker_declare(checker, var_decl->name,
-                                                 var_decl->initializer != NULL)) {
+          if (!type_checker_init_tracker_declare(
+                  checker, var_decl->name, var_decl->initializer != NULL)) {
             type_checker_set_error_at_location(
                 checker, declaration->location,
                 "Out of memory while tracking initialization state for '%s'",
@@ -2052,9 +2068,8 @@ int type_checker_process_declaration(TypeChecker *checker,
           symbol_table_exit_scope(checker->symbol_table);
           return 0;
         }
-        if (!type_checker_init_tracker_declare(checker,
-                                               func_decl->parameter_names[i],
-                                               1)) {
+        if (!type_checker_init_tracker_declare(
+                checker, func_decl->parameter_names[i], 1)) {
           type_checker_set_error_at_location(
               checker, declaration->location,
               "Out of memory while tracking parameter initialization");
@@ -2066,7 +2081,8 @@ int type_checker_process_declaration(TypeChecker *checker,
     }
 
     // Process the function body
-    if (func_decl->body && !type_checker_check_statement(checker, func_decl->body)) {
+    if (func_decl->body &&
+        !type_checker_check_statement(checker, func_decl->body)) {
       // Error already reported
       type_checker_init_tracker_reset(checker);
       symbol_table_exit_scope(checker->symbol_table);
@@ -2576,7 +2592,8 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       free(init_snapshot);
       return 0;
     }
-    type_checker_init_tracker_restore(checker, init_snapshot, init_snapshot_count);
+    type_checker_init_tracker_restore(checker, init_snapshot,
+                                      init_snapshot_count);
 
     for (size_t i = 0; i < if_stmt->else_if_count; i++) {
       Type *elif_cond_type =
@@ -2607,7 +2624,8 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       free(init_snapshot);
       return 0;
     }
-    type_checker_init_tracker_restore(checker, init_snapshot, init_snapshot_count);
+    type_checker_init_tracker_restore(checker, init_snapshot,
+                                      init_snapshot_count);
     free(init_snapshot);
 
     return 1;
@@ -2654,7 +2672,8 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       return 0;
     }
     checker->loop_depth--;
-    type_checker_init_tracker_restore(checker, init_snapshot, init_snapshot_count);
+    type_checker_init_tracker_restore(checker, init_snapshot,
+                                      init_snapshot_count);
     free(init_snapshot);
 
     return 1;
@@ -2910,7 +2929,8 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
                                         init_snapshot_count);
     }
     checker->switch_depth--;
-    type_checker_init_tracker_restore(checker, init_snapshot, init_snapshot_count);
+    type_checker_init_tracker_restore(checker, init_snapshot,
+                                      init_snapshot_count);
     free(init_snapshot);
     free(case_values);
     return 1;
@@ -3009,6 +3029,14 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
 
   const char *op = binop->operator;
 
+  // String concatenation
+  if (strcmp(op, "+") == 0) {
+    if (left_type == checker->builtin_string &&
+        right_type == checker->builtin_string) {
+      return checker->builtin_string;
+    }
+  }
+
   // Arithmetic operators require numeric types
   if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0 || strcmp(op, "*") == 0 ||
       strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
@@ -3040,6 +3068,22 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
       }
     }
 
+    return type_checker_promote_types(checker, left_type, right_type, op);
+  }
+
+  // Bitwise operators
+  if (strcmp(op, "&") == 0 || strcmp(op, "|") == 0 || strcmp(op, "^") == 0 ||
+      strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
+    if (!type_checker_is_integer_type(left_type)) {
+      type_checker_report_type_mismatch(checker, binop->left->location,
+                                        "integer type", left_type->name);
+      return NULL;
+    }
+    if (!type_checker_is_integer_type(right_type)) {
+      type_checker_report_type_mismatch(checker, binop->right->location,
+                                        "integer type", right_type->name);
+      return NULL;
+    }
     return type_checker_promote_types(checker, left_type, right_type, op);
   }
 
