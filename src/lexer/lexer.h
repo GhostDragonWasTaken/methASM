@@ -12,6 +12,7 @@ typedef enum {
 
   // Enhanced syntax keywords
   TOKEN_IMPORT,
+  TOKEN_IMPORT_STR,
   TOKEN_EXTERN,
   TOKEN_EXPORT,
   TOKEN_VAR,
@@ -68,6 +69,8 @@ typedef enum {
   TOKEN_MINUS,
   TOKEN_MULTIPLY,
   TOKEN_AMPERSAND,
+  TOKEN_AND_AND,
+  TOKEN_OR_OR,
   TOKEN_DIVIDE,
   TOKEN_DOT,
   TOKEN_NEWLINE,

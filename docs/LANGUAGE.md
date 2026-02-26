@@ -11,10 +11,11 @@ MethASM is a typed, assembly-inspired language that compiles to x86-64 assembly.
 5. [Control Flow](control-flow.md)
 6. [Modules](modules.md)
 7. [Standard Library](standard-library.md)
-8. [C Interoperability](c-interop.md)
-9. [Compilation](compilation.md)
-10. [Quick Reference](quick-reference.md)
-11. [Known Limitations](known-limitations.md)
+8. [Garbage Collector](garbage-collector.md)
+9. [C Interoperability](c-interop.md)
+10. [Compilation](compilation.md)
+11. [Quick Reference](quick-reference.md)
+12. [Known Limitations](known-limitations.md)
 
 ## Overview
 

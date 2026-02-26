@@ -283,12 +283,19 @@ static int is_declaration_exported(ASTNode *decl) {
   if (decl->type == AST_ENUM_DECLARATION) {
     return ((EnumDeclaration *)decl->data)->is_exported;
   }
+  if (decl->type == AST_VAR_DECLARATION) {
+    return ((VarDeclaration *)decl->data)->is_exported;
+  }
   return 0;
 }
 
+// Return values:
+//   1: added
+//   0: already visited
+//  -1: internal failure (e.g. allocation failure)
 static int add_visited_file(ImportContext *ctx, const char *path) {
   if (!ctx || !path) {
-    return 0;
+    return -1;
   }
 
   for (size_t i = 0; i < ctx->count; i++) {
@@ -302,7 +309,7 @@ static int add_visited_file(ImportContext *ctx, const char *path) {
     char **new_files =
         realloc(ctx->visited_files, new_capacity * sizeof(char *));
     if (!new_files) {
-      return 0;
+      return -1;
     }
     ctx->visited_files = new_files;
     ctx->capacity = new_capacity;
@@ -310,7 +317,7 @@ static int add_visited_file(ImportContext *ctx, const char *path) {
 
   ctx->visited_files[ctx->count] = strdup(path);
   if (!ctx->visited_files[ctx->count]) {
-    return 0;
+    return -1;
   }
   ctx->count++;
   return 1;
@@ -378,6 +385,179 @@ static char *format_import_chain(ImportContext *ctx) {
   return chain_str;
 }
 
+static void process_import_strs_in_node(ImportContext *ctx, ASTNode *node,
+                                        const char *current_file_path,
+                                        int *had_error) {
+  if (!node)
+    return;
+
+  if (node->type == AST_IMPORT_STR) {
+    ImportStrExpression *import_str = (ImportStrExpression *)node->data;
+    char *full_path =
+        resolve_import_path(ctx, current_file_path, import_str->file_path);
+
+    if (!full_path) {
+      if (ctx->reporter) {
+        char *chain = format_import_chain(ctx);
+        char error_msg[1024];
+        snprintf(error_msg, sizeof(error_msg),
+                 "Could not resolve embedded file '%s' (import chain: %s)",
+                 import_str->file_path, chain);
+        error_reporter_add_error(ctx->reporter, ERROR_IO, node->location,
+                                 error_msg);
+        free(chain);
+      }
+      *had_error = 1;
+      return;
+    }
+
+    char *source = read_file_content(full_path);
+    if (!source) {
+      if (ctx->reporter) {
+        char *chain = format_import_chain(ctx);
+        char error_msg[1024];
+        snprintf(error_msg, sizeof(error_msg),
+                 "Could not read embedded file '%s' (import chain: %s)",
+                 import_str->file_path, chain);
+        error_reporter_add_error(ctx->reporter, ERROR_IO, node->location,
+                                 error_msg);
+        free(chain);
+      }
+      free(full_path);
+      *had_error = 1;
+      return;
+    }
+
+    free(full_path);
+
+    // Free old data and change node type in-place
+    free(import_str->file_path);
+    free(import_str);
+
+    StringLiteral *string_literal = malloc(sizeof(StringLiteral));
+    string_literal->value = source;
+
+    node->type = AST_STRING_LITERAL;
+    node->data = string_literal;
+    return;
+  }
+
+  // Traverse via typed data structures to avoid cycles in children[].
+  switch (node->type) {
+  case AST_PROGRAM: {
+    Program *prog = (Program *)node->data;
+    if (prog) {
+      for (size_t i = 0; i < prog->declaration_count; i++) {
+        process_import_strs_in_node(ctx, prog->declarations[i],
+                                    current_file_path, had_error);
+      }
+    }
+    break;
+  }
+  case AST_VAR_DECLARATION: {
+    VarDeclaration *var = (VarDeclaration *)node->data;
+    if (var && var->initializer) {
+      process_import_strs_in_node(ctx, var->initializer, current_file_path,
+                                  had_error);
+    }
+    break;
+  }
+  case AST_FUNCTION_DECLARATION: {
+    FunctionDeclaration *func = (FunctionDeclaration *)node->data;
+    if (func && func->body) {
+      process_import_strs_in_node(ctx, func->body, current_file_path,
+                                  had_error);
+    }
+    break;
+  }
+  case AST_FUNCTION_CALL: {
+    CallExpression *call = (CallExpression *)node->data;
+    if (call) {
+      for (size_t i = 0; i < call->argument_count; i++) {
+        process_import_strs_in_node(ctx, call->arguments[i], current_file_path,
+                                    had_error);
+      }
+    }
+    break;
+  }
+  case AST_ASSIGNMENT: {
+    Assignment *assign = (Assignment *)node->data;
+    if (assign && assign->value) {
+      process_import_strs_in_node(ctx, assign->value, current_file_path,
+                                  had_error);
+    }
+    break;
+  }
+  case AST_RETURN_STATEMENT: {
+    // Return value is child[0] if present
+    if (node->child_count > 0) {
+      process_import_strs_in_node(ctx, node->children[0], current_file_path,
+                                  had_error);
+    }
+    break;
+  }
+  case AST_BINARY_EXPRESSION: {
+    BinaryExpression *bin = (BinaryExpression *)node->data;
+    if (bin) {
+      process_import_strs_in_node(ctx, bin->left, current_file_path, had_error);
+      process_import_strs_in_node(ctx, bin->right, current_file_path,
+                                  had_error);
+    }
+    break;
+  }
+  case AST_UNARY_EXPRESSION: {
+    UnaryExpression *un = (UnaryExpression *)node->data;
+    if (un && un->operand) {
+      process_import_strs_in_node(ctx, un->operand, current_file_path,
+                                  had_error);
+    }
+    break;
+  }
+  case AST_IF_STATEMENT:
+  case AST_WHILE_STATEMENT:
+  case AST_FOR_STATEMENT: {
+    // These use children[] but don't create cycles
+    for (size_t i = 0; i < node->child_count; i++) {
+      process_import_strs_in_node(ctx, node->children[i], current_file_path,
+                                  had_error);
+    }
+    break;
+  }
+  case AST_SWITCH_STATEMENT: {
+    SwitchStatement *sw = (SwitchStatement *)node->data;
+    if (sw) {
+      if (sw->expression) {
+        process_import_strs_in_node(ctx, sw->expression, current_file_path,
+                                    had_error);
+      }
+      for (size_t i = 0; i < sw->case_count; i++) {
+        process_import_strs_in_node(ctx, sw->cases[i], current_file_path,
+                                    had_error);
+      }
+    }
+    break;
+  }
+  case AST_CASE_CLAUSE: {
+    CaseClause *cc = (CaseClause *)node->data;
+    if (cc) {
+      if (cc->value) {
+        process_import_strs_in_node(ctx, cc->value, current_file_path,
+                                    had_error);
+      }
+      if (cc->body) {
+        process_import_strs_in_node(ctx, cc->body, current_file_path,
+                                    had_error);
+      }
+    }
+    break;
+  }
+  default:
+    // Leaf nodes or nodes that can't contain import_str (identifiers,
+    // literals, member access, etc.)
+    break;
+  }
+}
+
 static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
                                           const char *current_file_path,
                                           int *had_error, int is_nested) {
@@ -430,7 +610,20 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
         continue;
       }
 
-      if (!add_visited_file(ctx, full_path)) {
+      int visit_status = add_visited_file(ctx, full_path);
+      if (visit_status < 0) {
+        if (ctx->reporter) {
+          error_reporter_add_error(
+              ctx->reporter, ERROR_INTERNAL, decl->location,
+              "Failed to track visited imports (out of memory)");
+        }
+        free(full_path);
+        ast_destroy_node(decl);
+        *had_error = 1;
+        continue;
+      }
+
+      if (visit_status == 0) {
         // Circular dependency or already imported; report a warning with chain
         if (ctx->reporter) {
           char *chain = format_import_chain(ctx);
@@ -497,6 +690,8 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
         // Recursively resolve imports in the imported module
         imported_program = process_imports_recursive(ctx, imported_program,
                                                      full_path, had_error, 1);
+        process_import_strs_in_node(ctx, imported_program, full_path,
+                                    had_error);
 
         if (imported_program) {
           Program *imported_prog_data = (Program *)imported_program->data;
@@ -521,8 +716,8 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
                 ast_destroy_node(imp_decl);
               }
             } else {
-              // No export keyword used at all: include everything (backwards
-              // compat)
+              // No export keyword used at all: include everything
+              // (backwards compat)
               ADD_DECL(imp_decl);
             }
           }
@@ -617,6 +812,7 @@ int resolve_imports_with_options(ASTNode *program, const char *base_path,
 
   int had_error = 0;
   process_imports_recursive(&ctx, program, base_path, &had_error, 0);
+  process_import_strs_in_node(&ctx, program, base_path, &had_error);
 
   // Cleanup
   pop_import_chain(&ctx);

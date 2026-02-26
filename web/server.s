@@ -4,160 +4,4725 @@
 section .text
 ; Code section
 
-; First pass: processing 30 declarations
-; Declaration 0 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 1 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 2 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 3 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 4 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 5 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 6 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 7 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 8 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 9 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 10 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 11 type: 4 (AST_INLINE_ASM = 17)
-; Declaration 12 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 13 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 14 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 15 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 16 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 17 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 18 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 19 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 20 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 21 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 22 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 23 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 24 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 25 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 26 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 27 type: 2 (AST_INLINE_ASM = 17)
-; Declaration 28 type: 3 (AST_INLINE_ASM = 17)
-; Declaration 29 type: 3 (AST_INLINE_ASM = 17)
+; First pass: processing 139 declarations
+; Declaration 0 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 1 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 2 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 3 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 4 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 5 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 6 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 7 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 8 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 9 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 10 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 11 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 12 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 13 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 14 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 15 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 16 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 17 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 18 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 19 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 20 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 21 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 22 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 23 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 24 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 25 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 26 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 27 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 28 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 29 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 30 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 31 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 32 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 33 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 34 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 35 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 36 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 37 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 38 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 39 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 40 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 41 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 42 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 43 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 44 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 45 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 46 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 47 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 48 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 49 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 50 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 51 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 52 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 53 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 54 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 55 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 56 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 57 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 58 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 59 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 60 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 61 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 62 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 63 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 64 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 65 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 66 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 67 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 68 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 69 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 70 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 71 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 72 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 73 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 74 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 75 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 76 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 77 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 78 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 79 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 80 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 81 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 82 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 83 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 84 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 85 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 86 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 87 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 88 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 89 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 90 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 91 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 92 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 93 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 94 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 95 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 96 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 97 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 98 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 99 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 100 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 101 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 102 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 103 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 104 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 105 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 106 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 107 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 108 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 109 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 110 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 111 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 112 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 113 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 114 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 115 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 116 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 117 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 118 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 119 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 120 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 121 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 122 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 123 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 124 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 125 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 126 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 127 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 128 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 129 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 130 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 131 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 132 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 133 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 134 type: 3 (AST_INLINE_ASM = 18)
+; Declaration 135 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 136 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 137 type: 4 (AST_INLINE_ASM = 18)
+; Declaration 138 type: 4 (AST_INLINE_ASM = 18)
 
 ; Data section for global variables
 section .data
-; Global variable: http_header (string, 16 bytes)
-http_header:
+; Global variable: net_ref_count (int32, 4 bytes)
+net_ref_count:
+    dd 0
+
+; Global variable: net_ref_lock (int32, 4 bytes)
+net_ref_lock:
+    dd 0
+
+; Global variable: PAGE_CONTENT (string, 16 bytes)
+PAGE_CONTENT:
     dq Lstr0  ; Pointer to string data
-    dq 78  ; String length
+    dq 4834  ; String length
 Lstr0:
+    db "<!DOCTYPE html>", 10, "<html lang='en'>", 10, "<head>", 10, "<meta charset='UTF-8'>", 10, "<meta name='viewport' content='width=device-width,initial-scale=1'>", 10, "<title>MethASM ", 226, 128, 148, " Typed Assembly-Inspired Language</title>", 10, "<style>", 10, "*{box-sizing:border-box;margin:0;padding:0}", 10, "body{font-family:'JetBrains Mono','Fira Code',monospace;background:#0d1117;color:#c9d1d9;line-height:1.6;padding:2rem;max-width:900px;margin:0 auto}", 10, "h1{font-size:2.2rem;color:#58a6ff;margin-bottom:.5rem;font-weight:600}", 10, "h2{font-size:1.3rem;color:#79c0ff;margin:2rem 0 1rem;border-bottom:1px solid #30363d;padding-bottom:.3rem}", 10, ".subtitle{color:#8b949e;margin-bottom:2rem;font-size:.95rem}", 10, ".badge{display:inline-block;background:#21262d;color:#8b949e;padding:.2rem .5rem;border-radius:4px;font-size:.8rem;margin-right:.5rem;margin-bottom:.5rem}", 10, "section{margin-bottom:2rem}", 10, "p{margin-bottom:1rem;color:#b1bac4}", 10, "code{background:#161b22;padding:.15rem .4rem;border-radius:4px;font-size:.9em;color:#79c0ff}", 10, "pre{background:#161b22;padding:1rem;border-radius:6px;overflow-x:auto;margin:1rem 0;border:1px solid #30363d}", 10, "pre code{background:none;padding:0;color:#c9d1d9}", 10, "ul{margin-left:1.5rem;margin-bottom:1rem}", 10, "li{margin-bottom:.4rem;color:#b1bac4}", 10, ".footnote{font-size:.85rem;color:#6e7681;margin-top:3rem;padding-top:1rem;border-top:1px solid #30363d}", 10, "a{color:#58a6ff;text-decoration:none}", 10, "a:hover{text-decoration:underline}", 10, "</style>", 10, "</head>", 10, "<body>", 10, "<h1>MethASM</h1>", 10, "<p class='subtitle'>A typed, assembly-inspired language that compiles to x86-64 NASM assembly.</p>", 10, "<p><span class='badge'>Statically typed</span><span class='badge'>C interop</span><span class='badge'>Garbage collection</span><span class='badge'>Module system</span><span class='badge'>Windows & Linux</span></p>", 10, 10, "<section>", 10, "<h2>Overview</h2>", 10, "<p>MethASM provides explicit typing, structured control flow (<code>if</code>, <code>while</code>, <code>for</code>, <code>switch</code>), structs and enums, pointers and arrays, C interop via <code>extern</code>, a module system, and conservative GC for heap allocation via <code>new</code>. The compiler emits NASM-compatible assembly; link with the platform C runtime and any required libs (e.g. <code>ws2_32</code> for networking).</p>", 10, "</section>", 10, 10, "<section>", 10, "<h2>Key Features</h2>", 10, "<ul>", 10, "<li><strong>Explicit typing</strong> ", 226, 128, 148, " All variables and parameters have declared types; no inference.</li>", 10, "<li><strong>Control flow</strong> ", 226, 128, 148, " <code>if</code>/<code>else</code>, <code>while</code>, <code>for</code>, <code>switch</code> with <code>break</code>/<code>continue</code>.</li>", 10, "<li><strong>Structs & enums</strong> ", 226, 128, 148, " Named types with methods; enums for tagged values.</li>", 10, "<li><strong>Pointers & arrays</strong> ", 226, 128, 148, " Bounds-aware indexing; <code>ptr[i]</code> for element access.</li>", 10, "<li><strong>C interop</strong> ", 226, 128, 148, " <code>extern function</code> and <code>extern var</code> for FFI; <code>cstring</code> for char*.</li>", 10, "<li><strong>Garbage collection</strong> ", 226, 128, 148, " <code>new T</code> for GC-managed heap; use <code>malloc</code> when GC not linked.</li>", 10, "<li><strong>Modules</strong> ", 226, 128, 148, " <code>import &quot;std/io&quot;</code>; stdlib under <code>stdlib/</code>.</li>", 10, "</ul>", 10, "</section>", 10, 10, "<section>", 10, "<h2>Code Example</h2>", 10, "<pre><code>import &quot;std/io&quot;;", 10, "import &quot;std/net&quot;;", 10, 10, "function main() -> int32 {", 10, "  println(&quot;Hello, MethASM!&quot;);", 10, "  var sock: int64 = socket_tcp();", 10, "  // ... bind, listen, accept ...", 10, "  return 0;", 10, "}</code></pre>", 10, "</section>", 10, 10, "<section>", 10, "<h2>Standard Library</h2>", 10, "<h3>Cross-platform</h3>", 10, "<ul>", 10, "<li><code>std/io</code> ", 226, 128, 148, " <code>println</code>, <code>puts</code>, <code>print_int</code>, file I/O</li>", 10, "<li><code>std/mem</code> ", 226, 128, 148, " <code>malloc</code>, <code>free</code>, <code>memcpy</code>, <code>memset</code></li>", 10, "<li><code>std/math</code> ", 226, 128, 148, " <code>abs</code>, <code>min</code>, <code>max</code>, <code>clamp</code></li>", 10, "<li><code>std/conv</code> ", 226, 128, 148, " <code>atoi</code>, <code>strlen</code>, <code>strncmp</code>, char classification</li>", 10, "<li><code>std/process</code> ", 226, 128, 148, " <code>exit</code>, <code>rand</code>, <code>srand</code></li>", 10, "</ul>", 10, "<h3>Windows (Winsock2)</h3>", 10, "<ul>", 10, "<li><code>std/net</code> ", 226, 128, 148, " <code>socket</code>, <code>bind</code>, <code>listen</code>, <code>accept</code>, <code>send</code>, <code>recv</code></li>", 10, "<li><code>std/thread</code> ", 226, 128, 148, " Win32 threads, mutexes, atomics, spin locks</li>", 10, "</ul>", 10, "</section>", 10, 10, "<section>", 10, "<h2>This Server</h2>", 10, "<p>This page is served by an HTTP server written entirely in MethASM. Single-threaded, no GC, uses <code>std/net</code> for Winsock2. The server handles <code>GET /</code>, <code>GET /health</code>, and returns 404 for other requests. Built with: <code>methasm web/server.masm -o server.s</code> ", 226, 134, 146, " NASM ", 226, 134, 146, " GCC + ws2_32.</p>", 10, "</section>", 10, 10, "<p class='footnote'>MethASM ", 226, 128, 148, " Compiles to x86-64. Use <code>--prelude</code> for automatic stdlib imports. See docs for full reference.</p>", 10, "</body>", 10, "</html>", 10, 0
+
+; Global variable: HTTP_PAGE_HEADER (string, 16 bytes)
+HTTP_PAGE_HEADER:
+    dq Lstr1  ; Pointer to string data
+    dq 78  ; String length
+Lstr1:
     db "HTTP/1.1 200 OK", 13, 10, "Content-Type: text/html; charset=utf-8", 13, 10, "Connection: close", 13, 10, 13, 10, 0
 
-; Global variable: health_header (string, 16 bytes)
-health_header:
-    dq Lstr1  ; Pointer to string data
-    dq 70  ; String length
-Lstr1:
-    db "HTTP/1.1 200 OK", 13, 10, "Content-Type: application/json", 13, 10, "Connection: close", 13, 10, 13, 10, 0
-
-; Global variable: health_body (string, 16 bytes)
-health_body:
+; Global variable: HTTP_404_HEADER (string, 16 bytes)
+HTTP_404_HEADER:
     dq Lstr2  ; Pointer to string data
-    dq 34  ; String length
+    dq 45  ; String length
 Lstr2:
-    db "{", 34, "status", 34, ":", 34, "ok", 34, ",", 34, "server", 34, ":", 34, "MethASM", 34, "}", 0
+    db "HTTP/1.1 404 Not Found", 13, 10, "Content-Length: 9", 13, 10, 13, 10, 0
 
-; Global variable: html_body (string, 16 bytes)
-html_body:
+; Global variable: HTTP_404_BODY (string, 16 bytes)
+HTTP_404_BODY:
     dq Lstr3  ; Pointer to string data
-    dq 334  ; String length
+    dq 9  ; String length
 Lstr3:
-    db "<!DOCTYPE html><html><head><title>MethASM</title><style>body{font-family:system-ui;max-width:40em;margin:2em auto;padding:0 1em}h1{color:#2563eb}p{color:#64748b}a{color:#2563eb}</style></head><body><h1>MethASM Web Server</h1><p>Running on port 5000.</p><p><a href=", 34, "/health", 34, ">/health</a> ", 194, 183, " <a href=", 34, "/about", 34, ">/about</a></p></body></html>", 0
+    db "Not Found", 0
 
-; Global variable: about_body (string, 16 bytes)
-about_body:
+; Global variable: HTTP_HEALTH_HEADER (string, 16 bytes)
+HTTP_HEALTH_HEADER:
     dq Lstr4  ; Pointer to string data
-    dq 314  ; String length
+    dq 64  ; String length
 Lstr4:
-    db "<!DOCTYPE html><html><head><title>About - MethASM</title><style>body{font-family:system-ui;max-width:40em;margin:2em auto;padding:0 1em}h1{color:#2563eb}p{color:#64748b}a{color:#2563eb}</style></head><body><h1>About</h1><p>Server written in MethASM, compiled to x86-64.</p><p><a href=", 34, "/", 34, ">Back</a></p></body></html>", 0
+    db "HTTP/1.1 200 OK", 13, 10, "Content-Type: text/plain", 13, 10, "Content-Length: 2", 13, 10, 13, 10, 0
 
-; Global variable: not_found_header (string, 16 bytes)
-not_found_header:
+; Global variable: HTTP_HEALTH_BODY (string, 16 bytes)
+HTTP_HEALTH_BODY:
     dq Lstr5  ; Pointer to string data
-    dq 85  ; String length
-Lstr5:
-    db "HTTP/1.1 404 Not Found", 13, 10, "Content-Type: text/html; charset=utf-8", 13, 10, "Connection: close", 13, 10, 13, 10, 0
-
-; Global variable: not_found_body (string, 16 bytes)
-not_found_body:
-    dq Lstr6  ; Pointer to string data
-    dq 257  ; String length
-Lstr6:
-    db "<!DOCTYPE html><html><head><title>404</title><style>body{font-family:system-ui;max-width:40em;margin:2em auto;padding:0 1em}h1{color:#dc2626}p{color:#64748b}a{color:#2563eb}</style></head><body><h1>404 Not Found</h1><p><a href=", 34, "/", 34, ">Home</a></p></body></html>", 0
-
-; Global variable: nl (string, 16 bytes)
-nl:
-    dq Lstr7  ; Pointer to string data
     dq 2  ; String length
+Lstr5:
+    db "OK", 0
+
+; Global variable: err_net_init (string, 16 bytes)
+err_net_init:
+    dq Lstr6  ; Pointer to string data
+    dq 15  ; String length
+Lstr6:
+    db "net_init failed", 0
+
+; Global variable: err_socket (string, 16 bytes)
+err_socket:
+    dq Lstr7  ; Pointer to string data
+    dq 13  ; String length
 Lstr7:
-    db 13, 10, 0
+    db "socket failed", 0
 
-; Global variable: msg_wsa_fail (string, 16 bytes)
-msg_wsa_fail:
+; Global variable: err_reuseaddr (string, 16 bytes)
+err_reuseaddr:
     dq Lstr8  ; Pointer to string data
-    dq 32  ; String length
+    dq 17  ; String length
 Lstr8:
-    db "Startup error: WSAStartup failed", 0
+    db "setsockopt failed", 0
 
-; Global variable: msg_socket_fail (string, 16 bytes)
-msg_socket_fail:
+; Global variable: err_sockaddr (string, 16 bytes)
+err_sockaddr:
     dq Lstr9  ; Pointer to string data
-    dq 30  ; String length
+    dq 15  ; String length
 Lstr9:
-    db "Startup error: socket() failed", 0
+    db "sockaddr failed", 0
 
-; Global variable: msg_bind_fail (string, 16 bytes)
-msg_bind_fail:
+; Global variable: err_bind (string, 16 bytes)
+err_bind:
     dq Lstr10  ; Pointer to string data
-    dq 43  ; String length
+    dq 11  ; String length
 Lstr10:
-    db "Startup error: bind() failed (port in use?)", 0
+    db "bind failed", 0
 
-; Global variable: msg_listen_fail (string, 16 bytes)
-msg_listen_fail:
+; Global variable: err_listen (string, 16 bytes)
+err_listen:
     dq Lstr11  ; Pointer to string data
-    dq 30  ; String length
+    dq 13  ; String length
 Lstr11:
-    db "Startup error: listen() failed", 0
+    db "listen failed", 0
 
-; Global variable: msg_started (string, 16 bytes)
-msg_started:
+; Global variable: msg_ready (string, 16 bytes)
+msg_ready:
     dq Lstr12  ; Pointer to string data
-    dq 41  ; String length
+    dq 29  ; String length
 Lstr12:
-    db "Server listening on http://localhost:5000", 0
+    db "Server: http://localhost:5000", 0
 
 
 section .text
+    extern puts
+    extern putchar
+    extern getchar
+
+global cstr
+
+cstr:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 80    ; Allocate 80 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 's'
+    ; Parameter 's' arrived in register rcx
+ir_entry_0:
+    lea rax, [rbp - 8]
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    mov rax, qword [rax]
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    jmp Lcstr_exit
+Lcstr_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global print
+
+print:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 240    ; Allocate 240 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'msg'
+    ; Parameter 'msg' arrived in register rcx
+ir_entry_1:
+    mov rax, 0
+    ; Store to variable: i
+    mov qword [rbp - 16], rax  ; To stack [rbp - 16]
+ir_while_2:
+    ; Load variable: i
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 24], rax
+    ; Load variable: msg
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 24]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    movzx rax, byte [rax]
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    test rax, rax
+    jz ir_while_end_3
+    ; Load variable: i
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 56], rax
+    ; Load variable: msg
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 56]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 64], rax
+    mov rax, [rbp - 64]
+    movzx rax, byte [rax]
+    mov [rbp - 72], rax
+    ; IR call: putchar (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 72]
+    mov rcx, rax
+    call putchar
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 80], rax
+    ; Load variable: i
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 88], rax
+    mov rax, [rbp - 88]
+    ; Store to variable: i
+    mov qword [rbp - 16], rax  ; To stack [rbp - 16]
+    jmp ir_while_2
+ir_while_end_3:
+Lprint_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global println
+
+println:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'msg'
+    ; Parameter 'msg' arrived in register rcx
+ir_entry_4:
+    ; IR call: puts (1 args)
+    sub rsp, 32
+    ; Load variable: msg
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call puts
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+Lprintln_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global newline
+
+newline:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_5:
+    ; IR call: putchar (1 args)
+    sub rsp, 32
+    mov rax, 10
+    mov rcx, rax
+    call putchar
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 8], rax
+Lnewline_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global print_int
+
+print_int:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 656    ; Allocate 656 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'n'
+    ; Parameter 'n' arrived in register rcx
+ir_entry_6:
+    ; Load variable: n
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setl al
+    movzx rax, al
+    mov [rbp - 104], rax
+    mov rax, [rbp - 104]
+    test rax, rax
+    jz ir_if_next_8
+    ; IR call: putchar (1 args)
+    sub rsp, 32
+    mov rax, 45
+    mov rcx, rax
+    call putchar
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 112], rax
+    mov rax, 0
+    push rax
+    ; Load variable: n
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 120], rax
+    mov rax, [rbp - 120]
+    ; Store to variable: n
+    mov qword [rbp - 8], rax  ; To stack [rbp - 8]
+    jmp ir_if_end_7
+ir_if_next_8:
+ir_if_end_7:
+    ; Load variable: n
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 128], rax
+    mov rax, [rbp - 128]
+    test rax, rax
+    jz ir_if_next_10
+    ; IR call: putchar (1 args)
+    sub rsp, 32
+    mov rax, 48
+    mov rcx, rax
+    call putchar
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 136], rax
+    jmp Lprint_int_exit
+    jmp ir_if_end_9
+ir_if_next_10:
+ir_if_end_9:
+    mov rax, 0
+    ; Store to variable: len
+    mov dword [rbp - 92], eax  ; To stack [rbp - 92]
+ir_while_11:
+    ; Load variable: n
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setg al
+    movzx rax, al
+    mov [rbp - 144], rax
+    mov rax, [rbp - 144]
+    test rax, rax
+    jz ir_while_end_12
+    mov rax, 48
+    push rax
+    ; Load variable: n
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 152], rax
+    ; Load variable: n
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 10
+    mov r10, rax
+    pop rax
+    cqo
+    idiv r10
+    mov [rbp - 160], rax
+    mov rax, [rbp - 160]
+    push rax
+    mov rax, 10
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 168], rax
+    mov rax, [rbp - 152]
+    push rax
+    mov rax, [rbp - 168]
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 176], rax
+    ; Load variable: len
+    mov eax, dword [rbp - 92]  ; From stack [rbp - 92]
+    push rax
+    mov rax, 4
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 184], rax
+    ; Load variable: buf
+    lea rax, [rbp - 88]  ; Local array base
+    push rax
+    mov rax, [rbp - 184]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 192], rax
+    mov rax, [rbp - 192]
+    push rax
+    mov rax, [rbp - 176]
+    mov rcx, rax
+    pop rax
+    mov dword [rax], ecx
+    ; Load variable: n
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 10
+    mov r10, rax
+    pop rax
+    cqo
+    idiv r10
+    mov [rbp - 208], rax
+    mov rax, [rbp - 208]
+    ; Store to variable: n
+    mov qword [rbp - 8], rax  ; To stack [rbp - 8]
+    ; Load variable: len
+    mov eax, dword [rbp - 92]  ; From stack [rbp - 92]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 216], rax
+    mov rax, [rbp - 216]
+    ; Store to variable: len
+    mov dword [rbp - 92], eax  ; To stack [rbp - 92]
+    jmp ir_while_11
+ir_while_end_12:
+    ; Load variable: len
+    mov eax, dword [rbp - 92]  ; From stack [rbp - 92]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 224], rax
+    mov rax, [rbp - 224]
+    ; Store to variable: i
+    mov dword [rbp - 96], eax  ; To stack [rbp - 96]
+ir_while_13:
+    ; Load variable: i
+    mov eax, dword [rbp - 96]  ; From stack [rbp - 96]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setge al
+    movzx rax, al
+    mov [rbp - 232], rax
+    mov rax, [rbp - 232]
+    test rax, rax
+    jz ir_while_end_14
+    ; Load variable: i
+    mov eax, dword [rbp - 96]  ; From stack [rbp - 96]
+    push rax
+    mov rax, 4
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 240], rax
+    ; Load variable: buf
+    lea rax, [rbp - 88]  ; Local array base
+    push rax
+    mov rax, [rbp - 240]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 248], rax
+    mov rax, [rbp - 248]
+    mov eax, dword [rax]
+    mov [rbp - 256], rax
+    ; IR call: putchar (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 256]
+    mov rcx, rax
+    call putchar
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 264], rax
+    ; Load variable: i
+    mov eax, dword [rbp - 96]  ; From stack [rbp - 96]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 272], rax
+    mov rax, [rbp - 272]
+    ; Store to variable: i
+    mov dword [rbp - 96], eax  ; To stack [rbp - 96]
+    jmp ir_while_13
+ir_while_end_14:
+Lprint_int_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global println_int
+
+println_int:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 64    ; Allocate 64 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'n'
+    ; Parameter 'n' arrived in register rcx
+ir_entry_15:
+    ; IR call: print_int (1 args)
+    sub rsp, 32
+    ; Load variable: n
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call print_int
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 16], rax
+    ; IR call: putchar (1 args)
+    sub rsp, 32
+    mov rax, 10
+    mov rcx, rax
+    call putchar
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 24], rax
+Lprintln_int_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+    extern fopen
+    extern fclose
+    extern fread
+    extern fwrite
+    extern fputs
+    extern fgets
+    extern fflush
+    extern __acrt_iob_func
+
+global get_stdin
+
+get_stdin:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_16:
+    ; IR call: __acrt_iob_func (1 args)
+    sub rsp, 32
+    mov rax, 0
+    mov rcx, rax
+    call __acrt_iob_func
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 8], rax
+    mov rax, [rbp - 8]
+    jmp Lget_stdin_exit
+Lget_stdin_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global get_stdout
+
+get_stdout:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_17:
+    ; IR call: __acrt_iob_func (1 args)
+    sub rsp, 32
+    mov rax, 1
+    mov rcx, rax
+    call __acrt_iob_func
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 8], rax
+    mov rax, [rbp - 8]
+    jmp Lget_stdout_exit
+Lget_stdout_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global get_stderr
+
+get_stderr:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_18:
+    ; IR call: __acrt_iob_func (1 args)
+    sub rsp, 32
+    mov rax, 2
+    mov rcx, rax
+    call __acrt_iob_func
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 8], rax
+    mov rax, [rbp - 8]
+    jmp Lget_stderr_exit
+Lget_stderr_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+    extern malloc
+    extern calloc
+    extern realloc
+    extern free
+    extern memset
+    extern memcpy
+    extern memmove
+    extern memcmp
+
+global alloc_zeroed
+
+alloc_zeroed:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'n'
+    ; Parameter 'n' arrived in register rcx
+ir_entry_19:
+    ; IR call: calloc (2 args)
+    sub rsp, 32
+    mov rax, 1
+    mov rcx, rax
+    ; Load variable: n
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rdx, rax
+    call calloc
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    jmp Lalloc_zeroed_exit
+Lalloc_zeroed_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global buf_dup
+
+buf_dup:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 112    ; Allocate 112 bytes on stack (aligned)
+    ; Registering 2 function parameters
+    mov [rbp - 8], rcx  ; Home param 'src'
+    ; Parameter 'src' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'len'
+    ; Parameter 'len' arrived in register rdx
+ir_entry_20:
+    ; IR call: malloc (1 args)
+    sub rsp, 32
+    ; Load variable: len
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    mov rcx, rax
+    call malloc
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    ; Store to variable: dst
+    mov qword [rbp - 24], rax  ; To stack [rbp - 24]
+    ; Load variable: dst
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    test rax, rax
+    jz ir_if_next_22
+    mov rax, 0
+    jmp Lbuf_dup_exit
+    jmp ir_if_end_21
+ir_if_next_22:
+ir_if_end_21:
+    ; IR call: memcpy (3 args)
+    sub rsp, 32
+    ; Load variable: dst
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    mov rcx, rax
+    ; Load variable: src
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rdx, rax
+    ; Load variable: len
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    mov r8, rax
+    call memcpy
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 48], rax
+    ; Load variable: dst
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    jmp Lbuf_dup_exit
+Lbuf_dup_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global INFINITE
+
+INFINITE:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_23:
+    mov rax, 0
+    jmp LINFINITE_exit
+LINFINITE_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global WAIT_OBJECT_0
+
+WAIT_OBJECT_0:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_24:
+    mov rax, 0
+    jmp LWAIT_OBJECT_0_exit
+LWAIT_OBJECT_0_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global WAIT_TIMEOUT
+
+WAIT_TIMEOUT:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_25:
+    mov rax, 258
+    jmp LWAIT_TIMEOUT_exit
+LWAIT_TIMEOUT_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global WAIT_FAILED
+
+WAIT_FAILED:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_26:
+    mov rax, 0
+    jmp LWAIT_FAILED_exit
+LWAIT_FAILED_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+    extern CreateThread
+    extern CloseHandle
+    extern WaitForSingleObject
+    extern GetCurrentThreadId
+    extern Sleep
+    extern CreateMutexA
+    extern ReleaseMutex
+    extern _InterlockedCompareExchange
+    extern _InterlockedExchange
+    extern _InterlockedIncrement
+    extern _InterlockedDecrement
+
+global thread_close
+
+thread_close:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'handle'
+    ; Parameter 'handle' arrived in register rcx
+ir_entry_27:
+    ; IR call: CloseHandle (1 args)
+    sub rsp, 32
+    ; Load variable: handle
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call CloseHandle
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    jmp Lthread_close_exit
+Lthread_close_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global thread_join
+
+thread_join:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 48    ; Allocate 48 bytes on stack (aligned)
+    ; Registering 2 function parameters
+    mov [rbp - 8], rcx  ; Home param 'handle'
+    ; Parameter 'handle' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'timeout_ms'
+    ; Parameter 'timeout_ms' arrived in register rdx
+ir_entry_28:
+    ; IR call: WaitForSingleObject (2 args)
+    sub rsp, 32
+    ; Load variable: handle
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    ; Load variable: timeout_ms
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    mov rdx, rax
+    call WaitForSingleObject
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    jmp Lthread_join_exit
+Lthread_join_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global thread_join_infinite
+
+thread_join_infinite:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 64    ; Allocate 64 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'handle'
+    ; Parameter 'handle' arrived in register rcx
+ir_entry_29:
+    ; IR call: INFINITE (0 args)
+    sub rsp, 32
+    call INFINITE
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    ; IR call: WaitForSingleObject (2 args)
+    sub rsp, 32
+    ; Load variable: handle
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    mov rax, [rbp - 16]
+    mov rdx, rax
+    call WaitForSingleObject
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    jmp Lthread_join_infinite_exit
+Lthread_join_infinite_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global thread_detach
+
+thread_detach:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'handle'
+    ; Parameter 'handle' arrived in register rcx
+ir_entry_30:
+    ; IR call: CloseHandle (1 args)
+    sub rsp, 32
+    ; Load variable: handle
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call CloseHandle
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    jmp Lthread_detach_exit
+Lthread_detach_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global thread_sleep_ms
+
+thread_sleep_ms:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'milliseconds'
+    ; Parameter 'milliseconds' arrived in register rcx
+ir_entry_31:
+    ; IR call: Sleep (1 args)
+    sub rsp, 32
+    ; Load variable: milliseconds
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call Sleep
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 16], rax
+Lthread_sleep_ms_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global mutex_create
+
+mutex_create:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_32:
+    ; IR call: CreateMutexA (3 args)
+    sub rsp, 32
+    mov rax, 0
+    mov rcx, rax
+    mov rax, 0
+    mov rdx, rax
+    mov rax, 0
+    mov r8, rax
+    call CreateMutexA
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 8], rax
+    mov rax, [rbp - 8]
+    jmp Lmutex_create_exit
+Lmutex_create_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global mutex_create_owned
+
+mutex_create_owned:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_33:
+    ; IR call: CreateMutexA (3 args)
+    sub rsp, 32
+    mov rax, 0
+    mov rcx, rax
+    mov rax, 1
+    mov rdx, rax
+    mov rax, 0
+    mov r8, rax
+    call CreateMutexA
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 8], rax
+    mov rax, [rbp - 8]
+    jmp Lmutex_create_owned_exit
+Lmutex_create_owned_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global mutex_lock
+
+mutex_lock:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 112    ; Allocate 112 bytes on stack (aligned)
+    ; Registering 2 function parameters
+    mov [rbp - 8], rcx  ; Home param 'mutex'
+    ; Parameter 'mutex' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'timeout_ms'
+    ; Parameter 'timeout_ms' arrived in register rdx
+ir_entry_34:
+    ; IR call: WaitForSingleObject (2 args)
+    sub rsp, 32
+    ; Load variable: mutex
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    ; Load variable: timeout_ms
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    mov rdx, rax
+    call WaitForSingleObject
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    ; Store to variable: result
+    mov dword [rbp - 20], eax  ; To stack [rbp - 20]
+    ; IR call: WAIT_OBJECT_0 (0 args)
+    sub rsp, 32
+    call WAIT_OBJECT_0
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 40], rax
+    ; Load variable: result
+    mov eax, dword [rbp - 20]  ; From stack [rbp - 20]
+    push rax
+    mov rax, [rbp - 40]
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    test rax, rax
+    jz ir_if_next_36
+    mov rax, 1
+    jmp Lmutex_lock_exit
+    jmp ir_if_end_35
+ir_if_next_36:
+ir_if_end_35:
+    mov rax, 0
+    jmp Lmutex_lock_exit
+Lmutex_lock_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global mutex_lock_infinite
+
+mutex_lock_infinite:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 64    ; Allocate 64 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'mutex'
+    ; Parameter 'mutex' arrived in register rcx
+ir_entry_37:
+    ; IR call: INFINITE (0 args)
+    sub rsp, 32
+    call INFINITE
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    ; IR call: mutex_lock (2 args)
+    sub rsp, 32
+    ; Load variable: mutex
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    mov rax, [rbp - 16]
+    mov rdx, rax
+    call mutex_lock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    jmp Lmutex_lock_infinite_exit
+Lmutex_lock_infinite_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global mutex_unlock
+
+mutex_unlock:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'mutex'
+    ; Parameter 'mutex' arrived in register rcx
+ir_entry_38:
+    ; IR call: ReleaseMutex (1 args)
+    sub rsp, 32
+    ; Load variable: mutex
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call ReleaseMutex
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    jmp Lmutex_unlock_exit
+Lmutex_unlock_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global mutex_close
+
+mutex_close:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'mutex'
+    ; Parameter 'mutex' arrived in register rcx
+ir_entry_39:
+    ; IR call: CloseHandle (1 args)
+    sub rsp, 32
+    ; Load variable: mutex
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call CloseHandle
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    jmp Lmutex_close_exit
+Lmutex_close_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global atomic_compare_exchange_i32
+
+atomic_compare_exchange_i32:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 48    ; Allocate 48 bytes on stack (aligned)
+    ; Registering 3 function parameters
+    mov [rbp - 8], rcx  ; Home param 'target'
+    ; Parameter 'target' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'exchange'
+    ; Parameter 'exchange' arrived in register rdx
+    mov [rbp - 24], r8  ; Home param 'comparand'
+    ; Parameter 'comparand' arrived in register r8
+ir_entry_40:
+    ; IR call: InterlockedCompareExchange (3 args)
+    sub rsp, 32
+    ; Load variable: target
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    ; Load variable: exchange
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    mov rdx, rax
+    ; Load variable: comparand
+    mov eax, dword [rbp - 24]  ; From stack [rbp - 24]
+    mov r8, rax
+    call _InterlockedCompareExchange
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    jmp Latomic_compare_exchange_i32_exit
+Latomic_compare_exchange_i32_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global atomic_exchange_i32
+
+atomic_exchange_i32:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 48    ; Allocate 48 bytes on stack (aligned)
+    ; Registering 2 function parameters
+    mov [rbp - 8], rcx  ; Home param 'target'
+    ; Parameter 'target' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'value'
+    ; Parameter 'value' arrived in register rdx
+ir_entry_41:
+    ; IR call: InterlockedExchange (2 args)
+    sub rsp, 32
+    ; Load variable: target
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    ; Load variable: value
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    mov rdx, rax
+    call _InterlockedExchange
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    jmp Latomic_exchange_i32_exit
+Latomic_exchange_i32_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global atomic_inc_i32
+
+atomic_inc_i32:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'target'
+    ; Parameter 'target' arrived in register rcx
+ir_entry_42:
+    ; IR call: InterlockedIncrement (1 args)
+    sub rsp, 32
+    ; Load variable: target
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call _InterlockedIncrement
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    jmp Latomic_inc_i32_exit
+Latomic_inc_i32_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global atomic_dec_i32
+
+atomic_dec_i32:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'target'
+    ; Parameter 'target' arrived in register rcx
+ir_entry_43:
+    ; IR call: InterlockedDecrement (1 args)
+    sub rsp, 32
+    ; Load variable: target
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call _InterlockedDecrement
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    jmp Latomic_dec_i32_exit
+Latomic_dec_i32_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global spin_try_lock
+
+spin_try_lock:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 64    ; Allocate 64 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'lock_var'
+    ; Parameter 'lock_var' arrived in register rcx
+ir_entry_44:
+    ; IR call: InterlockedCompareExchange (3 args)
+    sub rsp, 32
+    ; Load variable: lock_var
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    mov rax, 1
+    mov rdx, rax
+    mov rax, 0
+    mov r8, rax
+    call _InterlockedCompareExchange
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_46
+    mov rax, 1
+    jmp Lspin_try_lock_exit
+    jmp ir_if_end_45
+ir_if_next_46:
+ir_if_end_45:
+    mov rax, 0
+    jmp Lspin_try_lock_exit
+Lspin_try_lock_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global spin_lock
+
+spin_lock:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 80    ; Allocate 80 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'lock_var'
+    ; Parameter 'lock_var' arrived in register rcx
+ir_entry_47:
+ir_while_48:
+    ; IR call: spin_try_lock (1 args)
+    sub rsp, 32
+    ; Load variable: lock_var
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call spin_try_lock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_while_end_49
+    ; IR call: Sleep (1 args)
+    sub rsp, 32
+    mov rax, 0
+    mov rcx, rax
+    call Sleep
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 32], rax
+    jmp ir_while_48
+ir_while_end_49:
+Lspin_lock_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global spin_unlock
+
+spin_unlock:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'lock_var'
+    ; Parameter 'lock_var' arrived in register rcx
+ir_entry_50:
+    ; IR call: InterlockedExchange (2 args)
+    sub rsp, 32
+    ; Load variable: lock_var
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    mov rax, 0
+    mov rdx, rax
+    call _InterlockedExchange
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+Lspin_unlock_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global AF_INET
+
+AF_INET:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_51:
+    mov rax, 2
+    jmp LAF_INET_exit
+LAF_INET_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global SOCK_STREAM
+
+SOCK_STREAM:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_52:
+    mov rax, 1
+    jmp LSOCK_STREAM_exit
+LSOCK_STREAM_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global SOCK_DGRAM
+
+SOCK_DGRAM:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_53:
+    mov rax, 2
+    jmp LSOCK_DGRAM_exit
+LSOCK_DGRAM_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global IPPROTO_TCP
+
+IPPROTO_TCP:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_54:
+    mov rax, 6
+    jmp LIPPROTO_TCP_exit
+LIPPROTO_TCP_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global IPPROTO_UDP
+
+IPPROTO_UDP:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_55:
+    mov rax, 17
+    jmp LIPPROTO_UDP_exit
+LIPPROTO_UDP_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global SOL_SOCKET
+
+SOL_SOCKET:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_56:
+    mov rax, 0
+    jmp LSOL_SOCKET_exit
+LSOL_SOCKET_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global SO_REUSEADDR
+
+SO_REUSEADDR:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_57:
+    mov rax, 4
+    jmp LSO_REUSEADDR_exit
+LSO_REUSEADDR_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global SD_RECEIVE
+
+SD_RECEIVE:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_58:
+    mov rax, 0
+    jmp LSD_RECEIVE_exit
+LSD_RECEIVE_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global SD_SEND
+
+SD_SEND:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_59:
+    mov rax, 1
+    jmp LSD_SEND_exit
+LSD_SEND_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global SD_BOTH
+
+SD_BOTH:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_60:
+    mov rax, 2
+    jmp LSD_BOTH_exit
+LSD_BOTH_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global INADDR_ANY
+
+INADDR_ANY:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    ; Registering 0 function parameters
+ir_entry_61:
+    mov rax, 0
+    jmp LINADDR_ANY_exit
+LINADDR_ANY_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global INVALID_SOCKET
+
+INVALID_SOCKET:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_62:
+    mov rax, 1
+    neg rax
+    mov [rbp - 8], rax
+    mov rax, [rbp - 8]
+    jmp LINVALID_SOCKET_exit
+LINVALID_SOCKET_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global SOCKET_ERROR
+
+SOCKET_ERROR:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_63:
+    mov rax, 1
+    neg rax
+    mov [rbp - 8], rax
+    mov rax, [rbp - 8]
+    jmp LSOCKET_ERROR_exit
+LSOCKET_ERROR_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
     extern WSAStartup
     extern WSACleanup
+    extern WSAGetLastError
     extern socket
+    extern closesocket
+    extern shutdown
+    extern connect
     extern bind
     extern listen
     extern accept
-    extern recv
-    extern send
-    extern closesocket
     extern setsockopt
+    extern send
+    extern recv
     extern htons
-    ; Struct declaration: SockAddrIn
-    ; Struct SockAddrIn: size=16, alignment=4
+    extern htonl
+    extern ntohs
+    extern ntohl
+    extern inet_addr
 
-global get_route
+global net_init
 
-get_route:
+net_init:
     push rbp        ; Save old base pointer
     mov rbp, rsp  ; Set new base pointer
-    sub rsp, 1472    ; Allocate 1472 bytes on stack (aligned)
+    sub rsp, 416    ; Allocate 416 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_64:
+    lea rax, [rel net_ref_lock]
+    mov [rbp - 24], rax
+    ; IR call: spin_lock (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 24]
+    mov rcx, rax
+    call spin_lock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 32], rax
+    ; Load variable: net_ref_count
+    mov eax, dword [rel net_ref_count]  ; From global memory
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setg al
+    movzx rax, al
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    test rax, rax
+    jz ir_if_next_66
+    ; Load variable: net_ref_count
+    mov eax, dword [rel net_ref_count]  ; From global memory
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    ; Store to variable: net_ref_count
+    mov dword [rel net_ref_count], eax  ; To global memory
+    lea rax, [rel net_ref_lock]
+    mov [rbp - 56], rax
+    ; IR call: spin_unlock (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 56]
+    mov rcx, rax
+    call spin_unlock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 64], rax
+    mov rax, 0
+    jmp Lnet_init_exit
+    jmp ir_if_end_65
+ir_if_next_66:
+ir_if_end_65:
+    ; IR call: malloc (1 args)
+    sub rsp, 32
+    mov rax, 408
+    mov rcx, rax
+    call malloc
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 72], rax
+    mov rax, [rbp - 72]
+    ; Store to variable: wsa_buf
+    mov qword [rbp - 8], rax  ; To stack [rbp - 8]
+    ; Load variable: wsa_buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 80], rax
+    mov rax, [rbp - 80]
+    test rax, rax
+    jz ir_if_next_68
+    lea rax, [rel net_ref_lock]
+    mov [rbp - 88], rax
+    ; IR call: spin_unlock (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 88]
+    mov rcx, rax
+    call spin_unlock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 96], rax
+    mov rax, 1
+    neg rax
+    mov [rbp - 104], rax
+    mov rax, [rbp - 104]
+    jmp Lnet_init_exit
+    jmp ir_if_end_67
+ir_if_next_68:
+ir_if_end_67:
+    ; IR call: WSAStartup (2 args)
+    sub rsp, 32
+    mov rax, 514
+    mov rcx, rax
+    ; Load variable: wsa_buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rdx, rax
+    call WSAStartup
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 112], rax
+    mov rax, [rbp - 112]
+    ; Store to variable: result
+    mov dword [rbp - 12], eax  ; To stack [rbp - 12]
+    ; IR call: free (1 args)
+    sub rsp, 32
+    ; Load variable: wsa_buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call free
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 120], rax
+    ; Load variable: result
+    mov eax, dword [rbp - 12]  ; From stack [rbp - 12]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 128], rax
+    mov rax, [rbp - 128]
+    test rax, rax
+    jz ir_if_next_70
+    mov rax, 1
+    ; Store to variable: net_ref_count
+    mov dword [rel net_ref_count], eax  ; To global memory
+    jmp ir_if_end_69
+ir_if_next_70:
+ir_if_end_69:
+    lea rax, [rel net_ref_lock]
+    mov [rbp - 136], rax
+    ; IR call: spin_unlock (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 136]
+    mov rcx, rax
+    call spin_unlock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 144], rax
+    ; Load variable: result
+    mov eax, dword [rbp - 12]  ; From stack [rbp - 12]
+    jmp Lnet_init_exit
+Lnet_init_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global net_cleanup
+
+net_cleanup:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 304    ; Allocate 304 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_71:
+    lea rax, [rel net_ref_lock]
+    mov [rbp - 16], rax
+    ; IR call: spin_lock (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 16]
+    mov rcx, rax
+    call spin_lock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 24], rax
+    ; Load variable: net_ref_count
+    mov eax, dword [rel net_ref_count]  ; From global memory
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setle al
+    movzx rax, al
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    test rax, rax
+    jz ir_if_next_73
+    lea rax, [rel net_ref_lock]
+    mov [rbp - 40], rax
+    ; IR call: spin_unlock (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 40]
+    mov rcx, rax
+    call spin_unlock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 48], rax
+    mov rax, 0
+    jmp Lnet_cleanup_exit
+    jmp ir_if_end_72
+ir_if_next_73:
+ir_if_end_72:
+    ; Load variable: net_ref_count
+    mov eax, dword [rel net_ref_count]  ; From global memory
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 56], rax
+    mov rax, [rbp - 56]
+    ; Store to variable: net_ref_count
+    mov dword [rel net_ref_count], eax  ; To global memory
+    ; Load variable: net_ref_count
+    mov eax, dword [rel net_ref_count]  ; From global memory
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setg al
+    movzx rax, al
+    mov [rbp - 64], rax
+    mov rax, [rbp - 64]
+    test rax, rax
+    jz ir_if_next_75
+    lea rax, [rel net_ref_lock]
+    mov [rbp - 72], rax
+    ; IR call: spin_unlock (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 72]
+    mov rcx, rax
+    call spin_unlock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 80], rax
+    mov rax, 0
+    jmp Lnet_cleanup_exit
+    jmp ir_if_end_74
+ir_if_next_75:
+ir_if_end_74:
+    ; IR call: WSACleanup (0 args)
+    sub rsp, 32
+    call WSACleanup
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 88], rax
+    mov rax, [rbp - 88]
+    ; Store to variable: result
+    mov dword [rbp - 4], eax  ; To stack [rbp - 4]
+    lea rax, [rel net_ref_lock]
+    mov [rbp - 96], rax
+    ; IR call: spin_unlock (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 96]
+    mov rcx, rax
+    call spin_unlock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 104], rax
+    ; Load variable: result
+    mov eax, dword [rbp - 4]  ; From stack [rbp - 4]
+    jmp Lnet_cleanup_exit
+Lnet_cleanup_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global net_last_error
+
+net_last_error:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_76:
+    ; IR call: WSAGetLastError (0 args)
+    sub rsp, 32
+    call WSAGetLastError
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 8], rax
+    mov rax, [rbp - 8]
+    jmp Lnet_last_error_exit
+Lnet_last_error_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global socket_tcp
+
+socket_tcp:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 96    ; Allocate 96 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_77:
+    ; IR call: AF_INET (0 args)
+    sub rsp, 32
+    call AF_INET
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 8], rax
+    ; IR call: SOCK_STREAM (0 args)
+    sub rsp, 32
+    call SOCK_STREAM
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    ; IR call: IPPROTO_TCP (0 args)
+    sub rsp, 32
+    call IPPROTO_TCP
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 24], rax
+    ; IR call: socket (3 args)
+    sub rsp, 32
+    mov rax, [rbp - 8]
+    mov rcx, rax
+    mov rax, [rbp - 16]
+    mov rdx, rax
+    mov rax, [rbp - 24]
+    mov r8, rax
+    call socket
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    jmp Lsocket_tcp_exit
+Lsocket_tcp_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global socket_udp
+
+socket_udp:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 96    ; Allocate 96 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_78:
+    ; IR call: AF_INET (0 args)
+    sub rsp, 32
+    call AF_INET
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 8], rax
+    ; IR call: SOCK_DGRAM (0 args)
+    sub rsp, 32
+    call SOCK_DGRAM
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    ; IR call: IPPROTO_UDP (0 args)
+    sub rsp, 32
+    call IPPROTO_UDP
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 24], rax
+    ; IR call: socket (3 args)
+    sub rsp, 32
+    mov rax, [rbp - 8]
+    mov rcx, rax
+    mov rax, [rbp - 16]
+    mov rdx, rax
+    mov rax, [rbp - 24]
+    mov r8, rax
+    call socket
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    jmp Lsocket_udp_exit
+Lsocket_udp_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global net_is_initialized
+
+net_is_initialized:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 144    ; Allocate 144 bytes on stack (aligned)
+    ; Registering 0 function parameters
+ir_entry_79:
+    mov rax, 0
+    ; Store to variable: ready
+    mov dword [rbp - 4], eax  ; To stack [rbp - 4]
+    lea rax, [rel net_ref_lock]
+    mov [rbp - 16], rax
+    ; IR call: spin_lock (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 16]
+    mov rcx, rax
+    call spin_lock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 24], rax
+    ; Load variable: net_ref_count
+    mov eax, dword [rel net_ref_count]  ; From global memory
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setg al
+    movzx rax, al
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    test rax, rax
+    jz ir_if_next_81
+    mov rax, 1
+    ; Store to variable: ready
+    mov dword [rbp - 4], eax  ; To stack [rbp - 4]
+    jmp ir_if_end_80
+ir_if_next_81:
+ir_if_end_80:
+    lea rax, [rel net_ref_lock]
+    mov [rbp - 40], rax
+    ; IR call: spin_unlock (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 40]
+    mov rcx, rax
+    call spin_unlock
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 48], rax
+    ; Load variable: ready
+    mov eax, dword [rbp - 4]  ; From stack [rbp - 4]
+    jmp Lnet_is_initialized_exit
+Lnet_is_initialized_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global sockaddr_in
+
+sockaddr_in:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 848    ; Allocate 848 bytes on stack (aligned)
+    ; Registering 2 function parameters
+    mov [rbp - 8], rcx  ; Home param 'ip'
+    ; Parameter 'ip' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'port'
+    ; Parameter 'port' arrived in register rdx
+ir_entry_82:
+    ; IR call: malloc (1 args)
+    sub rsp, 32
+    mov rax, 16
+    mov rcx, rax
+    call malloc
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    ; Store to variable: buf
+    mov qword [rbp - 24], rax  ; To stack [rbp - 24]
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    test rax, rax
+    jz ir_if_next_84
+    mov rax, 0
+    jmp Lsockaddr_in_exit
+    jmp ir_if_end_83
+ir_if_next_84:
+ir_if_end_83:
+    ; IR call: memset (3 args)
+    sub rsp, 32
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    mov rcx, rax
+    mov rax, 0
+    mov rdx, rax
+    mov rax, 16
+    mov r8, rax
+    call memset
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 56], rax
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 64], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, [rbp - 64]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 72], rax
+    mov rax, [rbp - 72]
+    push rax
+    mov rax, 2
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 1
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 88], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, [rbp - 88]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 96], rax
+    mov rax, [rbp - 96]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; IR call: htons (1 args)
+    sub rsp, 32
+    ; Load variable: port
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    mov rcx, rax
+    call htons
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 112], rax
+    mov rax, [rbp - 112]
+    ; Store to variable: net_port
+    mov dword [rbp - 28], eax  ; To stack [rbp - 28]
+    mov rax, 2
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 120], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, [rbp - 120]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 128], rax
+    mov rax, [rbp - 128]
+    push rax
+    ; Load variable: net_port
+    mov eax, dword [rbp - 28]  ; From stack [rbp - 28]
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; Load variable: net_port
+    mov eax, dword [rbp - 28]  ; From stack [rbp - 28]
+    push rax
+    mov rax, 256
+    mov r10, rax
+    pop rax
+    cqo
+    idiv r10
+    mov [rbp - 144], rax
+    mov rax, 3
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 152], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, [rbp - 152]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 160], rax
+    mov rax, [rbp - 160]
+    push rax
+    mov rax, [rbp - 144]
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; IR call: inet_addr (1 args)
+    sub rsp, 32
+    ; Load variable: ip
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call inet_addr
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 176], rax
+    mov rax, [rbp - 176]
+    ; Store to variable: addr
+    mov dword [rbp - 32], eax  ; To stack [rbp - 32]
+    mov rax, 4
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 184], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, [rbp - 184]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 192], rax
+    mov rax, [rbp - 192]
+    push rax
+    ; Load variable: addr
+    mov eax, dword [rbp - 32]  ; From stack [rbp - 32]
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; Load variable: addr
+    mov eax, dword [rbp - 32]  ; From stack [rbp - 32]
+    push rax
+    mov rax, 256
+    mov r10, rax
+    pop rax
+    cqo
+    idiv r10
+    mov [rbp - 208], rax
+    mov rax, 5
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 216], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, [rbp - 216]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 224], rax
+    mov rax, [rbp - 224]
+    push rax
+    mov rax, [rbp - 208]
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; Load variable: addr
+    mov eax, dword [rbp - 32]  ; From stack [rbp - 32]
+    push rax
+    mov rax, 65536
+    mov r10, rax
+    pop rax
+    cqo
+    idiv r10
+    mov [rbp - 240], rax
+    mov rax, 6
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 248], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, [rbp - 248]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 256], rax
+    mov rax, [rbp - 256]
+    push rax
+    mov rax, [rbp - 240]
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; Load variable: addr
+    mov eax, dword [rbp - 32]  ; From stack [rbp - 32]
+    push rax
+    mov rax, 16777216
+    mov r10, rax
+    pop rax
+    cqo
+    idiv r10
+    mov [rbp - 272], rax
+    mov rax, 7
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 280], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, [rbp - 280]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 288], rax
+    mov rax, [rbp - 288]
+    push rax
+    mov rax, [rbp - 272]
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; Load variable: buf
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    jmp Lsockaddr_in_exit
+Lsockaddr_in_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global sockaddr_in_any
+
+sockaddr_in_any:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 448    ; Allocate 448 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'port'
+    ; Parameter 'port' arrived in register rcx
+ir_entry_85:
+    ; IR call: malloc (1 args)
+    sub rsp, 32
+    mov rax, 16
+    mov rcx, rax
+    call malloc
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    ; Store to variable: buf
+    mov qword [rbp - 16], rax  ; To stack [rbp - 16]
+    ; Load variable: buf
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    test rax, rax
+    jz ir_if_next_87
+    mov rax, 0
+    jmp Lsockaddr_in_any_exit
+    jmp ir_if_end_86
+ir_if_next_87:
+ir_if_end_86:
+    ; IR call: memset (3 args)
+    sub rsp, 32
+    ; Load variable: buf
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    mov rcx, rax
+    mov rax, 0
+    mov rdx, rax
+    mov rax, 16
+    mov r8, rax
+    call memset
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 48], rax
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 56], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, [rbp - 56]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 64], rax
+    mov rax, [rbp - 64]
+    push rax
+    mov rax, 2
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 1
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 80], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, [rbp - 80]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 88], rax
+    mov rax, [rbp - 88]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; IR call: htons (1 args)
+    sub rsp, 32
+    ; Load variable: port
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call htons
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 104], rax
+    mov rax, [rbp - 104]
+    ; Store to variable: net_port
+    mov dword [rbp - 20], eax  ; To stack [rbp - 20]
+    mov rax, 2
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 112], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, [rbp - 112]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 120], rax
+    mov rax, [rbp - 120]
+    push rax
+    ; Load variable: net_port
+    mov eax, dword [rbp - 20]  ; From stack [rbp - 20]
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; Load variable: net_port
+    mov eax, dword [rbp - 20]  ; From stack [rbp - 20]
+    push rax
+    mov rax, 256
+    mov r10, rax
+    pop rax
+    cqo
+    idiv r10
+    mov [rbp - 136], rax
+    mov rax, 3
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 144], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, [rbp - 144]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 152], rax
+    mov rax, [rbp - 152]
+    push rax
+    mov rax, [rbp - 136]
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; Load variable: buf
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    jmp Lsockaddr_in_any_exit
+Lsockaddr_in_any_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global set_reuseaddr
+
+set_reuseaddr:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 528    ; Allocate 528 bytes on stack (aligned)
+    ; Registering 2 function parameters
+    mov [rbp - 8], rcx  ; Home param 'sock'
+    ; Parameter 'sock' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'enabled'
+    ; Parameter 'enabled' arrived in register rdx
+ir_entry_88:
+    ; Load variable: enabled
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    test rax, rax
+    jz ir_if_next_90
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 40], rax
+    ; Load variable: opt
+    lea rax, [rbp - 20]  ; Local array base
+    push rax
+    mov rax, [rbp - 40]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    push rax
+    mov rax, 1
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    jmp ir_if_end_89
+ir_if_next_90:
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 64], rax
+    ; Load variable: opt
+    lea rax, [rbp - 20]  ; Local array base
+    push rax
+    mov rax, [rbp - 64]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 72], rax
+    mov rax, [rbp - 72]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+ir_if_end_89:
+    mov rax, 1
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 88], rax
+    ; Load variable: opt
+    lea rax, [rbp - 20]  ; Local array base
+    push rax
+    mov rax, [rbp - 88]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 96], rax
+    mov rax, [rbp - 96]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 2
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 112], rax
+    ; Load variable: opt
+    lea rax, [rbp - 20]  ; Local array base
+    push rax
+    mov rax, [rbp - 112]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 120], rax
+    mov rax, [rbp - 120]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 3
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 136], rax
+    ; Load variable: opt
+    lea rax, [rbp - 20]  ; Local array base
+    push rax
+    mov rax, [rbp - 136]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 144], rax
+    mov rax, [rbp - 144]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; IR call: SOL_SOCKET (0 args)
+    sub rsp, 32
+    call SOL_SOCKET
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 160], rax
+    ; IR call: SO_REUSEADDR (0 args)
+    sub rsp, 32
+    call SO_REUSEADDR
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 168], rax
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 176], rax
+    ; Load variable: opt
+    lea rax, [rbp - 20]  ; Local array base
+    push rax
+    mov rax, [rbp - 176]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 184], rax
+    ; IR call: setsockopt (5 args)
+    sub rsp, 48
+    mov rax, 4
+    mov [rsp + 32], rax
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    mov rax, [rbp - 160]
+    mov rdx, rax
+    mov rax, [rbp - 168]
+    mov r8, rax
+    mov rax, [rbp - 184]
+    mov r9, rax
+    call setsockopt
+    mov rcx, rax
+    add rsp, 48
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 192], rax
+    mov rax, [rbp - 192]
+    jmp Lset_reuseaddr_exit
+Lset_reuseaddr_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global send_all
+
+send_all:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 256    ; Allocate 256 bytes on stack (aligned)
+    ; Registering 3 function parameters
+    mov [rbp - 8], rcx  ; Home param 'sock'
+    ; Parameter 'sock' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'buf'
+    ; Parameter 'buf' arrived in register rdx
+    mov [rbp - 24], r8  ; Home param 'len'
+    ; Parameter 'len' arrived in register r8
+ir_entry_91:
+    mov rax, 0
+    ; Store to variable: total
+    mov dword [rbp - 28], eax  ; To stack [rbp - 28]
+ir_while_92:
+    ; Load variable: total
+    mov eax, dword [rbp - 28]  ; From stack [rbp - 28]
+    push rax
+    ; Load variable: len
+    mov eax, dword [rbp - 24]  ; From stack [rbp - 24]
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setl al
+    movzx rax, al
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    test rax, rax
+    jz ir_while_end_93
+    ; Load variable: total
+    mov eax, dword [rbp - 28]  ; From stack [rbp - 28]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 48], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, [rbp - 48]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 56], rax
+    ; Load variable: len
+    mov eax, dword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    ; Load variable: total
+    mov eax, dword [rbp - 28]  ; From stack [rbp - 28]
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 64], rax
+    ; IR call: send (4 args)
+    sub rsp, 32
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    mov rax, [rbp - 56]
+    mov rdx, rax
+    mov rax, [rbp - 64]
+    mov r8, rax
+    mov rax, 0
+    mov r9, rax
+    call send
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 72], rax
+    mov rax, [rbp - 72]
+    ; Store to variable: sent
+    mov dword [rbp - 32], eax  ; To stack [rbp - 32]
+    ; Load variable: sent
+    mov eax, dword [rbp - 32]  ; From stack [rbp - 32]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setle al
+    movzx rax, al
+    mov [rbp - 80], rax
+    mov rax, [rbp - 80]
+    test rax, rax
+    jz ir_if_next_95
+    mov rax, 1
+    neg rax
+    mov [rbp - 88], rax
+    mov rax, [rbp - 88]
+    jmp Lsend_all_exit
+    jmp ir_if_end_94
+ir_if_next_95:
+ir_if_end_94:
+    ; Load variable: total
+    mov eax, dword [rbp - 28]  ; From stack [rbp - 28]
+    push rax
+    ; Load variable: sent
+    mov eax, dword [rbp - 32]  ; From stack [rbp - 32]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 96], rax
+    mov rax, [rbp - 96]
+    ; Store to variable: total
+    mov dword [rbp - 28], eax  ; To stack [rbp - 28]
+    jmp ir_while_92
+ir_while_end_93:
+    ; Load variable: total
+    mov eax, dword [rbp - 28]  ; From stack [rbp - 28]
+    jmp Lsend_all_exit
+Lsend_all_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+    extern atoi
+    extern atol
+
+global digit_to_char
+
+digit_to_char:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'd'
+    ; Parameter 'd' arrived in register rcx
+ir_entry_96:
+    ; Load variable: d
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 48
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    jmp Ldigit_to_char_exit
+Ldigit_to_char_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global char_to_digit
+
+char_to_digit:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 32    ; Allocate 32 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'c'
+    ; Parameter 'c' arrived in register rcx
+ir_entry_97:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 48
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    jmp Lchar_to_digit_exit
+Lchar_to_digit_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global is_digit
+
+is_digit:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 64    ; Allocate 64 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'c'
+    ; Parameter 'c' arrived in register rcx
+ir_entry_98:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 48
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setge al
+    movzx rax, al
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    test rax, rax
+    jz ir_if_next_100
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 57
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setle al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_102
+    mov rax, 1
+    jmp Lis_digit_exit
+    jmp ir_if_end_101
+ir_if_next_102:
+ir_if_end_101:
+    jmp ir_if_end_99
+ir_if_next_100:
+ir_if_end_99:
+    mov rax, 0
+    jmp Lis_digit_exit
+Lis_digit_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global is_upper
+
+is_upper:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 64    ; Allocate 64 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'c'
+    ; Parameter 'c' arrived in register rcx
+ir_entry_103:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 65
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setge al
+    movzx rax, al
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    test rax, rax
+    jz ir_if_next_105
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 90
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setle al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_107
+    mov rax, 1
+    jmp Lis_upper_exit
+    jmp ir_if_end_106
+ir_if_next_107:
+ir_if_end_106:
+    jmp ir_if_end_104
+ir_if_next_105:
+ir_if_end_104:
+    mov rax, 0
+    jmp Lis_upper_exit
+Lis_upper_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global is_lower
+
+is_lower:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 64    ; Allocate 64 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'c'
+    ; Parameter 'c' arrived in register rcx
+ir_entry_108:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 97
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setge al
+    movzx rax, al
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    test rax, rax
+    jz ir_if_next_110
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 122
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setle al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_112
+    mov rax, 1
+    jmp Lis_lower_exit
+    jmp ir_if_end_111
+ir_if_next_112:
+ir_if_end_111:
+    jmp ir_if_end_109
+ir_if_next_110:
+ir_if_end_109:
+    mov rax, 0
+    jmp Lis_lower_exit
+Lis_lower_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global is_alpha
+
+is_alpha:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 112    ; Allocate 112 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'c'
+    ; Parameter 'c' arrived in register rcx
+ir_entry_113:
+    ; IR call: is_upper (1 args)
+    sub rsp, 32
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call is_upper
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_115
+    mov rax, 1
+    jmp Lis_alpha_exit
+    jmp ir_if_end_114
+ir_if_next_115:
+ir_if_end_114:
+    ; IR call: is_lower (1 args)
+    sub rsp, 32
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call is_lower
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    test rax, rax
+    jz ir_if_next_117
+    mov rax, 1
+    jmp Lis_alpha_exit
+    jmp ir_if_end_116
+ir_if_next_117:
+ir_if_end_116:
+    mov rax, 0
+    jmp Lis_alpha_exit
+Lis_alpha_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global is_alnum
+
+is_alnum:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 112    ; Allocate 112 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'c'
+    ; Parameter 'c' arrived in register rcx
+ir_entry_118:
+    ; IR call: is_alpha (1 args)
+    sub rsp, 32
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call is_alpha
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_120
+    mov rax, 1
+    jmp Lis_alnum_exit
+    jmp ir_if_end_119
+ir_if_next_120:
+ir_if_end_119:
+    ; IR call: is_digit (1 args)
+    sub rsp, 32
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call is_digit
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    test rax, rax
+    jz ir_if_next_122
+    mov rax, 1
+    jmp Lis_alnum_exit
+    jmp ir_if_end_121
+ir_if_next_122:
+ir_if_end_121:
+    mov rax, 0
+    jmp Lis_alnum_exit
+Lis_alnum_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global is_space
+
+is_space:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 160    ; Allocate 160 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'c'
+    ; Parameter 'c' arrived in register rcx
+ir_entry_123:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 32
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    test rax, rax
+    jz ir_if_next_125
+    mov rax, 1
+    jmp Lis_space_exit
+    jmp ir_if_end_124
+ir_if_next_125:
+ir_if_end_124:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 9
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_127
+    mov rax, 1
+    jmp Lis_space_exit
+    jmp ir_if_end_126
+ir_if_next_127:
+ir_if_end_126:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 10
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    test rax, rax
+    jz ir_if_next_129
+    mov rax, 1
+    jmp Lis_space_exit
+    jmp ir_if_end_128
+ir_if_next_129:
+ir_if_end_128:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 13
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    test rax, rax
+    jz ir_if_next_131
+    mov rax, 1
+    jmp Lis_space_exit
+    jmp ir_if_end_130
+ir_if_next_131:
+ir_if_end_130:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 12
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    test rax, rax
+    jz ir_if_next_133
+    mov rax, 1
+    jmp Lis_space_exit
+    jmp ir_if_end_132
+ir_if_next_133:
+ir_if_end_132:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 11
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 56], rax
+    mov rax, [rbp - 56]
+    test rax, rax
+    jz ir_if_next_135
+    mov rax, 1
+    jmp Lis_space_exit
+    jmp ir_if_end_134
+ir_if_next_135:
+ir_if_end_134:
+    mov rax, 0
+    jmp Lis_space_exit
+Lis_space_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global to_lower
+
+to_lower:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 80    ; Allocate 80 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'c'
+    ; Parameter 'c' arrived in register rcx
+ir_entry_136:
+    ; IR call: is_upper (1 args)
+    sub rsp, 32
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call is_upper
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_138
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 32
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    jmp Lto_lower_exit
+    jmp ir_if_end_137
+ir_if_next_138:
+ir_if_end_137:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    jmp Lto_lower_exit
+Lto_lower_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global to_upper
+
+to_upper:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 80    ; Allocate 80 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 'c'
+    ; Parameter 'c' arrived in register rcx
+ir_entry_139:
+    ; IR call: is_lower (1 args)
+    sub rsp, 32
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call is_lower
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 16], rax
+    mov rax, [rbp - 16]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_141
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, 32
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    jmp Lto_upper_exit
+    jmp ir_if_end_140
+ir_if_next_141:
+ir_if_end_140:
+    ; Load variable: c
+    mov eax, dword [rbp - 8]  ; From stack [rbp - 8]
+    jmp Lto_upper_exit
+Lto_upper_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global strlen
+
+strlen:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 160    ; Allocate 160 bytes on stack (aligned)
+    ; Registering 1 function parameters
+    mov [rbp - 8], rcx  ; Home param 's'
+    ; Parameter 's' arrived in register rcx
+ir_entry_142:
+    mov rax, 0
+    ; Store to variable: i
+    mov qword [rbp - 16], rax  ; To stack [rbp - 16]
+ir_while_143:
+    ; Load variable: i
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 24], rax
+    ; Load variable: s
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 24]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 32], rax
+    mov rax, [rbp - 32]
+    movzx rax, byte [rax]
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    test rax, rax
+    jz ir_while_end_144
+    ; Load variable: i
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 56], rax
+    mov rax, [rbp - 56]
+    ; Store to variable: i
+    mov qword [rbp - 16], rax  ; To stack [rbp - 16]
+    jmp ir_while_143
+ir_while_end_144:
+    ; Load variable: i
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    jmp Lstrlen_exit
+Lstrlen_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global streq
+
+streq:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 416    ; Allocate 416 bytes on stack (aligned)
+    ; Registering 2 function parameters
+    mov [rbp - 8], rcx  ; Home param 'a'
+    ; Parameter 'a' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'b'
+    ; Parameter 'b' arrived in register rdx
+ir_entry_145:
+    mov rax, 0
+    ; Store to variable: i
+    mov qword [rbp - 24], rax  ; To stack [rbp - 24]
+ir_while_146:
+    ; Load variable: i
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 32], rax
+    ; Load variable: a
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 32]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    movzx rax, byte [rax]
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 56], rax
+    mov rax, [rbp - 56]
+    test rax, rax
+    jz ir_while_end_147
+    ; Load variable: i
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 64], rax
+    ; Load variable: a
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 64]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 72], rax
+    mov rax, [rbp - 72]
+    movzx rax, byte [rax]
+    mov [rbp - 80], rax
+    ; Load variable: i
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 88], rax
+    ; Load variable: b
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, [rbp - 88]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 96], rax
+    mov rax, [rbp - 96]
+    movzx rax, byte [rax]
+    mov [rbp - 104], rax
+    mov rax, [rbp - 80]
+    push rax
+    mov rax, [rbp - 104]
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 112], rax
+    mov rax, [rbp - 112]
+    test rax, rax
+    jz ir_if_next_149
+    mov rax, 0
+    jmp Lstreq_exit
+    jmp ir_if_end_148
+ir_if_next_149:
+ir_if_end_148:
+    ; Load variable: i
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 120], rax
+    mov rax, [rbp - 120]
+    ; Store to variable: i
+    mov qword [rbp - 24], rax  ; To stack [rbp - 24]
+    jmp ir_while_146
+ir_while_end_147:
+    ; Load variable: i
+    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 128], rax
+    ; Load variable: b
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, [rbp - 128]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 136], rax
+    mov rax, [rbp - 136]
+    movzx rax, byte [rax]
+    mov [rbp - 144], rax
+    mov rax, [rbp - 144]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 152], rax
+    mov rax, [rbp - 152]
+    test rax, rax
+    jz ir_if_next_151
+    mov rax, 0
+    jmp Lstreq_exit
+    jmp ir_if_end_150
+ir_if_next_151:
+ir_if_end_150:
+    mov rax, 1
+    jmp Lstreq_exit
+Lstreq_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global strncmp
+
+strncmp:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 880    ; Allocate 880 bytes on stack (aligned)
+    ; Registering 4 function parameters
+    mov [rbp - 8], rcx  ; Home param 'buf'
+    ; Parameter 'buf' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'offset'
+    ; Parameter 'offset' arrived in register rdx
+    mov [rbp - 24], r8  ; Home param 'needle'
+    ; Parameter 'needle' arrived in register r8
+    mov [rbp - 32], r9  ; Home param 'buf_len'
+    ; Parameter 'buf_len' arrived in register r9
+ir_entry_152:
+    ; Load variable: offset
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setl al
+    movzx rax, al
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    test rax, rax
+    jz ir_if_next_154
+    mov rax, 1
+    neg rax
+    mov [rbp - 56], rax
+    mov rax, [rbp - 56]
+    jmp Lstrncmp_exit
+    jmp ir_if_end_153
+ir_if_next_154:
+ir_if_end_153:
+    ; Load variable: buf_len
+    mov eax, dword [rbp - 32]  ; From stack [rbp - 32]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setl al
+    movzx rax, al
+    mov [rbp - 64], rax
+    mov rax, [rbp - 64]
+    test rax, rax
+    jz ir_if_next_156
+    mov rax, 1
+    neg rax
+    mov [rbp - 72], rax
+    mov rax, [rbp - 72]
+    jmp Lstrncmp_exit
+    jmp ir_if_end_155
+ir_if_next_156:
+ir_if_end_155:
+    ; Load variable: offset
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    ; Load variable: buf_len
+    mov eax, dword [rbp - 32]  ; From stack [rbp - 32]
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setg al
+    movzx rax, al
+    mov [rbp - 80], rax
+    mov rax, [rbp - 80]
+    test rax, rax
+    jz ir_if_next_158
+    mov rax, 1
+    neg rax
+    mov [rbp - 88], rax
+    mov rax, [rbp - 88]
+    jmp Lstrncmp_exit
+    jmp ir_if_end_157
+ir_if_next_158:
+ir_if_end_157:
+    mov rax, 0
+    ; Store to variable: i
+    mov dword [rbp - 36], eax  ; To stack [rbp - 36]
+ir_while_159:
+    lea rax, [rbp - 24]
+    mov [rbp - 96], rax
+    mov rax, [rbp - 96]
+    push rax
+    mov rax, 8
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 104], rax
+    mov rax, [rbp - 104]
+    mov rax, qword [rax]
+    mov [rbp - 112], rax
+    ; Load variable: i
+    mov eax, dword [rbp - 36]  ; From stack [rbp - 36]
+    push rax
+    mov rax, [rbp - 112]
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setl al
+    movzx rax, al
+    mov [rbp - 120], rax
+    mov rax, [rbp - 120]
+    test rax, rax
+    jz ir_while_end_160
+    ; Load variable: offset
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    ; Load variable: i
+    mov eax, dword [rbp - 36]  ; From stack [rbp - 36]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 128], rax
+    mov rax, [rbp - 128]
+    push rax
+    ; Load variable: buf_len
+    mov eax, dword [rbp - 32]  ; From stack [rbp - 32]
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setge al
+    movzx rax, al
+    mov [rbp - 136], rax
+    mov rax, [rbp - 136]
+    test rax, rax
+    jz ir_if_next_162
+    mov rax, 1
+    neg rax
+    mov [rbp - 144], rax
+    mov rax, [rbp - 144]
+    jmp Lstrncmp_exit
+    jmp ir_if_end_161
+ir_if_next_162:
+ir_if_end_161:
+    ; Load variable: offset
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    ; Load variable: i
+    mov eax, dword [rbp - 36]  ; From stack [rbp - 36]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 152], rax
+    mov rax, [rbp - 152]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 160], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 160]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 168], rax
+    mov rax, [rbp - 168]
+    movzx rax, byte [rax]
+    mov [rbp - 176], rax
+    lea rax, [rbp - 24]
+    mov [rbp - 184], rax
+    mov rax, [rbp - 184]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 192], rax
+    mov rax, [rbp - 192]
+    mov rax, qword [rax]
+    mov [rbp - 200], rax
+    ; Load variable: i
+    mov eax, dword [rbp - 36]  ; From stack [rbp - 36]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 208], rax
+    mov rax, [rbp - 200]
+    push rax
+    mov rax, [rbp - 208]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 216], rax
+    mov rax, [rbp - 216]
+    movzx rax, byte [rax]
+    mov [rbp - 224], rax
+    mov rax, [rbp - 176]
+    push rax
+    mov rax, [rbp - 224]
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 232], rax
+    mov rax, [rbp - 232]
+    test rax, rax
+    jz ir_if_next_164
+    ; Load variable: offset
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    ; Load variable: i
+    mov eax, dword [rbp - 36]  ; From stack [rbp - 36]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 240], rax
+    mov rax, [rbp - 240]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 248], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 248]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 256], rax
+    mov rax, [rbp - 256]
+    movzx rax, byte [rax]
+    mov [rbp - 264], rax
+    lea rax, [rbp - 24]
+    mov [rbp - 272], rax
+    mov rax, [rbp - 272]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 280], rax
+    mov rax, [rbp - 280]
+    mov rax, qword [rax]
+    mov [rbp - 288], rax
+    ; Load variable: i
+    mov eax, dword [rbp - 36]  ; From stack [rbp - 36]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 296], rax
+    mov rax, [rbp - 288]
+    push rax
+    mov rax, [rbp - 296]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 304], rax
+    mov rax, [rbp - 304]
+    movzx rax, byte [rax]
+    mov [rbp - 312], rax
+    mov rax, [rbp - 264]
+    push rax
+    mov rax, [rbp - 312]
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 320], rax
+    mov rax, [rbp - 320]
+    jmp Lstrncmp_exit
+    jmp ir_if_end_163
+ir_if_next_164:
+ir_if_end_163:
+    ; Load variable: i
+    mov eax, dword [rbp - 36]  ; From stack [rbp - 36]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 328], rax
+    mov rax, [rbp - 328]
+    ; Store to variable: i
+    mov dword [rbp - 36], eax  ; To stack [rbp - 36]
+    jmp ir_while_159
+ir_while_end_160:
+    mov rax, 0
+    jmp Lstrncmp_exit
+Lstrncmp_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global int_to_dec
+
+int_to_dec:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 752    ; Allocate 752 bytes on stack (aligned)
     ; Registering 2 function parameters
     mov [rbp - 8], rcx  ; Home param 'buf'
     ; Parameter 'buf' arrived in register rcx
-    mov [rbp - 16], rdx  ; Home param 'len'
-    ; Parameter 'len' arrived in register rdx
-ir_entry_0:
-    ; Load variable: len
+    mov [rbp - 16], rdx  ; Home param 'n'
+    ; Parameter 'n' arrived in register rdx
+ir_entry_165:
+    mov rax, 0
+    ; Store to variable: count
+    mov dword [rbp - 100], eax  ; To stack [rbp - 100]
+    ; Load variable: n
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 128], rax
+    mov rax, [rbp - 128]
+    test rax, rax
+    jz ir_if_next_167
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 136], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 136]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 144], rax
+    mov rax, [rbp - 144]
+    push rax
+    mov rax, 48
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 1
+    jmp Lint_to_dec_exit
+    jmp ir_if_end_166
+ir_if_next_167:
+ir_if_end_166:
+ir_while_168:
+    ; Load variable: n
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setg al
+    movzx rax, al
+    mov [rbp - 160], rax
+    mov rax, [rbp - 160]
+    test rax, rax
+    jz ir_while_end_169
+    ; Load variable: n
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 10
+    mov r10, rax
+    pop rax
+    cqo
+    idiv r10
+    mov [rbp - 168], rax
+    mov rax, [rbp - 168]
+    push rax
+    mov rax, 10
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 176], rax
+    ; Load variable: n
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, [rbp - 176]
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 184], rax
+    mov rax, [rbp - 184]
+    ; Store to variable: d
+    mov qword [rbp - 112], rax  ; To stack [rbp - 112]
+    ; Load variable: count
+    mov eax, dword [rbp - 100]  ; From stack [rbp - 100]
+    push rax
+    mov rax, 4
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 192], rax
+    ; Load variable: digits
+    lea rax, [rbp - 96]  ; Local array base
+    push rax
+    mov rax, [rbp - 192]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 200], rax
+    mov rax, [rbp - 200]
+    push rax
+    ; Load variable: d
+    mov rax, qword [rbp - 112]  ; From stack [rbp - 112]
+    mov rcx, rax
+    pop rax
+    mov dword [rax], ecx
+    ; Load variable: count
+    mov eax, dword [rbp - 100]  ; From stack [rbp - 100]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 216], rax
+    mov rax, [rbp - 216]
+    ; Store to variable: count
+    mov dword [rbp - 100], eax  ; To stack [rbp - 100]
+    ; Load variable: n
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 10
+    mov r10, rax
+    pop rax
+    cqo
+    idiv r10
+    mov [rbp - 224], rax
+    mov rax, [rbp - 224]
+    ; Store to variable: n
+    mov qword [rbp - 16], rax  ; To stack [rbp - 16]
+    jmp ir_while_168
+ir_while_end_169:
+    ; Load variable: count
+    mov eax, dword [rbp - 100]  ; From stack [rbp - 100]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 232], rax
+    mov rax, [rbp - 232]
+    ; Store to variable: i
+    mov dword [rbp - 116], eax  ; To stack [rbp - 116]
+ir_while_170:
+    ; Load variable: i
+    mov eax, dword [rbp - 116]  ; From stack [rbp - 116]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setge al
+    movzx rax, al
+    mov [rbp - 240], rax
+    mov rax, [rbp - 240]
+    test rax, rax
+    jz ir_while_end_171
+    ; Load variable: i
+    mov eax, dword [rbp - 116]  ; From stack [rbp - 116]
+    push rax
+    mov rax, 4
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 248], rax
+    ; Load variable: digits
+    lea rax, [rbp - 96]  ; Local array base
+    push rax
+    mov rax, [rbp - 248]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 256], rax
+    mov rax, [rbp - 256]
+    mov eax, dword [rax]
+    mov [rbp - 264], rax
+    ; IR call: digit_to_char (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 264]
+    mov rcx, rax
+    call digit_to_char
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 272], rax
+    ; Load variable: count
+    mov eax, dword [rbp - 100]  ; From stack [rbp - 100]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 280], rax
+    mov rax, [rbp - 280]
+    push rax
+    ; Load variable: i
+    mov eax, dword [rbp - 116]  ; From stack [rbp - 116]
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 288], rax
+    mov rax, [rbp - 288]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 296], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 296]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 304], rax
+    mov rax, [rbp - 304]
+    push rax
+    mov rax, [rbp - 272]
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    ; Load variable: i
+    mov eax, dword [rbp - 116]  ; From stack [rbp - 116]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    sub rax, r10
+    mov [rbp - 320], rax
+    mov rax, [rbp - 320]
+    ; Store to variable: i
+    mov dword [rbp - 116], eax  ; To stack [rbp - 116]
+    jmp ir_while_170
+ir_while_end_171:
+    ; Load variable: count
+    mov eax, dword [rbp - 100]  ; From stack [rbp - 100]
+    jmp Lint_to_dec_exit
+Lint_to_dec_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global is_get
+
+is_get:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 416    ; Allocate 416 bytes on stack (aligned)
+    ; Registering 2 function parameters
+    mov [rbp - 8], rcx  ; Home param 'buf'
+    ; Parameter 'buf' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'n'
+    ; Parameter 'n' arrived in register rdx
+ir_entry_172:
+    ; Load variable: n
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 4
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setl al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_174
+    mov rax, 0
+    jmp Lis_get_exit
+    jmp ir_if_end_173
+ir_if_next_174:
+ir_if_end_173:
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 32], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 32]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    movzx rax, byte [rax]
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    push rax
+    mov rax, 71
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 56], rax
+    mov rax, [rbp - 56]
+    test rax, rax
+    jz ir_if_next_176
+    mov rax, 0
+    jmp Lis_get_exit
+    jmp ir_if_end_175
+ir_if_next_176:
+ir_if_end_175:
+    mov rax, 1
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 64], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 64]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 72], rax
+    mov rax, [rbp - 72]
+    movzx rax, byte [rax]
+    mov [rbp - 80], rax
+    mov rax, [rbp - 80]
+    push rax
+    mov rax, 69
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 88], rax
+    mov rax, [rbp - 88]
+    test rax, rax
+    jz ir_if_next_178
+    mov rax, 0
+    jmp Lis_get_exit
+    jmp ir_if_end_177
+ir_if_next_178:
+ir_if_end_177:
+    mov rax, 2
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 96], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 96]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 104], rax
+    mov rax, [rbp - 104]
+    movzx rax, byte [rax]
+    mov [rbp - 112], rax
+    mov rax, [rbp - 112]
+    push rax
+    mov rax, 84
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 120], rax
+    mov rax, [rbp - 120]
+    test rax, rax
+    jz ir_if_next_180
+    mov rax, 0
+    jmp Lis_get_exit
+    jmp ir_if_end_179
+ir_if_next_180:
+ir_if_end_179:
+    mov rax, 3
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 128], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 128]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 136], rax
+    mov rax, [rbp - 136]
+    movzx rax, byte [rax]
+    mov [rbp - 144], rax
+    mov rax, [rbp - 144]
+    push rax
+    mov rax, 32
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 152], rax
+    mov rax, [rbp - 152]
+    test rax, rax
+    jz ir_if_next_182
+    mov rax, 0
+    jmp Lis_get_exit
+    jmp ir_if_end_181
+ir_if_next_182:
+ir_if_end_181:
+    mov rax, 1
+    jmp Lis_get_exit
+Lis_get_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global is_root
+
+is_root:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 224    ; Allocate 224 bytes on stack (aligned)
+    ; Registering 2 function parameters
+    mov [rbp - 8], rcx  ; Home param 'buf'
+    ; Parameter 'buf' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'n'
+    ; Parameter 'n' arrived in register rdx
+ir_entry_183:
+    ; Load variable: n
     mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
     push rax
     mov rax, 6
@@ -169,12 +4734,12 @@ ir_entry_0:
     mov [rbp - 24], rax
     mov rax, [rbp - 24]
     test rax, rax
-    jz ir_if_else_1
-    mov rax, 3
-    jmp Lget_route_exit
-    jmp ir_if_end_2
-ir_if_else_1:
-ir_if_end_2:
+    jz ir_if_next_185
+    mov rax, 0
+    jmp Lis_root_exit
+    jmp ir_if_end_184
+ir_if_next_185:
+ir_if_end_184:
     mov rax, 4
     push rax
     mov rax, 1
@@ -204,12 +4769,12 @@ ir_if_end_2:
     mov [rbp - 56], rax
     mov rax, [rbp - 56]
     test rax, rax
-    jz ir_if_else_3
-    mov rax, 3
-    jmp Lget_route_exit
-    jmp ir_if_end_4
-ir_if_else_3:
-ir_if_end_4:
+    jz ir_if_next_187
+    mov rax, 0
+    jmp Lis_root_exit
+    jmp ir_if_end_186
+ir_if_next_187:
+ir_if_end_186:
     mov rax, 5
     push rax
     mov rax, 1
@@ -234,18 +4799,126 @@ ir_if_end_4:
     mov r10, rax
     pop rax
     cmp rax, r10
-    sete al
+    setne al
     movzx rax, al
     mov [rbp - 88], rax
     mov rax, [rbp - 88]
     test rax, rax
-    jz ir_if_else_5
+    jz ir_if_next_189
     mov rax, 0
-    jmp Lget_route_exit
-    jmp ir_if_end_6
-ir_if_else_5:
-ir_if_end_6:
+    jmp Lis_root_exit
+    jmp ir_if_end_188
+ir_if_next_189:
+ir_if_end_188:
+    mov rax, 1
+    jmp Lis_root_exit
+Lis_root_exit:
+    ; Function epilogue
+    mov rsp, rbp  ; Restore stack pointer
+    pop rbp         ; Restore old base pointer
+    ret               ; Return to caller
+
+global is_health
+
+is_health:
+    push rbp        ; Save old base pointer
+    mov rbp, rsp  ; Set new base pointer
+    sub rsp, 928    ; Allocate 928 bytes on stack (aligned)
+    ; Registering 2 function parameters
+    mov [rbp - 8], rcx  ; Home param 'buf'
+    ; Parameter 'buf' arrived in register rcx
+    mov [rbp - 16], rdx  ; Home param 'n'
+    ; Parameter 'n' arrived in register rdx
+ir_entry_190:
+    ; Load variable: n
+    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
+    push rax
+    mov rax, 12
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setl al
+    movzx rax, al
+    mov [rbp - 24], rax
+    mov rax, [rbp - 24]
+    test rax, rax
+    jz ir_if_next_192
+    mov rax, 0
+    jmp Lis_health_exit
+    jmp ir_if_end_191
+ir_if_next_192:
+ir_if_end_191:
+    mov rax, 4
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 32], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 32]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 40], rax
+    mov rax, [rbp - 40]
+    movzx rax, byte [rax]
+    mov [rbp - 48], rax
+    mov rax, [rbp - 48]
+    push rax
+    mov rax, 47
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 56], rax
+    mov rax, [rbp - 56]
+    test rax, rax
+    jz ir_if_next_194
+    mov rax, 0
+    jmp Lis_health_exit
+    jmp ir_if_end_193
+ir_if_next_194:
+ir_if_end_193:
     mov rax, 5
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 64], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 64]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 72], rax
+    mov rax, [rbp - 72]
+    movzx rax, byte [rax]
+    mov [rbp - 80], rax
+    mov rax, [rbp - 80]
+    push rax
+    mov rax, 104
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 88], rax
+    mov rax, [rbp - 88]
+    test rax, rax
+    jz ir_if_next_196
+    mov rax, 0
+    jmp Lis_health_exit
+    jmp ir_if_end_195
+ir_if_next_196:
+ir_if_end_195:
+    mov rax, 6
     push rax
     mov rax, 1
     mov r10, rax
@@ -265,579 +4938,241 @@ ir_if_end_6:
     mov [rbp - 112], rax
     mov rax, [rbp - 112]
     push rax
-    mov rax, 104
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    sete al
-    movzx rax, al
-    mov [rbp - 120], rax
-    mov rax, [rbp - 120]
-    test rax, rax
-    jz ir_if_else_7
-    ; Load variable: len
-    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
-    push rax
-    mov rax, 11
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    setge al
-    movzx rax, al
-    mov [rbp - 128], rax
-    mov rax, [rbp - 128]
-    test rax, rax
-    jz ir_if_else_9
-    mov rax, 6
-    push rax
-    mov rax, 1
-    mov r10, rax
-    pop rax
-    imul rax, r10
-    mov [rbp - 136], rax
-    ; Load variable: buf
-    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
-    push rax
-    mov rax, [rbp - 136]
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 144], rax
-    mov rax, [rbp - 144]
-    movzx rax, byte [rax]
-    mov [rbp - 152], rax
-    mov rax, [rbp - 152]
-    push rax
     mov rax, 101
     mov r10, rax
     pop rax
     cmp rax, r10
-    sete al
+    setne al
     movzx rax, al
-    mov [rbp - 160], rax
-    mov rax, [rbp - 160]
+    mov [rbp - 120], rax
+    mov rax, [rbp - 120]
     test rax, rax
-    jz ir_if_else_11
+    jz ir_if_next_198
+    mov rax, 0
+    jmp Lis_health_exit
+    jmp ir_if_end_197
+ir_if_next_198:
+ir_if_end_197:
     mov rax, 7
     push rax
     mov rax, 1
     mov r10, rax
     pop rax
     imul rax, r10
-    mov [rbp - 168], rax
+    mov [rbp - 128], rax
     ; Load variable: buf
     mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
     push rax
-    mov rax, [rbp - 168]
+    mov rax, [rbp - 128]
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 176], rax
-    mov rax, [rbp - 176]
+    mov [rbp - 136], rax
+    mov rax, [rbp - 136]
     movzx rax, byte [rax]
-    mov [rbp - 184], rax
-    mov rax, [rbp - 184]
+    mov [rbp - 144], rax
+    mov rax, [rbp - 144]
     push rax
     mov rax, 97
     mov r10, rax
     pop rax
     cmp rax, r10
-    sete al
+    setne al
     movzx rax, al
-    mov [rbp - 192], rax
-    mov rax, [rbp - 192]
+    mov [rbp - 152], rax
+    mov rax, [rbp - 152]
     test rax, rax
-    jz ir_if_else_13
+    jz ir_if_next_200
+    mov rax, 0
+    jmp Lis_health_exit
+    jmp ir_if_end_199
+ir_if_next_200:
+ir_if_end_199:
     mov rax, 8
     push rax
     mov rax, 1
     mov r10, rax
     pop rax
     imul rax, r10
-    mov [rbp - 200], rax
+    mov [rbp - 160], rax
     ; Load variable: buf
     mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
     push rax
-    mov rax, [rbp - 200]
+    mov rax, [rbp - 160]
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 208], rax
-    mov rax, [rbp - 208]
+    mov [rbp - 168], rax
+    mov rax, [rbp - 168]
     movzx rax, byte [rax]
-    mov [rbp - 216], rax
-    mov rax, [rbp - 216]
+    mov [rbp - 176], rax
+    mov rax, [rbp - 176]
     push rax
     mov rax, 108
     mov r10, rax
     pop rax
     cmp rax, r10
-    sete al
+    setne al
     movzx rax, al
-    mov [rbp - 224], rax
-    mov rax, [rbp - 224]
+    mov [rbp - 184], rax
+    mov rax, [rbp - 184]
     test rax, rax
-    jz ir_if_else_15
+    jz ir_if_next_202
+    mov rax, 0
+    jmp Lis_health_exit
+    jmp ir_if_end_201
+ir_if_next_202:
+ir_if_end_201:
     mov rax, 9
     push rax
     mov rax, 1
     mov r10, rax
     pop rax
     imul rax, r10
-    mov [rbp - 232], rax
+    mov [rbp - 192], rax
     ; Load variable: buf
     mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
     push rax
-    mov rax, [rbp - 232]
+    mov rax, [rbp - 192]
     mov r10, rax
     pop rax
     add rax, r10
+    mov [rbp - 200], rax
+    mov rax, [rbp - 200]
+    movzx rax, byte [rax]
+    mov [rbp - 208], rax
+    mov rax, [rbp - 208]
+    push rax
+    mov rax, 116
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
+    mov [rbp - 216], rax
+    mov rax, [rbp - 216]
+    test rax, rax
+    jz ir_if_next_204
+    mov rax, 0
+    jmp Lis_health_exit
+    jmp ir_if_end_203
+ir_if_next_204:
+ir_if_end_203:
+    mov rax, 10
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 224], rax
+    ; Load variable: buf
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 224]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 232], rax
+    mov rax, [rbp - 232]
+    movzx rax, byte [rax]
     mov [rbp - 240], rax
     mov rax, [rbp - 240]
-    movzx rax, byte [rax]
+    push rax
+    mov rax, 104
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
     mov [rbp - 248], rax
     mov rax, [rbp - 248]
-    push rax
-    mov rax, 116
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    sete al
-    movzx rax, al
-    mov [rbp - 256], rax
-    mov rax, [rbp - 256]
     test rax, rax
-    jz ir_if_else_17
-    mov rax, 10
+    jz ir_if_next_206
+    mov rax, 0
+    jmp Lis_health_exit
+    jmp ir_if_end_205
+ir_if_next_206:
+ir_if_end_205:
+    mov rax, 11
     push rax
     mov rax, 1
     mov r10, rax
     pop rax
     imul rax, r10
-    mov [rbp - 264], rax
+    mov [rbp - 256], rax
     ; Load variable: buf
     mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
     push rax
-    mov rax, [rbp - 264]
+    mov rax, [rbp - 256]
     mov r10, rax
     pop rax
     add rax, r10
+    mov [rbp - 264], rax
+    mov rax, [rbp - 264]
+    movzx rax, byte [rax]
     mov [rbp - 272], rax
     mov rax, [rbp - 272]
-    movzx rax, byte [rax]
+    push rax
+    mov rax, 32
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
     mov [rbp - 280], rax
     mov rax, [rbp - 280]
-    push rax
-    mov rax, 104
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    sete al
-    movzx rax, al
-    mov [rbp - 288], rax
-    mov rax, [rbp - 288]
     test rax, rax
-    jz ir_if_else_19
-    mov rax, 1
-    jmp Lget_route_exit
-    jmp ir_if_end_20
-ir_if_else_19:
-ir_if_end_20:
-    jmp ir_if_end_18
-ir_if_else_17:
-ir_if_end_18:
-    jmp ir_if_end_16
-ir_if_else_15:
-    mov rax, 8
+    jz ir_sc_false_211
+ir_sc_rhs_209:
+    mov rax, 11
     push rax
     mov rax, 1
     mov r10, rax
     pop rax
     imul rax, r10
-    mov [rbp - 296], rax
+    mov [rbp - 288], rax
     ; Load variable: buf
     mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
     push rax
-    mov rax, [rbp - 296]
+    mov rax, [rbp - 288]
     mov r10, rax
     pop rax
     add rax, r10
+    mov [rbp - 296], rax
+    mov rax, [rbp - 296]
+    movzx rax, byte [rax]
     mov [rbp - 304], rax
     mov rax, [rbp - 304]
-    movzx rax, byte [rax]
+    push rax
+    mov rax, 63
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    setne al
+    movzx rax, al
     mov [rbp - 312], rax
     mov rax, [rbp - 312]
-    push rax
-    mov rax, 116
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    sete al
-    movzx rax, al
+    test rax, rax
+    jz ir_sc_false_211
+ir_sc_true_210:
+    mov rax, 1
     mov [rbp - 320], rax
+    jmp ir_sc_end_212
+ir_sc_false_211:
+    mov rax, 0
+    mov [rbp - 320], rax
+ir_sc_end_212:
     mov rax, [rbp - 320]
     test rax, rax
-    jz ir_if_else_21
-    mov rax, 9
-    push rax
-    mov rax, 1
-    mov r10, rax
-    pop rax
-    imul rax, r10
-    mov [rbp - 328], rax
-    ; Load variable: buf
-    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
-    push rax
-    mov rax, [rbp - 328]
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 336], rax
-    mov rax, [rbp - 336]
-    movzx rax, byte [rax]
-    mov [rbp - 344], rax
-    mov rax, [rbp - 344]
-    push rax
-    mov rax, 104
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    sete al
-    movzx rax, al
-    mov [rbp - 352], rax
-    mov rax, [rbp - 352]
-    test rax, rax
-    jz ir_if_else_23
-    mov rax, 1
-    jmp Lget_route_exit
-    jmp ir_if_end_24
-ir_if_else_23:
-ir_if_end_24:
-    jmp ir_if_end_22
-ir_if_else_21:
-ir_if_end_22:
-ir_if_end_16:
-    jmp ir_if_end_14
-ir_if_else_13:
-ir_if_end_14:
-    jmp ir_if_end_12
-ir_if_else_11:
-ir_if_end_12:
-    jmp ir_if_end_10
-ir_if_else_9:
-ir_if_end_10:
-    mov rax, 3
-    jmp Lget_route_exit
-    jmp ir_if_end_8
-ir_if_else_7:
-ir_if_end_8:
-    mov rax, 5
-    push rax
-    mov rax, 1
-    mov r10, rax
-    pop rax
-    imul rax, r10
-    mov [rbp - 360], rax
-    ; Load variable: buf
-    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
-    push rax
-    mov rax, [rbp - 360]
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 368], rax
-    mov rax, [rbp - 368]
-    movzx rax, byte [rax]
-    mov [rbp - 376], rax
-    mov rax, [rbp - 376]
-    push rax
-    mov rax, 97
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    sete al
-    movzx rax, al
-    mov [rbp - 384], rax
-    mov rax, [rbp - 384]
-    test rax, rax
-    jz ir_if_else_25
-    ; Load variable: len
-    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
-    push rax
-    mov rax, 10
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    setge al
-    movzx rax, al
-    mov [rbp - 392], rax
-    mov rax, [rbp - 392]
-    test rax, rax
-    jz ir_if_else_27
-    mov rax, 6
-    push rax
-    mov rax, 1
-    mov r10, rax
-    pop rax
-    imul rax, r10
-    mov [rbp - 400], rax
-    ; Load variable: buf
-    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
-    push rax
-    mov rax, [rbp - 400]
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 408], rax
-    mov rax, [rbp - 408]
-    movzx rax, byte [rax]
-    mov [rbp - 416], rax
-    mov rax, [rbp - 416]
-    push rax
-    mov rax, 98
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    sete al
-    movzx rax, al
-    mov [rbp - 424], rax
-    mov rax, [rbp - 424]
-    test rax, rax
-    jz ir_if_else_29
-    mov rax, 7
-    push rax
-    mov rax, 1
-    mov r10, rax
-    pop rax
-    imul rax, r10
-    mov [rbp - 432], rax
-    ; Load variable: buf
-    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
-    push rax
-    mov rax, [rbp - 432]
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 440], rax
-    mov rax, [rbp - 440]
-    movzx rax, byte [rax]
-    mov [rbp - 448], rax
-    mov rax, [rbp - 448]
-    push rax
-    mov rax, 111
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    sete al
-    movzx rax, al
-    mov [rbp - 456], rax
-    mov rax, [rbp - 456]
-    test rax, rax
-    jz ir_if_else_31
-    mov rax, 8
-    push rax
-    mov rax, 1
-    mov r10, rax
-    pop rax
-    imul rax, r10
-    mov [rbp - 464], rax
-    ; Load variable: buf
-    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
-    push rax
-    mov rax, [rbp - 464]
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 472], rax
-    mov rax, [rbp - 472]
-    movzx rax, byte [rax]
-    mov [rbp - 480], rax
-    mov rax, [rbp - 480]
-    push rax
-    mov rax, 117
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    sete al
-    movzx rax, al
-    mov [rbp - 488], rax
-    mov rax, [rbp - 488]
-    test rax, rax
-    jz ir_if_else_33
-    mov rax, 9
-    push rax
-    mov rax, 1
-    mov r10, rax
-    pop rax
-    imul rax, r10
-    mov [rbp - 496], rax
-    ; Load variable: buf
-    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
-    push rax
-    mov rax, [rbp - 496]
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 504], rax
-    mov rax, [rbp - 504]
-    movzx rax, byte [rax]
-    mov [rbp - 512], rax
-    mov rax, [rbp - 512]
-    push rax
-    mov rax, 116
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    sete al
-    movzx rax, al
-    mov [rbp - 520], rax
-    mov rax, [rbp - 520]
-    test rax, rax
-    jz ir_if_else_35
-    mov rax, 2
-    jmp Lget_route_exit
-    jmp ir_if_end_36
-ir_if_else_35:
-ir_if_end_36:
-    jmp ir_if_end_34
-ir_if_else_33:
-ir_if_end_34:
-    jmp ir_if_end_32
-ir_if_else_31:
-ir_if_end_32:
-    jmp ir_if_end_30
-ir_if_else_29:
-ir_if_end_30:
-    jmp ir_if_end_28
-ir_if_else_27:
-ir_if_end_28:
-    mov rax, 3
-    jmp Lget_route_exit
-    jmp ir_if_end_26
-ir_if_else_25:
-ir_if_end_26:
-    mov rax, 3
-    jmp Lget_route_exit
-Lget_route_exit:
-    ; Function epilogue
-    mov rsp, rbp  ; Restore stack pointer
-    pop rbp         ; Restore old base pointer
-    ret               ; Return to caller
-    extern GetStdHandle
-    extern WriteFile
-
-global log_line_parts
-
-log_line_parts:
-    push rbp        ; Save old base pointer
-    mov rbp, rsp  ; Set new base pointer
-    sub rsp, 304    ; Allocate 304 bytes on stack (aligned)
-    ; Registering 2 function parameters
-    mov [rbp - 8], rcx  ; Home param 'chars'
-    ; Parameter 'chars' arrived in register rcx
-    mov [rbp - 16], rdx  ; Home param 'len'
-    ; Parameter 'len' arrived in register rdx
-ir_entry_37:
-    mov rax, 11
-    neg rax
-    mov [rbp - 32], rax
-    ; IR call: GetStdHandle (1 args)
-    sub rsp, 32
-    mov rax, [rbp - 32]
-    mov rcx, rax
-    call GetStdHandle
-    mov rcx, rax
-    add rsp, 32
-    mov rax, rcx
-    ; Integer/pointer return value in rax
-    mov [rbp - 40], rax
-    mov rax, [rbp - 40]
-    ; Store to variable: out
-    mov qword [rbp - 24], rax  ; To stack [rbp - 24]
-    ; Load variable: out
-    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
-    push rax
+    jz ir_if_next_208
     mov rax, 0
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    setl al
-    movzx rax, al
-    mov [rbp - 48], rax
-    mov rax, [rbp - 48]
-    test rax, rax
-    jz ir_if_else_38
-    jmp Llog_line_parts_exit
-    jmp ir_if_end_39
-ir_if_else_38:
-ir_if_end_39:
-    ; IR call: WriteFile (5 args)
-    sub rsp, 48
-    mov rax, 0
-    mov [rsp + 32], rax
-    ; Load variable: out
-    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
-    mov rcx, rax
-    ; Load variable: chars
-    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
-    mov rdx, rax
-    ; Load variable: len
-    mov eax, dword [rbp - 16]  ; From stack [rbp - 16]
-    mov r8, rax
-    mov rax, 0
-    mov r9, rax
-    call WriteFile
-    mov rcx, rax
-    add rsp, 48
-    mov rax, rcx
-    ; Integer/pointer return value in rax
-    ; 32-bit return value already in eax
-    mov [rbp - 56], rax
-    lea rax, [rel nl]
-    mov [rbp - 64], rax
-    mov rax, [rbp - 64]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 72], rax
-    mov rax, [rbp - 72]
-    mov rax, qword [rax]
-    mov [rbp - 80], rax
-    lea rax, [rel nl]
-    mov [rbp - 88], rax
-    mov rax, [rbp - 88]
-    push rax
-    mov rax, 8
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 96], rax
-    mov rax, [rbp - 96]
-    mov rax, qword [rax]
-    mov [rbp - 104], rax
-    ; IR call: WriteFile (5 args)
-    sub rsp, 48
-    mov rax, 0
-    mov [rsp + 32], rax
-    ; Load variable: out
-    mov rax, qword [rbp - 24]  ; From stack [rbp - 24]
-    mov rcx, rax
-    mov rax, [rbp - 80]
-    mov rdx, rax
-    mov rax, [rbp - 104]
-    mov r8, rax
-    mov rax, 0
-    mov r9, rax
-    call WriteFile
-    mov rcx, rax
-    add rsp, 48
-    mov rax, rcx
-    ; Integer/pointer return value in rax
-    ; 32-bit return value already in eax
-    mov [rbp - 112], rax
-Llog_line_parts_exit:
+    jmp Lis_health_exit
+    jmp ir_if_end_207
+ir_if_next_208:
+ir_if_end_207:
+    mov rax, 1
+    jmp Lis_health_exit
+Lis_health_exit:
     ; Function epilogue
     mov rsp, rbp  ; Restore stack pointer
     pop rbp         ; Restore old base pointer
@@ -848,51 +5183,19 @@ global main
 main:
     push rbp        ; Save old base pointer
     mov rbp, rsp  ; Set new base pointer
-    sub rsp, 4752    ; Allocate 4752 bytes on stack (aligned)
+    sub rsp, 7296    ; Allocate 7296 bytes on stack (aligned)
     ; Registering 0 function parameters
-ir_entry_40:
-    mov rax, 0
-    ; Store to variable: listen_sock
-    mov qword [rbp - 440], rax  ; To stack [rbp - 440]
-    mov rax, 0
-    ; Store to variable: client
-    mov qword [rbp - 448], rax  ; To stack [rbp - 448]
-    mov rax, 0
-    ; Store to variable: result
-    mov dword [rbp - 452], eax  ; To stack [rbp - 452]
-    mov rax, 0
-    push rax
-    mov rax, 1
-    mov r10, rax
-    pop rax
-    imul rax, r10
-    mov [rbp - 1496], rax
-    ; Load variable: wsa
-    lea rax, [rbp - 416]  ; Local array base
-    push rax
-    mov rax, [rbp - 1496]
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1504], rax
-    ; IR call: WSAStartup (2 args)
+ir_entry_213:
+    ; IR call: net_init (0 args)
     sub rsp, 32
-    mov rax, 514
-    mov rcx, rax
-    mov rax, [rbp - 1504]
-    mov rdx, rax
-    call WSAStartup
+    call net_init
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 1512], rax
-    mov rax, [rbp - 1512]
-    ; Store to variable: result
-    mov dword [rbp - 452], eax  ; To stack [rbp - 452]
-    ; Load variable: result
-    mov eax, dword [rbp - 452]  ; From stack [rbp - 452]
+    mov [rbp - 4160], rax
+    mov rax, [rbp - 4160]
     push rax
     mov rax, 0
     mov r10, rax
@@ -900,251 +5203,256 @@ ir_entry_40:
     cmp rax, r10
     setne al
     movzx rax, al
-    mov [rbp - 1520], rax
-    mov rax, [rbp - 1520]
+    mov [rbp - 4168], rax
+    mov rax, [rbp - 4168]
     test rax, rax
-    jz ir_if_else_41
-    lea rax, [rel msg_wsa_fail]
-    mov [rbp - 1528], rax
-    mov rax, [rbp - 1528]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1536], rax
-    mov rax, [rbp - 1536]
-    mov rax, qword [rax]
-    mov [rbp - 1544], rax
-    lea rax, [rel msg_wsa_fail]
-    mov [rbp - 1552], rax
-    mov rax, [rbp - 1552]
-    push rax
-    mov rax, 8
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1560], rax
-    mov rax, [rbp - 1560]
-    mov rax, qword [rax]
-    mov [rbp - 1568], rax
-    ; IR call: log_line_parts (2 args)
+    jz ir_if_next_215
+    ; IR call: cstr (1 args)
     sub rsp, 32
-    mov rax, [rbp - 1544]
+    ; Load variable: err_net_init
+    mov rax, qword [rel err_net_init]  ; From global memory
     mov rcx, rax
-    mov rax, [rbp - 1568]
-    mov rdx, rax
-    call log_line_parts
-    mov rcx, rax
-    add rsp, 32
-    mov rax, rcx
-    ; Void return - no value to handle
-    mov [rbp - 1576], rax
-    mov rax, 1
-    jmp Lmain_exit
-    jmp ir_if_end_42
-ir_if_else_41:
-ir_if_end_42:
-    ; IR call: socket (3 args)
-    sub rsp, 32
-    mov rax, 2
-    mov rcx, rax
-    mov rax, 1
-    mov rdx, rax
-    mov rax, 0
-    mov r8, rax
-    call socket
+    call cstr
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
-    mov [rbp - 1584], rax
-    mov rax, [rbp - 1584]
-    ; Store to variable: listen_sock
-    mov qword [rbp - 440], rax  ; To stack [rbp - 440]
-    ; Load variable: listen_sock
-    mov rax, qword [rbp - 440]  ; From stack [rbp - 440]
+    mov [rbp - 4176], rax
+    ; IR call: println (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 4176]
+    mov rcx, rax
+    call println
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 4184], rax
+    mov rax, 1
+    jmp Lmain_exit
+    jmp ir_if_end_214
+ir_if_next_215:
+ir_if_end_214:
+    ; IR call: socket_tcp (0 args)
+    sub rsp, 32
+    call socket_tcp
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 4192], rax
+    mov rax, [rbp - 4192]
+    ; Store to variable: sock
+    mov qword [rbp - 8], rax  ; To stack [rbp - 8]
+    ; IR call: INVALID_SOCKET (0 args)
+    sub rsp, 32
+    call INVALID_SOCKET
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 4200], rax
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    push rax
+    mov rax, [rbp - 4200]
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 4208], rax
+    mov rax, [rbp - 4208]
+    test rax, rax
+    jz ir_if_next_217
+    ; IR call: cstr (1 args)
+    sub rsp, 32
+    ; Load variable: err_socket
+    mov rax, qword [rel err_socket]  ; From global memory
+    mov rcx, rax
+    call cstr
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 4216], rax
+    ; IR call: println (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 4216]
+    mov rcx, rax
+    call println
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 4224], rax
+    ; IR call: net_cleanup (0 args)
+    sub rsp, 32
+    call net_cleanup
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 4232], rax
+    mov rax, 1
+    jmp Lmain_exit
+    jmp ir_if_end_216
+ir_if_next_217:
+ir_if_end_216:
+    ; IR call: set_reuseaddr (2 args)
+    sub rsp, 32
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    mov rax, 1
+    mov rdx, rax
+    call set_reuseaddr
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 4240], rax
+    mov rax, [rbp - 4240]
     push rax
     mov rax, 0
     mov r10, rax
     pop rax
     cmp rax, r10
-    setl al
+    setne al
     movzx rax, al
-    mov [rbp - 1592], rax
-    mov rax, [rbp - 1592]
+    mov [rbp - 4248], rax
+    mov rax, [rbp - 4248]
     test rax, rax
-    jz ir_if_else_43
-    lea rax, [rel msg_socket_fail]
-    mov [rbp - 1600], rax
-    mov rax, [rbp - 1600]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1608], rax
-    mov rax, [rbp - 1608]
-    mov rax, qword [rax]
-    mov [rbp - 1616], rax
-    lea rax, [rel msg_socket_fail]
-    mov [rbp - 1624], rax
-    mov rax, [rbp - 1624]
-    push rax
-    mov rax, 8
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1632], rax
-    mov rax, [rbp - 1632]
-    mov rax, qword [rax]
-    mov [rbp - 1640], rax
-    ; IR call: log_line_parts (2 args)
+    jz ir_if_next_219
+    ; IR call: cstr (1 args)
     sub rsp, 32
-    mov rax, [rbp - 1616]
+    ; Load variable: err_reuseaddr
+    mov rax, qword [rel err_reuseaddr]  ; From global memory
     mov rcx, rax
-    mov rax, [rbp - 1640]
-    mov rdx, rax
-    call log_line_parts
+    call cstr
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 4256], rax
+    ; IR call: println (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 4256]
+    mov rcx, rax
+    call println
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Void return - no value to handle
-    mov [rbp - 1648], rax
-    ; IR call: WSACleanup (0 args)
+    mov [rbp - 4264], rax
+    ; IR call: closesocket (1 args)
     sub rsp, 32
-    call WSACleanup
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call closesocket
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 1656], rax
-    mov rax, 1
-    jmp Lmain_exit
-    jmp ir_if_end_44
-ir_if_else_43:
-ir_if_end_44:
-    mov rax, 0
-    push rax
-    mov rax, 1
-    mov r10, rax
-    pop rax
-    imul rax, r10
-    mov [rbp - 1664], rax
-    ; Load variable: opt
-    lea rax, [rbp - 456]  ; Local array base
-    push rax
-    mov rax, [rbp - 1664]
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1672], rax
-    mov rax, [rbp - 1672]
-    push rax
-    mov rax, 1
+    mov [rbp - 4272], rax
+    ; IR call: net_cleanup (0 args)
+    sub rsp, 32
+    call net_cleanup
     mov rcx, rax
-    pop rax
-    mov byte [rax], cl
-    mov rax, 0
-    push rax
-    mov rax, 1
-    mov r10, rax
-    pop rax
-    imul rax, r10
-    mov [rbp - 1688], rax
-    ; Load variable: opt
-    lea rax, [rbp - 456]  ; Local array base
-    push rax
-    mov rax, [rbp - 1688]
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1696], rax
-    ; IR call: setsockopt (5 args)
-    sub rsp, 48
-    mov rax, 4
-    mov [rsp + 32], rax
-    ; Load variable: listen_sock
-    mov rax, qword [rbp - 440]  ; From stack [rbp - 440]
-    mov rcx, rax
-    mov rax, 0
-    mov rdx, rax
-    mov rax, 4
-    mov r8, rax
-    mov rax, [rbp - 1696]
-    mov r9, rax
-    call setsockopt
-    mov rcx, rax
-    add rsp, 48
+    add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 1704], rax
-    lea rax, [rbp - 432]
-    mov [rbp - 1712], rax
-    mov rax, [rbp - 1712]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1720], rax
-    mov rax, [rbp - 1720]
-    push rax
-    mov rax, 2
-    mov rcx, rax
-    pop rax
-    mov word [rax], cx
-    ; IR call: htons (1 args)
+    mov [rbp - 4280], rax
+    mov rax, 1
+    jmp Lmain_exit
+    jmp ir_if_end_218
+ir_if_next_219:
+ir_if_end_218:
+    ; IR call: sockaddr_in_any (1 args)
     sub rsp, 32
     mov rax, 5000
     mov rcx, rax
-    call htons
+    call sockaddr_in_any
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
-    movzx eax, ax    ; Zero-extend 16-bit return value
-    mov [rbp - 1736], rax
-    lea rax, [rbp - 432]
-    mov [rbp - 1744], rax
-    mov rax, [rbp - 1744]
-    push rax
-    mov rax, 2
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1752], rax
-    mov rax, [rbp - 1752]
-    push rax
-    mov rax, [rbp - 1736]
-    mov rcx, rax
-    pop rax
-    mov word [rax], cx
-    lea rax, [rbp - 432]
-    mov [rbp - 1768], rax
-    mov rax, [rbp - 1768]
-    push rax
-    mov rax, 4
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1776], rax
-    mov rax, [rbp - 1776]
+    mov [rbp - 4288], rax
+    mov rax, [rbp - 4288]
+    ; Store to variable: addr
+    mov qword [rbp - 16], rax  ; To stack [rbp - 16]
+    ; Load variable: addr
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
     push rax
     mov rax, 0
-    mov rcx, rax
+    mov r10, rax
     pop rax
-    mov dword [rax], ecx
-    lea rax, [rbp - 432]
-    mov [rbp - 1792], rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 4296], rax
+    mov rax, [rbp - 4296]
+    test rax, rax
+    jz ir_if_next_221
+    ; IR call: cstr (1 args)
+    sub rsp, 32
+    ; Load variable: err_sockaddr
+    mov rax, qword [rel err_sockaddr]  ; From global memory
+    mov rcx, rax
+    call cstr
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 4304], rax
+    ; IR call: println (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 4304]
+    mov rcx, rax
+    call println
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 4312], rax
+    ; IR call: closesocket (1 args)
+    sub rsp, 32
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    call closesocket
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 4320], rax
+    ; IR call: net_cleanup (0 args)
+    sub rsp, 32
+    call net_cleanup
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 4328], rax
+    mov rax, 1
+    jmp Lmain_exit
+    jmp ir_if_end_220
+ir_if_next_221:
+ir_if_end_220:
     ; IR call: bind (3 args)
     sub rsp, 32
-    ; Load variable: listen_sock
-    mov rax, qword [rbp - 440]  ; From stack [rbp - 440]
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
     mov rcx, rax
-    mov rax, [rbp - 1792]
+    ; Load variable: addr
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
     mov rdx, rax
     mov rax, 16
     mov r8, rax
@@ -1154,12 +5462,8 @@ ir_if_end_44:
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 1800], rax
-    mov rax, [rbp - 1800]
-    ; Store to variable: result
-    mov dword [rbp - 452], eax  ; To stack [rbp - 452]
-    ; Load variable: result
-    mov eax, dword [rbp - 452]  ; From stack [rbp - 452]
+    mov [rbp - 4336], rax
+    mov rax, [rbp - 4336]
     push rax
     mov rax, 0
     mov r10, rax
@@ -1167,50 +5471,46 @@ ir_if_end_44:
     cmp rax, r10
     setne al
     movzx rax, al
-    mov [rbp - 1808], rax
-    mov rax, [rbp - 1808]
+    mov [rbp - 4344], rax
+    mov rax, [rbp - 4344]
     test rax, rax
-    jz ir_if_else_45
-    lea rax, [rel msg_bind_fail]
-    mov [rbp - 1816], rax
-    mov rax, [rbp - 1816]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1824], rax
-    mov rax, [rbp - 1824]
-    mov rax, qword [rax]
-    mov [rbp - 1832], rax
-    lea rax, [rel msg_bind_fail]
-    mov [rbp - 1840], rax
-    mov rax, [rbp - 1840]
-    push rax
-    mov rax, 8
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1848], rax
-    mov rax, [rbp - 1848]
-    mov rax, qword [rax]
-    mov [rbp - 1856], rax
-    ; IR call: log_line_parts (2 args)
+    jz ir_if_next_223
+    ; IR call: cstr (1 args)
     sub rsp, 32
-    mov rax, [rbp - 1832]
+    ; Load variable: err_bind
+    mov rax, qword [rel err_bind]  ; From global memory
     mov rcx, rax
-    mov rax, [rbp - 1856]
-    mov rdx, rax
-    call log_line_parts
+    call cstr
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 4352], rax
+    ; IR call: println (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 4352]
+    mov rcx, rax
+    call println
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Void return - no value to handle
-    mov [rbp - 1864], rax
+    mov [rbp - 4360], rax
+    ; IR call: free (1 args)
+    sub rsp, 32
+    ; Load variable: addr
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    mov rcx, rax
+    call free
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 4368], rax
     ; IR call: closesocket (1 args)
     sub rsp, 32
-    ; Load variable: listen_sock
-    mov rax, qword [rbp - 440]  ; From stack [rbp - 440]
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
     mov rcx, rax
     call closesocket
     mov rcx, rax
@@ -1218,25 +5518,36 @@ ir_if_end_44:
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 1872], rax
-    ; IR call: WSACleanup (0 args)
+    mov [rbp - 4376], rax
+    ; IR call: net_cleanup (0 args)
     sub rsp, 32
-    call WSACleanup
+    call net_cleanup
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 1880], rax
+    mov [rbp - 4384], rax
     mov rax, 1
     jmp Lmain_exit
-    jmp ir_if_end_46
-ir_if_else_45:
-ir_if_end_46:
+    jmp ir_if_end_222
+ir_if_next_223:
+ir_if_end_222:
+    ; IR call: free (1 args)
+    sub rsp, 32
+    ; Load variable: addr
+    mov rax, qword [rbp - 16]  ; From stack [rbp - 16]
+    mov rcx, rax
+    call free
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 4392], rax
     ; IR call: listen (2 args)
     sub rsp, 32
-    ; Load variable: listen_sock
-    mov rax, qword [rbp - 440]  ; From stack [rbp - 440]
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
     mov rcx, rax
     mov rax, 5
     mov rdx, rax
@@ -1246,12 +5557,8 @@ ir_if_end_46:
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 1888], rax
-    mov rax, [rbp - 1888]
-    ; Store to variable: result
-    mov dword [rbp - 452], eax  ; To stack [rbp - 452]
-    ; Load variable: result
-    mov eax, dword [rbp - 452]  ; From stack [rbp - 452]
+    mov [rbp - 4400], rax
+    mov rax, [rbp - 4400]
     push rax
     mov rax, 0
     mov r10, rax
@@ -1259,50 +5566,35 @@ ir_if_end_46:
     cmp rax, r10
     setne al
     movzx rax, al
-    mov [rbp - 1896], rax
-    mov rax, [rbp - 1896]
+    mov [rbp - 4408], rax
+    mov rax, [rbp - 4408]
     test rax, rax
-    jz ir_if_else_47
-    lea rax, [rel msg_listen_fail]
-    mov [rbp - 1904], rax
-    mov rax, [rbp - 1904]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1912], rax
-    mov rax, [rbp - 1912]
-    mov rax, qword [rax]
-    mov [rbp - 1920], rax
-    lea rax, [rel msg_listen_fail]
-    mov [rbp - 1928], rax
-    mov rax, [rbp - 1928]
-    push rax
-    mov rax, 8
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1936], rax
-    mov rax, [rbp - 1936]
-    mov rax, qword [rax]
-    mov [rbp - 1944], rax
-    ; IR call: log_line_parts (2 args)
+    jz ir_if_next_225
+    ; IR call: cstr (1 args)
     sub rsp, 32
-    mov rax, [rbp - 1920]
+    ; Load variable: err_listen
+    mov rax, qword [rel err_listen]  ; From global memory
     mov rcx, rax
-    mov rax, [rbp - 1944]
-    mov rdx, rax
-    call log_line_parts
+    call cstr
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 4416], rax
+    ; IR call: println (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 4416]
+    mov rcx, rax
+    call println
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Void return - no value to handle
-    mov [rbp - 1952], rax
+    mov [rbp - 4424], rax
     ; IR call: closesocket (1 args)
     sub rsp, 32
-    ; Load variable: listen_sock
-    mov rax, qword [rbp - 440]  ; From stack [rbp - 440]
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
     mov rcx, rax
     call closesocket
     mov rcx, rax
@@ -1310,119 +5602,310 @@ ir_if_end_46:
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 1960], rax
-    ; IR call: WSACleanup (0 args)
+    mov [rbp - 4432], rax
+    ; IR call: net_cleanup (0 args)
     sub rsp, 32
-    call WSACleanup
+    call net_cleanup
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 1968], rax
+    mov [rbp - 4440], rax
     mov rax, 1
     jmp Lmain_exit
-    jmp ir_if_end_48
-ir_if_else_47:
-ir_if_end_48:
-    lea rax, [rel msg_started]
-    mov [rbp - 1976], rax
-    mov rax, [rbp - 1976]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 1984], rax
-    mov rax, [rbp - 1984]
-    mov rax, qword [rax]
-    mov [rbp - 1992], rax
-    lea rax, [rel msg_started]
-    mov [rbp - 2000], rax
-    mov rax, [rbp - 2000]
-    push rax
-    mov rax, 8
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 2008], rax
-    mov rax, [rbp - 2008]
-    mov rax, qword [rax]
-    mov [rbp - 2016], rax
-    ; IR call: log_line_parts (2 args)
+    jmp ir_if_end_224
+ir_if_next_225:
+ir_if_end_224:
+    ; IR call: cstr (1 args)
     sub rsp, 32
-    mov rax, [rbp - 1992]
+    ; Load variable: msg_ready
+    mov rax, qword [rel msg_ready]  ; From global memory
     mov rcx, rax
-    mov rax, [rbp - 2016]
-    mov rdx, rax
-    call log_line_parts
-    mov rcx, rax
-    add rsp, 32
-    mov rax, rcx
-    ; Void return - no value to handle
-    mov [rbp - 2024], rax
-ir_while_49:
-    mov rax, 1
-    test rax, rax
-    jz ir_while_end_50
-    ; IR call: accept (3 args)
-    sub rsp, 32
-    ; Load variable: listen_sock
-    mov rax, qword [rbp - 440]  ; From stack [rbp - 440]
-    mov rcx, rax
-    mov rax, 0
-    mov rdx, rax
-    mov rax, 0
-    mov r8, rax
-    call accept
+    call cstr
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
-    mov [rbp - 2032], rax
-    mov rax, [rbp - 2032]
-    ; Store to variable: client
-    mov qword [rbp - 448], rax  ; To stack [rbp - 448]
-    ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    setl al
-    movzx rax, al
-    mov [rbp - 2040], rax
-    mov rax, [rbp - 2040]
-    test rax, rax
-    jz ir_if_else_51
-    jmp ir_while_49
-    jmp ir_if_end_52
-ir_if_else_51:
-ir_if_end_52:
+    mov [rbp - 4448], rax
+    ; IR call: println (1 args)
+    sub rsp, 32
+    mov rax, [rbp - 4448]
+    mov rcx, rax
+    call println
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Void return - no value to handle
+    mov [rbp - 4456], rax
     mov rax, 0
     push rax
     mov rax, 1
     mov r10, rax
     pop rax
     imul rax, r10
-    mov [rbp - 2048], rax
-    ; Load variable: buf
-    lea rax, [rbp - 1480]  ; Local array base
+    mov [rbp - 4464], rax
+    ; Load variable: addrlen_buf
+    lea rax, [rbp - 36]  ; Local array base
     push rax
-    mov rax, [rbp - 2048]
+    mov rax, [rbp - 4464]
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2056], rax
+    mov [rbp - 4472], rax
+    mov rax, [rbp - 4472]
+    push rax
+    mov rax, 16
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 1
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4488], rax
+    ; Load variable: addrlen_buf
+    lea rax, [rbp - 36]  ; Local array base
+    push rax
+    mov rax, [rbp - 4488]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4496], rax
+    mov rax, [rbp - 4496]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 2
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4512], rax
+    ; Load variable: addrlen_buf
+    lea rax, [rbp - 36]  ; Local array base
+    push rax
+    mov rax, [rbp - 4512]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4520], rax
+    mov rax, [rbp - 4520]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 3
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4536], rax
+    ; Load variable: addrlen_buf
+    lea rax, [rbp - 36]  ; Local array base
+    push rax
+    mov rax, [rbp - 4536]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4544], rax
+    mov rax, [rbp - 4544]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+ir_while_226:
+    mov rax, 1
+    test rax, rax
+    jz ir_while_end_227
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4560], rax
+    ; Load variable: addrlen_buf
+    lea rax, [rbp - 36]  ; Local array base
+    push rax
+    mov rax, [rbp - 4560]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4568], rax
+    mov rax, [rbp - 4568]
+    push rax
+    mov rax, 16
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 1
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4584], rax
+    ; Load variable: addrlen_buf
+    lea rax, [rbp - 36]  ; Local array base
+    push rax
+    mov rax, [rbp - 4584]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4592], rax
+    mov rax, [rbp - 4592]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 2
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4608], rax
+    ; Load variable: addrlen_buf
+    lea rax, [rbp - 36]  ; Local array base
+    push rax
+    mov rax, [rbp - 4608]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4616], rax
+    mov rax, [rbp - 4616]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 3
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4632], rax
+    ; Load variable: addrlen_buf
+    lea rax, [rbp - 36]  ; Local array base
+    push rax
+    mov rax, [rbp - 4632]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4640], rax
+    mov rax, [rbp - 4640]
+    push rax
+    mov rax, 0
+    mov rcx, rax
+    pop rax
+    mov byte [rax], cl
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4656], rax
+    ; Load variable: client_addr
+    lea rax, [rbp - 32]  ; Local array base
+    push rax
+    mov rax, [rbp - 4656]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4664], rax
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4672], rax
+    ; Load variable: addrlen_buf
+    lea rax, [rbp - 36]  ; Local array base
+    push rax
+    mov rax, [rbp - 4672]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4680], rax
+    ; IR call: accept (3 args)
+    sub rsp, 32
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
+    mov rcx, rax
+    mov rax, [rbp - 4664]
+    mov rdx, rax
+    mov rax, [rbp - 4680]
+    mov r8, rax
+    call accept
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 4688], rax
+    mov rax, [rbp - 4688]
+    ; Store to variable: client
+    mov qword [rbp - 4144], rax  ; To stack [rbp - 4144]
+    ; IR call: INVALID_SOCKET (0 args)
+    sub rsp, 32
+    call INVALID_SOCKET
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    mov [rbp - 4696], rax
+    ; Load variable: client
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
+    push rax
+    mov rax, [rbp - 4696]
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 4704], rax
+    mov rax, [rbp - 4704]
+    test rax, rax
+    jz ir_if_next_229
+    jmp ir_while_226
+    jmp ir_if_end_228
+ir_if_next_229:
+ir_if_end_228:
+    mov rax, 0
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4712], rax
+    ; Load variable: recv_buf
+    lea rax, [rbp - 4136]  ; Local array base
+    push rax
+    mov rax, [rbp - 4712]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4720], rax
     ; IR call: recv (4 args)
     sub rsp, 32
     ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
     mov rcx, rax
-    mov rax, [rbp - 2056]
+    mov rax, [rbp - 4720]
     mov rdx, rax
-    mov rax, 1024
+    mov rax, 4096
     mov r8, rax
     mov rax, 0
     mov r9, rax
@@ -1432,444 +5915,459 @@ ir_if_end_52:
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2064], rax
-    mov rax, [rbp - 2064]
-    ; Store to variable: bytes_read
-    mov dword [rbp - 1484], eax  ; To stack [rbp - 1484]
-    ; Load variable: bytes_read
-    mov eax, dword [rbp - 1484]  ; From stack [rbp - 1484]
+    mov [rbp - 4728], rax
+    mov rax, [rbp - 4728]
+    ; Store to variable: n
+    mov dword [rbp - 4148], eax  ; To stack [rbp - 4148]
+    ; Load variable: n
+    mov eax, dword [rbp - 4148]  ; From stack [rbp - 4148]
     push rax
     mov rax, 0
     mov r10, rax
     pop rax
     cmp rax, r10
-    setle al
+    setg al
     movzx rax, al
-    mov [rbp - 2072], rax
-    mov rax, [rbp - 2072]
+    mov [rbp - 4736], rax
+    mov rax, [rbp - 4736]
     test rax, rax
-    jz ir_if_else_53
-    ; IR call: closesocket (1 args)
-    sub rsp, 32
-    ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
-    mov rcx, rax
-    call closesocket
-    mov rcx, rax
-    add rsp, 32
-    mov rax, rcx
-    ; Integer/pointer return value in rax
-    ; 32-bit return value already in eax
-    mov [rbp - 2080], rax
-    jmp ir_while_49
-    jmp ir_if_end_54
-ir_if_else_53:
-ir_if_end_54:
+    jz ir_if_next_231
     mov rax, 0
     push rax
     mov rax, 1
     mov r10, rax
     pop rax
     imul rax, r10
-    mov [rbp - 2088], rax
-    ; Load variable: buf
-    lea rax, [rbp - 1480]  ; Local array base
+    mov [rbp - 4744], rax
+    ; Load variable: recv_buf
+    lea rax, [rbp - 4136]  ; Local array base
     push rax
-    mov rax, [rbp - 2088]
+    mov rax, [rbp - 4744]
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2096], rax
-    ; IR call: get_route (2 args)
+    mov [rbp - 4752], rax
+    ; IR call: is_get (2 args)
     sub rsp, 32
-    mov rax, [rbp - 2096]
+    mov rax, [rbp - 4752]
     mov rcx, rax
-    ; Load variable: bytes_read
-    mov eax, dword [rbp - 1484]  ; From stack [rbp - 1484]
+    ; Load variable: n
+    mov eax, dword [rbp - 4148]  ; From stack [rbp - 4148]
     mov rdx, rax
-    call get_route
+    call is_get
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2104], rax
-    mov rax, [rbp - 2104]
-    ; Store to variable: route
-    mov dword [rbp - 1488], eax  ; To stack [rbp - 1488]
-    ; Load variable: route
-    mov eax, dword [rbp - 1488]  ; From stack [rbp - 1488]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    cmp rax, r10
-    je ir_case_56
-    ; Load variable: route
-    mov eax, dword [rbp - 1488]  ; From stack [rbp - 1488]
+    mov [rbp - 4760], rax
+    mov rax, [rbp - 4760]
     push rax
     mov rax, 1
     mov r10, rax
     pop rax
     cmp rax, r10
-    je ir_case_57
-    ; Load variable: route
-    mov eax, dword [rbp - 1488]  ; From stack [rbp - 1488]
+    sete al
+    movzx rax, al
+    mov [rbp - 4768], rax
+    mov rax, [rbp - 4768]
+    test rax, rax
+    jz ir_if_next_233
+    mov rax, 0
     push rax
-    mov rax, 2
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4776], rax
+    ; Load variable: recv_buf
+    lea rax, [rbp - 4136]  ; Local array base
+    push rax
+    mov rax, [rbp - 4776]
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 4784], rax
+    ; IR call: is_health (2 args)
+    sub rsp, 32
+    mov rax, [rbp - 4784]
+    mov rcx, rax
+    ; Load variable: n
+    mov eax, dword [rbp - 4148]  ; From stack [rbp - 4148]
+    mov rdx, rax
+    call is_health
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 4792], rax
+    mov rax, [rbp - 4792]
+    push rax
+    mov rax, 1
     mov r10, rax
     pop rax
     cmp rax, r10
-    je ir_case_58
-    jmp ir_case_59
-ir_case_56:
-    lea rax, [rel http_header]
-    mov [rbp - 2112], rax
-    mov rax, [rbp - 2112]
+    sete al
+    movzx rax, al
+    mov [rbp - 4800], rax
+    mov rax, [rbp - 4800]
+    test rax, rax
+    jz ir_if_next_235
+    lea rax, [rel HTTP_HEALTH_HEADER]
+    mov [rbp - 4808], rax
+    mov rax, [rbp - 4808]
     push rax
     mov rax, 0
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2120], rax
-    mov rax, [rbp - 2120]
+    mov [rbp - 4816], rax
+    mov rax, [rbp - 4816]
     mov rax, qword [rax]
-    mov [rbp - 2128], rax
-    lea rax, [rel http_header]
-    mov [rbp - 2136], rax
-    mov rax, [rbp - 2136]
-    push rax
-    mov rax, 8
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 2144], rax
-    mov rax, [rbp - 2144]
-    mov rax, qword [rax]
-    mov [rbp - 2152], rax
-    ; IR call: send (4 args)
+    mov [rbp - 4824], rax
+    ; IR call: send_all (3 args)
     sub rsp, 32
     ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
     mov rcx, rax
-    mov rax, [rbp - 2128]
+    mov rax, [rbp - 4824]
     mov rdx, rax
-    mov rax, [rbp - 2152]
+    mov rax, 64
     mov r8, rax
-    mov rax, 0
-    mov r9, rax
-    call send
+    call send_all
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2160], rax
-    lea rax, [rel html_body]
-    mov [rbp - 2168], rax
-    mov rax, [rbp - 2168]
+    mov [rbp - 4832], rax
+    lea rax, [rel HTTP_HEALTH_BODY]
+    mov [rbp - 4840], rax
+    mov rax, [rbp - 4840]
     push rax
     mov rax, 0
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2176], rax
-    mov rax, [rbp - 2176]
+    mov [rbp - 4848], rax
+    mov rax, [rbp - 4848]
     mov rax, qword [rax]
-    mov [rbp - 2184], rax
-    lea rax, [rel html_body]
-    mov [rbp - 2192], rax
-    mov rax, [rbp - 2192]
-    push rax
-    mov rax, 8
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 2200], rax
-    mov rax, [rbp - 2200]
-    mov rax, qword [rax]
-    mov [rbp - 2208], rax
-    ; IR call: send (4 args)
+    mov [rbp - 4856], rax
+    ; IR call: send_all (3 args)
     sub rsp, 32
     ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
     mov rcx, rax
-    mov rax, [rbp - 2184]
+    mov rax, [rbp - 4856]
     mov rdx, rax
-    mov rax, [rbp - 2208]
+    mov rax, 2
     mov r8, rax
-    mov rax, 0
-    mov r9, rax
-    call send
+    call send_all
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2216], rax
-    jmp ir_switch_end_55
-ir_case_57:
-    lea rax, [rel health_header]
-    mov [rbp - 2224], rax
-    mov rax, [rbp - 2224]
-    push rax
+    mov [rbp - 4864], rax
+    jmp ir_if_end_234
+ir_if_next_235:
     mov rax, 0
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 2232], rax
-    mov rax, [rbp - 2232]
-    mov rax, qword [rax]
-    mov [rbp - 2240], rax
-    lea rax, [rel health_header]
-    mov [rbp - 2248], rax
-    mov rax, [rbp - 2248]
     push rax
-    mov rax, 8
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    imul rax, r10
+    mov [rbp - 4872], rax
+    ; Load variable: recv_buf
+    lea rax, [rbp - 4136]  ; Local array base
+    push rax
+    mov rax, [rbp - 4872]
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2256], rax
-    mov rax, [rbp - 2256]
-    mov rax, qword [rax]
-    mov [rbp - 2264], rax
-    ; IR call: send (4 args)
+    mov [rbp - 4880], rax
+    ; IR call: is_root (2 args)
     sub rsp, 32
-    ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
+    mov rax, [rbp - 4880]
     mov rcx, rax
-    mov rax, [rbp - 2240]
+    ; Load variable: n
+    mov eax, dword [rbp - 4148]  ; From stack [rbp - 4148]
     mov rdx, rax
-    mov rax, [rbp - 2264]
-    mov r8, rax
-    mov rax, 0
-    mov r9, rax
-    call send
+    call is_root
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2272], rax
-    lea rax, [rel health_body]
-    mov [rbp - 2280], rax
-    mov rax, [rbp - 2280]
+    mov [rbp - 4888], rax
+    mov rax, [rbp - 4888]
+    push rax
+    mov rax, 1
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 4896], rax
+    mov rax, [rbp - 4896]
+    test rax, rax
+    jz ir_if_next_236
+    lea rax, [rel HTTP_PAGE_HEADER]
+    mov [rbp - 4904], rax
+    mov rax, [rbp - 4904]
     push rax
     mov rax, 0
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2288], rax
-    mov rax, [rbp - 2288]
+    mov [rbp - 4912], rax
+    mov rax, [rbp - 4912]
     mov rax, qword [rax]
-    mov [rbp - 2296], rax
-    lea rax, [rel health_body]
-    mov [rbp - 2304], rax
-    mov rax, [rbp - 2304]
-    push rax
-    mov rax, 8
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 2312], rax
-    mov rax, [rbp - 2312]
-    mov rax, qword [rax]
-    mov [rbp - 2320], rax
-    ; IR call: send (4 args)
-    sub rsp, 32
-    ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
-    mov rcx, rax
-    mov rax, [rbp - 2296]
-    mov rdx, rax
-    mov rax, [rbp - 2320]
-    mov r8, rax
-    mov rax, 0
-    mov r9, rax
-    call send
-    mov rcx, rax
-    add rsp, 32
-    mov rax, rcx
-    ; Integer/pointer return value in rax
-    ; 32-bit return value already in eax
-    mov [rbp - 2328], rax
-    jmp ir_switch_end_55
-ir_case_58:
-    lea rax, [rel http_header]
-    mov [rbp - 2336], rax
-    mov rax, [rbp - 2336]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 2344], rax
-    mov rax, [rbp - 2344]
-    mov rax, qword [rax]
-    mov [rbp - 2352], rax
-    lea rax, [rel http_header]
-    mov [rbp - 2360], rax
-    mov rax, [rbp - 2360]
+    mov [rbp - 4920], rax
+    lea rax, [rel HTTP_PAGE_HEADER]
+    mov [rbp - 4928], rax
+    mov rax, [rbp - 4928]
     push rax
     mov rax, 8
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2368], rax
-    mov rax, [rbp - 2368]
+    mov [rbp - 4936], rax
+    mov rax, [rbp - 4936]
     mov rax, qword [rax]
-    mov [rbp - 2376], rax
-    ; IR call: send (4 args)
+    mov [rbp - 4944], rax
+    ; IR call: send_all (3 args)
     sub rsp, 32
     ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
     mov rcx, rax
-    mov rax, [rbp - 2352]
+    mov rax, [rbp - 4920]
     mov rdx, rax
-    mov rax, [rbp - 2376]
+    mov rax, [rbp - 4944]
     mov r8, rax
-    mov rax, 0
-    mov r9, rax
-    call send
+    call send_all
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2384], rax
-    lea rax, [rel about_body]
-    mov [rbp - 2392], rax
-    mov rax, [rbp - 2392]
-    push rax
-    mov rax, 0
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 2400], rax
-    mov rax, [rbp - 2400]
-    mov rax, qword [rax]
-    mov [rbp - 2408], rax
-    lea rax, [rel about_body]
-    mov [rbp - 2416], rax
-    mov rax, [rbp - 2416]
+    mov [rbp - 4952], rax
+    lea rax, [rel HTTP_PAGE_HEADER]
+    mov [rbp - 4960], rax
+    mov rax, [rbp - 4960]
     push rax
     mov rax, 8
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2424], rax
-    mov rax, [rbp - 2424]
+    mov [rbp - 4968], rax
+    mov rax, [rbp - 4968]
     mov rax, qword [rax]
-    mov [rbp - 2432], rax
-    ; IR call: send (4 args)
-    sub rsp, 32
-    ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
-    mov rcx, rax
-    mov rax, [rbp - 2408]
-    mov rdx, rax
-    mov rax, [rbp - 2432]
-    mov r8, rax
-    mov rax, 0
-    mov r9, rax
-    call send
-    mov rcx, rax
-    add rsp, 32
-    mov rax, rcx
-    ; Integer/pointer return value in rax
-    ; 32-bit return value already in eax
-    mov [rbp - 2440], rax
-    jmp ir_switch_end_55
-ir_case_59:
-    lea rax, [rel not_found_header]
-    mov [rbp - 2448], rax
-    mov rax, [rbp - 2448]
+    mov [rbp - 4976], rax
+    mov rax, [rbp - 4952]
+    push rax
+    mov rax, [rbp - 4976]
+    mov r10, rax
+    pop rax
+    cmp rax, r10
+    sete al
+    movzx rax, al
+    mov [rbp - 4984], rax
+    mov rax, [rbp - 4984]
+    test rax, rax
+    jz ir_if_next_238
+    lea rax, [rel PAGE_CONTENT]
+    mov [rbp - 4992], rax
+    mov rax, [rbp - 4992]
     push rax
     mov rax, 0
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2456], rax
-    mov rax, [rbp - 2456]
+    mov [rbp - 5000], rax
+    mov rax, [rbp - 5000]
     mov rax, qword [rax]
-    mov [rbp - 2464], rax
-    lea rax, [rel not_found_header]
-    mov [rbp - 2472], rax
-    mov rax, [rbp - 2472]
+    mov [rbp - 5008], rax
+    lea rax, [rel PAGE_CONTENT]
+    mov [rbp - 5016], rax
+    mov rax, [rbp - 5016]
     push rax
     mov rax, 8
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2480], rax
-    mov rax, [rbp - 2480]
+    mov [rbp - 5024], rax
+    mov rax, [rbp - 5024]
     mov rax, qword [rax]
-    mov [rbp - 2488], rax
-    ; IR call: send (4 args)
+    mov [rbp - 5032], rax
+    ; IR call: send_all (3 args)
     sub rsp, 32
     ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
     mov rcx, rax
-    mov rax, [rbp - 2464]
+    mov rax, [rbp - 5008]
     mov rdx, rax
-    mov rax, [rbp - 2488]
+    mov rax, [rbp - 5032]
     mov r8, rax
-    mov rax, 0
-    mov r9, rax
-    call send
+    call send_all
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2496], rax
-    lea rax, [rel not_found_body]
-    mov [rbp - 2504], rax
-    mov rax, [rbp - 2504]
+    mov [rbp - 5040], rax
+    jmp ir_if_end_237
+ir_if_next_238:
+ir_if_end_237:
+    jmp ir_if_end_234
+ir_if_next_236:
+    lea rax, [rel HTTP_404_HEADER]
+    mov [rbp - 5048], rax
+    mov rax, [rbp - 5048]
     push rax
     mov rax, 0
     mov r10, rax
     pop rax
     add rax, r10
-    mov [rbp - 2512], rax
-    mov rax, [rbp - 2512]
+    mov [rbp - 5056], rax
+    mov rax, [rbp - 5056]
     mov rax, qword [rax]
-    mov [rbp - 2520], rax
-    lea rax, [rel not_found_body]
-    mov [rbp - 2528], rax
-    mov rax, [rbp - 2528]
-    push rax
-    mov rax, 8
-    mov r10, rax
-    pop rax
-    add rax, r10
-    mov [rbp - 2536], rax
-    mov rax, [rbp - 2536]
-    mov rax, qword [rax]
-    mov [rbp - 2544], rax
-    ; IR call: send (4 args)
+    mov [rbp - 5064], rax
+    ; IR call: send_all (3 args)
     sub rsp, 32
     ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
     mov rcx, rax
-    mov rax, [rbp - 2520]
+    mov rax, [rbp - 5064]
     mov rdx, rax
-    mov rax, [rbp - 2544]
+    mov rax, 45
     mov r8, rax
-    mov rax, 0
-    mov r9, rax
-    call send
+    call send_all
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2552], rax
-ir_switch_end_55:
+    mov [rbp - 5072], rax
+    lea rax, [rel HTTP_404_BODY]
+    mov [rbp - 5080], rax
+    mov rax, [rbp - 5080]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 5088], rax
+    mov rax, [rbp - 5088]
+    mov rax, qword [rax]
+    mov [rbp - 5096], rax
+    ; IR call: send_all (3 args)
+    sub rsp, 32
+    ; Load variable: client
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
+    mov rcx, rax
+    mov rax, [rbp - 5096]
+    mov rdx, rax
+    mov rax, 9
+    mov r8, rax
+    call send_all
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 5104], rax
+ir_if_end_234:
+    jmp ir_if_end_232
+ir_if_next_233:
+    lea rax, [rel HTTP_404_HEADER]
+    mov [rbp - 5112], rax
+    mov rax, [rbp - 5112]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 5120], rax
+    mov rax, [rbp - 5120]
+    mov rax, qword [rax]
+    mov [rbp - 5128], rax
+    ; IR call: send_all (3 args)
+    sub rsp, 32
+    ; Load variable: client
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
+    mov rcx, rax
+    mov rax, [rbp - 5128]
+    mov rdx, rax
+    mov rax, 45
+    mov r8, rax
+    call send_all
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 5136], rax
+    lea rax, [rel HTTP_404_BODY]
+    mov [rbp - 5144], rax
+    mov rax, [rbp - 5144]
+    push rax
+    mov rax, 0
+    mov r10, rax
+    pop rax
+    add rax, r10
+    mov [rbp - 5152], rax
+    mov rax, [rbp - 5152]
+    mov rax, qword [rax]
+    mov [rbp - 5160], rax
+    ; IR call: send_all (3 args)
+    sub rsp, 32
+    ; Load variable: client
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
+    mov rcx, rax
+    mov rax, [rbp - 5160]
+    mov rdx, rax
+    mov rax, 9
+    mov r8, rax
+    call send_all
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 5168], rax
+ir_if_end_232:
+    jmp ir_if_end_230
+ir_if_next_231:
+ir_if_end_230:
+    ; IR call: SD_BOTH (0 args)
+    sub rsp, 32
+    call SD_BOTH
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 5176], rax
+    ; IR call: shutdown (2 args)
+    sub rsp, 32
+    ; Load variable: client
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
+    mov rcx, rax
+    mov rax, [rbp - 5176]
+    mov rdx, rax
+    call shutdown
+    mov rcx, rax
+    add rsp, 32
+    mov rax, rcx
+    ; Integer/pointer return value in rax
+    ; 32-bit return value already in eax
+    mov [rbp - 5184], rax
     ; IR call: closesocket (1 args)
     sub rsp, 32
     ; Load variable: client
-    mov rax, qword [rbp - 448]  ; From stack [rbp - 448]
+    mov rax, qword [rbp - 4144]  ; From stack [rbp - 4144]
     mov rcx, rax
     call closesocket
     mov rcx, rax
@@ -1877,13 +6375,13 @@ ir_switch_end_55:
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2560], rax
-    jmp ir_while_49
-ir_while_end_50:
+    mov [rbp - 5192], rax
+    jmp ir_while_226
+ir_while_end_227:
     ; IR call: closesocket (1 args)
     sub rsp, 32
-    ; Load variable: listen_sock
-    mov rax, qword [rbp - 440]  ; From stack [rbp - 440]
+    ; Load variable: sock
+    mov rax, qword [rbp - 8]  ; From stack [rbp - 8]
     mov rcx, rax
     call closesocket
     mov rcx, rax
@@ -1891,16 +6389,16 @@ ir_while_end_50:
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2568], rax
-    ; IR call: WSACleanup (0 args)
+    mov [rbp - 5200], rax
+    ; IR call: net_cleanup (0 args)
     sub rsp, 32
-    call WSACleanup
+    call net_cleanup
     mov rcx, rax
     add rsp, 32
     mov rax, rcx
     ; Integer/pointer return value in rax
     ; 32-bit return value already in eax
-    mov [rbp - 2576], rax
+    mov [rbp - 5208], rax
     mov rax, 0
     jmp Lmain_exit
 Lmain_exit:
@@ -1918,31 +6416,31 @@ mainCRTStartup:
     extern gc_init
     call gc_init
     extern gc_register_root
-    lea rcx, [rel http_header]
+    lea rcx, [rel PAGE_CONTENT]
     call gc_register_root
-    lea rcx, [rel health_header]
+    lea rcx, [rel HTTP_PAGE_HEADER]
     call gc_register_root
-    lea rcx, [rel health_body]
+    lea rcx, [rel HTTP_404_HEADER]
     call gc_register_root
-    lea rcx, [rel html_body]
+    lea rcx, [rel HTTP_404_BODY]
     call gc_register_root
-    lea rcx, [rel about_body]
+    lea rcx, [rel HTTP_HEALTH_HEADER]
     call gc_register_root
-    lea rcx, [rel not_found_header]
+    lea rcx, [rel HTTP_HEALTH_BODY]
     call gc_register_root
-    lea rcx, [rel not_found_body]
+    lea rcx, [rel err_net_init]
     call gc_register_root
-    lea rcx, [rel nl]
+    lea rcx, [rel err_socket]
     call gc_register_root
-    lea rcx, [rel msg_wsa_fail]
+    lea rcx, [rel err_reuseaddr]
     call gc_register_root
-    lea rcx, [rel msg_socket_fail]
+    lea rcx, [rel err_sockaddr]
     call gc_register_root
-    lea rcx, [rel msg_bind_fail]
+    lea rcx, [rel err_bind]
     call gc_register_root
-    lea rcx, [rel msg_listen_fail]
+    lea rcx, [rel err_listen]
     call gc_register_root
-    lea rcx, [rel msg_started]
+    lea rcx, [rel msg_ready]
     call gc_register_root
     ; Call user main function
     call main

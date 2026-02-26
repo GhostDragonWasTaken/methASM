@@ -484,8 +484,15 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
 
   if (options->debug_mode) {
+    if (error_reporter->count > 0) {
+      error_reporter_print_errors(error_reporter);
+    }
     printf("Successfully compiled '%s' to '%s'\n", input_filename,
            output_filename);
+  } else if (error_reporter->count > 0) {
+    // Surface non-fatal diagnostics (e.g. circular/duplicate import warnings)
+    // even on successful compilation.
+    error_reporter_print_errors(error_reporter);
   }
 
 cleanup:
@@ -523,7 +530,8 @@ void print_usage(const char *program_name) {
   printf("  --debug-format <fmt> Debug format: dwarf, stabs, or map (default: "
          "dwarf)\n");
   printf("  -O, --optimize      Enable optimizations\n");
-  printf("  --prelude           Auto-import the standard prelude (std/io, std/net, etc.)\n");
+  printf("  --prelude           Auto-import the standard prelude (std/io, "
+         "std/net, etc.)\n");
   printf("  -h, --help          Show this help message\n");
 }
 

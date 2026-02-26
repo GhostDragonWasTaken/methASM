@@ -40,6 +40,7 @@ export function forty_two() -> int32 {
   return 42;
 }
 
+export var answer: int32 = 42;
 export struct Point { ... }
 export enum Dir { ... }
 export extern function puts(msg: cstring) -> int32 = "puts";

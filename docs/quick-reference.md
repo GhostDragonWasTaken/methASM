@@ -60,6 +60,8 @@ function main() -> int32 {
 
 ## With GC and Structs
 
+Uses `new` for heap allocation. Link `gc.c` when building. See [Garbage Collector](garbage-collector.md).
+
 ```masm
 struct Point {
   x: int32;

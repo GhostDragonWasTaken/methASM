@@ -90,3 +90,22 @@ export function streq(a: cstring, b: cstring) -> int32 {
   if (b[i] != 0) { return 0; }
   return 1;
 }
+
+// Compare buf[offset..] with a string, bounded by buf_len.
+// Returns 0 on exact match, non-zero otherwise.
+export function strncmp(buf: cstring, offset: int32, needle: string, buf_len: int32) -> int32 {
+  if (offset < 0) { return -1; }
+  if (buf_len < 0) { return -1; }
+  if (offset > buf_len) { return -1; }
+
+  var i: int32 = 0;
+  while (i < needle.length) {
+    if (offset + i >= buf_len) { return -1; }
+    if (buf[offset + i] != needle.chars[i]) {
+      return buf[offset + i] - needle.chars[i];
+    }
+    i = i + 1;
+  }
+
+  return 0;
+}

@@ -423,8 +423,8 @@ int code_generator_generate_program(CodeGenerator *generator,
         emitted_gc_root_extern = 1;
       }
 
-      code_generator_emit(generator, "    lea %s, [rel %s]\n",
-                          first_param_reg, var_data->name);
+      code_generator_emit(generator, "    lea %s, [rel %s]\n", first_param_reg,
+                          var_data->name);
       code_generator_emit(generator, "    call gc_register_root\n");
     }
   }
@@ -785,28 +785,44 @@ void code_generator_generate_statement(CodeGenerator *generator,
   case AST_IF_STATEMENT: {
     IfStatement *if_data = (IfStatement *)statement->data;
     if (if_data && if_data->condition && if_data->then_branch) {
-      char *else_label = code_generator_generate_label(generator, "if_else");
       char *end_label = code_generator_generate_label(generator, "if_end");
-      if (!else_label || !end_label)
+      if (!end_label)
         break;
 
-      code_generator_generate_expression(generator, if_data->condition);
-      code_generator_emit(generator,
-                          "    test rax, rax      ; Test condition\n");
-      code_generator_emit(generator, "    jz %s              ; Jump if false\n",
-                          else_label);
+      ASTNode *current_cond = if_data->condition;
+      ASTNode *current_body = if_data->then_branch;
 
-      code_generator_generate_statement(generator, if_data->then_branch);
-      code_generator_emit(generator, "    jmp %s              ; Skip else\n",
-                          end_label);
+      for (size_t i = 0; i <= if_data->else_if_count; i++) {
+        char *next_label = code_generator_generate_label(generator, "if_next");
+        if (!next_label) {
+          free(end_label);
+          break;
+        }
 
-      code_generator_emit(generator, "%s:\n", else_label);
+        code_generator_generate_expression(generator, current_cond);
+        code_generator_emit(generator,
+                            "    test rax, rax      ; Test condition\n");
+        code_generator_emit(
+            generator, "    jz %s              ; Jump to next\n", next_label);
+
+        code_generator_generate_statement(generator, current_body);
+        code_generator_emit(
+            generator, "    jmp %s             ; Skip remaining\n", end_label);
+
+        code_generator_emit(generator, "%s:\n", next_label);
+        free(next_label);
+
+        if (i < if_data->else_if_count) {
+          current_cond = if_data->else_ifs[i].condition;
+          current_body = if_data->else_ifs[i].body;
+        }
+      }
+
       if (if_data->else_branch) {
         code_generator_generate_statement(generator, if_data->else_branch);
       }
 
       code_generator_emit(generator, "%s:\n", end_label);
-      free(else_label);
       free(end_label);
     } else {
       code_generator_set_error(generator, "Malformed if statement");

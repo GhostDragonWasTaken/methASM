@@ -61,7 +61,7 @@ extern var errno_value: int32 = "errno";
 
 ## Structs and Enums
 
-Struct and enum declarations define types. See [Types](types.md). Both can be prefixed with `export` to make them visible to modules that import this file.
+Functions, variables, structs, and enums can be prefixed with `export` to make them visible to modules that import this file.
 
 ```masm
 export enum Status {

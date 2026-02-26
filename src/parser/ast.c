@@ -45,6 +45,14 @@ void ast_destroy_node(ASTNode *node) {
     }
     break;
   }
+  case AST_IMPORT_STR: {
+    ImportStrExpression *import_str = (ImportStrExpression *)node->data;
+    if (import_str) {
+      free(import_str->file_path);
+      free(import_str);
+    }
+    break;
+  }
   case AST_VAR_DECLARATION: {
     VarDeclaration *var_decl = (VarDeclaration *)node->data;
     if (var_decl) {
@@ -204,6 +212,16 @@ void ast_destroy_node(ASTNode *node) {
     }
     break;
   }
+  case AST_IF_STATEMENT: {
+    IfStatement *if_stmt = (IfStatement *)node->data;
+    if (if_stmt) {
+      if (if_stmt->else_ifs) {
+        free(if_stmt->else_ifs);
+      }
+      free(if_stmt);
+    }
+    break;
+  }
   default:
     free(node->data);
     break;
@@ -263,6 +281,23 @@ ASTNode *ast_create_import_declaration(const char *module_name,
   return node;
 }
 
+ASTNode *ast_create_import_str(const char *file_path, SourceLocation location) {
+  ASTNode *node = ast_create_node(AST_IMPORT_STR, location);
+  if (!node)
+    return NULL;
+
+  ImportStrExpression *import_str = malloc(sizeof(ImportStrExpression));
+  if (!import_str) {
+    free(node);
+    return NULL;
+  }
+
+  import_str->file_path = file_path ? strdup(file_path) : NULL;
+  node->data = import_str;
+
+  return node;
+}
+
 ASTNode *ast_create_var_declaration(const char *name, const char *type_name,
                                     ASTNode *initializer,
                                     SourceLocation location) {
@@ -280,6 +315,7 @@ ASTNode *ast_create_var_declaration(const char *name, const char *type_name,
   var_decl->type_name = type_name ? strdup(type_name) : NULL;
   var_decl->initializer = initializer;
   var_decl->is_extern = 0;
+  var_decl->is_exported = 0;
   var_decl->link_name = NULL;
   node->data = var_decl;
 

@@ -7,6 +7,7 @@
 typedef enum {
   AST_PROGRAM,
   AST_IMPORT,
+  AST_IMPORT_STR,
   AST_VAR_DECLARATION,
   AST_FUNCTION_DECLARATION,
   AST_STRUCT_DECLARATION,
@@ -50,6 +51,10 @@ typedef struct ASTNode {
 typedef struct {
   char *module_name;
 } ImportDeclaration;
+
+typedef struct {
+  char *file_path;
+} ImportStrExpression;
 
 typedef struct {
   char *name;
@@ -159,7 +164,14 @@ typedef struct {
 
 typedef struct {
   ASTNode *condition;
+  ASTNode *body;
+} ElseIfClause;
+
+typedef struct {
+  ASTNode *condition;
   ASTNode *then_branch;
+  ElseIfClause *else_ifs;
+  size_t else_if_count;
   ASTNode *else_branch;
 } IfStatement;
 
@@ -200,6 +212,7 @@ void ast_add_child(ASTNode *parent, ASTNode *child);
 ASTNode *ast_create_program();
 ASTNode *ast_create_import_declaration(const char *module_name,
                                        SourceLocation location);
+ASTNode *ast_create_import_str(const char *file_path, SourceLocation location);
 ASTNode *ast_create_var_declaration(const char *name, const char *type_name,
                                     ASTNode *initializer,
                                     SourceLocation location);
@@ -226,9 +239,9 @@ ASTNode *ast_create_number_literal(long long int_value,
                                    SourceLocation location);
 ASTNode *ast_create_float_literal(double float_value, SourceLocation location);
 ASTNode *ast_create_string_literal(const char *value, SourceLocation location);
-ASTNode *ast_create_binary_expression(ASTNode *left, const char *operator,
-                                      ASTNode * right, SourceLocation location);
-ASTNode *ast_create_unary_expression(const char *operator, ASTNode * operand,
+ASTNode *ast_create_binary_expression(ASTNode *left, const char *op,
+                                      ASTNode *right, SourceLocation location);
+ASTNode *ast_create_unary_expression(const char *op, ASTNode *operand,
                                      SourceLocation location);
 ASTNode *ast_create_member_access(ASTNode *object, const char *member,
                                   SourceLocation location);

@@ -56,7 +56,7 @@ a >= b
 
 **Bitwise operators:** Bitwise AND (`&`), OR (`|`), XOR (`^`), complement (`~`), and shifts (`<<`, `>>`) are not supported. The `&` token is used only for address-of (unary). For bit manipulation, use inline assembly or C externs. This is a known limitation for systems programmers; see [Known Limitations](known-limitations.md).
 
-**Logical operators:** Short-circuit logical AND (`&&`) and OR (`||`) are not supported. Use nested `if` or comparison expressions. See [Control Flow](control-flow.md#short-circuit-evaluation).
+**Logical operators:** Short-circuit logical AND (`&&`) and OR (`||`) are supported.
 
 **Division by zero:** Integer division by zero produces undefined behavior. On x86-64, `idiv` raises a divide exception (#DE), typically resulting in a crash. The compiler does not insert runtime checks. Floating-point division by zero produces infinity or NaN per IEEE 754.
 
@@ -115,7 +115,7 @@ obj.method(args)
 
 ## Allocation
 
-The `new` expression allocates a value on the GC heap and returns a pointer. It requires linking the GC runtime (`gc.c`). The pointer is managed; no explicit `free` is needed. The GC performs conservative mark-and-sweep collection.
+The `new` expression allocates a value on the GC heap and returns a pointer. It requires linking the GC runtime (`gc.c`). The pointer is managed; no explicit `free` is needed. The GC performs conservative mark-and-sweep collection. See [Garbage Collector](garbage-collector.md) for details.
 
 ```masm
 var p: MyStruct* = new MyStruct;

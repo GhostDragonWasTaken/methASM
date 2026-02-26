@@ -101,6 +101,7 @@ $cases = @(
   @{ Name = "array_index"; Path = "tests/test_array_index.masm"; ShouldSucceed = $true },
   @{ Name = "control_flow"; Path = "tests/test_control_flow.masm"; ShouldSucceed = $true },
   @{ Name = "nested_switch_loop"; Path = "tests/test_nested_switch_loop.masm"; ShouldSucceed = $true },
+  @{ Name = "elseif_chaining"; Path = "tests/test_elseif.masm"; ShouldSucceed = $true },
   @{ Name = "switch_const_expr"; Path = "tests/test_switch_const_expr.masm"; ShouldSucceed = $true },
   @{ Name = "switch_continue_loop"; Path = "tests/test_switch_continue_loop.masm"; ShouldSucceed = $true },
   @{
@@ -133,6 +134,7 @@ $cases = @(
   @{ Name = "pointer_param_address"; Path = "tests/test_pointer_param_address.masm"; ShouldSucceed = $true },
   @{ Name = "call_many_args"; Path = "tests/test_call_many_args.masm"; ShouldSucceed = $true },
   @{ Name = "import_relative_no_ext"; Path = "tests/test_import_relative_no_ext.masm"; ShouldSucceed = $true },
+  @{ Name = "import_circular"; Path = "tests/test_import_circular.masm"; ShouldSucceed = $true },
   @{
     Name          = "import_include_path"
     Path          = "tests/test_import_include_path.masm"
@@ -154,6 +156,9 @@ $cases = @(
     ShouldSucceed = $true
     AsmMustMatch  = @("(?m)^\s*db .*13,\s*10.*$", "(?m)^\s*db .*9.*34.*92.*$")
   },
+  @{ Name = "char_literals"; Path = "tests/test_char_literals.masm"; ShouldSucceed = $true },
+  @{ Name = "logical_ops"; Path = "tests/test_logical_ops.masm"; ShouldSucceed = $true },
+  @{ Name = "strncmp_slice"; Path = "tests/test_strncmp_slice.masm"; ShouldSucceed = $true },
   @{ Name = "narrowing_conversions"; Path = "tests/test_narrowing_conversions.masm"; ShouldSucceed = $true },
   @{ Name = "stress_integrated"; Path = "tests/test_stress_integrated.masm"; ShouldSucceed = $true },
   @{ Name = "web_server_import"; Path = "web/server.masm"; ShouldSucceed = $true },

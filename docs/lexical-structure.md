@@ -51,15 +51,15 @@ Multiline strings are supported. A newline inside the quotes is stored as a lite
 
 ## Operators and Punctuation
 
-Assignment `=`. Comparison `==`, `!=`, `<`, `>`, `<=`, `>=`. Arithmetic `+`, `-`, `*`, `/`. Unary `-` (negation), `*` (dereference), `&` (address-of). Member access `.`. Arrow `->`. Brackets `( )`, `{ }`, `[ ]`. Delimiters `:`, `;`, `,`.
+Assignment `=`. Comparison `==`, `!=`, `<`, `>`, `<=`, `>=`. Logical `&&`, `||`. Arithmetic `+`, `-`, `*`, `/`. Unary `-` (negation), `*` (dereference), `&` (address-of). Member access `.`. Arrow `->`. Brackets `( )`, `{ }`, `[ ]`. Delimiters `:`, `;`, `,`.
 
-**Operator precedence:** Multiplication and division bind tighter than addition and subtraction. Relational operators bind tighter than equality. So `a + b * c` parses as `a + (b * c)`, and `a < b == c` parses as `(a < b) == c`. Precedence levels (highest first): member access (`.`), multiplicative (`*`, `/`), additive (`+`, `-`), relational (`<`, `<=`, `>`, `>=`), equality (`==`, `!=`). Use parentheses to override.
+**Operator precedence:** Multiplication and division bind tighter than addition and subtraction. Relational operators bind tighter than equality. Logical AND (`&&`) binds tighter than logical OR (`||`). So `a + b * c` parses as `a + (b * c)`, and `a < b == c` parses as `(a < b) == c`. Precedence levels (highest first): member access (`.`), multiplicative (`*`, `/`), additive (`+`, `-`), relational (`<`, `<=`, `>`, `>=`), equality (`==`, `!=`), logical AND (`&&`), logical OR (`||`). Use parentheses to override.
 
 **Modulo:** The modulo operator `%` is not supported. Use a helper or inline logic for remainder operations.
 
 **Bitwise operators:** Bitwise AND (`&`), OR (`|`), XOR (`^`), complement (`~`), and shifts (`<<`, `>>`) are not supported. The `&` token is used only for address-of (unary). For bit manipulation, use inline assembly or C externs.
 
-**Logical operators:** Short-circuit logical AND (`&&`) and OR (`||`) are not supported. Use nested `if` or comparison expressions. See [Known Limitations](known-limitations.md).
+**Logical operators:** Short-circuit logical AND (`&&`) and OR (`||`) are supported.
 
 **Arrow `->`:** The arrow serves two roles. In function signatures it denotes the return type: `function f() -> int32`. In expressions it denotes pointer field access: `ptr->field`. Both uses appear in the same program:
 

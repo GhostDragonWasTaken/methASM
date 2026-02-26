@@ -24,13 +24,13 @@ The `if` statement evaluates a condition. If true, the then branch runs. The opt
 if (x > 0) {
   // ...
 } else if (x < 0) {
-  // else if is just else + if statement
+  // `else if` is parsed as part of the if statement
 } else {
   // ...
 }
 ```
 
-`else if` chaining works because the `else` clause accepts any statement, including another `if`. There is no separate `elseif` keyword.
+`else if` chaining is fully supported as a contiguous sequence of conditions, avoiding deep AST nesting. There is no separate `elseif` keyword.
 
 ## While
 
@@ -128,17 +128,13 @@ return value;
 
 ## Short-Circuit Evaluation
 
-Logical operators `&&` and `||` are not supported (see [Lexical Structure](lexical-structure.md)). For pointer checks like `ptr != 0 && ptr->field > 0`, use nested `if`:
+Logical operators `&&` and `||` support short-circuit evaluation. For pointer checks like `ptr != 0 && ptr->field > 0`, a single condition is safe:
 
 ```masm
-if (ptr != 0) {
-  if (ptr->field > 0) {
-    // ...
-  }
+if (ptr != 0 && ptr->field > 0) {
+  // ...
 }
 ```
-
-This avoids dereferencing a null pointer. There is no short-circuit form; the nested structure is the safe pattern.
 
 ## Unreachable Code
 

@@ -2213,6 +2213,23 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       return 0;
     }
 
+    for (size_t i = 0; i < if_stmt->else_if_count; i++) {
+      Type *elif_cond_type =
+          type_checker_infer_type(checker, if_stmt->else_ifs[i].condition);
+      if (!elif_cond_type)
+        return 0;
+      if (!type_checker_is_numeric_type(elif_cond_type)) {
+        type_checker_report_type_mismatch(
+            checker, if_stmt->else_ifs[i].condition->location, "numeric type",
+            elif_cond_type->name);
+        return 0;
+      }
+      if (if_stmt->else_ifs[i].body &&
+          !type_checker_check_statement(checker, if_stmt->else_ifs[i].body)) {
+        return 0;
+      }
+    }
+
     // Check else branch if present
     if (if_stmt->else_branch &&
         !type_checker_check_statement(checker, if_stmt->else_branch)) {

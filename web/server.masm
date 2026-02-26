@@ -1,121 +1,190 @@
-// MethASM Web Server - Full implementation in MethASM
-// Serves HTML on port 5000 using Winsock (Windows) via extern C calls.
-// Uses modular imports to test the import system.
+// MethASM HTTP server
+//
+// Single-threaded TCP server on port 5000. Accepts connections, reads HTTP
+// requests, and responds accordingly. No GC - stack allocation only.
+//
+// Endpoints:
+//   GET /       -> Presentation page (index.html via import_str)
+//   GET /health -> plain text "OK" (health check)
+//   other       -> 404 Not Found
+//
+// Build: see web/build.bat
+// Run: server.exe, then open http://localhost:5000
+//
+// All strings are global to avoid compiler codegen ordering with literals in bodies.
 
-import "socket";
-import "http";
+import "std/io";
+import "std/net";
+import "std/conv";
 
-extern function GetStdHandle(nStdHandle: int32) -> int64 = "GetStdHandle";
-extern function WriteFile(hFile: int64, lpBuffer: uint8*, nNumberOfBytesToWrite: uint32, lpNumberOfBytesWritten: uint8*, lpOverlapped: uint8*) -> int32 = "WriteFile";
+// Page content loaded at compile time from index.html
+var PAGE_CONTENT: string = import_str "index.html";
 
-var nl: string = "\r\n";
-var msg_wsa_fail: string = "Startup error: WSAStartup failed";
-var msg_socket_fail: string = "Startup error: socket() failed";
-var msg_bind_fail: string = "Startup error: bind() failed (port in use?)";
-var msg_listen_fail: string = "Startup error: listen() failed";
-var msg_started: string = "Server listening on http://localhost:5000";
+// Root page response header.
+// We intentionally omit Content-Length and close the connection after body.
+// This avoids dynamic header assembly and remains valid HTTP/1.1.
+var HTTP_PAGE_HEADER: string = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n";
 
-function log_line_parts(chars: cstring, len: int32) {
-  var out: int64 = GetStdHandle(-11);
-  if (out < 0) {
-    return;
+// Other HTTP responses (fixed content)
+
+var HTTP_404_HEADER: string = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\n";
+var HTTP_404_BODY: string = "Not Found";
+
+var HTTP_HEALTH_HEADER: string = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n";
+var HTTP_HEALTH_BODY: string = "OK";
+
+// Build Content-Length decimal string in buf, return digit count
+function int_to_dec(buf: cstring, n: int64) -> int32 {
+  var digits: int32[20];
+  var count: int32 = 0;
+  if (n == 0) {
+    buf[0] = 48;
+    return 1;
   }
+  while (n > 0) {
+    var d: int64 = n - (n / 10) * 10;
+    digits[count] = d;
+    count = count + 1;
+    n = n / 10;
+  }
+  var i: int32 = count - 1;
+  while (i >= 0) {
+    buf[count - 1 - i] = digit_to_char(digits[i]);
+    i = i - 1;
+  }
+  return count;
+}
 
-  WriteFile(out, chars, len, 0, 0);
-  WriteFile(out, nl.chars, nl.length, 0, 0);
+// Error messages (globals so no string literals in function bodies)
+var err_net_init: string = "net_init failed";
+var err_socket: string = "socket failed";
+var err_reuseaddr: string = "setsockopt failed";
+var err_sockaddr: string = "sockaddr failed";
+var err_bind: string = "bind failed";
+var err_listen: string = "listen failed";
+var msg_ready: string = "Server: http://localhost:5000";
+
+// Manual GET check: 'G'=71, 'E'=69, 'T'=84, ' '=32
+function is_get(buf: cstring, n: int32) -> int32 {
+  if (n < 4) { return 0; }
+  if (buf[0] != 71) { return 0; }
+  if (buf[1] != 69) { return 0; }
+  if (buf[2] != 84) { return 0; }
+  if (buf[3] != 32) { return 0; }
+  return 1;
+}
+
+// Path is "/" (root)
+function is_root(buf: cstring, n: int32) -> int32 {
+  if (n < 6) { return 0; }
+  if (buf[4] != 47) { return 0; }
+  if (buf[5] != 32) { return 0; }
+  return 1;
+}
+
+// Path is "/health" (h=104,e=101,a=97,l=108,t=116,h=104)
+function is_health(buf: cstring, n: int32) -> int32 {
+  if (n < 12) { return 0; }
+  if (buf[4] != 47) { return 0; }
+  if (buf[5] != 104) { return 0; }
+  if (buf[6] != 101) { return 0; }
+  if (buf[7] != 97) { return 0; }
+  if (buf[8] != 108) { return 0; }
+  if (buf[9] != 116) { return 0; }
+  if (buf[10] != 104) { return 0; }
+  if (buf[11] != 32 && buf[11] != 63) { return 0; }
+  return 1;
 }
 
 function main() -> int32 {
-  var wsa: uint8[416];
-  var addr: SockAddrIn;
-  var listen_sock: int64 = 0;
-  var client: int64 = 0;
-  var result: int32 = 0;
-
-  // WSAStartup(MAKEWORD(2,2)=514, &wsa)
-  result = WSAStartup(514, &wsa[0]);
-  if (result != 0) {
-    log_line_parts(msg_wsa_fail.chars, msg_wsa_fail.length);
+  if (net_init() != 0) {
+    println(cstr(err_net_init));
     return 1;
   }
 
-  // listen_sock = socket(AF_INET, SOCK_STREAM, 0)
-  listen_sock = socket(2, 1, 0);
-  if (listen_sock < 0) {
-    log_line_parts(msg_socket_fail.chars, msg_socket_fail.length);
-    WSACleanup();
+  var sock: int64 = socket_tcp();
+  if (sock == INVALID_SOCKET()) {
+    println(cstr(err_socket));
+    net_cleanup();
     return 1;
   }
 
-  // SO_REUSEADDR for quick restart (SOL_SOCKET=0xFFFF, SO_REUSEADDR=4)
-  var opt: uint8[4];
-  opt[0] = 1;
-  setsockopt(listen_sock, 0xFFFF, 4, &opt[0], 4);
-
-  // addr.sin_family = AF_INET, addr.sin_port = htons(5000), addr.sin_addr = INADDR_ANY
-  addr.sin_family = 2;
-  addr.sin_port = htons(5000);
-  addr.sin_addr = 0;
-
-  // bind(listen_sock, &addr, 16)
-  result = bind(listen_sock, &addr, 16);
-  if (result != 0) {
-    log_line_parts(msg_bind_fail.chars, msg_bind_fail.length);
-    closesocket(listen_sock);
-    WSACleanup();
+  if (set_reuseaddr(sock, 1) != 0) {
+    println(cstr(err_reuseaddr));
+    closesocket(sock);
+    net_cleanup();
     return 1;
   }
 
-  // listen(listen_sock, 5)
-  result = listen(listen_sock, 5);
-  if (result != 0) {
-    log_line_parts(msg_listen_fail.chars, msg_listen_fail.length);
-    closesocket(listen_sock);
-    WSACleanup();
+  var addr: cstring = sockaddr_in_any(5000);
+  if (addr == 0) {
+    println(cstr(err_sockaddr));
+    closesocket(sock);
+    net_cleanup();
     return 1;
   }
 
-  log_line_parts(msg_started.chars, msg_started.length);
+  if (bind(sock, addr, 16) != 0) {
+    println(cstr(err_bind));
+    free(addr);
+    closesocket(sock);
+    net_cleanup();
+    return 1;
+  }
+  free(addr);
 
-  // Main accept loop
+  if (listen(sock, 5) != 0) {
+    println(cstr(err_listen));
+    closesocket(sock);
+    net_cleanup();
+    return 1;
+  }
+
+  println(cstr(msg_ready));
+
+  var client_addr: uint8[16];
+  var addrlen_buf: uint8[4];
+  addrlen_buf[0] = 16;
+  addrlen_buf[1] = 0;
+  addrlen_buf[2] = 0;
+  addrlen_buf[3] = 0;
+  var recv_buf: uint8[4096];
+
   while (1) {
-    // client = accept(listen_sock, 0, 0)
-    client = accept(listen_sock, 0, 0);
-    if (client < 0) {
+    addrlen_buf[0] = 16;
+    addrlen_buf[1] = 0;
+    addrlen_buf[2] = 0;
+    addrlen_buf[3] = 0;
+    var client: int64 = accept(sock, &client_addr[0], &addrlen_buf[0]);
+    if (client == INVALID_SOCKET()) {
       continue;
     }
 
-    var buf: uint8[1024];
-    var bytes_read: int32 = recv(client, &buf[0], 1024, 0);
-    if (bytes_read <= 0) {
-      closesocket(client);
-      continue;
+    var n: int32 = recv(client, &recv_buf[0], 4096, 0);
+    if (n > 0) {
+      if (is_get(&recv_buf[0], n) == 1) {
+        if (is_health(&recv_buf[0], n) == 1) {
+          send_all(client, HTTP_HEALTH_HEADER.chars, 64);
+          send_all(client, HTTP_HEALTH_BODY.chars, 2);
+        } else if (is_root(&recv_buf[0], n) == 1) {
+          if (send_all(client, HTTP_PAGE_HEADER.chars, HTTP_PAGE_HEADER.length) == HTTP_PAGE_HEADER.length) {
+            send_all(client, PAGE_CONTENT.chars, PAGE_CONTENT.length);
+          }
+        } else {
+          send_all(client, HTTP_404_HEADER.chars, 45);
+          send_all(client, HTTP_404_BODY.chars, 9);
+        }
+      } else {
+        send_all(client, HTTP_404_HEADER.chars, 45);
+        send_all(client, HTTP_404_BODY.chars, 9);
+      }
     }
 
-    var route: int32 = get_route(&buf[0], bytes_read);
-
-    switch (route) {
-      case 0:
-        send(client, http_header.chars, http_header.length, 0);
-        send(client, html_body.chars, html_body.length, 0);
-        break;
-      case 1:
-        send(client, health_header.chars, health_header.length, 0);
-        send(client, health_body.chars, health_body.length, 0);
-        break;
-      case 2:
-        send(client, http_header.chars, http_header.length, 0);
-        send(client, about_body.chars, about_body.length, 0);
-        break;
-      default:
-        send(client, not_found_header.chars, not_found_header.length, 0);
-        send(client, not_found_body.chars, not_found_body.length, 0);
-    }
-
+    shutdown(client, SD_BOTH());
     closesocket(client);
   }
 
-  closesocket(listen_sock);
-  WSACleanup();
+  closesocket(sock);
+  net_cleanup();
   return 0;
 }
