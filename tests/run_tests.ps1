@@ -5,7 +5,7 @@ param(
   [switch]$SkipDeterminism
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 function Write-CaseResult {
   param(
@@ -95,6 +95,23 @@ if (-not (Test-Path $tmpDir)) {
   New-Item -Path $tmpDir -ItemType Directory | Out-Null
 }
 
+$callManyArgsAsmMustMatch = @()
+$callManyArgsAsmMustNotMatch = @()
+if ($env:OS -eq "Windows_NT") {
+  $callManyArgsAsmMustMatch = @(
+    "(?m)^\s*mov rax, \[rbp \+ 48\]\s+; Load stack param 'e'",
+    "(?m)^\s*mov rax, \[rbp \+ 56\]\s+; Load stack param 'f'",
+    "(?m)^\s*mov rax, \[rbp \+ 64\]\s+; Load stack param 'g'",
+    "(?m)^\s*mov rax, \[rbp \+ 72\]\s+; Load stack param 'h'"
+  )
+  $callManyArgsAsmMustNotMatch = @(
+    "(?m)^\s*mov rax, \[rbp \+ 16\]\s+; Load stack param 'e'",
+    "(?m)^\s*mov rax, \[rbp \+ 24\]\s+; Load stack param 'f'",
+    "(?m)^\s*mov rax, \[rbp \+ 32\]\s+; Load stack param 'g'",
+    "(?m)^\s*mov rax, \[rbp \+ 40\]\s+; Load stack param 'h'"
+  )
+}
+
 $cases = @(
   @{ Name = "ok_global_int"; Path = "tests/ok_global_int.masm"; ShouldSucceed = $true },
   @{ Name = "only_struct"; Path = "tests/only_struct.masm"; ShouldSucceed = $true },
@@ -132,7 +149,13 @@ $cases = @(
   @{ Name = "pointers"; Path = "tests/test_pointers.masm"; ShouldSucceed = $true },
   @{ Name = "pointer_null"; Path = "tests/test_pointer_null.masm"; ShouldSucceed = $true },
   @{ Name = "pointer_param_address"; Path = "tests/test_pointer_param_address.masm"; ShouldSucceed = $true },
-  @{ Name = "call_many_args"; Path = "tests/test_call_many_args.masm"; ShouldSucceed = $true },
+  @{
+    Name            = "call_many_args"
+    Path            = "tests/test_call_many_args.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = $callManyArgsAsmMustMatch
+    AsmMustNotMatch = $callManyArgsAsmMustNotMatch
+  },
   @{ Name = "import_relative_no_ext"; Path = "tests/test_import_relative_no_ext.masm"; ShouldSucceed = $true },
   @{ Name = "import_circular"; Path = "tests/test_import_circular.masm"; ShouldSucceed = $true },
   @{
@@ -160,6 +183,172 @@ $cases = @(
   @{ Name = "logical_ops"; Path = "tests/test_logical_ops.masm"; ShouldSucceed = $true },
   @{ Name = "strncmp_slice"; Path = "tests/test_strncmp_slice.masm"; ShouldSucceed = $true },
   @{ Name = "narrowing_conversions"; Path = "tests/test_narrowing_conversions.masm"; ShouldSucceed = $true },
+  @{ Name = "signed_negation"; Path = "tests/test_signed_negation.masm"; ShouldSucceed = $true },
+  @{
+    Name            = "signed_division"
+    Path            = "tests/test_signed_division.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("\bidiv\b")
+  },
+  @{ Name = "signed_comparison"; Path = "tests/test_signed_comparison.masm"; ShouldSucceed = $true },
+  @{ Name = "signed_wraparound"; Path = "tests/test_signed_wraparound.masm"; ShouldSucceed = $true },
+  @{ Name = "signed_arithmetic"; Path = "tests/test_signed_arithmetic.masm"; ShouldSucceed = $true },
+  @{
+    Name            = "sign_extension"
+    Path            = "tests/test_sign_extension.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("\bmovsx\b")
+  },
+  @{
+    Name            = "unsigned_zero_ext"
+    Path            = "tests/test_unsigned_zero_ext.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("\bmovzx\b")
+    AsmMustNotMatch = @("\bmovsx\b")
+  },
+  @{ Name = "unsigned_division"; Path = "tests/test_unsigned_division.masm"; ShouldSucceed = $true },
+  @{ Name = "mixed_signed_unsigned"; Path = "tests/test_mixed_signed_unsigned.masm"; ShouldSucceed = $true },
+  @{
+    Name            = "narrowing_reverify"
+    Path            = "tests/test_narrowing_reverify.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("\bmovsx\b", "\bmovzx\b")
+  },
+  @{ Name = "stack_mixed_locals"; Path = "tests/test_stack_mixed_locals.masm"; ShouldSucceed = $true },
+  @{ Name = "stack_large_struct"; Path = "tests/test_stack_large_struct.masm"; ShouldSucceed = $true },
+  @{ Name = "stack_array_scalar"; Path = "tests/test_stack_array_scalar.masm"; ShouldSucceed = $true },
+  @{ Name = "int64_truncate"; Path = "tests/test_int64_truncate.masm"; ShouldSucceed = $true },
+  @{ Name = "string_length"; Path = "tests/test_string_length.masm"; ShouldSucceed = $true },
+  @{ Name = "struct_new_zeroed"; Path = "tests/test_struct_new_zeroed.masm"; ShouldSucceed = $true },
+  @{ Name = "struct_field_offset"; Path = "tests/test_struct_field_offset.masm"; ShouldSucceed = $true },
+  @{
+    Name          = "import_exported"
+    Path          = "tests/test_import_exported.masm"
+    ShouldSucceed = $true
+    Args          = @("-I", "tests/lib")
+  },
+  @{
+    Name          = "import_enum_switch"
+    Path          = "tests/test_import_enum_switch.masm"
+    ShouldSucceed = $true
+    Args          = @("-I", "tests/lib")
+  },
+  @{ Name = "extern_signed_param"; Path = "tests/test_extern_signed_param.masm"; ShouldSucceed = $true },
+  @{ Name = "extern_signed_return"; Path = "tests/test_extern_signed_return.masm"; ShouldSucceed = $true },
+  @{ Name = "extern_cstring"; Path = "tests/test_extern_cstring.masm"; ShouldSucceed = $true },
+
+  # ABI tests (MS x64 on Windows; patterns may need adjustment for SysV/Linux)
+  @{
+    Name            = "abi_int4_regs"
+    Path            = "tests/test_abi_int4_regs.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("Parameter 'a' arrived in register rcx", "Parameter 'b' arrived in register rdx", "Parameter 'c' arrived in register r8", "Parameter 'd' arrived in register r9")
+  },
+  @{
+    Name            = "abi_int_stack"
+    Path            = "tests/test_abi_int_stack.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("Parameter 'e' arrived on stack", "Parameter 'f' arrived on stack", "\[rsp \+ \d+\]|\[rbp \+ \d+\]")
+  },
+  @{
+    Name            = "abi_return_int"
+    Path            = "tests/test_abi_return_int.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("\bmov (eax|rax),")
+  },
+  @{
+    Name            = "abi_return_int64"
+    Path            = "tests/test_abi_return_int64.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("\bmov rax,")
+  },
+  @{
+    Name            = "abi_float_args"
+    Path            = "tests/test_abi_float_args.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("Parameter 'a' arrived in register xmm0", "Parameter 'b' arrived in register xmm1")
+  },
+  @{
+    Name            = "abi_float_return"
+    Path            = "tests/test_abi_float_return.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @(
+      "Float return value in xmm0|xmm0.*return",
+      "(?s); IR call: get_pi \(0 args\).*call get_pi.*movq rax, xmm0"
+    )
+  },
+  @{
+    Name            = "abi_float_symbol_args"
+    Path            = "tests/test_abi_float_symbol_args.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @(
+      "(?s); IR call: sum5f \(5 args\).*movq xmm0, rax",
+      "(?s); IR call: sum5f \(5 args\).*movq xmm1, rax",
+      "(?s); IR call: sum5f \(5 args\).*movq xmm2, rax",
+      "(?s); IR call: sum5f \(5 args\).*movq xmm3, rax",
+      "(?s); IR call: sum5f \(5 args\).*mov \[rsp \+ 32\], rax"
+    )
+    AsmMustNotMatch = @(
+      "(?s); IR call: sum5f \(5 args\).*mov rcx, rax",
+      "(?s); IR call: sum5f \(5 args\).*mov rdx, rax",
+      "(?s); IR call: sum5f \(5 args\).*mov r8, rax",
+      "(?s); IR call: sum5f \(5 args\).*mov r9, rax"
+    )
+  },
+  @{
+    Name            = "abi_mixed_args"
+    Path            = "tests/test_abi_mixed_args.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("Parameter.*arrived in register (rcx|rdx|r8|r9|xmm0)")
+  },
+  @{
+    Name            = "abi_shadow_space"
+    Path            = "tests/test_abi_shadow_space.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("sub rsp, 32|Shadow space")
+  },
+  @{
+    Name            = "abi_prologue"
+    Path            = "tests/test_abi_prologue.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("push rbp", "mov rbp, rsp")
+  },
+  @{
+    Name            = "abi_pointer_arg"
+    Path            = "tests/test_abi_pointer_arg.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("Parameter 'p' arrived in register rcx|mov \[rbp.*\], rcx")
+  },
+  @{
+    Name            = "abi_extern_calling_convention"
+    Path            = "tests/test_abi_extern_calling_convention.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("extern ext_check", "\bcall ext_check\b")
+  },
+  @{ Name = "abi_callee_saved"; Path = "tests/test_abi_callee_saved.masm"; ShouldSucceed = $true },
+  @{ Name = "abi_stack_alignment"; Path = "tests/test_abi_stack_alignment.masm"; ShouldSucceed = $true },
+  @{
+    Name            = "abi_float4_args"
+    Path            = "tests/test_abi_float4_args.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("xmm0", "xmm1", "xmm2", "xmm3")
+  },
+  @{
+    Name            = "abi_float_stack"
+    Path            = "tests/test_abi_float_stack.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("Parameter 'e' arrived on stack|movsd \[rsp")
+  },
+  @{ Name = "abi_void_return"; Path = "tests/test_abi_void_return.masm"; ShouldSucceed = $true },
+  @{
+    Name            = "abi_small_int_args"
+    Path            = "tests/test_abi_small_int_args.masm"
+    ShouldSucceed   = $true
+    AsmMustMatch    = @("Parameter.*arrived in register (rcx|rdx)")
+  },
+  @{ Name = "abi_nested_calls"; Path = "tests/test_abi_nested_calls.masm"; ShouldSucceed = $true },
+  @{ Name = "abi_indirect_call"; Path = "tests/test_abi_indirect_call.masm"; ShouldSucceed = $true },
+
   @{ Name = "stress_integrated"; Path = "tests/test_stress_integrated.masm"; ShouldSucceed = $true },
   @{ Name = "web_server_import"; Path = "web/server.masm"; ShouldSucceed = $true },
 
@@ -182,36 +371,54 @@ $cases = @(
   @{ Name = "err_deref_non_pointer"; Path = "tests/err_deref_non_pointer.masm"; ShouldSucceed = $false; Pattern = "Dereference operator requires a pointer operand" },
   @{ Name = "err_address_of_non_lvalue"; Path = "tests/err_address_of_non_lvalue.masm"; ShouldSucceed = $false; Pattern = "Address-of operator requires an assignable expression" },
   @{ Name = "err_pointer_type_mismatch"; Path = "tests/err_pointer_type_mismatch.masm"; ShouldSucceed = $false; Pattern = "Type mismatch" },
+  @{ Name = "err_use_before_init"; Path = "tests/err_use_before_init.masm"; ShouldSucceed = $false; Pattern = "before initialization" },
+  @{ Name = "err_array_index_oob_const"; Path = "tests/err_array_index_oob_const.masm"; ShouldSucceed = $false; Pattern = "out of bounds" },
+  @{ Name = "err_array_index_oob_const_negative"; Path = "tests/err_array_index_oob_const_negative.masm"; ShouldSucceed = $false; Pattern = "out of bounds" },
   @{ Name = "err_codegen_member_expr"; Path = "tests/err_codegen_member_expr.masm"; ShouldSucceed = $false },
   @{ Name = "err_function_arg_count"; Path = "tests/err_function_arg_count.masm"; ShouldSucceed = $false; Pattern = "expects .* arguments, got" },
   @{ Name = "err_function_arg_type"; Path = "tests/err_function_arg_type.masm"; ShouldSucceed = $false; Pattern = "Type mismatch" },
   @{ Name = "err_member_on_non_struct"; Path = "tests/err_member_on_non_struct.masm"; ShouldSucceed = $false; Pattern = "Cannot access field on non-struct type" },
   @{ Name = "err_switch_multiple_default"; Path = "tests/err_switch_multiple_default.masm"; ShouldSucceed = $false; Pattern = "Only one default case is allowed|only contain one default clause" },
-  @{ Name = "err_return_type_mismatch"; Path = "tests/err_return_type_mismatch.masm"; ShouldSucceed = $false; Pattern = "Type mismatch" }
+  @{ Name = "err_return_type_mismatch"; Path = "tests/err_return_type_mismatch.masm"; ShouldSucceed = $false; Pattern = "Type mismatch" },
+  @{
+    Name          = "err_import_private"
+    Path          = "tests/err_import_private.masm"
+    ShouldSucceed = $false
+    Pattern       = "Undefined variable|not visible|private_func"
+    Args          = @("-I", "tests/lib")
+  },
+  @{
+    Name          = "err_import_chain"
+    Path          = "tests/test_import_chain_error.masm"
+    ShouldSucceed = $false
+    Pattern       = "Could not resolve|import chain"
+  }
 )
 
 $total = 0
 $failed = 0
 
 foreach ($case in $cases) {
-  $total++
-  $outFile = Join-Path $tmpDir ("{0}.s" -f $case.Name)
-  if (Test-Path $outFile) {
-    Remove-Item -Path $outFile -Force
-  }
+  $caseName = $case.Name
+  try {
+    $total++
+    $outFile = Join-Path $tmpDir ("{0}.s" -f $case.Name)
+    if (Test-Path $outFile) {
+      Remove-Item -Path $outFile -Force -ErrorAction SilentlyContinue
+    }
 
-  $caseArgs = @()
-  if ($case.ContainsKey("Args") -and $case.Args) {
-    $caseArgs = @($case.Args)
-  }
+    $caseArgs = @()
+    if ($case.ContainsKey("Args") -and $case.Args) {
+      $caseArgs = @($case.Args)
+    }
 
-  $output = & $CompilerPath @caseArgs $case.Path -o $outFile 2>&1 | Out-String
-  $exitCode = $LASTEXITCODE
+    $output = & $CompilerPath @caseArgs $case.Path -o $outFile 2>&1 | Out-String
+    $exitCode = $LASTEXITCODE
 
-  $passed = $true
-  $reason = ""
+    $passed = $true
+    $reason = ""
 
-  if ($case.ShouldSucceed) {
+    if ($case.ShouldSucceed) {
     if ($exitCode -ne 0) {
       $passed = $false
       $reason = "Expected success, got exit code $exitCode"
@@ -236,7 +443,7 @@ foreach ($case in $cases) {
       elseif (-not $SkipDeterminism) {
         $outFile2 = Join-Path $tmpDir ("{0}.second.s" -f $case.Name)
         if (Test-Path $outFile2) {
-          Remove-Item -Path $outFile2 -Force
+          Remove-Item -Path $outFile2 -Force -ErrorAction SilentlyContinue
         }
 
         $output2 = & $CompilerPath @caseArgs $case.Path -o $outFile2 2>&1 | Out-String
@@ -272,15 +479,20 @@ foreach ($case in $cases) {
     }
   }
 
-  if (-not $passed) {
-    $failed++
-    Write-CaseResult -Name $case.Name -Passed $false -Reason $reason
-    if ($output) {
-      Write-Host ($output.TrimEnd())
+    if (-not $passed) {
+      $failed++
+      Write-CaseResult -Name $case.Name -Passed $false -Reason $reason
+      if ($output) {
+        Write-Host ($output.TrimEnd())
+      }
+    }
+    else {
+      Write-CaseResult -Name $case.Name -Passed $true
     }
   }
-  else {
-    Write-CaseResult -Name $case.Name -Passed $true
+  catch {
+    $failed++
+    Write-CaseResult -Name $caseName -Passed $false -Reason $_.Exception.Message
   }
 }
 

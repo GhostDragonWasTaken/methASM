@@ -49,7 +49,9 @@ var arr: int32[10];
 var buf: uint8[256];
 ```
 
-**Out-of-bounds indexing:** There is no compile-time or runtime bounds checking. Indexing with an out-of-range value produces undefined behavior. The compiler emits `base + index * element_size`; invalid indices can access arbitrary memory.
+**Out-of-bounds indexing:** The compiler rejects constant out-of-bounds indexes for fixed-size arrays (for example `arr[10]` on `int32[10]`). There is no runtime bounds checking, and non-constant indices are not proven safe at compile time. Indexing with an out-of-range value still produces undefined behavior.
+
+**Use before initialization:** Local scalar and pointer variables must be assigned before first read. A use like `var x: int32; return x;` is a compile error.
 
 **Passing arrays to functions:** Arrays are not passed by value (they can be large). Pass a pointer to the first element: `&arr[0]` or `&buf[0]`. The function parameter should have type `T*` (e.g. `int32*`, `uint8*`). Taking the address of an array with `&arr` yields a pointer to the whole array; for function calls expecting `T*`, use `&arr[0]`.
 

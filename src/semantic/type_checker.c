@@ -254,6 +254,233 @@ static int type_checker_is_null_pointer_constant(ASTNode *expression) {
   return type_checker_eval_integer_constant(expression, &value) && value == 0;
 }
 
+static void type_checker_init_tracker_reset(TypeChecker *checker) {
+  if (!checker) {
+    return;
+  }
+  for (size_t i = 0; i < checker->tracked_var_count; i++) {
+    free(checker->tracked_var_names[i]);
+  }
+  checker->tracked_var_count = 0;
+  checker->tracked_scope_count = 0;
+  checker->tracked_scope_depth = 0;
+}
+
+static int type_checker_init_tracker_ensure_var_capacity(TypeChecker *checker) {
+  if (!checker) {
+    return 0;
+  }
+  if (checker->tracked_var_count < checker->tracked_var_capacity) {
+    return 1;
+  }
+
+  size_t new_capacity =
+      checker->tracked_var_capacity == 0 ? 16 : checker->tracked_var_capacity * 2;
+  char **new_names = realloc(checker->tracked_var_names, new_capacity * sizeof(char *));
+  unsigned char *new_initialized =
+      realloc(checker->tracked_var_initialized, new_capacity * sizeof(unsigned char));
+  int *new_depths =
+      realloc(checker->tracked_var_scope_depth, new_capacity * sizeof(int));
+  if (!new_names || !new_initialized || !new_depths) {
+    free(new_names);
+    free(new_initialized);
+    free(new_depths);
+    return 0;
+  }
+
+  checker->tracked_var_names = new_names;
+  checker->tracked_var_initialized = new_initialized;
+  checker->tracked_var_scope_depth = new_depths;
+  checker->tracked_var_capacity = new_capacity;
+  return 1;
+}
+
+static int type_checker_init_tracker_ensure_scope_capacity(TypeChecker *checker) {
+  if (!checker) {
+    return 0;
+  }
+  if (checker->tracked_scope_count < checker->tracked_scope_capacity) {
+    return 1;
+  }
+
+  size_t new_capacity = checker->tracked_scope_capacity == 0
+                            ? 8
+                            : checker->tracked_scope_capacity * 2;
+  size_t *new_markers =
+      realloc(checker->tracked_scope_markers, new_capacity * sizeof(size_t));
+  if (!new_markers) {
+    return 0;
+  }
+  checker->tracked_scope_markers = new_markers;
+  checker->tracked_scope_capacity = new_capacity;
+  return 1;
+}
+
+static int type_checker_init_tracker_enter_scope(TypeChecker *checker) {
+  if (!checker || !type_checker_init_tracker_ensure_scope_capacity(checker)) {
+    return 0;
+  }
+  checker->tracked_scope_markers[checker->tracked_scope_count++] =
+      checker->tracked_var_count;
+  checker->tracked_scope_depth++;
+  return 1;
+}
+
+static void type_checker_init_tracker_exit_scope(TypeChecker *checker) {
+  if (!checker || checker->tracked_scope_count == 0) {
+    return;
+  }
+  size_t marker =
+      checker->tracked_scope_markers[checker->tracked_scope_count - 1];
+  checker->tracked_scope_count--;
+  while (checker->tracked_var_count > marker) {
+    size_t idx = checker->tracked_var_count - 1;
+    free(checker->tracked_var_names[idx]);
+    checker->tracked_var_names[idx] = NULL;
+    checker->tracked_var_initialized[idx] = 0;
+    checker->tracked_var_scope_depth[idx] = 0;
+    checker->tracked_var_count--;
+  }
+  if (checker->tracked_scope_depth > 0) {
+    checker->tracked_scope_depth--;
+  }
+}
+
+static int type_checker_init_tracker_declare(TypeChecker *checker,
+                                             const char *name,
+                                             int initialized) {
+  if (!checker || !name) {
+    return 0;
+  }
+  if (!type_checker_init_tracker_ensure_var_capacity(checker)) {
+    return 0;
+  }
+
+  char *name_copy = strdup(name);
+  if (!name_copy) {
+    return 0;
+  }
+
+  size_t idx = checker->tracked_var_count++;
+  checker->tracked_var_names[idx] = name_copy;
+  checker->tracked_var_initialized[idx] = initialized ? 1 : 0;
+  checker->tracked_var_scope_depth[idx] = checker->tracked_scope_depth;
+  return 1;
+}
+
+static long long type_checker_init_tracker_find(TypeChecker *checker,
+                                                const char *name) {
+  if (!checker || !name) {
+    return -1;
+  }
+  for (size_t i = checker->tracked_var_count; i > 0; i--) {
+    size_t idx = i - 1;
+    if (checker->tracked_var_names[idx] &&
+        strcmp(checker->tracked_var_names[idx], name) == 0) {
+      return (long long)idx;
+    }
+  }
+  return -1;
+}
+
+static int type_checker_init_tracker_is_initialized(TypeChecker *checker,
+                                                    const char *name,
+                                                    int *known) {
+  if (known) {
+    *known = 0;
+  }
+  long long idx = type_checker_init_tracker_find(checker, name);
+  if (idx < 0) {
+    return 0;
+  }
+  if (known) {
+    *known = 1;
+  }
+  return checker->tracked_var_initialized[idx] ? 1 : 0;
+}
+
+static void type_checker_init_tracker_set_initialized(TypeChecker *checker,
+                                                      const char *name) {
+  long long idx = type_checker_init_tracker_find(checker, name);
+  if (idx >= 0) {
+    checker->tracked_var_initialized[idx] = 1;
+  }
+}
+
+static unsigned char *type_checker_init_tracker_capture(TypeChecker *checker,
+                                                        size_t *count) {
+  if (count) {
+    *count = 0;
+  }
+  if (!checker) {
+    return NULL;
+  }
+  if (count) {
+    *count = checker->tracked_var_count;
+  }
+  if (checker->tracked_var_count == 0) {
+    return NULL;
+  }
+
+  unsigned char *snapshot = malloc(checker->tracked_var_count * sizeof(unsigned char));
+  if (!snapshot) {
+    return NULL;
+  }
+  memcpy(snapshot, checker->tracked_var_initialized,
+         checker->tracked_var_count * sizeof(unsigned char));
+  return snapshot;
+}
+
+static void type_checker_init_tracker_restore(TypeChecker *checker,
+                                              const unsigned char *snapshot,
+                                              size_t count) {
+  if (!checker || !snapshot) {
+    return;
+  }
+  size_t limit = count < checker->tracked_var_count ? count : checker->tracked_var_count;
+  memcpy(checker->tracked_var_initialized, snapshot, limit * sizeof(unsigned char));
+}
+
+static int type_checker_statement_guarantees_termination(ASTNode *statement) {
+  if (!statement) {
+    return 0;
+  }
+
+  switch (statement->type) {
+  case AST_RETURN_STATEMENT:
+  case AST_BREAK_STATEMENT:
+  case AST_CONTINUE_STATEMENT:
+    return 1;
+  case AST_IF_STATEMENT: {
+    IfStatement *if_stmt = (IfStatement *)statement->data;
+    if (!if_stmt || !if_stmt->then_branch || !if_stmt->else_branch) {
+      return 0;
+    }
+    if (!type_checker_statement_guarantees_termination(if_stmt->then_branch)) {
+      return 0;
+    }
+    for (size_t i = 0; i < if_stmt->else_if_count; i++) {
+      if (!if_stmt->else_ifs[i].body ||
+          !type_checker_statement_guarantees_termination(
+              if_stmt->else_ifs[i].body)) {
+        return 0;
+      }
+    }
+    return type_checker_statement_guarantees_termination(if_stmt->else_branch);
+  }
+  case AST_PROGRAM: {
+    for (size_t i = 0; i < statement->child_count; i++) {
+      if (type_checker_statement_guarantees_termination(statement->children[i])) {
+        return 1;
+      }
+    }
+    return 0;
+  }
+  default:
+    return 0;
+  }
+}
+
 static const char *type_checker_decl_link_name(const char *name, int is_extern,
                                                const char *link_name) {
   if (!is_extern) {
@@ -306,6 +533,15 @@ type_checker_create_with_error_reporter(SymbolTable *symbol_table,
   checker->current_function = NULL;
   checker->loop_depth = 0;
   checker->switch_depth = 0;
+  checker->tracked_var_names = NULL;
+  checker->tracked_var_initialized = NULL;
+  checker->tracked_var_scope_depth = NULL;
+  checker->tracked_var_count = 0;
+  checker->tracked_var_capacity = 0;
+  checker->tracked_scope_markers = NULL;
+  checker->tracked_scope_count = 0;
+  checker->tracked_scope_capacity = 0;
+  checker->tracked_scope_depth = 0;
 
   // Initialize built-in type pointers to NULL
   checker->builtin_int8 = NULL;
@@ -344,6 +580,14 @@ void type_checker_destroy(TypeChecker *checker) {
     type_destroy(checker->builtin_string);
     type_destroy(checker->builtin_cstring);
     type_destroy(checker->builtin_void);
+
+    for (size_t i = 0; i < checker->tracked_var_count; i++) {
+      free(checker->tracked_var_names[i]);
+    }
+    free(checker->tracked_var_names);
+    free(checker->tracked_var_initialized);
+    free(checker->tracked_var_scope_depth);
+    free(checker->tracked_scope_markers);
 
     free(checker->error_message);
     free(checker);
@@ -431,6 +675,23 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
       type_checker_report_undefined_symbol(checker, expression->location,
                                            id->name, "variable");
       return NULL;
+    }
+    if (checker->current_function &&
+        (symbol->kind == SYMBOL_VARIABLE || symbol->kind == SYMBOL_PARAMETER) &&
+        symbol->scope && symbol->scope->type != SCOPE_GLOBAL) {
+      int skip_uninit_check =
+          symbol->type &&
+          (symbol->type->kind == TYPE_ARRAY || symbol->type->kind == TYPE_STRUCT ||
+           symbol->type->kind == TYPE_STRING);
+      int known = 0;
+      int initialized = type_checker_init_tracker_is_initialized(
+          checker, id->name, &known);
+      if (!skip_uninit_check && known && !initialized) {
+        type_checker_set_error_at_location(
+            checker, expression->location,
+            "Variable '%s' may be used before initialization", id->name);
+        return NULL;
+      }
     }
     return symbol->type;
   }
@@ -638,6 +899,22 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
         type_checker_set_error_at_location(checker, expression->location,
                                            "Indexed type has no element type");
         return NULL;
+      }
+      if (array_type->kind == TYPE_ARRAY) {
+        long long constant_index = 0;
+        if (type_checker_eval_integer_constant(idx->index, &constant_index)) {
+          if (constant_index < 0 ||
+              (unsigned long long)constant_index >=
+                  (unsigned long long)array_type->array_size) {
+            type_checker_set_error_at_location(
+                checker, idx->index->location,
+                "Array index %lld is out of bounds for '%s' (size %zu)",
+                constant_index,
+                array_type->name ? array_type->name : "array",
+                array_type->array_size);
+            return NULL;
+          }
+        }
       }
       return array_type->base_type;
     }
@@ -1496,6 +1773,26 @@ int type_checker_process_declaration(TypeChecker *checker,
       return 0;
     }
 
+    if (checker->current_function && !var_decl->is_extern) {
+      Scope *declare_scope = symbol_table_get_current_scope(checker->symbol_table);
+      if (declare_scope && declare_scope->type != SCOPE_GLOBAL) {
+        int track_definite_init =
+            !(var_type && (var_type->kind == TYPE_ARRAY ||
+                           var_type->kind == TYPE_STRUCT ||
+                           var_type->kind == TYPE_STRING));
+        if (track_definite_init) {
+          if (!type_checker_init_tracker_declare(checker, var_decl->name,
+                                                 var_decl->initializer != NULL)) {
+            type_checker_set_error_at_location(
+                checker, declaration->location,
+                "Out of memory while tracking initialization state for '%s'",
+                var_decl->name);
+            return 0;
+          }
+        }
+      }
+    }
+
     return 1;
   }
 
@@ -1723,6 +2020,14 @@ int type_checker_process_declaration(TypeChecker *checker,
 
     // Enter a new scope for the function body
     symbol_table_enter_scope(checker->symbol_table, SCOPE_FUNCTION);
+    type_checker_init_tracker_reset(checker);
+    if (!type_checker_init_tracker_enter_scope(checker)) {
+      type_checker_set_error_at_location(
+          checker, declaration->location,
+          "Out of memory while initializing flow analysis scope");
+      symbol_table_exit_scope(checker->symbol_table);
+      return 0;
+    }
 
     // Add parameters to the new scope
     Type **active_param_types =
@@ -1743,6 +2048,17 @@ int type_checker_process_declaration(TypeChecker *checker,
           type_checker_report_duplicate_declaration(
               checker, declaration->location, func_decl->parameter_names[i]);
           symbol_destroy(param_symbol);
+          type_checker_init_tracker_reset(checker);
+          symbol_table_exit_scope(checker->symbol_table);
+          return 0;
+        }
+        if (!type_checker_init_tracker_declare(checker,
+                                               func_decl->parameter_names[i],
+                                               1)) {
+          type_checker_set_error_at_location(
+              checker, declaration->location,
+              "Out of memory while tracking parameter initialization");
+          type_checker_init_tracker_reset(checker);
           symbol_table_exit_scope(checker->symbol_table);
           return 0;
         }
@@ -1750,16 +2066,15 @@ int type_checker_process_declaration(TypeChecker *checker,
     }
 
     // Process the function body
-    if (func_decl->body) {
-      for (size_t i = 0; i < func_decl->body->child_count; i++) {
-        if (!type_checker_check_statement(checker,
-                                          func_decl->body->children[i])) {
-          // Error already reported
-          symbol_table_exit_scope(checker->symbol_table);
-          return 0;
-        }
-      }
+    if (func_decl->body && !type_checker_check_statement(checker, func_decl->body)) {
+      // Error already reported
+      type_checker_init_tracker_reset(checker);
+      symbol_table_exit_scope(checker->symbol_table);
+      return 0;
     }
+
+    type_checker_init_tracker_exit_scope(checker);
+    type_checker_init_tracker_reset(checker);
 
     // Exit the function's scope
     symbol_table_exit_scope(checker->symbol_table);
@@ -1845,6 +2160,38 @@ int type_checker_process_declaration(TypeChecker *checker,
 
         return 1;
       } else if (assignment->target->type == AST_INDEX_EXPRESSION) {
+        ArrayIndexExpression *target_index =
+            (ArrayIndexExpression *)assignment->target->data;
+        if (!target_index || !target_index->array || !target_index->index) {
+          type_checker_set_error_at_location(checker,
+                                             assignment->target->location,
+                                             "Invalid array assignment target");
+          return 0;
+        }
+
+        Type *target_array_type =
+            type_checker_infer_type(checker, target_index->array);
+        if (!target_array_type) {
+          return 0;
+        }
+        if (target_array_type->kind == TYPE_ARRAY) {
+          long long constant_index = 0;
+          if (type_checker_eval_integer_constant(target_index->index,
+                                                 &constant_index)) {
+            if (constant_index < 0 ||
+                (unsigned long long)constant_index >=
+                    (unsigned long long)target_array_type->array_size) {
+              type_checker_set_error_at_location(
+                  checker, target_index->index->location,
+                  "Array index %lld is out of bounds for '%s' (size %zu)",
+                  constant_index,
+                  target_array_type->name ? target_array_type->name : "array",
+                  target_array_type->array_size);
+              return 0;
+            }
+          }
+        }
+
         Type *element_type =
             type_checker_infer_type(checker, assignment->target);
         if (!element_type) {
@@ -1966,6 +2313,12 @@ int type_checker_process_declaration(TypeChecker *checker,
                                         var_symbol->type->name,
                                         value_type->name);
       return 0;
+    }
+
+    if (checker->current_function && var_symbol->scope &&
+        var_symbol->scope->type != SCOPE_GLOBAL) {
+      type_checker_init_tracker_set_initialized(checker,
+                                                assignment->variable_name);
     }
 
     return 1;
@@ -2207,34 +2560,55 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       return 0;
     }
 
+    size_t init_snapshot_count = 0;
+    unsigned char *init_snapshot =
+        type_checker_init_tracker_capture(checker, &init_snapshot_count);
+    if (checker->tracked_var_count > 0 && !init_snapshot) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "Out of memory while analyzing variable initialization flow");
+      return 0;
+    }
+
     // Check then branch
     if (if_stmt->then_branch &&
         !type_checker_check_statement(checker, if_stmt->then_branch)) {
+      free(init_snapshot);
       return 0;
     }
+    type_checker_init_tracker_restore(checker, init_snapshot, init_snapshot_count);
 
     for (size_t i = 0; i < if_stmt->else_if_count; i++) {
       Type *elif_cond_type =
           type_checker_infer_type(checker, if_stmt->else_ifs[i].condition);
-      if (!elif_cond_type)
+      if (!elif_cond_type) {
+        free(init_snapshot);
         return 0;
+      }
       if (!type_checker_is_numeric_type(elif_cond_type)) {
         type_checker_report_type_mismatch(
             checker, if_stmt->else_ifs[i].condition->location, "numeric type",
             elif_cond_type->name);
+        free(init_snapshot);
         return 0;
       }
       if (if_stmt->else_ifs[i].body &&
           !type_checker_check_statement(checker, if_stmt->else_ifs[i].body)) {
+        free(init_snapshot);
         return 0;
       }
+      type_checker_init_tracker_restore(checker, init_snapshot,
+                                        init_snapshot_count);
     }
 
     // Check else branch if present
     if (if_stmt->else_branch &&
         !type_checker_check_statement(checker, if_stmt->else_branch)) {
+      free(init_snapshot);
       return 0;
     }
+    type_checker_init_tracker_restore(checker, init_snapshot, init_snapshot_count);
+    free(init_snapshot);
 
     return 1;
   }
@@ -2262,13 +2636,26 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       return 0;
     }
 
+    size_t init_snapshot_count = 0;
+    unsigned char *init_snapshot =
+        type_checker_init_tracker_capture(checker, &init_snapshot_count);
+    if (checker->tracked_var_count > 0 && !init_snapshot) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "Out of memory while analyzing variable initialization flow");
+      return 0;
+    }
+
     checker->loop_depth++;
     if (while_stmt->body &&
         !type_checker_check_statement(checker, while_stmt->body)) {
       checker->loop_depth--;
+      free(init_snapshot);
       return 0;
     }
     checker->loop_depth--;
+    type_checker_init_tracker_restore(checker, init_snapshot, init_snapshot_count);
+    free(init_snapshot);
 
     return 1;
   }
@@ -2282,6 +2669,13 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
     }
 
     symbol_table_enter_scope(checker->symbol_table, SCOPE_BLOCK);
+    if (!type_checker_init_tracker_enter_scope(checker)) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "Out of memory while entering initialization analysis scope");
+      symbol_table_exit_scope(checker->symbol_table);
+      return 0;
+    }
 
     if (for_stmt->initializer) {
       int init_ok = 0;
@@ -2293,14 +2687,29 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
         init_ok = type_checker_check_expression(checker, for_stmt->initializer);
       }
       if (!init_ok) {
+        type_checker_init_tracker_exit_scope(checker);
         symbol_table_exit_scope(checker->symbol_table);
         return 0;
       }
     }
 
+    size_t post_init_snapshot_count = 0;
+    unsigned char *post_init_snapshot =
+        type_checker_init_tracker_capture(checker, &post_init_snapshot_count);
+    if (checker->tracked_var_count > 0 && !post_init_snapshot) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "Out of memory while analyzing variable initialization flow");
+      type_checker_init_tracker_exit_scope(checker);
+      symbol_table_exit_scope(checker->symbol_table);
+      return 0;
+    }
+
     if (for_stmt->condition) {
       Type *cond_type = type_checker_infer_type(checker, for_stmt->condition);
       if (!cond_type) {
+        free(post_init_snapshot);
+        type_checker_init_tracker_exit_scope(checker);
         symbol_table_exit_scope(checker->symbol_table);
         return 0;
       }
@@ -2308,6 +2717,8 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
         type_checker_report_type_mismatch(checker,
                                           for_stmt->condition->location,
                                           "numeric type", cond_type->name);
+        free(post_init_snapshot);
+        type_checker_init_tracker_exit_scope(checker);
         symbol_table_exit_scope(checker->symbol_table);
         return 0;
       }
@@ -2315,6 +2726,8 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
 
     if (for_stmt->increment &&
         !type_checker_check_expression(checker, for_stmt->increment)) {
+      free(post_init_snapshot);
+      type_checker_init_tracker_exit_scope(checker);
       symbol_table_exit_scope(checker->symbol_table);
       return 0;
     }
@@ -2323,11 +2736,17 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
     if (for_stmt->body &&
         !type_checker_check_statement(checker, for_stmt->body)) {
       checker->loop_depth--;
+      free(post_init_snapshot);
+      type_checker_init_tracker_exit_scope(checker);
       symbol_table_exit_scope(checker->symbol_table);
       return 0;
     }
     checker->loop_depth--;
 
+    type_checker_init_tracker_restore(checker, post_init_snapshot,
+                                      post_init_snapshot_count);
+    free(post_init_snapshot);
+    type_checker_init_tracker_exit_scope(checker);
     symbol_table_exit_scope(checker->symbol_table);
     return 1;
   }
@@ -2352,6 +2771,16 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       return 0;
     }
 
+    size_t init_snapshot_count = 0;
+    unsigned char *init_snapshot =
+        type_checker_init_tracker_capture(checker, &init_snapshot_count);
+    if (checker->tracked_var_count > 0 && !init_snapshot) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "Out of memory while analyzing variable initialization flow");
+      return 0;
+    }
+
     long long *case_values = NULL;
     size_t case_value_count = 0;
     int seen_default = 0;
@@ -2373,6 +2802,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
         type_checker_set_error_at_location(checker, statement->location,
                                            "Invalid case clause in switch");
         checker->switch_depth--;
+        free(init_snapshot);
         free(case_values);
         return 0;
       }
@@ -2382,6 +2812,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
         type_checker_set_error_at_location(checker, case_node->location,
                                            "Invalid case clause");
         checker->switch_depth--;
+        free(init_snapshot);
         free(case_values);
         return 0;
       }
@@ -2392,6 +2823,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
               checker, case_node->location,
               "Switch may only contain one default clause");
           checker->switch_depth--;
+          free(init_snapshot);
           free(case_values);
           return 0;
         }
@@ -2402,6 +2834,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
               checker, case_node->location,
               "Case clause is missing a value expression");
           checker->switch_depth--;
+          free(init_snapshot);
           free(case_values);
           return 0;
         }
@@ -2409,6 +2842,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
         Type *case_type = type_checker_infer_type(checker, case_clause->value);
         if (!case_type) {
           checker->switch_depth--;
+          free(init_snapshot);
           free(case_values);
           return 0;
         }
@@ -2417,6 +2851,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
                                             case_clause->value->location,
                                             "integer type", case_type->name);
           checker->switch_depth--;
+          free(init_snapshot);
           free(case_values);
           return 0;
         }
@@ -2425,6 +2860,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
                                             case_clause->value->location,
                                             switch_type->name, case_type->name);
           checker->switch_depth--;
+          free(init_snapshot);
           free(case_values);
           return 0;
         }
@@ -2436,6 +2872,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
               checker, case_clause->value->location,
               "Case value must be a compile-time integer constant expression");
           checker->switch_depth--;
+          free(init_snapshot);
           free(case_values);
           return 0;
         }
@@ -2446,6 +2883,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
                 checker, case_clause->value->location,
                 "Duplicate case value '%lld' in switch", case_value);
             checker->switch_depth--;
+            free(init_snapshot);
             free(case_values);
             return 0;
           }
@@ -2457,17 +2895,23 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
         type_checker_set_error_at_location(checker, case_node->location,
                                            "Case clause must have a body");
         checker->switch_depth--;
+        free(init_snapshot);
         free(case_values);
         return 0;
       }
 
       if (!type_checker_check_statement(checker, case_clause->body)) {
         checker->switch_depth--;
+        free(init_snapshot);
         free(case_values);
         return 0;
       }
+      type_checker_init_tracker_restore(checker, init_snapshot,
+                                        init_snapshot_count);
     }
     checker->switch_depth--;
+    type_checker_init_tracker_restore(checker, init_snapshot, init_snapshot_count);
+    free(init_snapshot);
     free(case_values);
     return 1;
   }
@@ -2501,14 +2945,33 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
     if (block) {
       // Enter a new nested scope
       symbol_table_enter_scope(checker->symbol_table, SCOPE_BLOCK);
+      if (!type_checker_init_tracker_enter_scope(checker)) {
+        type_checker_set_error_at_location(
+            checker, statement->location,
+            "Out of memory while entering initialization analysis scope");
+        symbol_table_exit_scope(checker->symbol_table);
+        return 0;
+      }
 
+      int reached_terminator = 0;
       for (size_t i = 0; i < statement->child_count; i++) {
+        ASTNode *child = statement->children[i];
+        if (reached_terminator && checker->error_reporter && child) {
+          error_reporter_add_warning(
+              checker->error_reporter, ERROR_SEMANTIC, child->location,
+              "Unreachable code: statement will never execute");
+        }
         if (!type_checker_check_statement(checker, statement->children[i])) {
+          type_checker_init_tracker_exit_scope(checker);
           symbol_table_exit_scope(checker->symbol_table);
           return 0;
         }
+        if (type_checker_statement_guarantees_termination(child)) {
+          reached_terminator = 1;
+        }
       }
 
+      type_checker_init_tracker_exit_scope(checker);
       symbol_table_exit_scope(checker->symbol_table);
     }
     return 1;

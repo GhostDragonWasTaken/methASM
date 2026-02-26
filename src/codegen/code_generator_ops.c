@@ -14,6 +14,22 @@ static int code_generator_generate_lvalue_address(CodeGenerator *generator,
                                                   ASTNode *target,
                                                   Type **out_target_type);
 
+static int code_generator_is_signed_integer_type(Type *type) {
+  if (!type) {
+    return 0;
+  }
+
+  switch (type->kind) {
+  case TYPE_INT8:
+  case TYPE_INT16:
+  case TYPE_INT32:
+  case TYPE_INT64:
+    return 1;
+  default:
+    return 0;
+  }
+}
+
 // Expression and assignment implementation functions
 void code_generator_generate_binary_operation(CodeGenerator *generator,
                                               ASTNode *left, const char *op,
@@ -323,6 +339,7 @@ void code_generator_load_variable(CodeGenerator *generator,
     if (symbol->type && symbol->type->size > 0 && symbol->type->size <= 8) {
       value_size = (int)symbol->type->size;
     }
+    int signed_integer = code_generator_is_signed_integer_type(symbol->type);
 
     if (symbol->data.variable.is_in_register) {
       x86Register reg = (x86Register)symbol->data.variable.register_id;
@@ -334,16 +351,33 @@ void code_generator_load_variable(CodeGenerator *generator,
     } else {
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
         if (value_size == 1) {
-          code_generator_emit(
-              generator, "    movzx rax, byte [rel %s]  ; From global memory\n",
-              resolved_name);
+          if (signed_integer) {
+            code_generator_emit(
+                generator,
+                "    movsx rax, byte [rel %s]  ; From global memory (signed)\n",
+                resolved_name);
+          } else {
+            code_generator_emit(
+                generator,
+                "    movzx rax, byte [rel %s]  ; From global memory\n",
+                resolved_name);
+          }
         } else if (value_size == 2) {
-          code_generator_emit(
-              generator, "    movzx rax, word [rel %s]  ; From global memory\n",
-              resolved_name);
+          if (signed_integer) {
+            code_generator_emit(
+                generator,
+                "    movsx rax, word [rel %s]  ; From global memory (signed)\n",
+                resolved_name);
+          } else {
+            code_generator_emit(
+                generator,
+                "    movzx rax, word [rel %s]  ; From global memory\n",
+                resolved_name);
+          }
         } else if (value_size == 4) {
           code_generator_emit(
-              generator, "    mov eax, dword [rel %s]  ; From global memory\n",
+              generator,
+              "    movsxd rax, dword [rel %s]  ; From global memory\n",
               resolved_name);
         } else {
           code_generator_emit(
@@ -354,18 +388,32 @@ void code_generator_load_variable(CodeGenerator *generator,
         // Local variable or parameter on stack
         int offset = symbol->data.variable.memory_offset;
         if (value_size == 1) {
-          code_generator_emit(generator,
-                              "    movzx rax, byte [rbp - %d]  ; From stack "
-                              "[rbp - %d]\n",
-                              offset, offset);
+          if (signed_integer) {
+            code_generator_emit(generator,
+                                "    movsx rax, byte [rbp - %d]  ; From stack "
+                                "[rbp - %d] (signed)\n",
+                                offset, offset);
+          } else {
+            code_generator_emit(generator,
+                                "    movzx rax, byte [rbp - %d]  ; From stack "
+                                "[rbp - %d]\n",
+                                offset, offset);
+          }
         } else if (value_size == 2) {
-          code_generator_emit(generator,
-                              "    movzx rax, word [rbp - %d]  ; From stack "
-                              "[rbp - %d]\n",
-                              offset, offset);
+          if (signed_integer) {
+            code_generator_emit(generator,
+                                "    movsx rax, word [rbp - %d]  ; From stack "
+                                "[rbp - %d] (signed)\n",
+                                offset, offset);
+          } else {
+            code_generator_emit(generator,
+                                "    movzx rax, word [rbp - %d]  ; From stack "
+                                "[rbp - %d]\n",
+                                offset, offset);
+          }
         } else if (value_size == 4) {
           code_generator_emit(generator,
-                              "    mov eax, dword [rbp - %d]  ; From stack "
+                              "    movsxd rax, dword [rbp - %d]  ; From stack "
                               "[rbp - %d]\n",
                               offset, offset);
         } else {

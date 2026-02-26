@@ -33,6 +33,15 @@ typedef struct {
   Symbol *current_function;
   int loop_depth;
   int switch_depth;
+  char **tracked_var_names;
+  unsigned char *tracked_var_initialized;
+  int *tracked_var_scope_depth;
+  size_t tracked_var_count;
+  size_t tracked_var_capacity;
+  size_t *tracked_scope_markers;
+  size_t tracked_scope_count;
+  size_t tracked_scope_capacity;
+  int tracked_scope_depth;
 } TypeChecker;
 
 // Function declarations

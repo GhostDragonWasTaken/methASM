@@ -25,7 +25,7 @@ No compound assignment (`+=`, `-=`, `*=`, `/=`). Use `x = x + 1` instead of `x +
 
 No labeled `break` or `continue` (e.g. `break outer`). Use flags or restructure nested loops.
 
-No unreachable-code warning. Code after `return` is not diagnosed.
+Unreachable code analysis is currently block-local and conservative; some dead paths in complex control-flow may not be diagnosed yet.
 
 No function pointers. Functions cannot be passed as arguments or stored in variables. For callbacks, use C externs.
 

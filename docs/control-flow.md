@@ -138,4 +138,4 @@ if (ptr != 0 && ptr->field > 0) {
 
 ## Unreachable Code
 
-The compiler does not warn or error on code after a `return` statement. Unreachable code is compiled and may execute if control flow is altered (e.g. via `goto` in inline assembly). For fail-fast style, ensure all code paths either return or loop.
+The compiler emits a warning for unreachable statements that appear after an unconditional `return`, `break`, or `continue` in the same block.

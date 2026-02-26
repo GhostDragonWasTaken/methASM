@@ -49,6 +49,14 @@ When modifying `web/server.masm` or `web/index.html`, use these rules to avoid r
 
 These checks catch the common failure mode where only one route (often `/`) crashes due to response construction bugs.
 
+## Stack Safety Diagnostics
+
+The compiler emits a warning for unusually large function stack frames (currently 256 KiB). This is intended as an early signal for stack overflow risk in deeply nested calls or thread stacks with limited reserve.
+
+On Windows x64, MethASM now emits stack probing (`___chkstk_ms`) for large frame allocations (>4 KiB) before subtracting `rsp`, to avoid guard-page skips.
+
+The warning threshold is currently fixed and may become configurable in a future release.
+
 ## Testing
 
 The test suite compiles and runs a set of programs. Run:

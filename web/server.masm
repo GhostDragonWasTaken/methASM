@@ -4,9 +4,15 @@
 // requests, and responds accordingly. No GC - stack allocation only.
 //
 // Endpoints:
-//   GET /       -> Presentation page (index.html via import_str)
-//   GET /health -> plain text "OK" (health check)
-//   other       -> 404 Not Found
+//   GET /           -> Presentation page (index.html via import_str)
+//   GET /health     -> plain text "OK" (health check)
+//   GET /forum      -> Forum index (thread list, new thread form)
+//   GET /forum?thread=N -> Thread view (posts, reply form); 404 if invalid N
+//   POST /forum     -> Create thread (form: title=...) -> 302 to new thread
+//   POST /forum?thread=N -> Add post (form: body=...) -> 302 to thread
+//   other           -> 404 Not Found
+//
+// Storage: threads.txt (one title per line), posts_N.txt (one post per line)
 //
 // Build: see web/build.bat
 // Run: server.exe, then open http://localhost:5000
@@ -32,6 +38,77 @@ var HTTP_404_BODY: string = "Not Found";
 
 var HTTP_HEALTH_HEADER: string = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n";
 var HTTP_HEALTH_BODY: string = "OK";
+
+// Forum HTML chunks (Connection: close, no Content-Length)
+var FORUM_HEADER: string = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n";
+var FORUM_CSS: string = "<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'JetBrains Mono',monospace;background:#0d1117;color:#c9d1d9;line-height:1.6;padding:2rem;max-width:800px;margin:0 auto}h1{color:#58a6ff;margin-bottom:1rem}h2{color:#79c0ff;margin:1.5rem 0 .8rem}ul{list-style:none}li{margin:.4rem 0;padding:.5rem;background:#161b22;border-radius:4px;border-left:3px solid #30363d}li a{color:#58a6ff;text-decoration:none}form{margin:1rem 0}input,textarea{width:100%;max-width:400px;padding:.5rem;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-family:inherit}textarea{min-height:80px;resize:vertical}button{background:#238636;color:#fff;border:none;padding:.4rem .8rem;border-radius:4px;cursor:pointer}.post{margin:.8rem 0;padding:.8rem;background:#161b22;border-radius:4px;border-left:3px solid #58a6ff;white-space:pre-wrap;word-break:break-word}.empty{color:#8b949e;font-style:italic}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}.err{color:#f85149;margin:.5rem 0}</style>";
+var FORUM_INDEX_START: string = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Forum</title>";
+var FORUM_INDEX_BODY: string = "</head><body><h1>Forum</h1><p><a href='/'>Back</a></p><h2>Threads</h2><ul>";
+var FORUM_INDEX_END: string = "</ul><h2>New thread</h2>";
+var FORUM_FORM: string = "<form method='POST' action='/forum'><input name='title' placeholder='Thread title' required maxlength='200'><button type='submit'>Create</button></form></body></html>";
+var FORUM_THREAD_START: string = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Thread</title>";
+var FORUM_THREAD_HEAD_END: string = "</head><body><h1>";
+var FORUM_THREAD_MID: string = "</h1><p><a href='/forum'>Back</a></p><h2>Posts</h2>";
+var FORUM_THREAD_END: string = "<h2>Reply</h2><form method='POST' action='/forum?thread=";
+var FORUM_THREAD_END2: string = "'><textarea name='body' placeholder='Your reply...'></textarea><button type='submit'>Post</button></form></body></html>";
+var FORUM_NO_POSTS: string = "<p class='empty'>No posts yet. Be the first to reply!</p>";
+var FORUM_ERR_EMPTY: string = "<p class='err'>Thread title cannot be empty.</p>";
+var FORUM_LI_OPEN: string = "<li><a href='/forum?thread=";
+var FORUM_LI_MID: string = "'>";
+var FORUM_LI_CLOSE: string = "</a></li>";
+var FORUM_POST_OPEN: string = "<div class='post'>";
+var FORUM_POST_CLOSE: string = "</div>";
+var REDIRECT_302: string = "HTTP/1.1 302 Found\r\nLocation: ";
+var REDIRECT_END: string = "\r\n\r\n";
+var fn_threads: string = "threads.txt";
+var fn_posts_prefix: string = "posts_";
+var fn_posts_suffix: string = ".txt";
+var mode_r: string = "r";
+var mode_a: string = "a";
+var nl: string = "\n";
+var key_title: string = "title";
+var key_body: string = "body";
+var hdr_content_length: string = "Content-Length:";
+var hdr_content_length_lo: string = "content-length:";
+var pat_crlf2: string = "\r\n\r\n";
+var pat_lf2: string = "\n\n";
+var html_amp: string = "&amp;";
+var html_lt: string = "&lt;";
+var html_gt: string = "&gt;";
+var html_quot: string = "&quot;";
+var html_apos: string = "&#39;";
+
+// Debug (set to 1 to enable)
+var dbg_on: int32 = 0;
+var dbg_post: string = "[POST] ";
+var dbg_bs: string = " body_start=";
+var dbg_bl: string = " body_len=";
+var dbg_cl: string = " content_len=";
+var dbg_need: string = " need=";
+var dbg_n: string = " n=";
+var dbg_got: string = " got=";
+var dbg_title: string = " title_len=";
+var dbg_fopen_ok: string = " fopen_ok";
+var dbg_fopen_fail: string = " fopen_fail";
+var dbg_newline: string = "\n";
+var dbg_fbs_enter: string = "[fbs] enter n=";
+var dbg_fbs_exit: string = "[fbs] exit ret=";
+var dbg_fbs_ok: string = "[fbs] ok";
+var dbg_loop: string = "[fbs] loop i=";
+
+function dbg(label: cstring, val: int64) {
+  if (dbg_on == 0) { return; }
+  print(label);
+  print_int(val);
+  putchar(10);
+  fflush(get_stdout());
+}
+
+function dbg_msg(msg: cstring) {
+  if (dbg_on == 0) { return; }
+  println(msg);
+  fflush(get_stdout());
+}
 
 // Build Content-Length decimal string in buf, return digit count
 function int_to_dec(buf: cstring, n: int64) -> int32 {
@@ -94,6 +171,412 @@ function is_health(buf: cstring, n: int32) -> int32 {
   if (buf[10] != 104) { return 0; }
   if (buf[11] != 32 && buf[11] != 63) { return 0; }
   return 1;
+}
+
+// POST check: 'P'=80,'O'=79,'S'=83,'T'=84,' '=32
+function is_post(buf: cstring, n: int32) -> int32 {
+  if (n < 5) { return 0; }
+  if (buf[0] != 80) { return 0; }
+  if (buf[1] != 79) { return 0; }
+  if (buf[2] != 83) { return 0; }
+  if (buf[3] != 84) { return 0; }
+  if (buf[4] != 32) { return 0; }
+  return 1;
+}
+
+// Path is "/forum" or "/forum?thread=N". path_start: 4 for GET, 5 for POST.
+// /forum = 47,102,111,114,117,109 (6 chars)
+function is_forum(buf: cstring, n: int32, path_start: int32) -> int32 {
+  if (path_start + 6 > n) { return 0; }
+  if (buf[path_start] != 47) { return 0; }
+  if (buf[path_start + 1] != 102) { return 0; }
+  if (buf[path_start + 2] != 111) { return 0; }
+  if (buf[path_start + 3] != 114) { return 0; }
+  if (buf[path_start + 4] != 117) { return 0; }
+  if (buf[path_start + 5] != 109) { return 0; }
+  return 1;
+}
+
+// Parse ?thread=N from request. Query starts at path_start+7 (after "/forum").
+// Returns thread id or 0 if not found.
+function get_thread_id(buf: cstring, n: int32, path_start: int32) -> int32 {
+  var i: int32 = path_start + 6;
+  if (i >= n) { return 0; }
+  if (buf[i] != 63) { return 0; }
+  i = i + 1;
+  if (i + 7 > n) { return 0; }
+  if (buf[i] != 116 || buf[i+1] != 104 || buf[i+2] != 114 || buf[i+3] != 101 || buf[i+4] != 97 || buf[i+5] != 100 || buf[i+6] != 61) {
+    return 0;
+  }
+  i = i + 7;
+  var id: int32 = 0;
+  while (i < n && buf[i] >= 48 && buf[i] <= 57) {
+    id = id * 10 + (buf[i] - 48);
+    i = i + 1;
+  }
+  return id;
+}
+
+// Parse Content-Length header. Returns value or 0 if not found. Case-insensitive. "Content-Length:" = 15 chars.
+function parse_content_length(buf: cstring, n: int32) -> int32 {
+  var i: int32 = 0;
+  while (i + 15 <= n) {
+    var match: int32 = 1;
+    var k: int32 = 0;
+    while (k < 15) {
+      var b: int32 = buf[i + k];
+      var h: int32 = hdr_content_length.chars[k];
+      var lo: int32 = hdr_content_length_lo.chars[k];
+      if (b != h && b != lo) { match = 0; break; }
+      k = k + 1;
+    }
+    if (match == 1) {
+      i = i + 15;
+      while (i < n && (buf[i] == 32 || buf[i] == 9)) {
+        i = i + 1;
+      }
+      var val: int32 = 0;
+      while (i < n && buf[i] >= 48 && buf[i] <= 57) {
+        val = val * 10 + (buf[i] - 48);
+        i = i + 1;
+      }
+      return val;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// Find start of HTTP body (after \r\n\r\n or \n\n). Returns offset or n if not found.
+// Uses memcmp to avoid potential codegen issues with manual byte loop.
+function find_body_start(buf: cstring, n: int32) -> int32 {
+  if (dbg_on != 0) { dbg_msg(cstr(dbg_fbs_ok)); }
+  if (dbg_on != 0) { dbg(cstr(dbg_fbs_enter), n); }
+  var i: int32 = 0;
+  while (i + 4 <= n) {
+    if (memcmp(&buf[i], cstr(pat_crlf2), 4) == 0) {
+      if (dbg_on != 0) { dbg(cstr(dbg_fbs_exit), i + 4); }
+      return i + 4;
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i + 2 <= n) {
+    if (memcmp(&buf[i], cstr(pat_lf2), 2) == 0) {
+      if (dbg_on != 0) { dbg(cstr(dbg_fbs_exit), i + 2); }
+      return i + 2;
+    }
+    i = i + 1;
+  }
+  if (dbg_on != 0) { dbg(cstr(dbg_fbs_exit), n); }
+  return n;
+}
+
+// Hex char to value (0-15). Returns -1 if not hex.
+function hex_char_val(c: int32) -> int32 {
+  if (c >= 48 && c <= 57) { return c - 48; }
+  if (c >= 97 && c <= 102) { return c - 97 + 10; }
+  if (c >= 65 && c <= 70) { return c - 65 + 10; }
+  return -1;
+}
+
+// Extract form value for key= from body. Copies to out, decodes + as space and %XX as byte.
+// Returns byte count written, or 0 if not found. Caps at out_max-1, null-terminates.
+function extract_form_value(buf: cstring, body_start: int32, body_len: int32, key: cstring, key_len: int32, out: cstring, out_max: int32) -> int32 {
+  var i: int32 = body_start;
+  var end: int32 = body_start + body_len;
+  while (i + key_len + 1 <= end) {
+    var match: int32 = 1;
+    var k: int32 = 0;
+    while (k < key_len) {
+      if (buf[i + k] != key[k]) { match = 0; break; }
+      k = k + 1;
+    }
+    if (match == 1 && buf[i + key_len] == 61) {
+      i = i + key_len + 1;
+      var out_len: int32 = 0;
+      while (i < end && out_len < out_max - 1) {
+        if (buf[i] == 38) { break; }
+        if (buf[i] == 43) {
+          out[out_len] = 32;
+          out_len = out_len + 1;
+          i = i + 1;
+        } else if (buf[i] == 37 && i + 2 < end) {
+          var hi: int32 = hex_char_val(buf[i + 1]);
+          var lo: int32 = hex_char_val(buf[i + 2]);
+          if (hi >= 0 && lo >= 0) {
+            out[out_len] = hi * 16 + lo;
+            out_len = out_len + 1;
+            i = i + 3;
+          } else {
+            out[out_len] = buf[i];
+            out_len = out_len + 1;
+            i = i + 1;
+          }
+        } else {
+          out[out_len] = buf[i];
+          out_len = out_len + 1;
+          i = i + 1;
+        }
+      }
+      out[out_len] = 0;
+      return out_len;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// Write HTML-escaped text to client.
+function send_html_escaped(client: int64, src: cstring, len: int32) {
+  var i: int32 = 0;
+  while (i < len) {
+    var ch: int32 = src[i];
+    if (ch == 38) {
+      send_all(client, html_amp.chars, html_amp.length);
+    } else if (ch == 60) {
+      send_all(client, html_lt.chars, html_lt.length);
+    } else if (ch == 62) {
+      send_all(client, html_gt.chars, html_gt.length);
+    } else if (ch == 34) {
+      send_all(client, html_quot.chars, html_quot.length);
+    } else if (ch == 39) {
+      send_all(client, html_apos.chars, html_apos.length);
+    } else {
+      send_all(client, &src[i], 1);
+    }
+    i = i + 1;
+  }
+}
+
+// Build "posts_N.txt" in buf, null-terminate. buf must be at least 32 bytes.
+function build_posts_filename(buf: cstring, id: int32) {
+  memcpy(buf, fn_posts_prefix.chars, fn_posts_prefix.length);
+  var dc: int32 = int_to_dec(&buf[fn_posts_prefix.length], id);
+  memcpy(&buf[fn_posts_prefix.length + dc], fn_posts_suffix.chars, fn_posts_suffix.length);
+  buf[fn_posts_prefix.length + dc + fn_posts_suffix.length] = 0;
+}
+
+// Build "/forum?thread=N" in buf (null-terminated). buf must be at least 32 bytes.
+function build_forum_thread_url(buf: cstring, thread_id: int32) {
+  buf[0] = 47;
+  buf[1] = 102;
+  buf[2] = 111;
+  buf[3] = 114;
+  buf[4] = 117;
+  buf[5] = 109;
+  buf[6] = 63;
+  buf[7] = 116;
+  buf[8] = 104;
+  buf[9] = 114;
+  buf[10] = 101;
+  buf[11] = 97;
+  buf[12] = 100;
+  buf[13] = 61;
+  var dc: int32 = int_to_dec(&buf[14], thread_id);
+  buf[14 + dc] = 0;
+}
+
+// Count lines in threads.txt. Returns 0 if file missing or empty.
+function count_threads() -> int32 {
+  var fp: cstring = fopen(cstr(fn_threads), cstr(mode_r));
+  if (fp == 0) { return 0; }
+  var count: int32 = 0;
+  var line_buf: uint8[64];
+  while (fgets(&line_buf[0], 64, fp) != 0) {
+    count = count + 1;
+  }
+  fclose(fp);
+  return count;
+}
+
+// Send 302 redirect to location. location must be null-terminated.
+function send_redirect(client: int64, location: cstring) {
+  send_all(client, REDIRECT_302.chars, REDIRECT_302.length);
+  var len: int32 = 0;
+  while (location[len] != 0) { len = len + 1; }
+  send_all(client, location, len);
+  send_all(client, REDIRECT_END.chars, REDIRECT_END.length);
+}
+
+// Serve forum index: thread list + new thread form. show_err_empty=1 to show empty-title error.
+function serve_forum_index(client: int64, show_err_empty: int32) {
+  send_all(client, FORUM_HEADER.chars, FORUM_HEADER.length);
+  send_all(client, FORUM_INDEX_START.chars, FORUM_INDEX_START.length);
+  send_all(client, FORUM_CSS.chars, FORUM_CSS.length);
+  send_all(client, FORUM_INDEX_BODY.chars, FORUM_INDEX_BODY.length);
+
+  var fp: cstring = fopen(cstr(fn_threads), cstr(mode_r));
+  if (fp != 0) {
+    var line_buf: uint8[512];
+    var line_num: int32 = 1;
+    while (fgets(&line_buf[0], 512, fp) != 0) {
+      var len: int32 = 0;
+      while (line_buf[len] != 0 && line_buf[len] != 10 && line_buf[len] != 13) {
+        len = len + 1;
+      }
+      if (len > 0) {
+        var item_buf: uint8[600];
+        memcpy(&item_buf[0], FORUM_LI_OPEN.chars, FORUM_LI_OPEN.length);
+        var dc: int32 = int_to_dec(&item_buf[FORUM_LI_OPEN.length], line_num);
+        memcpy(&item_buf[FORUM_LI_OPEN.length + dc], FORUM_LI_MID.chars, FORUM_LI_MID.length);
+        var mid: int32 = FORUM_LI_OPEN.length + dc + FORUM_LI_MID.length;
+        var copy_len: int32 = len;
+        if (copy_len > 200) { copy_len = 200; }
+        send_all(client, &item_buf[0], mid);
+        send_html_escaped(client, &line_buf[0], copy_len);
+        send_all(client, FORUM_LI_CLOSE.chars, FORUM_LI_CLOSE.length);
+      }
+      line_num = line_num + 1;
+    }
+    fclose(fp);
+  }
+
+  send_all(client, FORUM_INDEX_END.chars, FORUM_INDEX_END.length);
+  if (show_err_empty != 0) {
+    send_all(client, FORUM_ERR_EMPTY.chars, FORUM_ERR_EMPTY.length);
+  }
+  send_all(client, FORUM_FORM.chars, FORUM_FORM.length);
+}
+
+// Serve thread view: title, posts, reply form
+function serve_forum_thread(client: int64, thread_id: int32) {
+  send_all(client, FORUM_HEADER.chars, FORUM_HEADER.length);
+  send_all(client, FORUM_THREAD_START.chars, FORUM_THREAD_START.length);
+  send_all(client, FORUM_CSS.chars, FORUM_CSS.length);
+  send_all(client, FORUM_THREAD_HEAD_END.chars, FORUM_THREAD_HEAD_END.length);
+
+  var title_buf: uint8[256];
+  title_buf[0] = 85;
+  title_buf[1] = 110;
+  title_buf[2] = 107;
+  title_buf[3] = 110;
+  title_buf[4] = 111;
+  title_buf[5] = 119;
+  title_buf[6] = 110;
+  title_buf[7] = 0;
+
+  var fp: cstring = fopen(cstr(fn_threads), cstr(mode_r));
+  if (fp != 0) {
+    var line_buf: uint8[512];
+    var line_num: int32 = 1;
+    while (fgets(&line_buf[0], 512, fp) != 0) {
+      if (line_num == thread_id) {
+        var len: int32 = 0;
+        while (line_buf[len] != 0 && line_buf[len] != 10 && line_buf[len] != 13) {
+          if (len < 255) {
+            title_buf[len] = line_buf[len];
+          }
+          len = len + 1;
+        }
+        if (len < 256) {
+          title_buf[len] = 0;
+        } else {
+          title_buf[255] = 0;
+        }
+        break;
+      }
+      line_num = line_num + 1;
+    }
+    fclose(fp);
+  }
+
+  var title_len: int32 = 0;
+  while (title_buf[title_len] != 0) {
+    title_len = title_len + 1;
+  }
+  send_html_escaped(client, &title_buf[0], title_len);
+  send_all(client, FORUM_THREAD_MID.chars, FORUM_THREAD_MID.length);
+
+  var posts_fn: uint8[32];
+  build_posts_filename(&posts_fn[0], thread_id);
+  var had_posts: int32 = 0;
+  fp = fopen(&posts_fn[0], cstr(mode_r));
+  if (fp != 0) {
+    var line_buf: uint8[2048];
+    while (fgets(&line_buf[0], 2048, fp) != 0) {
+      var len: int32 = 0;
+      while (line_buf[len] != 0 && line_buf[len] != 10 && line_buf[len] != 13) {
+        len = len + 1;
+      }
+      if (len > 0) {
+        had_posts = 1;
+        send_all(client, FORUM_POST_OPEN.chars, FORUM_POST_OPEN.length);
+        send_html_escaped(client, &line_buf[0], len);
+        send_all(client, FORUM_POST_CLOSE.chars, FORUM_POST_CLOSE.length);
+      }
+    }
+    fclose(fp);
+  }
+  if (had_posts == 0) {
+    send_all(client, FORUM_NO_POSTS.chars, FORUM_NO_POSTS.length);
+  }
+
+  send_all(client, FORUM_THREAD_END.chars, FORUM_THREAD_END.length);
+  var id_buf: uint8[16];
+  var dc: int32 = int_to_dec(&id_buf[0], thread_id);
+  send_all(client, &id_buf[0], dc);
+  send_all(client, FORUM_THREAD_END2.chars, FORUM_THREAD_END2.length);
+}
+
+// Handle POST /forum (new thread): append title to threads.txt
+function handle_post_new_thread(client: int64, buf: cstring, n: int32) {
+  var body_start: int32 = find_body_start(buf, n);
+  var body_len: int32 = n - body_start;
+  if (dbg_on != 0) {
+    dbg(cstr(dbg_bs), body_start);
+    dbg(cstr(dbg_bl), body_len);
+  }
+  var title_buf: uint8[256];
+  var got: int32 = extract_form_value(buf, body_start, body_len, cstr(key_title), 5, &title_buf[0], 256);
+  if (dbg_on != 0) { dbg(cstr(dbg_title), got); }
+  if (got > 0) {
+    var count: int32 = count_threads();
+    var fp: cstring = fopen(cstr(fn_threads), cstr(mode_a));
+    if (dbg_on != 0) {
+      if (fp != 0) { dbg_msg(cstr(dbg_fopen_ok)); } else { dbg_msg(cstr(dbg_fopen_fail)); }
+    }
+    if (fp != 0) {
+      fputs(&title_buf[0], fp);
+      fputs(cstr(nl), fp);
+      fclose(fp);
+      var new_id: int32 = count + 1;
+      var loc_buf: uint8[32];
+      build_forum_thread_url(&loc_buf[0], new_id);
+      send_redirect(client, &loc_buf[0]);
+      return;
+    }
+  }
+  serve_forum_index(client, got == 0);
+}
+
+// Handle POST /forum?thread=N (reply): append body to posts_N.txt
+function handle_post_reply(client: int64, buf: cstring, n: int32, thread_id: int32) {
+  var body_start: int32 = find_body_start(buf, n);
+  var body_len: int32 = n - body_start;
+  if (dbg_on != 0) {
+    dbg(cstr(dbg_bs), body_start);
+    dbg(cstr(dbg_bl), body_len);
+  }
+  var post_buf: uint8[2048];
+  var got: int32 = extract_form_value(buf, body_start, body_len, cstr(key_body), 4, &post_buf[0], 2048);
+  if (dbg_on != 0) { dbg(cstr(dbg_title), got); }
+  if (got > 0) {
+    var posts_fn: uint8[32];
+    build_posts_filename(&posts_fn[0], thread_id);
+    var fp: cstring = fopen(&posts_fn[0], cstr(mode_a));
+    if (dbg_on != 0) {
+      if (fp != 0) { dbg_msg(cstr(dbg_fopen_ok)); } else { dbg_msg(cstr(dbg_fopen_fail)); }
+    }
+    if (fp != 0) {
+      fputs(&post_buf[0], fp);
+      fputs(cstr(nl), fp);
+      fclose(fp);
+    }
+  }
+  var loc_buf: uint8[32];
+  build_forum_thread_url(&loc_buf[0], thread_id);
+  send_redirect(client, &loc_buf[0]);
 }
 
 function main() -> int32 {
@@ -162,21 +645,72 @@ function main() -> int32 {
 
     var n: int32 = recv(client, &recv_buf[0], 4096, 0);
     if (n > 0) {
+      if (is_post(&recv_buf[0], n) == 1) {
+        var body_start: int32 = find_body_start(&recv_buf[0], n);
+        if (dbg_on != 0) { dbg(cstr(dbg_post), n); }
+        if (dbg_on != 0) { dbg(cstr(dbg_bs), body_start); }
+        var content_len: int32 = parse_content_length(&recv_buf[0], body_start);
+        if (dbg_on != 0) { dbg(cstr(dbg_cl), content_len); }
+        var need: int32 = body_start + content_len;
+        if (dbg_on != 0) { dbg(cstr(dbg_need), need); }
+        if (content_len > 0 && need <= 4096 && n < need) {
+          while (n < need) {
+            var got: int32 = recv(client, &recv_buf[n], need - n, 0);
+            if (dbg_on != 0) { dbg(cstr(dbg_got), got); }
+            if (got <= 0) { break; }
+            n = n + got;
+          }
+        }
+        if (dbg_on != 0) { dbg(cstr(dbg_n), n); }
+      }
+      if (n > 0) {
       if (is_get(&recv_buf[0], n) == 1) {
         if (is_health(&recv_buf[0], n) == 1) {
-          send_all(client, HTTP_HEALTH_HEADER.chars, 64);
+          send_all(client, HTTP_HEALTH_HEADER.chars, HTTP_HEALTH_HEADER.length);
           send_all(client, HTTP_HEALTH_BODY.chars, 2);
         } else if (is_root(&recv_buf[0], n) == 1) {
           if (send_all(client, HTTP_PAGE_HEADER.chars, HTTP_PAGE_HEADER.length) == HTTP_PAGE_HEADER.length) {
             send_all(client, PAGE_CONTENT.chars, PAGE_CONTENT.length);
           }
+        } else if (is_forum(&recv_buf[0], n, 4) == 1) {
+          var tid: int32 = get_thread_id(&recv_buf[0], n, 4);
+          if (tid > 0) {
+            var max_tid: int32 = count_threads();
+            if (tid <= max_tid) {
+              serve_forum_thread(client, tid);
+            } else {
+              send_all(client, HTTP_404_HEADER.chars, HTTP_404_HEADER.length);
+              send_all(client, HTTP_404_BODY.chars, 9);
+            }
+          } else {
+            serve_forum_index(client, 0);
+          }
         } else {
-          send_all(client, HTTP_404_HEADER.chars, 45);
+          send_all(client, HTTP_404_HEADER.chars, HTTP_404_HEADER.length);
+          send_all(client, HTTP_404_BODY.chars, 9);
+        }
+      } else if (is_post(&recv_buf[0], n) == 1) {
+        if (is_forum(&recv_buf[0], n, 5) == 1) {
+          var tid: int32 = get_thread_id(&recv_buf[0], n, 5);
+          if (tid > 0) {
+            var max_tid: int32 = count_threads();
+            if (tid <= max_tid) {
+              handle_post_reply(client, &recv_buf[0], n, tid);
+            } else {
+              send_all(client, HTTP_404_HEADER.chars, HTTP_404_HEADER.length);
+              send_all(client, HTTP_404_BODY.chars, 9);
+            }
+          } else {
+            handle_post_new_thread(client, &recv_buf[0], n);
+          }
+        } else {
+          send_all(client, HTTP_404_HEADER.chars, HTTP_404_HEADER.length);
           send_all(client, HTTP_404_BODY.chars, 9);
         }
       } else {
-        send_all(client, HTTP_404_HEADER.chars, 45);
+        send_all(client, HTTP_404_HEADER.chars, HTTP_404_HEADER.length);
         send_all(client, HTTP_404_BODY.chars, 9);
+      }
       }
     }
 

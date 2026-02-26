@@ -78,7 +78,8 @@ function main() -> int32 {
 
 <section>
 <h2>This Server</h2>
-<p>This page is served by an HTTP server written entirely in MethASM. Single-threaded, no GC, uses <code>std/net</code> for Winsock2. The server handles <code>GET /</code>, <code>GET /health</code>, and returns 404 for other requests. Built with: <code>methasm web/server.masm -o server.s</code> → NASM → GCC + ws2_32.</p>
+<p>This page is served by an HTTP server written entirely in MethASM. Single-threaded, no GC, uses <code>std/net</code> for Winsock2. The server handles <code>GET /</code>, <code>GET /health</code>, <code>GET /forum</code>, and returns 404 for other requests. Built with: <code>methasm web/server.masm -o server.s</code> → NASM → GCC + ws2_32.</p>
+<p><a href='/forum'>Forum</a></p>
 </section>
 
 <p class='footnote'>MethASM — Compiles to x86-64. Use <code>--prelude</code> for automatic stdlib imports. See docs for full reference.</p>
