@@ -192,9 +192,18 @@ Options:
 
 - `-i <file>` input file
 - `-o <file>` output file
+- `-I <dir>` add an import search directory (repeatable)
+- `--stdlib <dir>` set stdlib root directory (default: `stdlib`)
 - `-d`, `--debug` enable debug mode
 - `-O`, `--optimize` enable optimization flag
 - `-h`, `--help` print usage
+
+Import resolution behavior:
+
+- Tries the importer file's directory first.
+- If the import has no extension, `.masm` is tried automatically.
+- `std/...` imports are resolved under the configured stdlib root.
+- `-I` directories are searched after local imports.
 
 Example:
 

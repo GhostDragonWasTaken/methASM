@@ -1,0 +1,24 @@
+// MethASM standard library: I/O
+
+// C runtime externs
+export extern function puts(msg: cstring) -> int32;
+export extern function putchar(c: int32) -> int32;
+
+// Convert a MethASM string to a C string (gets the underlying pointer)
+export function cstr(s: string) -> cstring {
+  return s.chars;
+}
+
+// Output a null-terminated string exactly as it is (no newline)
+export function print(msg: cstring) {
+  var i: int64 = 0;
+  while (msg[i] != 0) {
+    putchar(msg[i]);
+    i = i + 1;
+  }
+}
+
+// Output a null-terminated string followed by a newline
+export function println(msg: cstring) {
+  puts(msg);
+}

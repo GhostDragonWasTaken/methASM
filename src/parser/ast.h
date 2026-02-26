@@ -55,6 +55,7 @@ typedef struct {
   char *type_name;
   ASTNode *initializer;
   int is_extern;
+  int is_exported;
   char *link_name;
 } VarDeclaration;
 

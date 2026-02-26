@@ -9,6 +9,7 @@
 #include "codegen/code_generator.h"
 #include "error/error_reporter.h"
 #include "debug/debug_info.h"
+#include <stddef.h>
 
 typedef struct {
     const char* input_filename;
@@ -19,6 +20,9 @@ typedef struct {
     int generate_line_mapping;
     int generate_stack_trace_support;
     const char* debug_format; // "dwarf", "stabs", or "map"
+    const char** import_directories;
+    size_t import_directory_count;
+    const char* stdlib_directory;
 } CompilerOptions;
 
 // Function declarations

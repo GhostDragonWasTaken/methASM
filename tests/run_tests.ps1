@@ -120,7 +120,7 @@ $cases = @(
     Name="extern_global_link_name"
     Path="tests/test_extern_global_link_name.masm"
     ShouldSucceed=$true
-    AsmMustMatch=@("(?m)^\s*extern\s+errno\b", "\[\s*errno\s*\+\s*rip\s*\]")
+    AsmMustMatch=@("(?m)^\s*extern\s+errno\b", "(\[\s*errno\s*\+\s*rip\s*\]|\[\s*rel\s+errno\s*\])")
     AsmMustNotMatch=@("(?m)^\s*global\s+errno\b", "(?m)^\s*errno:\s*$")
   },
   @{ Name="cstring_alias_type"; Path="tests/test_cstring_alias_type.masm"; ShouldSucceed=$true },
@@ -130,6 +130,15 @@ $cases = @(
   @{ Name="pointer_null"; Path="tests/test_pointer_null.masm"; ShouldSucceed=$true },
   @{ Name="pointer_param_address"; Path="tests/test_pointer_param_address.masm"; ShouldSucceed=$true },
   @{ Name="call_many_args"; Path="tests/test_call_many_args.masm"; ShouldSucceed=$true },
+  @{ Name="import_relative_no_ext"; Path="tests/test_import_relative_no_ext.masm"; ShouldSucceed=$true },
+  @{
+    Name="import_include_path"
+    Path="tests/test_import_include_path.masm"
+    ShouldSucceed=$true
+    Args=@("-I", "tests/lib")
+  },
+  @{ Name="import_std_core"; Path="tests/test_import_std_core.masm"; ShouldSucceed=$true },
+  @{ Name="std_io"; Path="tests/test_std_io.masm"; ShouldSucceed=$true },
   @{
     Name="string_escape_codegen"
     Path="tests/test_string_escape_codegen.masm"
@@ -176,7 +185,12 @@ foreach ($case in $cases) {
     Remove-Item -Path $outFile -Force
   }
 
-  $output = & $CompilerPath $case.Path -o $outFile 2>&1 | Out-String
+  $caseArgs = @()
+  if ($case.ContainsKey("Args") -and $case.Args) {
+    $caseArgs = @($case.Args)
+  }
+
+  $output = & $CompilerPath @caseArgs $case.Path -o $outFile 2>&1 | Out-String
   $exitCode = $LASTEXITCODE
 
   $passed = $true
@@ -208,7 +222,7 @@ foreach ($case in $cases) {
           Remove-Item -Path $outFile2 -Force
         }
 
-        $output2 = & $CompilerPath $case.Path -o $outFile2 2>&1 | Out-String
+        $output2 = & $CompilerPath @caseArgs $case.Path -o $outFile2 2>&1 | Out-String
         $exitCode2 = $LASTEXITCODE
         if ($exitCode2 -ne 0) {
           $passed = $false

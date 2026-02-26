@@ -479,9 +479,33 @@ ASTNode *parser_parse_declaration(Parser *parser) {
       if (decl && decl->data) {
         ((StructDeclaration *)decl->data)->is_exported = 1;
       }
+    } else if (parser->current_token.type == TOKEN_EXTERN) {
+      parser_advance(parser); // consume 'extern'
+      if (parser->current_token.type == TOKEN_FUNCTION) {
+        decl = parser_parse_function_declaration(parser);
+        if (decl && decl->data) {
+          FunctionDeclaration *func_data = (FunctionDeclaration *)decl->data;
+          if (func_data->body != NULL) {
+            parser_set_error(parser, "Extern functions must not have a body");
+            ast_destroy_node(decl);
+            return NULL;
+          }
+          func_data->is_extern = 1;
+          func_data->is_exported = 1;
+        }
+      } else if (parser->current_token.type == TOKEN_VAR) {
+        decl = parser_parse_extern_var_declaration(parser);
+        if (decl && decl->data) {
+          ((VarDeclaration *)decl->data)->is_exported = 1;
+        }
+      } else {
+        parser_set_error(parser,
+                         "Expected 'function' or 'var' after 'export extern'");
+        return NULL;
+      }
     } else {
-      parser_set_error(parser,
-                       "Expected 'function' or 'struct' after 'export'");
+      parser_set_error(
+          parser, "Expected 'function', 'struct', or 'extern' after 'export'");
       return NULL;
     }
     return decl;
