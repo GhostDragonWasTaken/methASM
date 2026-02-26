@@ -297,8 +297,7 @@ void code_generator_load_variable(CodeGenerator *generator,
       resolved_name =
           code_generator_get_link_symbol_name(generator, variable_name);
       if (!resolved_name) {
-        code_generator_set_error(generator,
-                                 "Invalid extern symbol name '%s'",
+        code_generator_set_error(generator, "Invalid extern symbol name '%s'",
                                  variable_name);
         return;
       }
@@ -402,8 +401,7 @@ void code_generator_store_variable(CodeGenerator *generator,
       resolved_name =
           code_generator_get_link_symbol_name(generator, variable_name);
       if (!resolved_name) {
-        code_generator_set_error(generator,
-                                 "Invalid extern symbol name '%s'",
+        code_generator_set_error(generator, "Invalid extern symbol name '%s'",
                                  variable_name);
         return;
       }
@@ -439,13 +437,13 @@ void code_generator_store_variable(CodeGenerator *generator,
     } else {
       if (symbol->scope && symbol->scope->type == SCOPE_GLOBAL) {
         if (value_size == 1) {
-          code_generator_emit(
-              generator, "    mov byte [rel %s], al  ; To global memory\n",
-              resolved_name);
+          code_generator_emit(generator,
+                              "    mov byte [rel %s], al  ; To global memory\n",
+                              resolved_name);
         } else if (value_size == 2) {
-          code_generator_emit(
-              generator, "    mov word [rel %s], ax  ; To global memory\n",
-              resolved_name);
+          code_generator_emit(generator,
+                              "    mov word [rel %s], ax  ; To global memory\n",
+                              resolved_name);
         } else if (value_size == 4) {
           code_generator_emit(
               generator, "    mov dword [rel %s], eax  ; To global memory\n",
@@ -467,15 +465,17 @@ void code_generator_store_variable(CodeGenerator *generator,
               generator, "    mov word [rbp - %d], ax  ; To stack [rbp - %d]\n",
               offset, offset);
         } else if (value_size == 4) {
-          code_generator_emit(generator,
-                              "    mov dword [rbp - %d], eax  ; To stack [rbp - "
-                              "%d]\n",
-                              offset, offset);
+          code_generator_emit(
+              generator,
+              "    mov dword [rbp - %d], eax  ; To stack [rbp - "
+              "%d]\n",
+              offset, offset);
         } else {
-          code_generator_emit(generator,
-                              "    mov qword [rbp - %d], rax  ; To stack [rbp - "
-                              "%d]\n",
-                              offset, offset);
+          code_generator_emit(
+              generator,
+              "    mov qword [rbp - %d], rax  ; To stack [rbp - "
+              "%d]\n",
+              offset, offset);
         }
       }
     }
@@ -498,9 +498,9 @@ void code_generator_load_string_literal(CodeGenerator *generator,
   char *label_struct = code_generator_generate_label(generator, "str_struct");
   if (label && label_struct) {
     // Load string address into RAX
-    code_generator_emit(
-        generator, "    lea rax, [rel %s]  ; Load string struct address\n",
-        label_struct);
+    code_generator_emit(generator,
+                        "    lea rax, [rel %s]  ; Load string struct address\n",
+                        label_struct);
 
     // Add string to global variables buffer for data section
     code_generator_emit_to_global_buffer(generator, "%s:\n", label);
@@ -573,7 +573,12 @@ const char *code_generator_get_arithmetic_instruction(const char *op,
       return "sub";
     if (strcmp(op, "*") == 0)
       return "imul";
-    // Division and modulo are handled specially
+    // Division and modulo are handled specially via idiv in the IR backend;
+    // return a sentinel so the caller enters the arithmetic branch.
+    if (strcmp(op, "/") == 0)
+      return "idiv";
+    if (strcmp(op, "%") == 0)
+      return "idiv";
     if (strcmp(op, "&") == 0)
       return "and"; // Bitwise AND
     if (strcmp(op, "|") == 0)

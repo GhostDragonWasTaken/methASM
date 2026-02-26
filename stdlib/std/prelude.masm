@@ -1,0 +1,11 @@
+// MethASM standard prelude
+// This module is automatically imported by the compiler unless --no-prelude
+// is specified. It re-exports the most commonly needed standard library
+// functions so they are available without explicit imports.
+
+import "std/io";
+import "std/math";
+import "std/conv";
+import "std/mem";
+import "std/process";
+import "std/net";

@@ -135,6 +135,8 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[i], "-O") == 0 ||
                strcmp(argv[i], "--optimize") == 0) {
       options.optimize = 1;
+    } else if (strcmp(argv[i], "--no-prelude") == 0) {
+      options.no_prelude = 1;
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       print_usage(argv[0]);
       return 0;
@@ -301,6 +303,30 @@ int compile_file(const char *input_filename, const char *output_filename,
             : "stdlib";
   } else {
     import_options.stdlib_directory = "stdlib";
+  }
+
+  // Auto-inject the standard prelude unless --no-prelude was specified.
+  if (!options->no_prelude) {
+    Program *prog_data = (Program *)program->data;
+    SourceLocation prelude_loc = {0, 0};
+    ASTNode *prelude_import =
+        ast_create_import_declaration("std/prelude", prelude_loc);
+    if (prelude_import) {
+      // Prepend the prelude import before all user declarations.
+      ASTNode **grown =
+          realloc(prog_data->declarations,
+                  (prog_data->declaration_count + 1) * sizeof(ASTNode *));
+      if (grown) {
+        memmove(grown + 1, grown,
+                prog_data->declaration_count * sizeof(ASTNode *));
+        grown[0] = prelude_import;
+        prog_data->declarations = grown;
+        prog_data->declaration_count++;
+        ast_add_child(program, prelude_import);
+      } else {
+        ast_destroy_node(prelude_import);
+      }
+    }
   }
 
   if (!resolve_imports_with_options(program, input_filename, error_reporter,
@@ -497,6 +523,7 @@ void print_usage(const char *program_name) {
   printf("  --debug-format <fmt> Debug format: dwarf, stabs, or map (default: "
          "dwarf)\n");
   printf("  -O, --optimize      Enable optimizations\n");
+  printf("  --no-prelude        Do not auto-import the standard prelude\n");
   printf("  -h, --help          Show this help message\n");
 }
 
