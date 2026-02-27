@@ -1304,8 +1304,6 @@ int monomorphize_program(ASTNode *program) {
     if (!is_generic) {
       prog->declarations[write_idx++] = decl;
     }
-    // Generic definitions are NOT destroyed here because the children array
-    // still references them; they will be cleaned up when the program is freed.
   }
   prog->declaration_count = write_idx;
 
