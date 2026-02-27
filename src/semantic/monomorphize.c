@@ -1277,6 +1277,10 @@ int monomorphize_program(ASTNode *program) {
         prog->declarations[prog->declaration_count] = mono_node;
         prog->declaration_count++;
         ast_add_child(program, mono_node);
+
+        // Scan the new node for additional generic instantiations
+        // (e.g., a monomorphized function calling another generic function)
+        collect_type_instantiations(mono_node, &ctx);
       }
     }
     processed = current_count;
