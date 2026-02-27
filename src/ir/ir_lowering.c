@@ -44,6 +44,15 @@ static void ir_set_error(IRLoweringContext *context, const char *format, ...);
 static char *ir_new_label_name(IRLoweringContext *context, const char *prefix);
 static int ir_emit(IRLoweringContext *context, IRFunction *function,
                    const IRInstruction *instruction);
+static int ir_emit_runtime_trap(IRLoweringContext *context, IRFunction *function,
+                                SourceLocation location,
+                                const char *message);
+static int ir_emit_null_check(IRLoweringContext *context, IRFunction *function,
+                              SourceLocation location,
+                              const IROperand *value);
+static int ir_emit_bounds_check(IRLoweringContext *context, IRFunction *function,
+                                SourceLocation location,
+                                const IROperand *index, size_t array_size);
 static int ir_push_control_frame(IRLoweringContext *context,
                                  const char *break_label,
                                  const char *continue_label);
@@ -476,6 +485,204 @@ static int ir_emit(IRLoweringContext *context, IRFunction *function,
   return 1;
 }
 
+static int ir_emit_runtime_trap(IRLoweringContext *context, IRFunction *function,
+                                SourceLocation location,
+                                const char *message) {
+  if (!context || !function || !message) {
+    return 0;
+  }
+
+  IRInstruction puts_call = {0};
+  puts_call.op = IR_OP_CALL;
+  puts_call.location = location;
+  puts_call.text = "puts";
+  puts_call.argument_count = 1;
+  puts_call.arguments = malloc(sizeof(IROperand));
+  if (!puts_call.arguments) {
+    ir_set_error(context, "Out of memory while lowering runtime trap");
+    return 0;
+  }
+  puts_call.arguments[0] = ir_operand_string(message);
+  if (!ir_emit(context, function, &puts_call)) {
+    ir_operand_destroy(&puts_call.arguments[0]);
+    free(puts_call.arguments);
+    return 0;
+  }
+  ir_operand_destroy(&puts_call.arguments[0]);
+  free(puts_call.arguments);
+
+  IRInstruction exit_call = {0};
+  exit_call.op = IR_OP_CALL;
+  exit_call.location = location;
+  exit_call.text = "exit";
+  exit_call.argument_count = 1;
+  exit_call.arguments = malloc(sizeof(IROperand));
+  if (!exit_call.arguments) {
+    ir_set_error(context, "Out of memory while lowering runtime trap");
+    return 0;
+  }
+  exit_call.arguments[0] = ir_operand_int(1);
+  if (!ir_emit(context, function, &exit_call)) {
+    ir_operand_destroy(&exit_call.arguments[0]);
+    free(exit_call.arguments);
+    return 0;
+  }
+  ir_operand_destroy(&exit_call.arguments[0]);
+  free(exit_call.arguments);
+  return 1;
+}
+
+static int ir_emit_null_check(IRLoweringContext *context, IRFunction *function,
+                              SourceLocation location,
+                              const IROperand *value) {
+  if (!context || !function || !value) {
+    return 0;
+  }
+
+  char *trap_label = ir_new_label_name(context, "trap_null");
+  char *ok_label = ir_new_label_name(context, "nonnull");
+  if (!trap_label || !ok_label) {
+    free(trap_label);
+    free(ok_label);
+    ir_set_error(context, "Out of memory while lowering null check");
+    return 0;
+  }
+
+  IRInstruction branch = {0};
+  branch.op = IR_OP_BRANCH_ZERO;
+  branch.location = location;
+  branch.lhs = *value;
+  branch.text = trap_label;
+  if (!ir_emit(context, function, &branch)) {
+    free(trap_label);
+    free(ok_label);
+    return 0;
+  }
+
+  IRInstruction jump = {0};
+  jump.op = IR_OP_JUMP;
+  jump.location = location;
+  jump.text = ok_label;
+  if (!ir_emit(context, function, &jump)) {
+    free(trap_label);
+    free(ok_label);
+    return 0;
+  }
+
+  IRInstruction trap = {0};
+  trap.op = IR_OP_LABEL;
+  trap.location = location;
+  trap.text = trap_label;
+  if (!ir_emit(context, function, &trap) ||
+      !ir_emit_runtime_trap(context, function, location,
+                            "Fatal error: Null pointer dereference")) {
+    free(trap_label);
+    free(ok_label);
+    return 0;
+  }
+
+  IRInstruction ok = {0};
+  ok.op = IR_OP_LABEL;
+  ok.location = location;
+  ok.text = ok_label;
+  if (!ir_emit(context, function, &ok)) {
+    free(trap_label);
+    free(ok_label);
+    return 0;
+  }
+
+  free(trap_label);
+  free(ok_label);
+  return 1;
+}
+
+static int ir_emit_bounds_check(IRLoweringContext *context, IRFunction *function,
+                                SourceLocation location,
+                                const IROperand *index, size_t array_size) {
+  if (!context || !function || !index) {
+    return 0;
+  }
+
+  IROperand in_bounds = ir_operand_none();
+  if (!ir_make_temp_operand(context, &in_bounds)) {
+    return 0;
+  }
+
+  IRInstruction compare = {0};
+  compare.op = IR_OP_BINARY;
+  compare.location = location;
+  compare.dest = in_bounds;
+  compare.lhs = *index;
+  compare.rhs = ir_operand_int((long long)array_size);
+  compare.text = "<";
+  if (!ir_emit(context, function, &compare)) {
+    ir_operand_destroy(&in_bounds);
+    return 0;
+  }
+
+  char *trap_label = ir_new_label_name(context, "trap_bounds");
+  char *ok_label = ir_new_label_name(context, "in_bounds");
+  if (!trap_label || !ok_label) {
+    free(trap_label);
+    free(ok_label);
+    ir_operand_destroy(&in_bounds);
+    ir_set_error(context, "Out of memory while lowering bounds check");
+    return 0;
+  }
+
+  IRInstruction branch = {0};
+  branch.op = IR_OP_BRANCH_ZERO;
+  branch.location = location;
+  branch.lhs = in_bounds;
+  branch.text = trap_label;
+  if (!ir_emit(context, function, &branch)) {
+    free(trap_label);
+    free(ok_label);
+    ir_operand_destroy(&in_bounds);
+    return 0;
+  }
+
+  IRInstruction jump = {0};
+  jump.op = IR_OP_JUMP;
+  jump.location = location;
+  jump.text = ok_label;
+  if (!ir_emit(context, function, &jump)) {
+    free(trap_label);
+    free(ok_label);
+    ir_operand_destroy(&in_bounds);
+    return 0;
+  }
+
+  IRInstruction trap = {0};
+  trap.op = IR_OP_LABEL;
+  trap.location = location;
+  trap.text = trap_label;
+  if (!ir_emit(context, function, &trap) ||
+      !ir_emit_runtime_trap(context, function, location,
+                            "Fatal error: Array index out of bounds")) {
+    free(trap_label);
+    free(ok_label);
+    ir_operand_destroy(&in_bounds);
+    return 0;
+  }
+
+  IRInstruction ok = {0};
+  ok.op = IR_OP_LABEL;
+  ok.location = location;
+  ok.text = ok_label;
+  if (!ir_emit(context, function, &ok)) {
+    free(trap_label);
+    free(ok_label);
+    ir_operand_destroy(&in_bounds);
+    return 0;
+  }
+
+  free(trap_label);
+  free(ok_label);
+  ir_operand_destroy(&in_bounds);
+  return 1;
+}
+
 static int ir_push_control_frame(IRLoweringContext *context,
                                  const char *break_label,
                                  const char *continue_label) {
@@ -825,6 +1032,11 @@ static int ir_lower_lvalue_address(IRLoweringContext *context,
                                &object_address)) {
         return 0;
       }
+      if (!ir_emit_null_check(context, function, expression->location,
+                              &object_address)) {
+        ir_operand_destroy(&object_address);
+        return 0;
+      }
       object_type = object_type->base_type;
     } else if (object_type && object_type->kind == TYPE_STRING) {
       // String values are represented as pointers to {chars, length} records.
@@ -917,6 +1129,20 @@ static int ir_lower_lvalue_address(IRLoweringContext *context,
       return 0;
     }
 
+    if (array_type->kind == TYPE_POINTER &&
+        !ir_emit_null_check(context, function, expression->location, &base)) {
+      ir_operand_destroy(&base);
+      ir_operand_destroy(&index);
+      return 0;
+    }
+    if (array_type->kind == TYPE_ARRAY &&
+        !ir_emit_bounds_check(context, function, expression->location, &index,
+                              array_type->array_size)) {
+      ir_operand_destroy(&base);
+      ir_operand_destroy(&index);
+      return 0;
+    }
+
     IROperand scaled = ir_operand_none();
     if (!ir_make_temp_operand(context, &scaled)) {
       ir_operand_destroy(&base);
@@ -987,6 +1213,12 @@ static int ir_lower_lvalue_address(IRLoweringContext *context,
     IROperand pointer_value = ir_operand_none();
     if (!ir_lower_expression(context, function, unary->operand,
                              &pointer_value)) {
+      return 0;
+    }
+
+    if (!ir_emit_null_check(context, function, expression->location,
+                            &pointer_value)) {
+      ir_operand_destroy(&pointer_value);
       return 0;
     }
 

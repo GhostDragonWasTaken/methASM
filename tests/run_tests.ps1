@@ -148,6 +148,18 @@ $cases = @(
   @{ Name = "gc_alloc_fixed"; Path = "tests/test_gc_alloc_fixed.masm"; ShouldSucceed = $true },
   @{ Name = "pointers"; Path = "tests/test_pointers.masm"; ShouldSucceed = $true },
   @{ Name = "pointer_null"; Path = "tests/test_pointer_null.masm"; ShouldSucceed = $true },
+  @{
+    Name          = "runtime_null_deref_check"
+    Path          = "tests/test_runtime_null_deref_check.masm"
+    ShouldSucceed = $true
+    AsmMustMatch  = @("Fatal error: Null pointer dereference", "\bcall exit\b")
+  },
+  @{
+    Name          = "runtime_array_bounds_check"
+    Path          = "tests/test_runtime_array_bounds_check.masm"
+    ShouldSucceed = $true
+    AsmMustMatch  = @("Fatal error: Array index out of bounds", "\bsetl al\b")
+  },
   @{ Name = "pointer_param_address"; Path = "tests/test_pointer_param_address.masm"; ShouldSucceed = $true },
   @{
     Name            = "call_many_args"
@@ -432,6 +444,12 @@ $cases = @(
     )
   },
   @{ Name = "defer_complex_interleaving"; Path = "tests/test_defer_complex_interleaving.masm"; ShouldSucceed = $true },
+  @{
+    Name            = "warn_gc_escape_extern"
+    Path            = "tests/test_warn_gc_escape_extern.masm"
+    ShouldSucceed   = $true
+    OutputMustMatch = @("Managed pointer passed to extern function 'sink' may escape GC visibility")
+  },
 
   @{ Name = "err_unknown_char"; Path = "tests/err_unknown_char.masm"; ShouldSucceed = $false; Pattern = "Lexical error|error" },
   @{ Name = "err_invalid_hex"; Path = "tests/err_invalid_hex.masm"; ShouldSucceed = $false; Pattern = "Invalid hexadecimal literal" },
@@ -455,6 +473,7 @@ $cases = @(
   @{ Name = "err_use_before_init"; Path = "tests/err_use_before_init.masm"; ShouldSucceed = $false; Pattern = "before initialization" },
   @{ Name = "err_array_index_oob_const"; Path = "tests/err_array_index_oob_const.masm"; ShouldSucceed = $false; Pattern = "out of bounds" },
   @{ Name = "err_array_index_oob_const_negative"; Path = "tests/err_array_index_oob_const_negative.masm"; ShouldSucceed = $false; Pattern = "out of bounds" },
+  @{ Name = "err_null_deref_const"; Path = "tests/err_null_deref_const.masm"; ShouldSucceed = $false; Pattern = "Null pointer dereference" },
   @{ Name = "err_codegen_member_expr"; Path = "tests/err_codegen_member_expr.masm"; ShouldSucceed = $false },
   @{ Name = "err_function_arg_count"; Path = "tests/err_function_arg_count.masm"; ShouldSucceed = $false; Pattern = "expects .* arguments, got" },
   @{ Name = "err_function_arg_type"; Path = "tests/err_function_arg_type.masm"; ShouldSucceed = $false; Pattern = "Type mismatch" },
@@ -508,11 +527,19 @@ foreach ($case in $cases) {
       else {
         $requiredAsmPatterns = @()
         $forbiddenAsmPatterns = @()
+        $requiredOutputPatterns = @()
+        $forbiddenOutputPatterns = @()
         if ($case.ContainsKey("AsmMustMatch") -and $case.AsmMustMatch) {
           $requiredAsmPatterns = @($case.AsmMustMatch)
         }
         if ($case.ContainsKey("AsmMustNotMatch") -and $case.AsmMustNotMatch) {
           $forbiddenAsmPatterns = @($case.AsmMustNotMatch)
+        }
+        if ($case.ContainsKey("OutputMustMatch") -and $case.OutputMustMatch) {
+          $requiredOutputPatterns = @($case.OutputMustMatch)
+        }
+        if ($case.ContainsKey("OutputMustNotMatch") -and $case.OutputMustNotMatch) {
+          $forbiddenOutputPatterns = @($case.OutputMustNotMatch)
         }
 
         $asmCheck = Test-AssemblyOutput -AsmPath $outFile `
@@ -522,7 +549,31 @@ foreach ($case in $cases) {
           $passed = $false
           $reason = $asmCheck.Reason
         }
-        elseif (-not $SkipDeterminism) {
+        else {
+          foreach ($pattern in $requiredOutputPatterns) {
+            if ([string]::IsNullOrWhiteSpace($pattern)) {
+              continue
+            }
+            if ($output -notmatch $pattern) {
+              $passed = $false
+              $reason = "Compiler output missing required pattern '$pattern'"
+              break
+            }
+          }
+        }
+        if ($passed) {
+          foreach ($pattern in $forbiddenOutputPatterns) {
+            if ([string]::IsNullOrWhiteSpace($pattern)) {
+              continue
+            }
+            if ($output -match $pattern) {
+              $passed = $false
+              $reason = "Compiler output matched forbidden pattern '$pattern'"
+              break
+            }
+          }
+        }
+        if ($passed -and -not $SkipDeterminism) {
           $outFile2 = Join-Path $tmpDir ("{0}.second.s" -f $case.Name)
           if (Test-Path $outFile2) {
             Remove-Item -Path $outFile2 -Force -ErrorAction SilentlyContinue

@@ -8,6 +8,12 @@ static void code_generator_emit_store_value_at_address(CodeGenerator *generator,
 static void
 code_generator_emit_load_value_from_address(CodeGenerator *generator,
                                             int element_size);
+static void code_generator_emit_runtime_trap(CodeGenerator *generator,
+                                             const char *message);
+static void code_generator_emit_null_check(CodeGenerator *generator,
+                                           const char *context);
+static void code_generator_emit_bounds_check(CodeGenerator *generator,
+                                             Type *array_type);
 static int code_generator_generate_array_element_address(
     CodeGenerator *generator, ASTNode *array_expr, ASTNode *index_expr);
 static int code_generator_generate_lvalue_address(CodeGenerator *generator,
@@ -28,6 +34,113 @@ static int code_generator_is_signed_integer_type(Type *type) {
   default:
     return 0;
   }
+}
+
+static void code_generator_emit_runtime_trap(CodeGenerator *generator,
+                                             const char *message) {
+  if (!generator || !message) {
+    return;
+  }
+
+  char *message_label = code_generator_generate_label(generator, "runtime_msg");
+  if (!message_label) {
+    free(message_label);
+    code_generator_set_error(generator,
+                             "Out of memory while creating runtime trap labels");
+    return;
+  }
+
+  CallingConventionSpec *conv_spec =
+      generator->register_allocator
+          ? generator->register_allocator->calling_convention
+          : NULL;
+  const char *first_param_reg = "rdi";
+  if (conv_spec && conv_spec->int_param_count > 0) {
+    const char *candidate =
+        code_generator_get_register_name(conv_spec->int_param_registers[0]);
+    if (candidate) {
+      first_param_reg = candidate;
+    }
+  }
+
+  code_generator_emit_to_global_buffer(generator, "%s:\n", message_label);
+  if (!code_generator_emit_escaped_string_bytes(generator, message, 1)) {
+    free(message_label);
+    return;
+  }
+  code_generator_emit_to_global_buffer(generator, "\n");
+
+  if (!code_generator_emit_extern_symbol(generator, "puts") ||
+      !code_generator_emit_extern_symbol(generator, "exit")) {
+    free(message_label);
+    return;
+  }
+  code_generator_emit(generator,
+                      "    lea %s, [rel %s]  ; runtime trap message\n",
+                      first_param_reg, message_label);
+  if (conv_spec && conv_spec->convention == CALLING_CONV_MS_X64) {
+    code_generator_emit(generator,
+                        "    sub rsp, %d      ; Shadow space for puts\n",
+                        conv_spec->shadow_space_size);
+    code_generator_emit(generator, "    call puts\n");
+    code_generator_emit(generator,
+                        "    add rsp, %d\n", conv_spec->shadow_space_size);
+    code_generator_emit(generator, "    mov ecx, 1\n");
+    code_generator_emit(generator,
+                        "    sub rsp, %d      ; Shadow space for exit\n",
+                        conv_spec->shadow_space_size);
+    code_generator_emit(generator, "    call exit\n");
+    code_generator_emit(generator,
+                        "    add rsp, %d\n", conv_spec->shadow_space_size);
+  } else {
+    code_generator_emit(generator, "    call puts\n");
+    code_generator_emit(generator, "    mov edi, 1\n");
+    code_generator_emit(generator, "    call exit\n");
+  }
+
+  free(message_label);
+}
+
+static void code_generator_emit_null_check(CodeGenerator *generator,
+                                           const char *context) {
+  if (!generator) {
+    return;
+  }
+
+  char *continue_label = code_generator_generate_label(generator, "nonnull");
+  if (!continue_label) {
+    code_generator_set_error(generator,
+                             "Out of memory while creating null-check label");
+    return;
+  }
+
+  code_generator_emit(generator, "    test rax, rax\n");
+  code_generator_emit(generator, "    jnz %s\n", continue_label);
+  code_generator_emit_runtime_trap(generator, context ? context
+                                                      : "Fatal error: Null pointer dereference");
+  code_generator_emit(generator, "%s:\n", continue_label);
+  free(continue_label);
+}
+
+static void code_generator_emit_bounds_check(CodeGenerator *generator,
+                                             Type *array_type) {
+  if (!generator || !array_type || array_type->kind != TYPE_ARRAY) {
+    return;
+  }
+
+  char *continue_label = code_generator_generate_label(generator, "in_bounds");
+  if (!continue_label) {
+    code_generator_set_error(generator,
+                             "Out of memory while creating bounds-check label");
+    return;
+  }
+
+  code_generator_emit(generator, "    cmp rax, %zu\n", array_type->array_size);
+  code_generator_emit(generator, "    jb %s\n", continue_label);
+  code_generator_emit_runtime_trap(generator,
+                                   "Fatal error: Array index out of bounds");
+  code_generator_emit(generator, "%s:\n", continue_label);
+  free(continue_label);
 }
 
 // Expression and assignment implementation functions
@@ -310,6 +423,12 @@ void code_generator_generate_unary_operation(CodeGenerator *generator,
       code_generator_set_error(
           generator,
           "Aggregate dereference values are not supported in this context");
+      return;
+    }
+
+    code_generator_emit_null_check(generator,
+                                   "Fatal error: Null pointer dereference");
+    if (generator->has_error) {
       return;
     }
 
@@ -1084,8 +1203,21 @@ static int code_generator_generate_array_element_address(
       code_generator_get_type_storage_size(array_type->base_type);
 
   code_generator_generate_expression(generator, array_expr);
+  if (array_type->kind == TYPE_POINTER) {
+    code_generator_emit_null_check(generator,
+                                   "Fatal error: Null pointer dereference");
+    if (generator->has_error) {
+      return 0;
+    }
+  }
   code_generator_emit(generator, "    push rax           ; Save array base\n");
   code_generator_generate_expression(generator, index_expr);
+  if (array_type->kind == TYPE_ARRAY) {
+    code_generator_emit_bounds_check(generator, array_type);
+    if (generator->has_error) {
+      return 0;
+    }
+  }
   code_generator_emit(generator,
                       "    pop rcx            ; Restore array base\n");
   if (element_size > 1) {
@@ -1269,6 +1401,12 @@ static int code_generator_generate_lvalue_address(CodeGenerator *generator,
     }
 
     code_generator_generate_expression(generator, unary->operand);
+    if (generator->has_error) {
+      return 0;
+    }
+
+    code_generator_emit_null_check(generator,
+                                   "Fatal error: Null pointer dereference");
     if (generator->has_error) {
       return 0;
     }

@@ -783,7 +783,7 @@ static int code_generator_emit_ir_call(CodeGenerator *generator,
     code_generator_set_error(generator, "Invalid IR call target");
     return 0;
   }
-  if (function_symbol && function_symbol->is_extern) {
+  if ((function_symbol && function_symbol->is_extern) || !function_symbol) {
     if (!code_generator_emit_extern_symbol(generator, call_target)) {
       return 0;
     }

@@ -249,9 +249,46 @@ static int type_checker_eval_integer_constant(ASTNode *expression,
   }
 }
 
+static int type_checker_ast_contains_node_type(ASTNode *node,
+                                               ASTNodeType target_type) {
+  if (!node) {
+    return 0;
+  }
+  if (node->type == target_type) {
+    return 1;
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    if (type_checker_ast_contains_node_type(node->children[i], target_type)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int type_checker_is_null_pointer_constant(ASTNode *expression) {
   long long value = 0;
   return type_checker_eval_integer_constant(expression, &value) && value == 0;
+}
+
+static int type_checker_is_gc_managed_pointer_type(Type *type) {
+  return type && type->kind == TYPE_POINTER && type->base_type &&
+         type->base_type->kind == TYPE_STRUCT;
+}
+
+static void type_checker_warn_gc_escape_to_c(TypeChecker *checker,
+                                             ASTNode *argument,
+                                             const char *callee_name) {
+  if (!checker || !checker->error_reporter || !argument || !callee_name) {
+    return;
+  }
+
+  char message[512];
+  snprintf(message, sizeof(message),
+           "Managed pointer passed to extern function '%s' may escape GC "
+           "visibility; register C-held slots with gc_register_root",
+           callee_name);
+  error_reporter_add_warning(checker->error_reporter, ERROR_SEMANTIC,
+                             argument->location, message);
 }
 
 static void type_checker_init_tracker_reset(TypeChecker *checker) {
@@ -538,6 +575,7 @@ type_checker_create_with_error_reporter(SymbolTable *symbol_table,
   checker->error_message = NULL;
   checker->error_reporter = error_reporter;
   checker->current_function = NULL;
+  checker->current_function_decl = NULL;
   checker->loop_depth = 0;
   checker->switch_depth = 0;
   checker->tracked_var_names = NULL;
@@ -757,6 +795,11 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
       if (!operand_type) {
         return NULL;
       }
+      if (type_checker_is_null_pointer_constant(unop->operand)) {
+        type_checker_set_error_at_location(checker, expression->location,
+                                           "Null pointer dereference");
+        return NULL;
+      }
       if (operand_type->kind != TYPE_POINTER || !operand_type->base_type) {
         type_checker_set_error_at_location(
             checker, expression->location,
@@ -849,6 +892,12 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
                                           param_type->name, arg_type->name);
         return NULL;
       }
+
+      if (func_symbol->is_extern &&
+          type_checker_is_gc_managed_pointer_type(arg_type)) {
+        type_checker_warn_gc_escape_to_c(checker, call->arguments[i],
+                                         call->function_name);
+      }
     }
 
     return func_symbol->data.function.return_type;
@@ -914,6 +963,12 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
       if (!array_type->base_type) {
         type_checker_set_error_at_location(checker, expression->location,
                                            "Indexed type has no element type");
+        return NULL;
+      }
+      if (array_type->kind == TYPE_POINTER &&
+          type_checker_is_null_pointer_constant(idx->array)) {
+        type_checker_set_error_at_location(checker, idx->array->location,
+                                           "Null pointer dereference");
         return NULL;
       }
       if (array_type->kind == TYPE_ARRAY) {
@@ -2042,6 +2097,7 @@ int type_checker_process_declaration(TypeChecker *checker,
     } else {
       checker->current_function = func_symbol;
     }
+    checker->current_function_decl = declaration;
 
     // Enter a new scope for the function body
     symbol_table_enter_scope(checker->symbol_table, SCOPE_FUNCTION);
@@ -2106,6 +2162,7 @@ int type_checker_process_declaration(TypeChecker *checker,
 
     // Reset the current function in the type checker
     checker->current_function = NULL;
+    checker->current_function_decl = NULL;
 
     return 1;
   }
@@ -2328,6 +2385,15 @@ int type_checker_process_declaration(TypeChecker *checker,
             "Cannot infer type of assignment value");
       }
       return 0;
+    }
+
+    if (var_symbol->is_extern &&
+        type_checker_is_gc_managed_pointer_type(value_type) &&
+        checker->error_reporter) {
+      error_reporter_add_warning(
+          checker->error_reporter, ERROR_SEMANTIC, assignment->value->location,
+          "Managed pointer stored in extern variable may escape GC visibility; "
+          "register the C-held slot with gc_register_root");
     }
 
     // Validate assignment compatibility
@@ -2613,6 +2679,21 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
                                             func_return_type->name,
                                             value_type->name);
           return 0;
+        }
+
+        if (checker->current_function_decl &&
+            type_checker_ast_contains_node_type(checker->current_function_decl,
+                                                AST_ERRDEFER_STATEMENT)) {
+          long long constant_value = 0;
+          if (type_checker_eval_integer_constant(ret_stmt->value,
+                                                 &constant_value) &&
+              constant_value != 0) {
+            error_reporter_add_warning(
+                checker->error_reporter, ERROR_SEMANTIC,
+                ret_stmt->value->location,
+                "Non-zero constant return in function with errdefer will "
+                "trigger errdefer by convention");
+          }
         }
       } else {
         type_checker_set_error_at_location(

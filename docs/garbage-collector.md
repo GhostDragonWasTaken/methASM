@@ -145,6 +145,8 @@ A common pitfall: passing a GC-managed pointer to a C function that stores it so
 
 If the GC appears to collect too aggressively (use-after-free, premature collection), a managed pointer is likely stored where the GC cannot see it. Register that location with `gc_register_root` or ensure the pointer is on the stack or in a heap object that is reachable.
 
+The compiler emits a warning when a managed struct pointer is passed to an `extern function` or stored in an `extern` variable, because those are common ways to let C retain a GC-managed pointer without registering the storage slot. The warning is heuristic: it does not prove that C will retain the pointer, and it does not eliminate the need to call `gc_register_root` when C-owned storage keeps the reference.
+
 If the GC retains too much memory (growth without bound, high `gc_get_allocated_bytes`), use the diagnostic API to inspect:
 
 - `gc_get_allocation_count()`: number of live objects
