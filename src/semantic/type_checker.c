@@ -886,7 +886,13 @@ static Type *type_checker_infer_type_internal(TypeChecker *checker,
       int is_null_pointer_arg =
           (param_type && param_type->kind == TYPE_POINTER &&
            type_checker_is_null_pointer_constant(call->arguments[i]));
-      if (!is_null_pointer_arg &&
+      // Allow implicit string literal -> cstring coercion.
+      // A string literal's .chars is always a valid null-terminated pointer.
+      int is_string_to_cstring =
+          (param_type && param_type->name &&
+           strcmp(param_type->name, "cstring") == 0 &&
+           call->arguments[i]->type == AST_STRING_LITERAL);
+      if (!is_null_pointer_arg && !is_string_to_cstring &&
           !type_checker_is_assignable(checker, param_type, arg_type)) {
         type_checker_report_type_mismatch(checker, call->arguments[i]->location,
                                           param_type->name, arg_type->name);
@@ -1444,7 +1450,11 @@ int type_checker_validate_function_call(TypeChecker *checker,
     int is_null_pointer_arg =
         (param_type && param_type->kind == TYPE_POINTER &&
          type_checker_is_null_pointer_constant(call->arguments[i]));
-    if (!is_null_pointer_arg &&
+    // Allow implicit string literal -> cstring coercion.
+    int is_string_to_cstring = (param_type && param_type->name &&
+                                strcmp(param_type->name, "cstring") == 0 &&
+                                call->arguments[i]->type == AST_STRING_LITERAL);
+    if (!is_null_pointer_arg && !is_string_to_cstring &&
         !type_checker_is_assignable(checker, param_type, arg_type)) {
       type_checker_set_error(
           checker,
@@ -1690,8 +1700,9 @@ int type_checker_process_declaration(TypeChecker *checker,
     return 0;
 
   case AST_ERRDEFER_STATEMENT:
-    type_checker_set_error_at_location(checker, declaration->location,
-                                       "Errdefer statement outside of a function");
+    type_checker_set_error_at_location(
+        checker, declaration->location,
+        "Errdefer statement outside of a function");
     return 0;
   case AST_VAR_DECLARATION: {
     VarDeclaration *var_decl = (VarDeclaration *)declaration->data;
@@ -2584,8 +2595,9 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
   switch (statement->type) {
   case AST_DEFER_STATEMENT: {
     if (!checker->current_function) {
-      type_checker_set_error_at_location(checker, statement->location,
-                                         "Defer statement outside of a function");
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "Defer statement outside of a function");
       return 0;
     }
 
@@ -2613,8 +2625,9 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
 
   case AST_ERRDEFER_STATEMENT: {
     if (!checker->current_function) {
-      type_checker_set_error_at_location(checker, statement->location,
-                                         "Errdefer statement outside of a function");
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "Errdefer statement outside of a function");
       return 0;
     }
 
@@ -2631,9 +2644,10 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
     case AST_PROGRAM:
       break;
     default:
-      type_checker_set_error_at_location(
-          checker, defer_stmt->statement->location,
-          "Errdeferred statement must be a function call, assignment, or block");
+      type_checker_set_error_at_location(checker,
+                                         defer_stmt->statement->location,
+                                         "Errdeferred statement must be a "
+                                         "function call, assignment, or block");
       return 0;
     }
 
