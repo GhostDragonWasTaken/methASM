@@ -21,8 +21,10 @@ Current implementation status:
 - Core language front-end and backend pipeline are operational.
 - Fail-fast diagnostics are enforced across lexer, parser, semantic analysis, and codegen.
 - Arrays, pointers, structured types, and major control-flow constructs are implemented.
+- `defer` and `errdefer` are implemented in the IR pipeline, including assignments and block statements.
 - Runtime GC integration is compiled and exercised by runtime tests.
 - String concatenation is implemented (the compiler now accepts `string + string` and emits GC-backed code), and the Windows web server example exercises that path together with `std/net`.
+- Dynamic null-dereference and fixed-array bounds traps are emitted by the compiler, and obvious GC-managed pointer escapes to C produce warnings.
 - Automated compiler/runtime regression suite is available under `tests/run_tests.ps1`.
 
 ## Compiler Guarantees
@@ -44,6 +46,7 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Dereference (`*p`) and address-of (`&x`) operators
 - Pointer-to-struct arrow notation (`p->field`)
 - Fixed-size array type annotations (for example `int32[10]`)
+- Bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`)
 - Functions and function calls
 - Function forward declarations (e.g. `function add(a: int32, b: int32) -> int32;`)
 - Function return type syntax with both `->` and `:`
@@ -60,6 +63,7 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - `switch`, `case`, `default`
 - `break` and `continue`
 - `return`
+- `defer` and `errdefer`
 - Inline assembly blocks
 
 ## Type and Semantic Analysis
@@ -74,12 +78,15 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Assignment compatibility validation
 - Field assignment validation
 - Array index expression validation (index type and target type checks)
+- Compile-time rejection of constant null dereference (`*0`)
+- Compile-time rejection of constant fixed-array out-of-bounds indices
 - Loop/switch context checks for `break` and `continue`
 - Switch expression validation and compile-time case constant evaluation
 - Duplicate `case` detection and default-clause uniqueness checks
 - Undefined symbol detection with source locations
 - Forward declaration signature compatibility checks in symbol resolution
 - Extern/non-extern redeclaration and link-name consistency checks
+- Warning on managed struct pointers passed to `extern function` or stored in `extern` variables
 
 ## Code Generation
 
@@ -90,6 +97,8 @@ This reduces silent failures and minimizes incorrect cascading diagnostics.
 - Method call emission (mangled names, `this` as first parameter)
 - Pointer dereference and address-of code generation
 - Array and pointer element address calculation and typed indexed load/store emission
+- Runtime null checks for dynamic dereference and pointer-based indexing
+- Runtime bounds checks for dynamic indexing into fixed-size arrays
 - Code generation for `if`, `while`, `for`, and `switch` control flow
 - Nested control-flow label management for `break` and `continue`
 - `_start` entry emission that calls `main` when present
@@ -137,6 +146,7 @@ Current backend coverage:
 - Control flow (`if`/`while`/`for`/`switch`/`break`/`continue`) is emitted from explicit IR control-flow instructions.
 - Local declarations, assignment, branches, labels, and returns emit directly from IR.
 - IR now models lvalue address and memory operations explicitly (`addr_of`, `load`, `store`) for struct fields, pointer dereference, and indexed access.
+- IR lowering also injects runtime traps for dynamic null dereference and fixed-array out-of-bounds access.
 - Heap allocation is modeled as explicit IR (`new`) instead of AST-side expression fallback.
 - Integer binary/unary operations lower to pure IR.
 - Type-aware lowering supports specific floating-point calculations with XMM registers.
@@ -163,6 +173,7 @@ Practical interpretation:
 - Iterative mark traversal using a worklist
 - Stack root scanning
 - Root registration API: `gc_register_root`, `gc_unregister_root` (pointer globals auto-registered)
+- Compiler warnings for common GC-managed pointer escapes across the C boundary
 - Collection controls: `gc_collect`, `gc_collect_now`, `gc_set_collection_threshold`, `gc_get_collection_threshold`
 - Runtime cleanup: `gc_shutdown`
 
@@ -285,9 +296,12 @@ Makefile      Linux/macOS build and test targets
 ## Known Limitations
 
 - Optimization passes are limited.
-- Language surface area is still evolving.
-- Some advanced language and backend scenarios are not implemented.
+- Pointer indexing is only null-checked, not bounds-checked, because raw pointers do not carry extent information.
+- Managed pointers that cross into C remain convention-based: the compiler warns on obvious escape paths, but C-held storage still must use `gc_register_root`.
+- Deferred statements capture variables by reference, not by value.
+- `errdefer` is still convention-based: `0` means success and any non-zero return value is treated as an error path.
 - `switch` case labels currently require compile-time integer constant expressions and do not yet support range-style cases.
+- No labeled `break` or `continue`.
 
 ## Contributing
 
