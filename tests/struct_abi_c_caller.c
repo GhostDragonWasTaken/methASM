@@ -1,5 +1,4 @@
-/* C driver: calls exported Mettle functions with structs by value and reads a
- * struct back, which is the direction that never worked. */
+
 #include <stdint.h>
 
 typedef struct {
@@ -33,11 +32,11 @@ int mettle_c_driver_check(void) {
   ThreeI32 made;
   int32_t total = 0;
 
-  total += mettle_take_three(t);          /* 66 */
+  total += mettle_take_three(t);
   made = mettle_make_three(3, 4, 5);
-  total += made.a + made.b + made.c;      /* 12 */
-  total += mettle_take_two_f64(p);        /* 32 */
-  total += mettle_take_mixed(m);          /* 107 */
-  total += mettle_take_big32(b);          /* 36 */
-  return (int)total;                      /* 253 */
+  total += made.a + made.b + made.c;
+  total += mettle_take_two_f64(p);
+  total += mettle_take_mixed(m);
+  total += mettle_take_big32(b);
+  return (int)total;
 }

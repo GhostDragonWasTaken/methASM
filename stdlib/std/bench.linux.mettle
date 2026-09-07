@@ -1,12 +1,3 @@
-// High-resolution timing for benchmarks (native ELF / Linux).
-//
-// Linux counterpart to std/bench. Uses the owned clock_gettime ABI, which
-// issues the Linux clock syscall. The import resolver picks this
-// file over bench.mettle automatically on the native ELF target, so
-// `import "std/bench"` works unchanged on both platforms.
-
-// clock_gettime(clk_id, timespec*) -> 0 on success. timespec is 16 bytes:
-// tv_sec @0 (int64), tv_nsec @8 (int64). CLOCK_MONOTONIC = 1 on Linux.
 extern fn clock_gettime(clk_id: int32, ts: cstring) -> int32 = "clock_gettime";
 
 export fn bench_time_us() -> int64 {

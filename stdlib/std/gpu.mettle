@@ -1,18 +1,3 @@
-// Mettle standard library: GPU (NVIDIA CUDA Driver API)
-//
-// Thin bindings over nvcuda.dll (the OS driver -- no cudart, no nvcc) plus
-// ergonomic helpers. Link the driver import stub at build time:
-//   mettle --build app.mettle -o app.exe --link-arg <CUDA>/lib/x64/cuda.lib
-//
-// Compact and named 3-D `dispatch` forms lower through the provider-neutral
-// `mtlc_gpu_launch_checked` ABI below. Kernels are written in a separate file
-// compiled with `mettle --emit-ptx kernels.mettle -o kernels.ptx`.
-// Kernel-native `tensor_matmul` is provider-neutral despite this module's CUDA
-// host implementation: it consumes ordinary matrix pointers, exact unsigned
-// M/N/K region controls, and neutral descriptors. No CUDA fragment or launch
-// object enters source/shared IR.
-
-// ---- CUDA Driver API (versioned _v2 exports use the modern 64-bit ABI) ----
 export extern fn cuInit(flags: uint32) -> int32 = "cuInit";
 export extern fn cuDeviceGet(dev: int32*, ordinal: int32) -> int32 = "cuDeviceGet";
 export extern fn cuDeviceGetAttribute(value: int32*, attribute: int32, dev: int32) -> int32 = "cuDeviceGetAttribute";
@@ -54,8 +39,6 @@ export extern fn cuLaunchKernel(f: int64, gx: uint32, gy: uint32, gz: uint32,
                                       sharedBytes: uint32, stream: int64,
                                       kernelParams: int64*, extra: int64*) -> int32 = "cuLaunchKernel";
 export extern fn cuCtxSynchronize() -> int32 = "cuCtxSynchronize";
-// Stream capture and graphs: record a launch sequence once, replay it as one
-// submission. CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1.
 export extern fn cuStreamBeginCapture_v2(stream: int64, mode: int32) -> int32 = "cuStreamBeginCapture_v2";
 export extern fn cuStreamEndCapture(stream: int64, graphOut: int64*) -> int32 = "cuStreamEndCapture";
 export extern fn cuGraphInstantiateWithFlags(execOut: int64*, graph: int64, flags: int64) -> int32 = "cuGraphInstantiateWithFlags";
@@ -63,11 +46,8 @@ export extern fn cuGraphLaunch(exec: int64, stream: int64) -> int32 = "cuGraphLa
 export extern fn cuGraphExecDestroy(exec: int64) -> int32 = "cuGraphExecDestroy";
 export extern fn cuGraphDestroy(graph: int64) -> int32 = "cuGraphDestroy";
 extern fn __mtlc_gpu_process_exit(code: int32) = "exit";
-// Diagnostics for the typed-dispatch failures below, declared here rather than
-// imported so this module depends only on the driver and Mettle's runtime.
 extern fn __mtlc_gpu_fputs(text: cstring, stream: cstring) -> int32 = "fputs";
 extern fn __mtlc_gpu_iob(index: int32) -> cstring = "__acrt_iob_func";
-// Enough of stdio to read a PTX file without pulling std/io in behind it.
 extern fn __mtlc_gpu_fopen(path: cstring, mode: cstring) -> cstring = "fopen";
 extern fn __mtlc_gpu_fclose(fp: cstring) -> int32 = "fclose";
 extern fn __mtlc_gpu_fread(buf: uint8*, size: int64, count: int64, fp: cstring) -> int64 = "fread";
@@ -76,8 +56,6 @@ extern fn __mtlc_gpu_ftell(fp: cstring) -> int64 = "ftell";
 extern fn __mtlc_gpu_malloc(bytes: int64) -> uint8* = "malloc";
 extern fn __mtlc_gpu_release(block: uint8*) = "free";
 
-// std/gpu depends on the driver and Mettle's runtime, so it converts its string
-// literals rather than importing std/io for cstr.
 @inline fn __mtlc_gpu_cstr(s: string) -> cstring { return s.chars; }
 
 fn __mtlc_gpu_note(text: string) {
@@ -93,13 +71,6 @@ fn __mtlc_gpu_fail(part1: cstring, part2: cstring, part3: cstring) {
   __mtlc_gpu_process_exit(1);
 }
 
-// ---- driver status codes as text ----
-//
-// A CUresult printed as a bare integer tells nobody anything. Every helper
-// below that reports a failure names the status and quotes the driver's own
-// sentence about it.
-
-// "CUDA_ERROR_INVALID_PTX" and the like.
 export fn gpu_error_name(status: int32) -> cstring {
   var text: cstring = 0;
   if (cuGetErrorName(status, &text) != 0 || text == 0) {
@@ -108,7 +79,6 @@ export fn gpu_error_name(status: int32) -> cstring {
   return text;
 }
 
-// The driver's readable sentence, for example "a PTX JIT compilation failed".
 export fn gpu_error_text(status: int32) -> cstring {
   var text: cstring = 0;
   if (cuGetErrorString(status, &text) != 0 || text == 0) {
@@ -127,14 +97,8 @@ fn __mtlc_gpu_report(what: string, status: int32) {
   __mtlc_gpu_fputs(__mtlc_gpu_cstr(")\n"), err);
 }
 
-// ---- ergonomic helpers (return handles directly; 0 on failure) ----
-
-// Initialize CUDA on device 0 and create a context. Returns the context handle
-// (nonzero) or 0 on failure.
 export fn gpu_init() -> int64 { return gpu_init_on(0); }
 
-// The same, on a chosen device ordinal. An inference process that owns two
-// cards initializes one context per card and binds each before its launches.
 export fn gpu_init_on(ordinal: int32) -> int64 {
   var status: int32 = cuInit(0);
   if (status != 0) {
@@ -153,19 +117,13 @@ export fn gpu_init_on(ordinal: int32) -> int64 {
     return 0;
   }
   var ctx: int64 = 0;
-  status = cuCtxCreate_v2(&ctx, 8, dev);      // CU_CTX_MAP_HOST
+  status = cuCtxCreate_v2(&ctx, 8, dev);
   if (status != 0) {
     __mtlc_gpu_report("mettle: could not create a GPU context", status);
     return 0;
   }
   return ctx;
 }
-
-// ---- what this machine has ----
-//
-// The compiler answers the same questions at build time (`mettle --gpu-info`);
-// these answer them at run time, which is what a server sizing its launches
-// to the card it actually landed on needs.
 
 export fn gpu_device_count() -> int32 {
   var count: int32 = 0;
@@ -181,7 +139,6 @@ fn __mtlc_gpu_attribute(ordinal: int32, attribute: int32) -> int32 {
   return value;
 }
 
-// Multiprocessor count: the number a grid has to cover to fill the card.
 export fn gpu_sm_count(ordinal: int32) -> int32 {
   return __mtlc_gpu_attribute(ordinal, 16);
 }
@@ -194,12 +151,9 @@ export fn gpu_max_threads_per_block(ordinal: int32) -> int32 {
 export fn gpu_max_shared_memory_per_block(ordinal: int32) -> int32 {
   return __mtlc_gpu_attribute(ordinal, 8);
 }
-// 1 when host and device share memory, as on GB10: a copy is a formality
-// there, and managed allocations are the natural choice.
 export fn gpu_is_integrated(ordinal: int32) -> int32 {
   return __mtlc_gpu_attribute(ordinal, 18);
 }
-// Compute capability as major * 10 + minor, so 120 is sm_120.
 export fn gpu_compute_capability(ordinal: int32) -> int32 {
   var major: int32 = __mtlc_gpu_attribute(ordinal, 75);
   return major * 10 + __mtlc_gpu_attribute(ordinal, 76);
@@ -211,15 +165,11 @@ export fn gpu_total_memory(ordinal: int32) -> int64 {
   if (cuDeviceTotalMem_v2(&bytes, dev) != 0) { return 0; }
   return bytes;
 }
-// 12090 means CUDA 12.9.
 export fn gpu_driver_version() -> int32 {
   var version: int32 = 0;
   if (cuDriverGetVersion(&version) != 0) { return 0; }
   return version;
 }
-// The device's marketing name, written into `buffer` and returned as a view
-// over it, the same borrowed-string convention `read_line` uses. An empty
-// view means the driver would not answer.
 export fn gpu_device_name(ordinal: int32, buffer: uint8*, capacity: int32) -> string {
   var name: string;
   name.chars = (cstring)buffer;
@@ -235,10 +185,6 @@ export fn gpu_device_name(ordinal: int32, buffer: uint8*, capacity: int32) -> st
   return name;
 }
 
-// ---- one call to get running ----
-
-// Initialize CUDA on device 0, load `ptx_path`, and bind it for `dispatch`.
-// Returns 1 when the GPU is ready, 0 after reporting what went wrong.
 export fn gpu_open(ptx_path: cstring) -> int32 {
   return gpu_open_on(0, ptx_path);
 }
@@ -249,14 +195,8 @@ export fn gpu_open_on(ordinal: int32, ptx_path: cstring) -> int32 {
   return 1;
 }
 
-// The driver writes its PTX JIT diagnostics here. A module that fails to
-// compile is the single most common GPU bring-up failure, and the driver's
-// message names the line and the instruction; without this buffer all a
-// program ever sees is a status code.
 var g_gpu_jit_log: uint8[8192];
 
-// Load a module from a null-terminated PTX image in host memory. 0 on failure,
-// with the driver's status and its JIT log written to stderr.
 export fn gpu_module(ptx_image: uint8*) -> int64 {
   var status: int32 = 0;
   var mod: int64 = gpu_module_ex(ptx_image, &status);
@@ -272,15 +212,12 @@ export fn gpu_module(ptx_image: uint8*) -> int64 {
   return mod;
 }
 
-// Load a PTX image and hand back the driver's status rather than reporting it.
-// Use this when the caller wants to decide what a failure means; gpu_module is
-// the same load with the diagnostics already written.
 export fn gpu_module_ex(ptx_image: uint8*, status_out: int32*) -> int64 {
   var options: int32[2];
   var values: int64[2];
-  options[0] = 5;                             // CU_JIT_ERROR_LOG_BUFFER
+  options[0] = 5;
   values[0] = (int64)&g_gpu_jit_log[0];
-  options[1] = 6;                             // ..._SIZE_BYTES
+  options[1] = 6;
   values[1] = 8192;
   g_gpu_jit_log[0] = 0;
   var mod: int64 = 0;
@@ -288,19 +225,12 @@ export fn gpu_module_ex(ptx_image: uint8*, status_out: int32*) -> int64 {
                                          &values[0]);
   status_out[0] = status;
   if (status != 0) { return 0; }
-  // Typed `dispatch` resolves declared kernel names against the module loaded
-  // most recently; gpu_module_bind overrides that when several are live.
   gpu_module_bind(mod);
   return mod;
 }
 
-// The driver's JIT log from the last gpu_module/gpu_module_ex call, or an
-// empty string when the load succeeded quietly.
 @inline export fn gpu_jit_log() -> cstring { return (cstring)&g_gpu_jit_log[0]; }
 
-// Read a PTX file and load it. This is the boilerplate every host program was
-// writing by hand -- open, size, read, terminate, load -- with each failure
-// named. 0 on failure.
 export fn gpu_module_file(path: cstring) -> int64 {
   var fp: cstring = __mtlc_gpu_fopen(path, __mtlc_gpu_cstr("rb"));
   if (fp == 0) {
@@ -309,9 +239,9 @@ export fn gpu_module_file(path: cstring) -> int64 {
     __mtlc_gpu_note("'; emit it first with `mettle --emit-ptx`\n");
     return 0;
   }
-  __mtlc_gpu_fseek(fp, 0, 2);                 // SEEK_END
+  __mtlc_gpu_fseek(fp, 0, 2);
   var size: int64 = __mtlc_gpu_ftell(fp);
-  __mtlc_gpu_fseek(fp, 0, 0);                 // SEEK_SET
+  __mtlc_gpu_fseek(fp, 0, 0);
   if (size <= 0) {
     __mtlc_gpu_fclose(fp);
     __mtlc_gpu_note("mettle: the GPU module '");
@@ -319,8 +249,6 @@ export fn gpu_module_file(path: cstring) -> int64 {
     __mtlc_gpu_note("' is empty\n");
     return 0;
   }
-  // cuModuleLoadData reads PTX as a C string, so the image needs its
-  // terminator alongside the file's own bytes.
   var image: uint8* = __mtlc_gpu_malloc(size + 1);
   if (image == (uint8*)0) {
     __mtlc_gpu_fclose(fp);
@@ -335,14 +263,12 @@ export fn gpu_module_file(path: cstring) -> int64 {
   return mod;
 }
 
-// Resolve a kernel by name to a launchable handle. 0 on failure.
 export fn gpu_func(mod: int64, name: cstring) -> int64 {
   var kf: int64 = 0;
   if (cuModuleGetFunction(&kf, mod, name) != 0) { return 0; }
   return kf;
 }
 
-// Allocate `bytes` of device memory; returns the device pointer (0 on failure).
 export fn gpu_malloc(bytes: int64) -> int64 {
   var dptr: int64 = 0;
   if (cuMemAlloc_v2(&dptr, bytes) != 0) { return 0; }
@@ -350,10 +276,6 @@ export fn gpu_malloc(bytes: int64) -> int64 {
 }
 @inline export fn gpu_free(dptr: int64) -> int32 { return cuMemFree_v2(dptr); }
 
-// Managed memory is especially important on integrated UMA systems such as
-// GB10: this returns one pointer value usable by both the Arm host and kernels.
-// CU_MEM_ATTACH_GLOBAL = 1. Synchronize the producing stream before the other
-// processor consumes data; unified addressing does not remove ordering rules.
 export fn gpu_managed_malloc(bytes: int64) -> uint8* {
   var ptr: int64 = 0;
   if (cuMemAllocManaged(&ptr, bytes, 1) != 0) { return (uint8*)0; }
@@ -363,8 +285,6 @@ export fn gpu_managed_malloc(bytes: int64) -> uint8* {
   return cuMemFree_v2((int64)ptr);
 }
 
-// Stream-ordered device allocation avoids a context-wide synchronization and
-// makes allocator reuse safe according to the stream dependency graph.
 export fn gpu_malloc_async(bytes: int64, stream: int64) -> int64 {
   var ptr: int64 = 0;
   if (cuMemAllocAsync(&ptr, bytes, stream) != 0) { return 0; }
@@ -376,7 +296,7 @@ export fn gpu_malloc_async(bytes: int64, stream: int64) -> int64 {
 export fn gpu_host_mapped_malloc(bytes: int64, dev_ptr_out: int64*) -> uint8* {
   dev_ptr_out[0] = 0;
   var hp: int64 = 0;
-  if (cuMemHostAlloc(&hp, bytes, 2) != 0) { return (uint8*)0; } // CU_MEMHOSTALLOC_DEVICEMAP
+  if (cuMemHostAlloc(&hp, bytes, 2) != 0) { return (uint8*)0; }
   var dp: int64 = 0;
   if (cuMemHostGetDevicePointer_v2(&dp, hp, 0) != 0) {
     cuMemFreeHost(hp);
@@ -396,7 +316,7 @@ export fn gpu_host_mapped_malloc(bytes: int64, dev_ptr_out: int64*) -> uint8* {
 
 export fn gpu_stream_create() -> int64 {
   var stream: int64 = 0;
-  if (cuStreamCreate(&stream, 1) != 0) { return 0; } // CU_STREAM_NON_BLOCKING
+  if (cuStreamCreate(&stream, 1) != 0) { return 0; }
   return stream;
 }
 @inline export fn gpu_stream_destroy(stream: int64) -> int32 {
@@ -441,17 +361,12 @@ export fn gpu_event_create() -> int64 {
   return cuDeviceGetAttribute(value_out, attribute, device);
 }
 
-// Low-level 1-D status-returning helper. The semantic `dispatch` path uses the
-// checked 3-D provider ABI below; call this directly when the host wants to
-// inspect CUDA's status itself.
 @inline export fn gpu_launch(f: int64, grid: int32, block: int32,
                           params: int64*, nargs: int32) -> int32 {
   return cuLaunchKernel(f, (uint32)grid, 1, 1, (uint32)block, 1, 1,
                         0, 0, params, (int64*)0);
 }
 
-// Backend-neutral launch shape used by runtime/frontends that need full CUDA,
-// HIP, or SPIR-V dimensionality. This CUDA provider maps it to cuLaunchKernel.
 @inline export fn gpu_launch_3d(f: int64,
                         gx: int32, gy: int32, gz: int32,
                         bx: int32, by: int32, bz: int32,
@@ -462,10 +377,6 @@ export fn gpu_event_create() -> int64 {
                         (uint32)shared_bytes, stream, params, (int64*)0);
 }
 
-// Stable runtime-provider ABI consumed by semantic launch IR. A CUDA provider
-// is bundled here; HIP/OpenCL providers can implement the same function without
-// changing a frontend or the compiler IR. `dispatch` is checked by definition:
-// an invalid enqueue cannot disappear as a silently ignored status code.
 export fn mtlc_gpu_launch_checked(f: int64,
                                   gx: int32, gy: int32, gz: int32,
                                   bx: int32, by: int32, bz: int32,
@@ -474,10 +385,6 @@ export fn mtlc_gpu_launch_checked(f: int64,
   var rc: int32 = gpu_launch_3d(f, gx, gy, gz, bx, by, bz, shared_bytes,
                                 stream, params, nargs);
   if (rc == 0) { return; }
-  // The launch shape is what an enqueue failure is nearly always about, so
-  // print it next to the status. The handle came from the name cache when the
-  // dispatch was typed, which is how the kernel gets named here without
-  // widening the provider ABI every backend implements.
   var err: cstring = __mtlc_gpu_iob(2);
   __mtlc_gpu_fputs(__mtlc_gpu_cstr("mettle: GPU launch of "), err);
   __mtlc_gpu_fputs(__mtlc_gpu_kernel_name(f), err);
@@ -492,33 +399,10 @@ export fn mtlc_gpu_launch_checked(f: int64,
                        params, nargs);
 }
 
-// ---- launch graphs ----
-//
-// A decode step is a fixed sequence of launches whose shapes never change; the
-// per-launch enqueue cost is then pure overhead. Capture the sequence once on
-// a stream and replay it as a single submission:
-//
-//   var g: int64 = gpu_graph_capture_begin(stream);
-//   dispatch norm[work: dim](...) on stream;
-//   dispatch matvec[work: d](...) on stream;
-//   var exec: int64 = gpu_graph_capture_end(stream);
-//   ...
-//   gpu_graph_launch(exec, stream);   // every token after the first
-//
-// Everything between begin and end must enqueue on `stream` and must not
-// synchronize; a capture records work rather than running it, so a readback in
-// the middle deadlocks. Buffer ADDRESSES are baked into the graph, contents are
-// not: a replay reads whatever the buffers hold at replay time, which is what
-// makes one capture serve every token.
-
-// Begin capturing `stream`. Returns 0 on success, the driver status otherwise.
 @inline export fn gpu_graph_capture_begin(stream: int64) -> int32 {
-  return cuStreamBeginCapture_v2(stream, 1); // THREAD_LOCAL
+  return cuStreamBeginCapture_v2(stream, 1);
 }
 
-// End the capture and instantiate the recorded graph. Returns an executable
-// graph handle (0 on failure) ready for gpu_graph_launch. The intermediate
-// graph object is released; the executable owns what it needs.
 export fn gpu_graph_capture_end(stream: int64) -> int64 {
   var graph: int64 = 0;
   if (cuStreamEndCapture(stream, &graph) != 0) { return 0; }
@@ -538,40 +422,20 @@ export fn gpu_graph_capture_end(stream: int64) -> int64 {
   return cuGraphExecDestroy(exec);
 }
 
-// ---- typed dispatch: kernel handles resolved by name ----
-//
-// `extern kernel name(...)` declares a kernel host-side; `dispatch name[...]`
-// then checks its arguments and resolves the handle through the two functions
-// below rather than through a host variable holding a gpu_func result.
-//
-// The module a name resolves against is the one gpu_module loaded last, or one
-// named explicitly with gpu_module_bind. Resolution is cached: the compiler
-// passes a string literal, so the same name arrives as the same pointer every
-// time and a hit costs a pointer compare rather than a driver call.
-
 var g_gpu_bound_module: int64 = 0;
 var g_gpu_kernel_names: int64[128];
 var g_gpu_kernel_handles: int64[128];
 var g_gpu_kernel_count: int32 = 0;
 
-// Make `mod` the module that typed dispatch resolves names against. gpu_module
-// does this for the module it loads, so an ordinary one-module program never
-// calls this; a program juggling several modules uses it to say which is live.
 export fn gpu_module_bind(mod: int64) -> int64 {
   var previous: int64 = g_gpu_bound_module;
   g_gpu_bound_module = mod;
-  // A rebind invalidates every cached handle: the same name in a different
-  // module is a different function.
   if (previous != mod) { g_gpu_kernel_count = 0; }
   return previous;
 }
 
 @inline export fn gpu_module_bound() -> int64 { return g_gpu_bound_module; }
 
-// Resolve (and cache) a kernel handle for typed dispatch. Terminates the
-// process on failure: a launch of a kernel the module does not define cannot
-// be made to do anything sensible, and returning 0 would enqueue against a
-// null handle.
 export fn mtlc_gpu_kernel_handle(name: cstring) -> int64 {
   var key: int64 = (int64)name;
   var i: int32 = 0;
@@ -596,8 +460,6 @@ export fn mtlc_gpu_kernel_handle(name: cstring) -> int64 {
   return handle;
 }
 
-// Name a kernel handle by walking the resolution cache backwards. Only the
-// failure paths call this, so a linear scan is the right shape.
 fn __mtlc_gpu_kernel_name(handle: int64) -> cstring {
   var i: int32 = 0;
   while (i < g_gpu_kernel_count) {
@@ -609,8 +471,6 @@ fn __mtlc_gpu_kernel_name(handle: int64) -> cstring {
   return __mtlc_gpu_cstr("an untyped kernel handle");
 }
 
-// Synchronous launch helper for diagnostics or one-off kernels where immediate
-// completion/error reporting matters more than throughput.
 export fn gpu_launch_sync(f: int64, grid: int32, block: int32,
                                 params: int64*, nargs: int32) -> int32 {
   var rc: int32 = gpu_launch(f, grid, block, params, nargs);
@@ -618,10 +478,3 @@ export fn gpu_launch_sync(f: int64, grid: int32, block: int32,
   return cuCtxSynchronize();
 }
 
-// ---- the device side ----
-//
-// The group collectives a kernel writes -- `Uniform<T>`, `warp_sum_f32` and
-// the rest -- live in `std/warp`. They are device code, and this module is the
-// host's driver binding: a host program that imported them would carry a
-// function it can never run. A kernel file imports `std/warp`; a host file
-// imports this one.

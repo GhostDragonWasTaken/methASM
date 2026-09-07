@@ -1,7 +1,3 @@
-// Mettle standard library: Directory and file operations
-//
-// Cross platform helpers supplied by Mettle's owned runtime.
-
 export extern fn mettle_dir_exists(path: cstring) -> int32 = "mettle_dir_exists";
 export extern fn mettle_dir_create(path: cstring) -> int32 = "mettle_dir_create";
 export extern fn mettle_file_exists(path: cstring) -> int32 = "mettle_file_exists";
@@ -20,14 +16,10 @@ export fn file_exists(path: cstring) -> int32 {
   return mettle_file_exists(path);
 }
 
-// Fill buf with current working directory. Returns 0 on success, -1 on failure.
 export fn getcwd(buf: cstring, size: int32) -> int32 {
   return mettle_getcwd(buf, size);
 }
 
-// Recursively list Markdown files under root_dir.
-// Writes null-terminated relative paths back-to-back into paths_buf.
-// Returns the number of files written.
 export fn dir_list_md_files(root_dir: cstring, paths_buf: cstring, paths_size: int32, max_files: int32) -> int32 {
   return mettle_dir_list_md_files(root_dir, paths_buf, paths_size, max_files);
 }

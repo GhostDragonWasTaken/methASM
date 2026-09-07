@@ -1,9 +1,4 @@
-/* Unit test for the AArch64 encoder/decoder/ABI: known-good constants from the
- * ARM ARM, encode->decode round-trips, and AAPCS64 register-file checks. Pure
- * 32-bit math; runs on the x86 build host.
- *
- * Build: gcc -Isrc tests/arm64_encode_test.c src/codegen/binary/arm64_encode.c
- *            src/codegen/binary/arm64_disasm.c src/codegen/binary/arm64_abi.c */
+
 
 #include "codegen/binary/arm64.h"
 
@@ -29,8 +24,6 @@ static void check_int(const char *what, long long got, long long want) {
     printf("  FAIL %-28s got %lld  want %lld\n", what, got, want);
   }
 }
-
-/* ---- layer 1: ground-truth constants from the ARM ARM ------------------- */
 
 static void test_known_good(void) {
   printf("known-good encodings (ARM ARM ground truth):\n");
@@ -112,7 +105,6 @@ static void test_known_good(void) {
   check_word("str x0, [sp, #8]", arm64_str_imm(1, ARM64_X0, ARM64_SP, 8),
              0xF90007E0u);
 
-  /* The canonical AAPCS64 frame save/restore pair. */
   check_word("stp x29,x30,[sp,#-16]!",
              arm64_stp_pre(1, ARM64_X29, ARM64_X30, ARM64_SP, -16),
              0xA9BF7BFDu);
@@ -120,8 +112,6 @@ static void test_known_good(void) {
              arm64_ldp_post(1, ARM64_X29, ARM64_X30, ARM64_SP, 16),
              0xA8C17BFDu);
 
-  /* SP-move trap: mov x29,sp / mov sp,x29 must use the add-#0 form. The ORR
-   * mov form with reg 31 means XZR and would zero the register instead. */
   check_word("mov x29, sp", arm64_mov_sp(ARM64_X29, ARM64_SP), 0x910003FDu);
   check_word("mov sp, x29", arm64_mov_sp(ARM64_SP, ARM64_X29), 0x910003BFu);
   check_int("mov_sp differs from orr-mov",
@@ -139,12 +129,9 @@ static void test_known_good(void) {
   check_word("b.eq .", arm64_bcond(ARM64_EQ, 0), 0x54000000u);
   check_word("b.ne .", arm64_bcond(ARM64_NE, 0), 0x54000001u);
 
-  /* A small relative branch: +8 bytes forward = imm field 2. */
   check_word("b .+8", arm64_b(8), 0x14000002u);
   check_word("b .-8", arm64_b(-8), 0x17FFFFFEu);
 }
-
-/* ---- layer 2: encode -> decode round-trip ------------------------------- */
 
 static const int kRegs[] = {0, 1, 2, 7, 15, 19, 28, 30};
 static const int kNReg = (int)(sizeof(kRegs) / sizeof(kRegs[0]));
@@ -179,7 +166,6 @@ static void test_roundtrip(void) {
       check_int("sdiv.op", d.op, ARM64_DIS_SDIV);
       check_int("sdiv.rd", d.rd, rd);
 
-      /* load/store with a sweep of scaled offsets */
       for (int off = 0; off <= 32760; off += 4088) {
         d = arm64_decode(arm64_ldr_imm(1, rd, rn, off));
         check_int("ldr.op", d.op, ARM64_DIS_LDR_IMM);
@@ -193,7 +179,6 @@ static void test_roundtrip(void) {
     }
   }
 
-  /* add/sub immediate across the 12-bit range */
   for (int imm = 0; imm <= 4095; imm += 273) {
     Arm64Inst d = arm64_decode(arm64_add_imm(1, ARM64_X3, ARM64_X5, imm, 0));
     check_int("addimm.op", d.op, ARM64_DIS_ADD_IMM);
@@ -205,7 +190,6 @@ static void test_roundtrip(void) {
     check_int("subimm.imm", d.imm, imm);
   }
 
-  /* movz/movk across all four halfword positions */
   for (int hw = 0; hw < 4; hw++) {
     Arm64Inst d = arm64_decode(arm64_movz(1, ARM64_X9, 0xABCD, hw));
     check_int("movz.op", d.op, ARM64_DIS_MOVZ);
@@ -214,7 +198,6 @@ static void test_roundtrip(void) {
     check_int("movz.rd", d.rd, 9);
   }
 
-  /* shift-by-immediate aliases decode to UBFM/SBFM with the alias immr/imms */
   for (int s = 0; s < 64; s += 7) {
     Arm64Inst d = arm64_decode(arm64_lsl_imm(1, ARM64_X0, ARM64_X1, s));
     check_int("lsl.op", d.op, ARM64_DIS_UBFM);
@@ -231,7 +214,6 @@ static void test_roundtrip(void) {
     check_int("asr.imms", d.imms, 63);
   }
 
-  /* conditional branch + cset across all condition codes */
   for (int c = 0; c <= 13; c++) {
     Arm64Inst d = arm64_decode(arm64_bcond((Arm64Cond)c, 0));
     check_int("bcond.op", d.op, ARM64_DIS_BCOND);
@@ -240,11 +222,10 @@ static void test_roundtrip(void) {
     d = arm64_decode(arm64_cset(1, ARM64_X4, (Arm64Cond)c));
     check_int("cset.op", d.op, ARM64_DIS_CSINC);
     check_int("cset.rd", d.rd, 4);
-    /* cset uses the inverted condition internally */
+
     check_int("cset.cond", d.cond, c ^ 1);
   }
 
-  /* branch offsets: positive and negative, including the 26-bit extremes */
   int offs[] = {0, 4, -4, 8, -8, 4096, -4096, 1 << 20, -(1 << 20)};
   for (int i = 0; i < (int)(sizeof(offs) / sizeof(offs[0])); i++) {
     Arm64Inst d = arm64_decode(arm64_b(offs[i]));
@@ -253,7 +234,6 @@ static void test_roundtrip(void) {
     check_int("bl.off", d.imm, offs[i]);
   }
 
-  /* stp/ldp pair with the frame-typical negative pre-index offsets */
   int pairoffs[] = {-16, -32, -64, 16, 32, 64, 0};
   for (int i = 0; i < (int)(sizeof(pairoffs) / sizeof(pairoffs[0])); i++) {
     Arm64Inst d =
@@ -271,13 +251,10 @@ static void test_roundtrip(void) {
   }
 }
 
-/* ---- layer 3: AAPCS64 register-file + ABI descriptor (Brick 1) ---------- */
-
 static void test_abi(void) {
   printf("AAPCS64 register-file + ABI:\n");
   const Arm64Abi *abi = arm64_aapcs64();
 
-  /* argument-register tables */
   check_int("gp_arg_count", abi->gp_arg_count, 8);
   check_int("vec_arg_count", abi->vec_arg_count, 8);
   check_int("gp_arg[0]", abi->gp_arg_regs[0], ARM64_X0);
@@ -285,7 +262,6 @@ static void test_abi(void) {
   check_int("indirect_result", abi->indirect_result_reg, ARM64_X8);
   check_int("stack_slot_bytes", abi->stack_slot_bytes, 8);
 
-  /* fixed-role registers */
   check_int("fp", abi->fp, ARM64_X29);
   check_int("lr", abi->lr, ARM64_X30);
   check_int("sp", abi->sp, 31);
@@ -293,13 +269,11 @@ static void test_abi(void) {
   check_int("scratch1", abi->scratch1, ARM64_X17);
   check_int("platform", abi->platform, ARM64_X18);
 
-  /* pools have the expected sizes */
   check_int("callee_saved_count", abi->gp_callee_saved_count, 10);
   check_int("gp_temps_count", abi->gp_temps_count, 7);
   check_int("vec_volatile_count", abi->vec_volatile_count, 8);
   check_int("vec_callee_count", abi->vec_callee_saved_count, 8);
 
-  /* role predicates over the whole GP file */
   check_int("x0 arg-index", arm64_reg_arg_index(ARM64_X0), 0);
   check_int("x7 arg-index", arm64_reg_arg_index(ARM64_X7), 7);
   check_int("x8 arg-index", arm64_reg_arg_index(ARM64_X8), -1);
@@ -310,7 +284,6 @@ static void test_abi(void) {
   check_int("x9 volatile", arm64_reg_is_volatile(ARM64_X9), 1);
   check_int("x19 not volatile", arm64_reg_is_volatile(ARM64_X19), 0);
 
-  /* no allocatable register collides with a scratch/reserved/fixed role */
   check_int("sp not allocatable", arm64_reg_is_allocatable(ARM64_SP), 0);
   check_int("fp not allocatable", arm64_reg_is_allocatable(ARM64_X29), 0);
   check_int("lr not allocatable", arm64_reg_is_allocatable(ARM64_X30), 0);
@@ -330,7 +303,6 @@ static void test_abi(void) {
     check_int("temp not an arg reg", arm64_reg_arg_index(abi->gp_temps[i]), -1);
   }
 
-  /* argument layout: all-GP, overflow to the stack after x0..x7 */
   {
     int isf[12] = {0};
     Arm64ArgLocation locs[12];
@@ -346,9 +318,8 @@ static void test_abi(void) {
     check_int("stack bytes", sb, 32);
   }
 
-  /* argument layout: GP and FP counted independently (no cross-consumption) */
   {
-    int isf[6] = {0, 1, 0, 1, 0, 1}; /* int,float,int,float,int,float */
+    int isf[6] = {0, 1, 0, 1, 0, 1};
     Arm64ArgLocation locs[6];
     int sb = -1;
     arm64_compute_arg_layout(isf, 6, locs, &sb);
@@ -362,7 +333,6 @@ static void test_abi(void) {
     check_int("mixed no stack", sb, 0);
   }
 
-  /* argument layout: all-FP, overflow to the stack after v0..v7 */
   {
     int isf[10];
     Arm64ArgLocation locs[10];

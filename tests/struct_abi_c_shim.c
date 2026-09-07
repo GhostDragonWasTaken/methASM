@@ -36,11 +36,6 @@ Odd3 mettle_struct_abi_c_make_odd3(uint8_t a, uint8_t b, uint8_t c) {
   return o;
 }
 
-/* System V cuts an aggregate into eightbytes and classifies each one, so these
- * three shapes travel differently from each other and differently again from
- * Microsoft x64, which passes all of them by pointer. Big is MEMORY (on the
- * stack by value), TwoF64 is two SSE eightbytes (two XMM registers), and Mixed
- * is one of each. */
 typedef struct {
   int32_t a, b, c, d, e, f, g, h;
 } Big32;

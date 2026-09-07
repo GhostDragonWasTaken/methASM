@@ -1,6 +1,4 @@
-/* Hardware-free provider for tests/test_gpu_dispatch.mettle. On AArch64 it
- * additionally verifies the AAPCS64 placement of all eleven cuLaunchKernel
- * arguments, including the three overflow arguments carried on the stack. */
+
 #include <stdint.h>
 #include <stdio.h>
 
@@ -32,10 +30,6 @@ int cuLaunchKernel(int64_t function, uint32_t gx, uint32_t gy, uint32_t gz,
 
 int gpu_stub_finish(void) { return launch_calls == 3 ? 0 : 96; }
 
-/* Link-only no-op stubs for the rest of the CUDA driver surface std/gpu
- * binds. The dispatch test never calls these; they exist because linking the
- * whole relocatable object resolves every std/gpu function, not just the
- * ones main() reaches. Out-parameters are zeroed defensively. */
 static int stub_out64(int64_t *out) {
   if (out) *out = 0;
   return 0;
@@ -139,17 +133,10 @@ int cuGraphLaunch(int64_t exec, int64_t stream) { (void)exec; (void)stream; retu
 int cuGraphExecDestroy(int64_t exec) { (void)exec; return 0; }
 int cuGraphDestroy(int64_t graph) { (void)graph; return 0; }
 
-/* std/gpu reaches stderr through the UCRT spelling. The bundled runtime
- * defines it, but this link is plain glibc. */
 void *__acrt_iob_func(int index) {
   return index == 0 ? (void *)stdin : index == 1 ? (void *)stdout : (void *)stderr;
 }
 
-/* `"{code}"` in std/gpu's diagnostics lowers to this runtime helper. The
- * bundled string runtime supplies it; this link does not have it, and the
- * dispatch test only reaches it on a failure path, so a small ring of
- * buffers is enough to keep one message's digits apart. `string` is a
- * 16-byte view: `chars` at offset 0, `length` at offset 8. */
 typedef struct {
   const char *chars;
   uint64_t length;

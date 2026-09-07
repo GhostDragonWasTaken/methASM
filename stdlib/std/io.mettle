@@ -1,51 +1,18 @@
-// Mettle standard library: I/O
-//
-// Console output, file operations, and formatted printing.
-//
-// File I/O pattern with defer for automatic cleanup:
-//   var file: cstring = fopen("data.txt", "r");
-//   if (file != 0) {
-//     defer fclose(file);
-//     ... read/write operations ...
-//   }
-//
-// Multiple resources with LIFO cleanup:
-//   var src: cstring = fopen("input.txt", "r");
-//   if (src == 0) { return err(); }
-//   defer fclose(src);
-//   
-//   var dst: cstring = fopen("output.txt", "w");
-//   if (dst == 0) { return err(); }
-//   defer fclose(dst);  // Runs first (LIFO)
-//   
-
-// ─── Console output ─────────────────────────────────────────────────────────
 export extern fn puts(msg: cstring) -> int32;
 export extern fn putchar(c: int32) -> int32;
 export extern fn getchar() -> int32 = "getchar";
 
-// Write a string exactly as-is (no trailing newline).
-//
-// A `string` is a pointer and a length with no terminator, so this writes
-// `length` bytes and never scans for a NUL. Nothing here depends on a C string:
-// the write path is Mettle's own.
 export fn print(msg: string) {
   if (msg.length > (uint64)0) {
     fwrite(msg.chars, 1, (int64)msg.length, get_stdout());
   }
 }
 
-// Write a string followed by a newline.
-// @inline: two calls trip the inliner's call-count cap, and this wrapper is
-// exactly the case the decorator exists for.
 @inline export fn println(msg: string) {
   print(msg);
   putchar(10);
 }
 
-// The boundary forms, for a pointer that arrived from C or from a byte buffer
-// the program NUL-terminated itself. The length is discovered by scanning for
-// the terminator, which is exactly the cost `print` does not pay.
 export fn print_cstr(s: cstring) {
   fputs(s, get_stdout());
 }
@@ -54,16 +21,10 @@ export fn println_cstr(s: cstring) {
   puts(s);
 }
 
-// Print a newline
 export fn newline() {
   putchar(10);
 }
 
-// Values print through interpolation: println("{n}"). The print_int family
-// this file used to carry is gone; one pair of printers, one way to do it.
-
-// ─── File I/O ───────────────────────────────────────────────────────────────
-// FILE* is represented as cstring (opaque pointer)
 export extern fn fopen(filename: cstring, mode: cstring) -> cstring = "fopen";
 export extern fn fclose(fp: cstring) -> int32 = "fclose";
 export extern fn fread(buf: cstring, size: int64, count: int64, fp: cstring) -> int64 = "fread";
@@ -72,46 +33,23 @@ export extern fn fputs(s: cstring, fp: cstring) -> int32 = "fputs";
 export extern fn fgets(buf: cstring, size: int32, fp: cstring) -> cstring = "fgets";
 export extern fn fflush(fp: cstring) -> int32 = "fflush";
 
-// ─── Standard streams (accessed via C helpers) ──────────────────────────────
-// On Windows, stdin/stdout/stderr are macros expanding to __acrt_iob_func(n).
-// The owned Windows runtime exposes them through its _iob ABI adapter.
 export extern fn __acrt_iob_func(index: int32) -> cstring = "__acrt_iob_func";
 
 export fn get_stdin() -> cstring  { return __acrt_iob_func(0); }
 export fn get_stdout() -> cstring { return __acrt_iob_func(1); }
 export fn get_stderr() -> cstring { return __acrt_iob_func(2); }
 
-// Write message to stderr (no newline)
 export fn print_err(msg: string) {
   if (msg.length > (uint64)0) {
     fwrite(msg.chars, 1, (int64)msg.length, get_stderr());
   }
 }
 
-// Write message to stderr followed by newline
 @inline export fn println_err(msg: string) {
   print_err(msg);
   fwrite("\n".chars, 1, 1, get_stderr());
 }
 
-// ─── Reading a line ─────────────────────────────────────────────────────────
-
-// Read one line from `fp` into `buf` and return a view of it, without the
-// newline. `cap` is the buffer's size in bytes, and the view is never longer
-// than `cap - 1` characters, because the underlying read reserves one byte for
-// a terminator. A line longer than that comes back in pieces across calls,
-// each piece a complete view.
-//
-// The view borrows `buf`, so it lives as long as the buffer and no longer, and
-// the next call overwrites it. Copy out what you need to keep:
-//
-//     var buf: uint8[256];
-//     var line: string = read_line(&buf[0], 256, get_stdin());
-//     if (line.length == (uint64)0 && at_eof) { ... }
-//     for c in line { ... }
-//
-// An empty view means either an empty line or end of input; `feof`-style
-// disambiguation is the caller's, via the same buffer coming back untouched.
 export fn read_line(buf: cstring, cap: int32, fp: cstring) -> string {
   var empty: string;
   empty.chars = buf;
@@ -127,7 +65,6 @@ export fn read_line(buf: cstring, cap: int32, fp: cstring) -> string {
   while (n < (int64)cap && buf[n] != 0) {
     n = n + 1;
   }
-  // Both line endings, so a file written on Windows reads the same here.
   while (n > 0 && (buf[n - 1] == 10 || buf[n - 1] == 13)) {
     n = n - 1;
   }
@@ -137,28 +74,10 @@ export fn read_line(buf: cstring, cap: int32, fp: cstring) -> string {
   return out;
 }
 
-// The same, from standard input.
 export fn read_line_stdin(buf: cstring, cap: int32) -> string {
   return read_line(buf, cap, get_stdin());
 }
 
-// ─── FFI string marshalling ─────────────────────────────────────────────────
-//
-// A Mettle `string` is a borrowed view: a pointer, a length, and no terminator.
-// A C function reads until a NUL, so handing one a `string` means producing a
-// terminated copy. `cstr` is where that copy happens, and it takes the
-// allocator it comes from so the cost is in the signature rather than in the
-// punctuation at every call site:
-//
-//     var path: cstring = cstr(name, &malloc);
-//     defer free(path);
-//     var fp: cstring = fopen(path, "rb");
-//
-// A string LITERAL needs none of this. It already sits in rodata with a
-// terminator the compiler emitted, so it flows straight into a `cstring`
-// parameter -- `fopen("data.txt", "rb")` allocates nothing.
-//
-// Returns 0 when the allocator does.
 export fn cstr(s: string, alloc: fn(int64) -> rawptr) -> cstring {
   var n: int64 = (int64)s.length;
   var out: cstring = alloc(n + 1);

@@ -1,20 +1,4 @@
-/* Gate for the shared strength-reduction table (src/codegen/binary/
- * strength_rules.c).
- *
- * Every backend now takes its "is there a cheaper form of x <op> C" answer
- * from one table, so that table is worth proving rather than trusting. Two
- * things are checked here, against the real module (no copies):
- *
- *   1. Every rewrite the classifier names computes what the original
- *      operation computes. The shift/mask forms are simulated exactly as the
- *      backends emit them, over a probe set that includes the signs, the
- *      boundaries, and the values that break naive lowerings.
- *   2. The Granlund-Montgomery parameters divide correctly, for signed and
- *      unsigned, over an exhaustive small range plus a sparse sweep of large
- *      and adversarial divisors.
- *
- * This is what lets a backend delete its private copy of the magic math: the
- * remaining implementation is the one under test. */
+
 #include "codegen/binary/strength_rules.h"
 
 #include <inttypes.h>
@@ -25,9 +9,7 @@ typedef unsigned __int128 TestU128;
 typedef __int128 TestS128;
 
 static int g_failures = 0;
-/* Per-kind exercise counts. A gate that silently covers nothing is worse
- * than no gate, so the run asserts every kind the table can name was
- * actually simulated. */
+
 static long long g_kind_hits[CG_SR_REM_MAGIC + 1];
 static const char *const g_kind_names[] = {
     "NONE",      "MUL_SHL",   "MUL_SHL_ADD", "MUL_SHL_SUB", "UDIV_SHR",
@@ -40,8 +22,6 @@ static void fail(const char *what, long long c, long long n) {
   g_failures++;
 }
 
-/* ---- simulate what a backend emits for each rewrite kind ---------------- */
-
 static int64_t sim_mulhi_s(int64_t a, int64_t b) {
   return (int64_t)(((TestS128)a * (TestS128)b) >> 64);
 }
@@ -50,8 +30,6 @@ static uint64_t sim_mulhi_u(uint64_t a, uint64_t b) {
   return (uint64_t)(((TestU128)a * (TestU128)b) >> 64);
 }
 
-/* The signed magic sequence: mulhi, the sign-disagreement correction, the
- * post-shift, then add the sign bit. */
 static int64_t sim_div_magic_s(int64_t n, int64_t d, const CgStrengthRewrite *r) {
   int64_t q = sim_mulhi_s(n, (int64_t)r->magic);
   if (d > 0 && r->magic < 0) {
@@ -65,8 +43,6 @@ static int64_t sim_div_magic_s(int64_t n, int64_t d, const CgStrengthRewrite *r)
   return q;
 }
 
-/* The unsigned magic sequence, including the overflow-safe reconstruction
- * that magic_add selects. */
 static uint64_t sim_div_magic_u(uint64_t n, const CgStrengthRewrite *r) {
   uint64_t hi = sim_mulhi_u(n, (uint64_t)r->magic);
   if (!r->magic_add) {
@@ -76,8 +52,6 @@ static uint64_t sim_div_magic_u(uint64_t n, const CgStrengthRewrite *r) {
   return t >> (r->shift - 1);
 }
 
-/* Apply whatever the classifier named, exactly as a backend would. Returns 0
- * when the kind is one no backend simulates here. */
 static int apply_rewrite(const CgStrengthRewrite *r, char op, int64_t n,
                          int64_t c, int is_unsigned, int64_t *out) {
   if (r->kind >= 0 && r->kind <= CG_SR_REM_MAGIC) {
@@ -100,7 +74,7 @@ static int apply_rewrite(const CgStrengthRewrite *r, char op, int64_t n,
     *out = (int64_t)((uint64_t)n & (uint64_t)r->mask);
     return 1;
   case CG_SR_SDIV_POW2: {
-    /* bias = (n < 0) ? (2^k - 1) : 0; q = (n + bias) >> k */
+
     int64_t bias = (int64_t)(((uint64_t)(n >> 63)) >> (64 - r->shift));
     *out = (n + bias) >> r->shift;
     return 1;
@@ -130,8 +104,6 @@ static int apply_rewrite(const CgStrengthRewrite *r, char op, int64_t n,
   }
 }
 
-/* ---- probes ------------------------------------------------------------- */
-
 static const int64_t g_signed_probes[] = {
     0, 1, -1, 2, -2, 3, -3, 7, -7, 10, -10, 63, 64, 65, -63, -64, -65,
     100, -100, 1000, -1000, 32767, 32768, -32768, 65535, 65536, -65536,
@@ -151,13 +123,10 @@ static const uint64_t g_unsigned_probes[] = {
 #define UNSIGNED_PROBE_COUNT                                                  \
   ((int)(sizeof(g_unsigned_probes) / sizeof(g_unsigned_probes[0])))
 
-/* Check every rule the classifier offers for this divisor/multiplier. */
 static void check_constant(int64_t c) {
   CgStrengthRewrite r;
   int64_t got;
 
-  /* multiply, signed and unsigned operands alike (the shift forms agree mod
-   * 2^64, which is what both signednesses observe) */
   if (c > 0 && cg_strength_classify('*', c, 0, &r)) {
     for (int i = 0; i < SIGNED_PROBE_COUNT; i++) {
       int64_t n = g_signed_probes[i];
@@ -168,12 +137,11 @@ static void check_constant(int64_t c) {
     }
   }
 
-  /* signed divide and remainder */
   if (cg_strength_classify('/', c, 0, &r)) {
     for (int i = 0; i < SIGNED_PROBE_COUNT; i++) {
       int64_t n = g_signed_probes[i];
       if (n == INT64_MIN && c == -1) {
-        continue; /* the one case native division traps on too */
+        continue;
       }
       if (apply_rewrite(&r, '/', n, c, 0, &got) && got != n / c) {
         fail("sdiv", c, n);
@@ -192,7 +160,6 @@ static void check_constant(int64_t c) {
     }
   }
 
-  /* unsigned divide and remainder */
   if (c > 0) {
     uint64_t uc = (uint64_t)c;
     if (cg_strength_classify('/', c, 1, &r)) {
@@ -219,7 +186,6 @@ static void check_constant(int64_t c) {
 int main(void) {
   CgStrengthRewrite r;
 
-  /* Divide by zero must never be reduced: the runtime trap has to fire. */
   if (cg_strength_classify('/', 0, 0, &r) ||
       cg_strength_classify('%', 0, 0, &r) ||
       cg_strength_classify('/', 0, 1, &r)) {
@@ -227,14 +193,11 @@ int main(void) {
     g_failures++;
   }
 
-  /* Exhaustive over the small divisors real code actually uses. */
   for (int64_t c = 1; c <= 20000; c++) {
     check_constant(c);
     check_constant(-c);
   }
 
-  /* Adversarial shapes: powers of two and their neighbours, where the
-   * shift/mask rows and the magic rows meet. */
   for (int k = 1; k < 62; k++) {
     int64_t p = (int64_t)1 << k;
     check_constant(p);
@@ -245,8 +208,6 @@ int main(void) {
     check_constant(-(p + 1));
   }
 
-  /* Sparse large sweep, including past the 32-bit boundary where a backend's
-   * own magic helper used to give up. */
   for (int64_t c = 1000000; c < 4000000000LL; c += 7654321) {
     check_constant(c);
     check_constant(-c);

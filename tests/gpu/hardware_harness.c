@@ -1,10 +1,4 @@
-/*
- * CUDA Driver differential harness for Mettle-emitted PTX.
- *
- * This intentionally does not include CUDA headers or link to a CUDA import
- * library. It loads the stable Driver API dynamically so the identical source
- * compiles on Windows/x86-64 development machines and Linux/AArch64 DGX Spark.
- */
+
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -27,9 +21,6 @@ typedef void *CUmodule;
 typedef void *CUfunction;
 typedef uint64_t CUdeviceptr;
 
-/* CUDA tensor maps are opaque 128-byte values with a 64-byte host alignment
- * requirement.  Keep the harness independent of CUDA headers while matching
- * the stable Driver API ABI exactly on x86-64 and AArch64. */
 typedef struct {
   _Alignas(64) uint64_t opaque[16];
 } CUtensorMap;
@@ -353,11 +344,6 @@ cleanup:
   return ok;
 }
 
-/* Records across the whole device surface: a record kernel parameter marshalled
- * as its own bytes, a record local, a runtime-indexed array of records, a
- * by-value call taking and returning a record, a whole-record assignment, and a
- * pointer to a record element handed to a device helper. The oracle recomputes
- * the same chain in C against the same layout. */
 typedef struct {
   int32_t count;
   float alpha;
@@ -899,9 +885,7 @@ cleanup:
 }
 
 static int test_tensor_f16_f32(Harness *h) {
-  /* PTX WMMA requires half strides to be multiples of eight elements and
-   * float strides to be multiples of four. Keep every stride padded but legal
-   * so this test distinguishes runtime-stride handling from invalid input. */
+
   enum { M = 16, N = 16, K = 16, LDA = 24, LDB = 24, LDC = 20, LDD = 24 };
   uint16_t a[M * LDA], b[N * LDB];
   float c[M * LDC], d[M * LDD];
@@ -915,12 +899,12 @@ static int test_tensor_f16_f32(Harness *h) {
   for (int i = 0; i < M * LDD; i++) d[i] = -12345.0f;
   for (int row = 0; row < M; row++) {
     for (int inner = 0; inner < K; inner++) {
-      a[row * LDA + inner] = UINT16_C(0x3c00); /* binary16 1.0 */
+      a[row * LDA + inner] = UINT16_C(0x3c00);
     }
   }
   for (int col = 0; col < N; col++) {
     for (int inner = 0; inner < K; inner++) {
-      b[col * LDB + inner] = UINT16_C(0x3c00); /* column-major */
+      b[col * LDB + inner] = UINT16_C(0x3c00);
     }
   }
   for (int row = 0; row < M; row++) {
@@ -974,9 +958,6 @@ static void set_packed_nibble(uint8_t *storage, size_t logical_index,
                             ((value & UINT8_C(0xf)) << shift));
 }
 
-/* Target-independent least-significant-bit-first subbyte packing. Byte-wise
- * updates avoid unaligned or host-endian integer accesses on DGX Spark's
- * AArch64 host as well as x86-64 development systems. */
 static void set_packed_bits(uint8_t *storage, size_t logical_index,
                             unsigned bits, uint8_t value) {
   size_t first_bit = logical_index * (size_t)bits;
@@ -1309,8 +1290,7 @@ static int test_tensor_nvfp4(Harness *h, Nvfp4TestMode mode) {
                                   UINT8_C(0xa), UINT8_C(0x4),
                                   UINT8_C(0x9)};
   const float values[5] = {0.5f, 1.0f, -1.0f, 2.0f, -0.5f};
-  /* UE4M3 is positive E4M3 with the high bit clear. These exact binary
-   * fractions exercise mantissa-bearing scales, not only powers of two. */
+
   const uint8_t ue4m3_bits[5] = {UINT8_C(0x30), UINT8_C(0x38),
                                    UINT8_C(0x3c), UINT8_C(0x40),
                                    UINT8_C(0x34)};
@@ -1451,9 +1431,7 @@ typedef enum {
 
 static int test_tensor_mxfp6(Harness *h, Mxfp6TestMode mode) {
   enum { M = 16, N = 16 };
-  /* NVIDIA's E3M2 encoding has sign bit 5, exponent bias 3, and two
-   * explicit mantissa bits. All oracle values and products are exact binary
-   * fractions, so equality tests are deterministic across host ISAs. */
+
   const uint8_t e3m2_bits[5] = {UINT8_C(0x08), UINT8_C(0x0c),
                                   UINT8_C(0x2c), UINT8_C(0x10),
                                   UINT8_C(0x28)};
@@ -1660,9 +1638,7 @@ static int test_tensor_fp8_native(Harness *h) {
   }
 
   {
-    /* A and B are both stored transposed. A is column-major (KxM), B is
-     * row-major (NxK), and C/D are column-major. The 32x24 result forces six
-     * backend-owned m16n8 native subtiles. */
+
     enum { M = 32, N = 24, K = 16, LDA = 20, LDB = 20, LDC = 36, LDD = 40 };
     uint8_t a[M * LDA], b[N * LDB];
     float c[N * LDC], d[N * LDD];
@@ -1939,9 +1915,7 @@ static int test_gemm_full_tiles_f16_f32(Harness *h) {
       }
     }
   }
-  /* The outer shape/K guards share the source-level join with the loop exit.
-   * A residency transform must split only the loop edge: when the guard fails,
-   * no accumulator exists and D must remain entirely untouched. */
+
   for (int i = 0; i < M * LDD; i++) d[i] = -23456.0f;
   k = 15;
   if (!copy_to_device(h, dd, d, sizeof(d)) ||
@@ -2066,9 +2040,7 @@ cleanup:
 }
 
 static int test_tensor_chain4(Harness *h) {
-  /* WMMA f16 strides are multiples of 8 elements and f32 strides multiples
-   * of 4. Keep every matrix unequal and padded without violating that device
-   * contract. */
+
   enum { M = 16, N = 16, K = 64, LDA = 72, LDB = 80, LDC = 20, LDD = 24 };
   uint16_t a[M * LDA], b[N * LDB];
   float c[M * LDC], d[M * LDD];
@@ -2077,7 +2049,7 @@ static int test_tensor_chain4(Harness *h) {
   void *parameters[] = {&da, &db, &dc, &dd, &lda, &ldb, &ldc, &ldd};
   const uint16_t tile_values[4] = {
       UINT16_C(0x3c00), UINT16_C(0x4000),
-      UINT16_C(0x4200), UINT16_C(0x4400)}; /* 1, 2, 3, 4 */
+      UINT16_C(0x4200), UINT16_C(0x4400)};
   int ok = 0;
 
   for (int i = 0; i < M * LDA; i++) a[i] = UINT16_C(0x7e00);
@@ -2087,8 +2059,7 @@ static int test_tensor_chain4(Harness *h) {
   for (int row = 0; row < M; row++) {
     uint16_t row_scale = row < 8 ? UINT16_C(0x3c00) : UINT16_C(0x4000);
     for (int inner = 0; inner < K; inner++) {
-      /* Keep each operand individually representable as binary16 while making
-       * every K tile contribute a distinct exact amount. */
+
       a[row * LDA + inner] =
           row < 8 ? tile_values[inner / 16]
                   : (inner / 16 == 0 ? row_scale
@@ -2154,10 +2125,10 @@ static int test_tensor_pipeline_f16_f32(Harness *h) {
   void *parameters[] = {&da, &db, &dc, &dd};
   const uint16_t a_values[2][2] = {
       {UINT16_C(0x3c00), UINT16_C(0x4000)},
-      {UINT16_C(0x4200), UINT16_C(0x4400)}}; /* (1,2), (3,4) */
+      {UINT16_C(0x4200), UINT16_C(0x4400)}};
   const uint16_t b_values[2][2] = {
       {UINT16_C(0x3c00), UINT16_C(0x4000)},
-      {UINT16_C(0x4000), UINT16_C(0x4200)}}; /* (1,2), (2,3) */
+      {UINT16_C(0x4000), UINT16_C(0x4200)}};
   int ok = 0;
 
   for (int tile = 0; tile < TILES; tile++) {
@@ -2219,15 +2190,15 @@ static int test_tensor_pipeline4_f16_f32(Harness *h) {
   CUdeviceptr da = 0, db = 0, dc = 0, dd = 0;
   void *parameters[] = {&da, &db, &dc, &dd};
   const uint16_t a_values[TILES][2] = {
-      {UINT16_C(0x3c00), UINT16_C(0x4000)}, /* (1,2) */
-      {UINT16_C(0x4200), UINT16_C(0x4400)}, /* (3,4) */
-      {UINT16_C(0x3c00), UINT16_C(0x4200)}, /* (1,3) */
-      {UINT16_C(0x4000), UINT16_C(0x4400)}}; /* (2,4) */
+      {UINT16_C(0x3c00), UINT16_C(0x4000)},
+      {UINT16_C(0x4200), UINT16_C(0x4400)},
+      {UINT16_C(0x3c00), UINT16_C(0x4200)},
+      {UINT16_C(0x4000), UINT16_C(0x4400)}};
   const uint16_t b_values[TILES][2] = {
-      {UINT16_C(0x3c00), UINT16_C(0x4000)}, /* (1,2) */
-      {UINT16_C(0x4000), UINT16_C(0x4200)}, /* (2,3) */
-      {UINT16_C(0x4200), UINT16_C(0x3c00)}, /* (3,1) */
-      {UINT16_C(0x4400), UINT16_C(0x4000)}}; /* (4,2) */
+      {UINT16_C(0x3c00), UINT16_C(0x4000)},
+      {UINT16_C(0x4000), UINT16_C(0x4200)},
+      {UINT16_C(0x4200), UINT16_C(0x3c00)},
+      {UINT16_C(0x4400), UINT16_C(0x4000)}};
   const float a_numeric[TILES][2] = {
       {1.0f, 2.0f}, {3.0f, 4.0f}, {1.0f, 3.0f}, {2.0f, 4.0f}};
   const float b_numeric[TILES][2] = {

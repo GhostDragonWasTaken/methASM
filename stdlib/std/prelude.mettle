@@ -1,14 +1,6 @@
-// Mettle standard prelude
-// This module is imported when you pass --prelude to the compiler. It re-exports the most commonly needed standard library
-// functions so they are available without explicit imports.
-
 import "std/core";
 import "std/io";
 import "std/math";
 import "std/conv";
 import "std/mem";
 import "std/process";
-// Networking is NOT auto-imported: std/net is Windows-only (Winsock2 + Win32
-// threading) and would drag platform-specific symbols into every program. Import
-// it explicitly when needed — `import "std/net"` on Windows, or
-// `import "std/net_posix"` on Linux/macOS.

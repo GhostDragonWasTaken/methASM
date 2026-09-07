@@ -1,11 +1,3 @@
-// Mettle standard library: native Win32 bindings.
-//
-// This module exposes a small, typed Win32 surface without requiring each
-// program to repeat raw extern declarations. In --build --linker internal mode,
-// common Win32 DLLs are probed directly by the native PE linker.
-
-// Basic Win32 constants. They are functions because Mettle does not yet have
-// top-level constant expressions.
 export fn FALSE() -> int32 { return 0; }
 export fn TRUE() -> int32 { return 1; }
 export fn NULL_HANDLE() -> int64 { return 0; }
@@ -36,7 +28,6 @@ export fn OPEN_ALWAYS() -> uint32 { return 4; }
 export fn TRUNCATE_EXISTING() -> uint32 { return 5; }
 export fn FILE_ATTRIBUTE_NORMAL() -> uint32 { return 128; }
 
-// SYSTEMTIME from WinBase.h.
 export struct Win32SystemTime {
   year: uint16;
   month: uint16;
@@ -48,7 +39,6 @@ export struct Win32SystemTime {
   milliseconds: uint16;
 }
 
-// Kernel32.
 export extern fn Win32_GetLastError() -> uint32 = "GetLastError";
 export extern fn Win32_SetLastError(error_code: uint32) = "SetLastError";
 export extern fn Win32_GetStdHandle(std_handle: int32) -> int64 = "GetStdHandle";
@@ -64,7 +54,6 @@ export extern fn Win32_CreateFileA(file_name: cstring, desired_access: uint32, s
 export extern fn Win32_ReadFile(file: int64, buffer: cstring, bytes_to_read: uint32, bytes_read: uint32*, overlapped: cstring) -> int32 = "ReadFile";
 export extern fn Win32_WriteFile(file: int64, buffer: cstring, bytes_to_write: uint32, bytes_written: uint32*, overlapped: cstring) -> int32 = "WriteFile";
 
-// User32.
 export extern fn Win32_GetSystemMetrics(index: int32) -> int32 = "GetSystemMetrics";
 export extern fn Win32_MessageBoxA(owner: int64, text: cstring, caption: cstring, kind: uint32) -> int32 = "MessageBoxA";
 

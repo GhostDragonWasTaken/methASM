@@ -1,100 +1,34 @@
-// Mettle standard library: native general-purpose allocator
-//
-// Mettle's own malloc/free, owned end to end — no C runtime allocator in the
-// path. Raw pages come straight from the OS via `std/osmem` (VirtualAlloc on
-// Windows, anonymous mmap on Linux); everything above that — size classes, free
-// lists, slab carving, large-allocation handling, realloc — is implemented in
-// Mettle here.
-//
-// Design
-//   - Small requests (<= 4096 bytes) are served from per-size-class free lists.
-//     A class is `(idx+1)*16` bytes, so the index is a direct (size-1)/16 map
-//     with no search. When a class runs dry, a fresh slab is mapped from the OS
-//     and carved into blocks pushed onto that class's free list.
-//   - Large requests get their own OS mapping (header + payload, page-rounded)
-//     and are returned to the OS on free.
-//   - Every block carries a 16-byte header (usable-size + class index) just
-//     below the returned pointer, so free/realloc need no external bookkeeping.
-//     A header of 16 bytes keeps every returned pointer 16-byte aligned.
-//   - Freed small blocks are NOT zeroed; mem_calloc / mx_calloc zero explicitly.
-//
-// Thread safety: every public heap operation takes the heap's spinlock, so a
-// single MemHeap (including the process-global one behind mx_*) is safe to share
-// across threads, matching the owned process heap it replaces
-// under --native-heap. Internal *_nolock cores do the real work so that
-// compound operations (calloc, realloc) hold the lock exactly once and never
-// self-deadlock. The lock is a short-critical-section spinlock; for heavily
-// contended workloads, prefer a per-thread MemHeap to avoid serialization.
-//
-// Two API layers: explicit heaps (mem_alloc(h, ...)) for region/thread-scoped
-// pools, and a lazily-created process-global heap (mx_alloc(...)) for the
-// common case. Blocks must be freed to the heap that allocated them.
-
 import "std/osmem";
 import "std/mem";
 import "std/thread";
 
-// ─── Layout constants ───────────────────────────────────────────────────────
-
-// Bytes in a BlockHeader / SlabHeader (both two int64 fields).
 fn mem_header_bytes() -> int64 { return (int64)16; }
 
-// Number of small size classes. Class `i` holds `(i+1)*16` usable bytes, so the
-// largest small allocation is 256*16 = 4096 bytes.
 fn mem_num_classes() -> int64 { return (int64)256; }
 
-// Usable bytes for size class `idx`.
 fn mem_class_size(idx: int64) -> int64 { return (idx + (int64)1) * (int64)16; }
 
-// Largest request served from a size class; anything larger is OS-direct.
 fn mem_max_small() -> int64 { return mem_class_size(mem_num_classes() - (int64)1); }
 
-// Default slab size carved per refill. Rounded up when a single class block
-// plus header would not fit several times over.
 fn mem_slab_bytes() -> int64 { return (int64)65536; }
 
-// ─── Types ──────────────────────────────────────────────────────────────────
-
-// Sits immediately below every returned pointer. For small blocks `size` is the
-// class's usable byte count and `class_idx` is 0..255. For large blocks
-// `class_idx` is -1 and `size` is the total mapped byte count (header included),
-// which is exactly what os_mem_unmap needs.
-// Sits immediately below every returned pointer. `class_idx` shrinks to int32
-// (it only ever holds 0..255 or -1) to make room for a `magic` tag in the same
-// 16 bytes, so the header still keeps returned pointers 16-byte aligned. The
-// magic distinguishes a live block from a freed/never-allocated one, which lets
-// free/realloc reject double-frees and bad pointers instead of corrupting the
-// free list.
 export struct BlockHeader {
   size: int64;
   class_idx: int32;
   magic: int32;
 }
 
-// Magic tags. Distinct, non-zero, and unlikely to occur by accident (freshly
-// OS-mapped pages are zero, so a zero magic also reads as "not live").
-fn mem_magic_live() -> int32 { return (int32)0x6D4C5645; } // 'mLVE'
-fn mem_magic_dead() -> int32 { return (int32)0x6D444544; } // 'mDED'
+fn mem_magic_live() -> int32 { return (int32)0x6D4C5645; }
+fn mem_magic_dead() -> int32 { return (int32)0x6D444544; }
 
-// ─── Use-after-free detection ────────────────────────────────────────────────
-
-// Freed small blocks are filled with this byte; a block leaving quarantine
-// with any other byte in it was written through a dangling pointer.
 fn mem_poison_byte() -> int32 { return (int32)0xDD; }
 fn mem_quarantine_slots() -> int64 { return (int64)32; }
 fn mem_large_quarantine_slots() -> int64 { return (int64)8; }
 
-// Crash-handler bridge (src/runtime/crash_handler.c owns the hook). The
-// default heap registers its classifier so an access-violation report can
-// say "that address is inside a freed heap block" instead of printing an
-// anonymous pointer.
 extern fn mem_crash_set_classifier(f: fn(cstring) -> int64) = "mettle_crash_set_heap_classifier";
 extern fn mem_crash_note(msg: cstring) = "mettle_crash_write_stderr";
 extern fn mem_uaf_exit(code: int32) = "exit";
 
-// Report a write-after-free found at quarantine exit and stop: the heap's
-// poison was corrupted through a dangling pointer, so free-list metadata can
-// no longer be trusted.
 fn mem_report_write_after_free() {
   mem_crash_note("Fatal error: use-after-free detected\n");
   mem_crash_note("A heap block was written through a dangling pointer after it was freed\n");
@@ -102,24 +36,11 @@ fn mem_report_write_after_free() {
   mem_uaf_exit((int32)134);
 }
 
-// Header at the start of each carved slab, threading slabs into a list so a heap
-// can release every page it mapped on destroy.
 export struct SlabHeader {
   next: int64;
   map_size: int64;
 }
 
-// A heap: 256 free-list heads (each a user-pointer-or-0), the slab list,
-// occupancy counters, and the use-after-free quarantine. Allocated in its own
-// OS page, which the OS zero-fills, so a freshly mapped heap is already in
-// its empty state.
-//
-// The quarantine is what turns this allocator into a use-after-free detector:
-// freed small blocks are poisoned (0xDD) and parked here before reuse, so a
-// write through a dangling pointer corrupts the poison and is caught the
-// moment the block leaves quarantine. Freed page-backed blocks keep their
-// mapping with all access revoked, so any touch faults instantly; the crash
-// handler asks mem_crash_classify whether a faulting address belongs to one.
 export struct MemHeap {
   free_lists: int64[256];
   slabs: int64;
@@ -129,11 +50,11 @@ export struct MemHeap {
   total_allocs: int64;
   total_frees: int64;
   invalid_frees: int64;
-  quarantine_blocks: int64[32];    // small-block user pointers awaiting reuse
+  quarantine_blocks: int64[32];
   quarantine_classes: int64[32];
   quarantine_head: int64;
   quarantine_count: int64;
-  large_quarantine_base: int64[8]; // header addresses of revoked mappings
+  large_quarantine_base: int64[8];
   large_quarantine_size: int64[8];
   large_quarantine_head: int64;
   large_quarantine_count: int64;
@@ -149,16 +70,11 @@ export struct MemStats {
   invalid_frees: int64;
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-// Round `n` up to a whole number of OS pages.
 fn mem_round_up_page(n: int64) -> int64 {
   var pg: int64 = os_page_size();
   return (n + (pg - (int64)1)) & ~(pg - (int64)1);
 }
 
-// Map and zero a heap structure. The OS page is already zero-filled, so this is
-// just the mapping plus a null check.
 export fn mem_heap_create() -> MemHeap* {
   var raw: cstring = os_mem_map(mem_round_up_page(mem_header_bytes() * (int64)512));
   if (raw == 0) {
@@ -167,8 +83,6 @@ export fn mem_heap_create() -> MemHeap* {
   return (MemHeap*)raw;
 }
 
-// Map a fresh slab for size class `idx`, carve it into blocks, and push them all
-// onto the class free list. Returns 1 on success, 0 on OOM.
 fn mem_refill_class(h: MemHeap*, idx: int64) -> int32 {
   var stride: int64 = mem_header_bytes() + mem_class_size(idx);
   var min_bytes: int64 = mem_header_bytes() + stride * (int64)8;
@@ -204,7 +118,6 @@ fn mem_refill_class(h: MemHeap*, idx: int64) -> int32 {
   return 1;
 }
 
-// Usable bytes a block can hold, from its header.
 fn mem_block_usable(hdr: BlockHeader*) -> int64 {
   if (hdr->class_idx < (int32)0) {
     return hdr->size - mem_header_bytes();
@@ -212,11 +125,7 @@ fn mem_block_usable(hdr: BlockHeader*) -> int64 {
   return hdr->size;
 }
 
-// ─── Internal cores (caller holds h->lock) ────────────────────────────────────
-
-// Allocate `n` bytes (n > 0). Caller must hold h->lock. Uninitialized contents.
 fn mem_alloc_nolock(h: MemHeap*, n: int64) -> cstring {
-  // Large path: dedicated OS mapping (header + payload, page-rounded).
   if (n > mem_max_small()) {
     var total: int64 = mem_round_up_page(mem_header_bytes() + n);
     var base: cstring = os_mem_map(total);
@@ -234,7 +143,6 @@ fn mem_alloc_nolock(h: MemHeap*, n: int64) -> cstring {
     return (cstring)((int64)base + mem_header_bytes());
   }
 
-  // Small path: pop from the size class, refilling from a slab if empty.
   var idx: int64 = (n + (int64)15) / (int64)16 - (int64)1;
   if (h->free_lists[idx] == (int64)0) {
     if (mem_refill_class(h, idx) == 0) {
@@ -251,10 +159,6 @@ fn mem_alloc_nolock(h: MemHeap*, n: int64) -> cstring {
   return (cstring)user;
 }
 
-// Verify a quarantined block's poison and link it onto its free list. Caller
-// must hold h->lock. A corrupted poison byte means the program wrote through
-// a dangling pointer after free(): report and stop rather than handing out a
-// block whose metadata cannot be trusted.
 fn mem_quarantine_release(h: MemHeap*, user: int64, idx: int64) {
   var size: int64 = mem_class_size(idx);
   var i: int64 = 0;
@@ -268,10 +172,6 @@ fn mem_quarantine_release(h: MemHeap*, user: int64, idx: int64) {
   h->free_lists[idx] = user;
 }
 
-// Park a freed (already poisoned) small block. The quarantine is a fixed ring:
-// when full, the oldest block is verified and released for reuse. The delay is
-// what catches dangling writes -- the block is still poison when the write
-// lands, instead of already being someone else's live allocation.
 fn mem_quarantine_push(h: MemHeap*, user: int64, idx: int64) {
   if (h->quarantine_count == mem_quarantine_slots()) {
     mem_quarantine_release(h, h->quarantine_blocks[h->quarantine_head],
@@ -284,10 +184,6 @@ fn mem_quarantine_push(h: MemHeap*, user: int64, idx: int64) {
   h->quarantine_head = (h->quarantine_head + (int64)1) % mem_quarantine_slots();
 }
 
-// Park a freed page-backed block with all access revoked: any later read or
-// write of it is an instant access violation the crash handler classifies as
-// use-after-free. The ring keeps the address ranges identifiable; eviction
-// returns the oldest mapping to the OS.
 fn mem_large_quarantine_push(h: MemHeap*, base: int64, total: int64) {
   if (h->large_quarantine_count == mem_large_quarantine_slots()) {
     var old_base: int64 = h->large_quarantine_base[h->large_quarantine_head];
@@ -302,15 +198,6 @@ fn mem_large_quarantine_push(h: MemHeap*, base: int64, total: int64) {
   h->large_quarantine_head = (h->large_quarantine_head + (int64)1) % mem_large_quarantine_slots();
 }
 
-// Free a block (p != 0). Caller must hold h->lock.
-//
-// Validates the header magic first: a block that is not currently live (a
-// double-free, a free of a never-allocated pointer, or a pointer into the
-// middle of a block) is rejected and counted in `invalid_frees` rather than
-// being pushed onto the free list — turning what would be silent free-list
-// corruption (and a later crash far from the bug) into a contained, observable
-// no-op. (A wild pointer into unmapped memory still faults on the header read,
-// exactly as it would with the C heap.)
 fn mem_free_nolock(h: MemHeap*, p: cstring) {
   var hdr: BlockHeader* = (BlockHeader*)((int64)p - mem_header_bytes());
   if (hdr->magic != mem_magic_live()) {
@@ -318,10 +205,6 @@ fn mem_free_nolock(h: MemHeap*, p: cstring) {
     return;
   }
   if (hdr->class_idx < (int32)0) {
-    // Large block: revoke access and quarantine the mapping instead of
-    // unmapping immediately, so a use-after-free faults at the dangling
-    // pointer with the address still classifiable. bytes_reserved stays
-    // counted until the mapping actually leaves the quarantine.
     var total: int64 = hdr->size;
     h->bytes_in_use = h->bytes_in_use - (total - mem_header_bytes());
     h->live_allocs = h->live_allocs - (int64)1;
@@ -330,9 +213,6 @@ fn mem_free_nolock(h: MemHeap*, p: cstring) {
     mem_large_quarantine_push(h, (int64)hdr, total);
     return;
   }
-  // Small block: mark dead, poison the payload, and quarantine it. The
-  // dead magic catches an immediate re-free; the poison catches dangling
-  // writes when the block eventually leaves quarantine.
   hdr->magic = mem_magic_dead();
   var idx: int64 = (int64)hdr->class_idx;
   mem_fill(p, mem_poison_byte(), mem_class_size(idx));
@@ -342,10 +222,6 @@ fn mem_free_nolock(h: MemHeap*, p: cstring) {
   h->total_frees = h->total_frees + (int64)1;
 }
 
-// ─── Explicit-heap API (thread-safe) ──────────────────────────────────────────
-
-// Allocate `n` bytes from `h`. Returns 0 on bad input or OOM. Contents are
-// uninitialized (use mem_calloc to zero).
 export fn mem_alloc(h: MemHeap*, n: int64) -> rawptr {
   if (h == 0 || n <= (int64)0) {
     return 0;
@@ -356,9 +232,6 @@ export fn mem_alloc(h: MemHeap*, n: int64) -> rawptr {
   return p;
 }
 
-// Allocate `count * size` zero-filled bytes from `h`. Rejects a count*size
-// multiply that would overflow int64 (returns 0) so a wrapped-around small
-// request can never under-allocate behind a large logical size.
 export fn mem_calloc(h: MemHeap*, count: int64, size: int64) -> rawptr {
   if (h == 0 || count <= (int64)0 || size <= (int64)0) {
     return 0;
@@ -377,8 +250,6 @@ export fn mem_calloc(h: MemHeap*, count: int64, size: int64) -> rawptr {
   return p;
 }
 
-// Free a block previously returned by mem_alloc/mem_calloc/mem_realloc on `h`.
-// Freeing 0 is a no-op. The block must belong to `h`.
 export fn mem_free(h: MemHeap*, p: rawptr) {
   if (h == 0 || p == 0) {
     return;
@@ -388,9 +259,6 @@ export fn mem_free(h: MemHeap*, p: rawptr) {
   spin_unlock(&h->lock);
 }
 
-// Resize a block, preserving its contents up to the smaller of old/new size.
-// realloc(h, 0, n) == alloc; realloc(h, p, 0) frees and returns 0. Returns 0 on
-// OOM with the original block left intact.
 export fn mem_realloc(h: MemHeap*, p: rawptr, newsize: int64) -> rawptr {
   if (p == 0) {
     return mem_alloc(h, newsize);
@@ -403,9 +271,6 @@ export fn mem_realloc(h: MemHeap*, p: rawptr, newsize: int64) -> rawptr {
     return 0;
   }
   var hdr: BlockHeader* = (BlockHeader*)((int64)p - mem_header_bytes());
-  // Reject a realloc of a non-live pointer (double-free'd / bogus) rather than
-  // copying from and freeing a garbage header. The header is immutable while a
-  // block is live, so this read needs no lock.
   if (hdr->magic != mem_magic_live()) {
     spin_lock(&h->lock);
     h->invalid_frees = h->invalid_frees + (int64)1;
@@ -416,7 +281,6 @@ export fn mem_realloc(h: MemHeap*, p: rawptr, newsize: int64) -> rawptr {
   if (newsize <= old_usable) {
     return p;
   }
-  // alloc-new + copy + free-old, all under a single lock acquisition.
   spin_lock(&h->lock);
   var np: cstring = mem_alloc_nolock(h, newsize);
   if (np != 0) {
@@ -427,8 +291,6 @@ export fn mem_realloc(h: MemHeap*, p: rawptr, newsize: int64) -> rawptr {
   return np;
 }
 
-// Snapshot of occupancy. Bytes-in-use counts usable payload; bytes-reserved
-// counts everything mapped from the OS (slabs + large blocks).
 export fn mem_heap_stats(h: MemHeap*) -> MemStats {
   var s: MemStats;
   s.bytes_in_use = (int64)0;
@@ -451,10 +313,6 @@ export fn mem_heap_stats(h: MemHeap*) -> MemStats {
   return s;
 }
 
-// Release every slab and large block tracked by `h`, then the heap page itself.
-// `h` must not be used afterward. Large blocks are not threaded in the slab
-// list, so they must already have been freed individually; this reclaims the
-// small-allocation slabs and the heap header.
 export fn mem_heap_destroy(h: MemHeap*) {
   if (h == 0) {
     return;
@@ -466,7 +324,6 @@ export fn mem_heap_destroy(h: MemHeap*) {
     os_mem_unmap((cstring)slab, sh->map_size);
     slab = next;
   }
-  // Quarantined page-backed blocks hold their own (access-revoked) mappings.
   var q: int64 = 0;
   while (q < mem_large_quarantine_slots()) {
     if (h->large_quarantine_base[q] != (int64)0) {
@@ -478,15 +335,9 @@ export fn mem_heap_destroy(h: MemHeap*) {
   os_mem_unmap((cstring)h, mem_round_up_page(mem_header_bytes() * (int64)512));
 }
 
-// ─── Process-global heap ──────────────────────────────────────────────────────
-
 var g_mem_default_heap: MemHeap* = 0;
 var g_mem_default_heap_lock: int32 = 0;
 
-// Crash-time classifier: is `addr` inside a quarantined (freed) block of the
-// process-global heap? The crash handler calls this after an access
-// violation, so it takes no lock and only reads. Returns the block's usable
-// byte count when the address belongs to a freed block, 0 otherwise.
 export fn mem_crash_classify(addr: cstring) -> int64 {
   var h: MemHeap* = g_mem_default_heap;
   if (h == 0) {
@@ -512,19 +363,12 @@ export fn mem_crash_classify(addr: cstring) -> int64 {
   return (int64)0;
 }
 
-// The lazily-created process-global heap backing the mx_* convenience API.
-// Double-checked under a dedicated init lock so concurrent first-touch from
-// multiple threads creates exactly one heap (the fast path is a plain pointer
-// read; on x86-64 the aligned pointer store publishing the heap is atomic).
 export fn mem_default_heap() -> MemHeap* {
   if (g_mem_default_heap == 0) {
     spin_lock(&g_mem_default_heap_lock);
     if (g_mem_default_heap == 0) {
       g_mem_default_heap = mem_heap_create();
       if (g_mem_default_heap != 0) {
-        // Let the crash handler resolve faulting addresses against the
-        // quarantine, so an access violation in freed memory reports as
-        // use-after-free instead of an anonymous pointer.
         mem_crash_set_classifier(&mem_crash_classify);
       }
     }
@@ -553,38 +397,22 @@ export fn mx_stats() -> MemStats {
   return mem_heap_stats(mem_default_heap());
 }
 
-// ─── Compiler entry points (--native-heap) ────────────────────────────────────
-//
-// When the compiler is invoked with --native-heap it auto-injects this module
-// and rewrites `new` and the malloc/calloc/realloc/free intercepts to call
-// these fixed-name shims instead of the OS heap manager (Win32 HeapAlloc /
-// default owned heap). They are `export`ed so code reachability keeps them as
-// roots even though the calls are injected at emit time and are invisible to
-// the IR call graph. They run on the (thread-safe) process-global heap.
-
-// Backing for `new`: `n` zero-filled bytes.
 export fn mettle_heap_zeroed(n: int64) -> rawptr {
   return mem_calloc(mem_default_heap(), (int64)1, n);
 }
 
-// Backing for calloc: count*size zero-filled bytes with an overflow guard, so
-// the multiply happens in checked Mettle rather than as an unchecked register
-// imul in the backend.
 export fn mettle_heap_calloc(count: int64, size: int64) -> rawptr {
   return mem_calloc(mem_default_heap(), count, size);
 }
 
-// Backing for malloc: `n` uninitialized bytes.
 export fn mettle_heap_alloc(n: int64) -> rawptr {
   return mem_alloc(mem_default_heap(), n);
 }
 
-// Backing for realloc.
 export fn mettle_heap_realloc(p: rawptr, n: int64) -> rawptr {
   return mem_realloc(mem_default_heap(), p, n);
 }
 
-// Backing for `delete` and free.
 export fn mettle_heap_free(p: rawptr) {
   mem_free(mem_default_heap(), p);
 }

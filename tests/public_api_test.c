@@ -1,31 +1,4 @@
-/* public_api_test.c - proves the FULL public libmtlc surface end to end, using
- * only <mtlc/...> headers + the static library (no internal headers, no Mettle
- * frontend). Driven by tests/run_tests.ps1 (the `public_api` gate).
- *
- *   public_api_test <outdir>
- *
- * Builds six module families through mtlc/build.h and emits through
- * mtlc/pipeline.h:
- *   1. native:  globals (read+write), owned malloc + putchar, pointer
- *      load/store, address-of local, float
- *      arithmetic + cast, optimizer on -> <outdir>/pubapi_native.exe
- *      (the harness runs it: expects exit code 42 and stdout "OK")
- *   2. gpu:     a float32* kernel -> PTX text (checked: ".entry") and a SPIR-V
- *      binary (checked: magic 0x07230203)
- *   3. arm64:   globals + an 11-argument external call -> relocatable AArch64
- *      ELF (checked: machine/type and AAELF64 address/call relocations)
- *   4. launch:  frontend-neutral semantic GPU launch -> native object with the
- *      checked runtime-provider ABI (never executed; no GPU is required)
- *   5. tensor:  frontend-neutral cooperative matrix descriptors spanning the
- *      stable PTX WMMA shape/type family -> GB10 PTX
- *   6. transfer: frontend-neutral multidimensional workgroup transfers ->
- *      portable cooperative replay and native GB10 TMA PTX
- *   7. ergonomics: the convenience surface -- composite type constructors,
- *      element/field addressing, typed operator enums, allocated labels,
- *      builder and context diagnostics -> <outdir>/pubapi_ergonomics.exe
- *      (the harness runs it: expects exit code 77)
- *
- * Exit code 0 = everything emitted and structurally verified. */
+
 #include <mtlc/build.h>
 #include <mtlc/mtlc.h>
 #include <mtlc/pipeline.h>
@@ -92,25 +65,22 @@ static int is_arm64_relocatable_with_native_relocs(const char *path,
   }
   for (uint16_t i = 0; i < shnum; i++) {
     const unsigned char *section = bytes + shoff + (uint64_t)i * shentsize;
-    if (read_le32(section + 4) != 4) continue; /* SHT_RELA */
+    if (read_le32(section + 4) != 4) continue;
     uint64_t offset = read_le64(section + 24);
     uint64_t size = read_le64(section + 32);
     uint64_t entsize = read_le64(section + 56);
     if (entsize < 24 || offset + size > (uint64_t)length) continue;
     for (uint64_t at = offset; at + 24 <= offset + size; at += entsize) {
       uint32_t type = (uint32_t)read_le64(bytes + at + 8);
-      page |= type == 275; /* R_AARCH64_ADR_PREL_PG_HI21 */
-      lo12 |= type == 277; /* R_AARCH64_ADD_ABS_LO12_NC */
-      call |= type == 283; /* R_AARCH64_CALL26 */
+      page |= type == 275;
+      lo12 |= type == 277;
+      call |= type == 283;
     }
   }
   free(bytes);
   return call && (!require_address || (page && lo12));
 }
 
-/* Inspect enough SPIR-V to prove the atomic's semantic operands, even on
- * developer machines without spirv-dis/spirv-val. OpConstant = 43 and
- * OpAtomicIAdd = 234 in SPIR-V 1.0. */
 static int spirv_has_atomic_contract(const char *path, uint32_t expected_scope,
                                      uint32_t expected_semantics) {
   FILE *f = fopen(path, "rb");
@@ -368,9 +338,6 @@ static int spirv_has_capability(const char *path,
   return found;
 }
 
-/* Count OpVariables whose pointer pointee is an OpTypeArray and whose final
- * operand is the requested Storage Class. This excludes ordinary Function
- * shadow variables while proving neutral workgroup/private arrays survive. */
 static size_t spirv_count_array_variable_storage(
     const char *path, uint32_t expected_storage) {
   FILE *f = fopen(path, "rb");
@@ -433,9 +400,6 @@ invalid:
   return 0;
 }
 
-/* OpTypePointer = 32 and OpFunctionParameter = 55. Dynamic workgroup memory
- * must cross the OpenCL kernel ABI as exactly one Workgroup pointer parameter,
- * not as a fixed OpVariable or a global pointer. */
 static size_t spirv_count_pointer_parameters(const char *path,
                                              uint32_t expected_storage) {
   FILE *f = fopen(path, "rb");
@@ -485,7 +449,6 @@ done:
   return found;
 }
 
-/* ---- module 1: the native program (exit 42, prints "OK") ---- */
 static MtlcModule *build_native_module(void) {
   const MtlcType *i64 = mtlc_type_scalar(MTLC_TYPE_INT64);
   const MtlcType *i32 = mtlc_type_scalar(MTLC_TYPE_INT32);
@@ -493,22 +456,19 @@ static MtlcModule *build_native_module(void) {
   const MtlcType *pi64 = mtlc_type_pointer(i64);
   MtlcBuilder *b = mtlc_builder_create();
 
-  /* module global, read AND written below */
-  mtlc_builder_global(b, "counter", i64, 40, /*extern=*/0);
+  mtlc_builder_global(b, "counter", i64, 40,  0);
 
-  /* Runtime externs resolved by libmtlc's freestanding program object. */
   {
     const char *pn[] = {"size"};
     const MtlcType *pt[] = {i64};
-    mtlc_builder_function(b, "malloc", pi64, pn, pt, 1, /*extern=*/1);
+    mtlc_builder_function(b, "malloc", pi64, pn, pt, 1,  1);
   }
   {
     const char *pn[] = {"c"};
     const MtlcType *pt[] = {i32};
-    mtlc_builder_function(b, "putchar", i32, pn, pt, 1, /*extern=*/1);
+    mtlc_builder_function(b, "putchar", i32, pn, pt, 1,  1);
   }
 
-  /* The inliner must not alias this address-taken parameter to caller storage. */
   {
     const char *pn[] = {"value"};
     const MtlcType *pt[] = {i64};
@@ -522,8 +482,6 @@ static MtlcModule *build_native_module(void) {
 
   MtlcFn *m = mtlc_builder_function(b, "main", i64, NULL, NULL, 0, 0);
 
-  /* heap memory through an extern + pointer store/load:
-   *   p = malloc(8); *p = 41; x = *p + 1;              -> x = 42 */
   MtlcValue eight = mtlc_const_int(m, i64, 8);
   MtlcValue p = mtlc_call(m, "malloc", &eight, 1, pi64);
   MtlcValue c41 = mtlc_const_int(m, i64, 41);
@@ -532,22 +490,18 @@ static MtlcModule *build_native_module(void) {
   MtlcValue x = mtlc_local(m, "x", i64);
   mtlc_assign(m, x, mtlc_binary(m, "+", loaded, mtlc_const_int(m, i64, 1), i64));
 
-  /* global read: x += counter - 40                      (+0) */
   MtlcValue g = mtlc_global_ref(m, "counter");
   MtlcValue gdiff = mtlc_binary(m, "-", g, mtlc_const_int(m, i64, 40), i64);
   mtlc_assign(m, x, mtlc_binary(m, "+", x, gdiff, i64));
 
-  /* float arithmetic + cast: (2.5 * 4.0) -> 10.0 -> 10; x += 10 - 10  (+0) */
   MtlcValue fprod = mtlc_binary(m, "*", mtlc_const_float(m, f64, 2.5),
                                 mtlc_const_float(m, f64, 4.0), f64);
   MtlcValue fi = mtlc_cast(m, fprod, i64);
   MtlcValue fdiff = mtlc_binary(m, "-", fi, mtlc_const_int(m, i64, 10), i64);
   mtlc_assign(m, x, mtlc_binary(m, "+", x, fdiff, i64));
 
-  /* touch_copy mutates only its by-value parameter; x must remain 42. */
   mtlc_call(m, "touch_copy", &x, 1, i64);
 
-  /* address-of a local + store/load through the pointer: l=7; *&l=8; (+0) */
   MtlcValue l = mtlc_local(m, "l", i64);
   mtlc_assign(m, l, mtlc_const_int(m, i64, 7));
   MtlcValue pl = mtlc_address_of(m, l, pi64);
@@ -556,11 +510,9 @@ static MtlcModule *build_native_module(void) {
   MtlcValue ldiff = mtlc_binary(m, "-", lv, mtlc_const_int(m, i64, 8), i64);
   mtlc_assign(m, x, mtlc_binary(m, "+", x, ldiff, i64));
 
-  /* global WRITE + read-back: counter = x; x = counter */
   mtlc_assign(m, g, x);
   mtlc_assign(m, x, mtlc_global_ref(m, "counter"));
 
-  /* print "OK\n" through the putchar extern */
   MtlcValue cO = mtlc_const_int(m, i32, 'O');
   mtlc_call(m, "putchar", &cO, 1, i32);
   MtlcValue cK = mtlc_const_int(m, i32, 'K');
@@ -568,11 +520,10 @@ static MtlcModule *build_native_module(void) {
   MtlcValue nl = mtlc_const_int(m, i32, '\n');
   mtlc_call(m, "putchar", &nl, 1, i32);
 
-  mtlc_return(m, x); /* 42 */
+  mtlc_return(m, x);
   return mtlc_builder_finish(b);
 }
 
-/* ---- module 2: a GPU kernel (for PTX + SPIR-V) ---- */
 static MtlcModule *build_gpu_module(void) {
   const MtlcType *f32 = mtlc_type_scalar(MTLC_TYPE_FLOAT32);
   const MtlcType *boolean = mtlc_type_scalar(MTLC_TYPE_BOOL);
@@ -590,15 +541,11 @@ static MtlcModule *build_gpu_module(void) {
   MtlcBuilder *b = mtlc_builder_create();
   const char *pn[] = {"a", "counter", "counter64"};
   const MtlcType *pt[] = {pf32, pu32, pu64};
-  /* An ordinary function must remain ordinary in a GPU module. This is the
-   * public-API proof that libmtlc's entry-point decision does not depend on the
-   * Mettle parser/AST. */
+
   MtlcFn *helper =
       mtlc_builder_function(b, "ordinary_not_entry", f32, NULL, NULL, 0, 0);
   mtlc_return(helper, mtlc_const_float(helper, f32, 1.0));
 
-  /* Ordinary functions become device helpers only through kernel reachability.
-   * There is no PTX/SPIR-V annotation in the public neutral IR. */
   const char *helper_names[] = {"x"};
   const MtlcType *helper_types[] = {f32};
   MtlcFn *scale_value = mtlc_builder_function(
@@ -606,8 +553,7 @@ static MtlcModule *build_gpu_module(void) {
   mtlc_return(scale_value,
               mtlc_binary(scale_value, "*", mtlc_fn_param(scale_value, 0),
                           mtlc_const_float(scale_value, f32, 2.0), f32));
-  /* Asserted below to reach PTX as a device function with a real call
-   * site, so the case has to say it must stay out of line. */
+
   mtlc_fn_set_noinline(scale_value);
 
   const char *load_names[] = {"p"};
@@ -617,8 +563,7 @@ static MtlcModule *build_gpu_module(void) {
   MtlcValue loaded = mtlc_load(load_scaled, mtlc_fn_param(load_scaled, 0), f32);
   mtlc_return(load_scaled,
               mtlc_call(load_scaled, "scale_value", &loaded, 1, f32));
-  /* Asserted below to reach PTX as a device function with a real call
-   * site, so the case has to say it must stay out of line. */
+
   mtlc_fn_set_noinline(load_scaled);
 
   const char *store_names[] = {"p", "x"};
@@ -628,8 +573,7 @@ static MtlcModule *build_gpu_module(void) {
   mtlc_store(store_value, mtlc_fn_param(store_value, 0),
              mtlc_fn_param(store_value, 1), f32);
   mtlc_return(store_value, MTLC_NO_VALUE);
-  /* Asserted below to reach PTX as a device function with a real call
-   * site, so the case has to say it must stay out of line. */
+
   mtlc_fn_set_noinline(store_value);
 
   const char *narrow_names[] = {"x"};
@@ -637,20 +581,15 @@ static MtlcModule *build_gpu_module(void) {
   MtlcFn *identity_i8 = mtlc_builder_function(
       b, "identity_i8", i8, narrow_names, i8_types, 1, 0);
   mtlc_return(identity_i8, mtlc_fn_param(identity_i8, 0));
-  /* Asserted below to reach PTX as a device function with a real call
-   * site, so the case has to say it must stay out of line. */
+
   mtlc_fn_set_noinline(identity_i8);
   const MtlcType *u16_types[] = {u16};
   MtlcFn *identity_u16 = mtlc_builder_function(
       b, "identity_u16", u16, narrow_names, u16_types, 1, 0);
   mtlc_return(identity_u16, mtlc_fn_param(identity_u16, 0));
-  /* Asserted below to reach PTX as a device function with a real call
-   * site, so the case has to say it must stay out of line. */
+
   mtlc_fn_set_noinline(identity_u16);
 
-  /* A collective inside an ordinary helper remains frontend-neutral. The
-   * shared call-graph verifier propagates the uniform flag from every call
-   * site while allowing the reduced value itself to vary by lane. */
   const char *collective_names[] = {"value", "uniform_flag"};
   const MtlcType *collective_types[] = {u32, u32};
   MtlcFn *conditional_reduce = mtlc_builder_function(
@@ -664,13 +603,11 @@ static MtlcModule *build_gpu_module(void) {
                  &reduced_value, 1, u32);
   mtlc_label(conditional_reduce, "collective_skip");
   mtlc_return(conditional_reduce, MTLC_NO_VALUE);
-  /* Asserted below to reach PTX as a device function with a real call
-   * site, so the case has to say it must stay out of line. */
+
   mtlc_fn_set_noinline(conditional_reduce);
 
   MtlcFn *k = mtlc_builder_kernel(b, "scale2", pn, pt, 3);
-  /* Explicit semantic intrinsic: proves a non-Mettle frontend never has to
-   * manufacture the legacy source spelling "gpu_tid_x". */
+
   mtlc_intrinsic(k, MTLC_INTRINSIC_GPU_LOCAL_ID_X, NULL, 0, u32);
   MtlcValue a = mtlc_fn_param(k, 0);
   MtlcValue v2 = mtlc_call(k, "load_scaled", &a, 1, f32);
@@ -716,9 +653,7 @@ static MtlcModule *build_gpu_module(void) {
                  &active_lane, 1, boolean);
   MtlcValue conditional_args[] = {subgroup_lane, lane_zero};
   mtlc_call(k, "conditional_reduce", conditional_args, 2, voidt);
-  /* Static memory is target-neutral at the public boundary. Both backends
-   * must preserve the exact workgroup/private address space through stores
-   * and loads; the barrier makes the shared-memory intent explicit. */
+
   MtlcValue tile = mtlc_address_space_alloc(
       k, "tile", f32, 32, MTLC_ADDRESS_SPACE_WORKGROUP);
   MtlcValue scratch = mtlc_address_space_alloc(
@@ -729,9 +664,7 @@ static MtlcModule *build_gpu_module(void) {
       mtlc_dynamic_workgroup_view(k, "dynamic_metadata", u32);
   MtlcValue dynamic_counters =
       mtlc_dynamic_workgroup_view(k, "dynamic_counters", u64);
-  /* The public builder emits the same neutral async-copy contract as the
-   * reference frontend. GB10 lowers this to cp.async; the portable PTX and
-   * SPIR-V profiles replay the exact copy synchronously. */
+
   mtlc_async_copy_workgroup(k, tile, a, f32, 1, 4,
                             MTLC_ASYNC_CACHE_ALL);
   mtlc_async_copy_commit(k);
@@ -754,9 +687,7 @@ static MtlcModule *build_gpu_module(void) {
   MtlcValue u16_arg = mtlc_const_int(k, u16, 65535);
   mtlc_call(k, "identity_i8", &i8_arg, 1, i8);
   mtlc_call(k, "identity_u16", &u16_arg, 1, u16);
-  /* Exact memory semantics are public neutral IR, not strings understood only
-   * by one frontend or backend. The PTX backend uses NVIDIA's seq-cst ABI
-   * sequence; SPIR-V receives the matching scope/order/memory-class bits. */
+
   {
     static const MtlcMemoryOrder orders[] = {
         MTLC_MEMORY_ORDER_RELAXED, MTLC_MEMORY_ORDER_ACQUIRE,
@@ -886,9 +817,6 @@ static MtlcModule *build_gpu_module(void) {
   }
   mtlc_return(k, MTLC_NO_VALUE);
 
-  /* A second, completely ordinary public-builder kernel proves automatic
-   * staging is owned by the shared optimizer rather than the Mettle frontend.
-   * No async API is used here. */
   {
     const char *auto_names[] = {"source", "output"};
     const MtlcType *auto_types[] = {pf32, pf32};
@@ -927,7 +855,6 @@ static MtlcModule *build_subgroup_shuffle_module(void) {
   return mtlc_builder_finish(builder);
 }
 
-/* ---- rank-aware tensor movement (portable contract + PTX TMA) ---- */
 static MtlcModule *build_tensor_transfer_module(void) {
   const MtlcType *voidt = mtlc_type_scalar(MTLC_TYPE_VOID);
   const MtlcType *f32 = mtlc_type_scalar(MTLC_TYPE_FLOAT32);
@@ -1036,7 +963,6 @@ static int tensor_transfer_descriptor_validation(void) {
   return !mtlc_tensor_transfer_desc_is_valid(&desc);
 }
 
-/* ---- module 3: native AArch64 object ABI ---- */
 static MtlcModule *build_arm64_module(void) {
   const MtlcType *i64 = mtlc_type_scalar(MTLC_TYPE_INT64);
   const MtlcType *pi64 = mtlc_type_pointer(i64);
@@ -1068,7 +994,6 @@ static MtlcModule *build_arm64_module(void) {
   return mtlc_builder_finish(b);
 }
 
-/* ---- module 4: semantic host launch (for native object lowering) ---- */
 static MtlcModule *build_launch_module(void) {
   const MtlcType *v = mtlc_type_scalar(MTLC_TYPE_VOID);
   const MtlcType *i64 = mtlc_type_scalar(MTLC_TYPE_INT64);
@@ -1500,8 +1425,6 @@ static void add_strided_tensor_loop_kernel(
   MtlcValue active = mtlc_binary(kernel, "<", inner, values[4], boolean);
   mtlc_branch_if_zero(kernel, active, "tensor_k_done");
 
-  /* Public IR pointer arithmetic is expressed in bytes, as in the frontend's
-   * neutral lowering. Both f16 input pointers share the same scaled offset. */
   MtlcValue byte_offset =
       element_size_shift == 0
           ? inner
@@ -1539,8 +1462,7 @@ static void add_tensor_pipeline_kernel(
       kernel, "b_stage", u16, 1024, MTLC_ADDRESS_SPACE_WORKGROUP);
   MtlcValue lane = mtlc_intrinsic(
       kernel, MTLC_INTRINSIC_GPU_LOCAL_ID_X, NULL, 0, u32);
-  /* Public pointer arithmetic is byte-based. Eight binary16 elements per lane
-   * therefore advance by sixteen bytes; consecutive tiles are 512 bytes. */
+
   MtlcValue lane_bytes = mtlc_binary(
       kernel, "<<", lane, mtlc_const_int(kernel, u32, 4), u32);
   MtlcValue a_tiles[4];
@@ -1579,7 +1501,6 @@ static void add_tensor_pipeline_kernel(
   mtlc_return(kernel, MTLC_NO_VALUE);
 }
 
-/* ---- module 5: broad target-neutral tensor descriptors ---- */
 static const MtlcTensorElement k_mxf8f6f4_elements[] = {
     MTLC_TENSOR_ELEMENT_FLOAT8_E4M3,
     MTLC_TENSOR_ELEMENT_FLOAT8_E5M2,
@@ -1726,9 +1647,6 @@ static MtlcModule *build_tensor_module(void) {
   add_tensor_chain_kernel(builder, "tensor_tiled_f16_chain3_m32n32",
                           &tiled_desc, pu16, pu16, pf32, pf32);
 
-  /* Structured sparsity remains a neutral compressed-A + uint8 group-mask
-   * contract. Only the PTX backend translates that representation into its
-   * ordered warp metadata and mma.sp fragments. */
   desc.sparsity = MTLC_TENSOR_SPARSITY_STRUCTURED_2_TO_4;
   desc.a_leading_dimension = 8;
   add_sparse_tensor_kernel(builder, "tensor_sparse_f16_2to4", &desc, pu16,
@@ -1737,9 +1655,6 @@ static MtlcModule *build_tensor_module(void) {
       builder, "tensor_matmul_sparse_f16_2to4_public", &desc, pu16, pu16,
       pf32, pf32, pu8, u32);
 
-  /* Native low-precision support is expressed through the same neutral
-   * descriptor used by every frontend. The PTX backend alone owns register
-   * fragment packing, m16n8 subdivision, and the sm_89+ instruction choice. */
   desc = (MtlcTensorMmaDesc){0};
   desc.m = 16;
   desc.n = 16;
@@ -1781,8 +1696,6 @@ static MtlcModule *build_tensor_module(void) {
                             "tensor_fp8_m32n24k16_transposed", &desc, pu8,
                             pu8, pf32, pf32);
 
-  /* Packed storage and block scales are descriptor semantics, not PTX
-   * intrinsics. This exact module is built entirely through libmtlc. */
   desc = (MtlcTensorMmaDesc){0};
   desc.m = 16;
   desc.n = 16;
@@ -1813,8 +1726,6 @@ static MtlcModule *build_tensor_module(void) {
       builder, "tensor_mxfp4_runtime_k_m16n16k64", &desc, pu8, pf32, pu8,
       64, 1, 2, 32);
 
-  /* The same public operation selects NVFP4 when its semantic scale grid is
-   * UE4M3 block16. No PTX kind or selector leaks into the builder. */
   desc = (MtlcTensorMmaDesc){0};
   desc.m = 16;
   desc.n = 16;
@@ -1845,9 +1756,6 @@ static MtlcModule *build_tensor_module(void) {
       builder, "tensor_nvfp4_runtime_k_m16n16k64", &desc, pu8, pf32, pu8,
       64, 1, 2, 16);
 
-  /* Dense FP6 and mixed FP6 formats share the neutral packing/scale surface.
-   * libmtlc describes six-bit logical values; PTX privately expands each
-   * fragment into byte containers for Blackwell's mxf8f6f4 family. */
   desc = (MtlcTensorMmaDesc){0};
   desc.m = 16;
   desc.n = 16;
@@ -1879,9 +1787,6 @@ static MtlcModule *build_tensor_module(void) {
       builder, "tensor_mxfp6_runtime_k_m16n16k32", &desc, pu8, pf32, pu8,
       32, 3, 4, 32);
 
-  /* Assemble the full documented 5x5 A/B mxf8f6f4 type matrix. This guards
-   * independent operand selection rather than extrapolating from one mixed
-   * pair; all entries still use the same public neutral operation. */
   for (size_t a_kind = 0; a_kind < 5; a_kind++) {
     for (size_t b_kind = 0; b_kind < 5; b_kind++) {
       char name[96], matmul_name[112];
@@ -2217,16 +2122,12 @@ static int public_async_copy_contract_is_checked(void) {
       mtlc_builder_kernel(builder, "bad_async_copy", names, types, 1);
   MtlcValue destination = mtlc_address_space_alloc(
       kernel, "destination", f32, 1, MTLC_ADDRESS_SPACE_WORKGROUP);
-  /* Four bytes cannot be represented by an eight-byte transaction. */
+
   mtlc_async_copy_workgroup(kernel, destination, mtlc_fn_param(kernel, 0),
                             f32, 1, 8, MTLC_ASYNC_CACHE_ALL);
   return mtlc_builder_finish(builder) == NULL;
 }
 
-/* ------------------------------------------------------- 7. ergonomics ---- */
-
-/* Diagnostics are collected rather than printed, which is the whole point of
- * the handler: an embedder formats them itself. */
 typedef struct {
   char last[512];
   int count;
@@ -2241,8 +2142,6 @@ static void diag_sink(void *user_data, MtlcDiagSeverity severity,
   }
 }
 
-/* The layout mtlc_type_struct must compute for { int32; float64; int8 } under
- * the standard C rule: 0, 8 (padded to alignment 8), 16, size 24, align 8. */
 static int composite_types_are_laid_out(void) {
   const MtlcType *i32 = mtlc_type_scalar(MTLC_TYPE_INT32);
   const MtlcType *f64 = mtlc_type_scalar(MTLC_TYPE_FLOAT64);
@@ -2263,8 +2162,7 @@ static int composite_types_are_laid_out(void) {
       mtlc_type_field_index(record, "absent") != (size_t)-1) {
     return 0;
   }
-  /* Interned by name: the same declaration is the same descriptor, and a
-   * conflicting one is refused rather than silently shadowing. */
+
   if (mtlc_type_struct("ErgRecord", names, types, 3) != record) return 0;
   {
     const char *other_names[] = {"tag"};
@@ -2291,13 +2189,9 @@ static int composite_types_are_laid_out(void) {
   return 1;
 }
 
-/* A bad operator string, a bad label handle, and a branch to a label that was
- * never defined must each fail the builder with a message that names the
- * offending thing -- not produce a module that breaks later in codegen. */
 static int builder_reports_its_errors(void) {
   const MtlcType *i64 = mtlc_type_scalar(MTLC_TYPE_INT64);
 
-  /* 1. an operator the IR does not have */
   {
     DiagSink sink = {{0}, 0};
     MtlcBuilder *b = mtlc_builder_create();
@@ -2313,7 +2207,6 @@ static int builder_reports_its_errors(void) {
     if (mtlc_builder_finish(b) != NULL) return 0;
   }
 
-  /* 2. a label handle that was never allocated */
   {
     DiagSink sink = {{0}, 0};
     MtlcBuilder *b = mtlc_builder_create();
@@ -2325,7 +2218,6 @@ static int builder_reports_its_errors(void) {
     mtlc_builder_destroy(b);
   }
 
-  /* 3. a branch to a label string that is never defined */
   {
     DiagSink sink = {{0}, 0};
     MtlcBuilder *b = mtlc_builder_create();
@@ -2334,12 +2226,11 @@ static int builder_reports_its_errors(void) {
     mtlc_jump(f, "nowhere");
     mtlc_label(f, "elsewhere");
     mtlc_return(f, mtlc_const_int(f, i64, 0));
-    if (!mtlc_builder_ok(b)) return 0; /* only detectable at finish */
+    if (!mtlc_builder_ok(b)) return 0;
     if (mtlc_builder_finish(b) != NULL) return 0;
     if (!strstr(sink.last, "nowhere") || !strstr(sink.last, "main")) return 0;
   }
 
-  /* 4. placing the same allocated label twice */
   {
     DiagSink sink = {{0}, 0};
     MtlcBuilder *b = mtlc_builder_create();
@@ -2353,7 +2244,6 @@ static int builder_reports_its_errors(void) {
     mtlc_builder_destroy(b);
   }
 
-  /* 5. indexing through something that is not a pointer */
   {
     DiagSink sink = {{0}, 0};
     MtlcBuilder *b = mtlc_builder_create();
@@ -2367,8 +2257,6 @@ static int builder_reports_its_errors(void) {
     mtlc_builder_destroy(b);
   }
 
-  /* 6. a missing index, including at a stride of one where the scaling
-   *    multiply that would otherwise catch it is skipped. */
   {
     const MtlcType *pi8 = mtlc_type_pointer(mtlc_type_scalar(MTLC_TYPE_INT8));
     DiagSink sink = {{0}, 0};
@@ -2385,7 +2273,6 @@ static int builder_reports_its_errors(void) {
   return 1;
 }
 
-/* A failing pipeline call must leave a retrievable message on the context. */
 static int context_reports_pipeline_errors(void) {
   DiagSink sink = {{0}, 0};
   MtlcContext *ctx = mtlc_context_create();
@@ -2399,7 +2286,6 @@ static int context_reports_pipeline_errors(void) {
   mtlc_context_clear_error(ctx);
   if (mtlc_context_last_error(ctx) != NULL) return 0;
 
-  /* With a handler installed the message goes there instead of stderr. */
   mtlc_context_set_diagnostic_handler(ctx, diag_sink, &sink);
   if (mtlc_emit(ctx, NULL, MTLC_ARCH_PTX, "unused.ptx")) return 0;
   if (sink.count != 1 || !strstr(sink.last, "mtlc_emit")) return 0;
@@ -2412,13 +2298,6 @@ static int context_reports_pipeline_errors(void) {
   return 1;
 }
 
-/* A whole program built with the convenience surface only: allocated labels
- * for the loop, operator enums for the arithmetic, element addressing over a
- * malloc'd array, and field addressing through a struct pointer.
- *
- *   sum = 0; for (i = 0; i < 5; i++) { a[i] = i * i; sum += a[i]; }  -> 30
- *   r->tag = sum; r->flag = 47;  return r->tag + r->flag;            -> 77
- */
 static MtlcModule *build_ergonomics_module(void) {
   const MtlcType *i32 = mtlc_type_scalar(MTLC_TYPE_INT32);
   const MtlcType *i64 = mtlc_type_scalar(MTLC_TYPE_INT64);
@@ -2450,7 +2329,6 @@ static MtlcModule *build_ergonomics_module(void) {
     return NULL;
   }
 
-  /* int64 a[5], via malloc: element addressing does the stride arithmetic. */
   MtlcValue bytes = mtlc_const_int(m, i64, 5 * 8);
   MtlcValue array = mtlc_call(m, "malloc", &bytes, 1, pi64);
 
@@ -2477,12 +2355,11 @@ static MtlcModule *build_ergonomics_module(void) {
   mtlc_jump_to(m, top);
   mtlc_label_here(m, done);
 
-  /* A struct through a pointer: offsets come from the computed layout. */
   MtlcValue record_bytes = mtlc_const_int(m, i64, (long long)record->size);
   MtlcValue r = mtlc_cast(m, mtlc_call(m, "malloc", &record_bytes, 1, pi64),
                           precord);
-  mtlc_store_field(m, r, precord, 0, mtlc_cast(m, sum, i32));   /* tag  = 30 */
-  mtlc_store_field(m, r, precord, 2, mtlc_const_int(m, i8, 47)); /* flag = 47 */
+  mtlc_store_field(m, r, precord, 0, mtlc_cast(m, sum, i32));
+  mtlc_store_field(m, r, precord, 2, mtlc_const_int(m, i8, 47));
 
   MtlcValue tag = mtlc_cast(m, mtlc_load_field(m, r, precord, 0), i64);
   MtlcValue flag = mtlc_cast(m, mtlc_load_field(m, r, precord, 2), i64);
@@ -2537,7 +2414,6 @@ int main(int argc, char **argv) {
     return fail("public async-copy contract validation");
   }
 
-  /* 1. native executable (optimized) */
   {
     MtlcModule *m = build_native_module();
     if (!m) {
@@ -2555,7 +2431,6 @@ int main(int argc, char **argv) {
     mtlc_module_destroy(m);
   }
 
-  /* 2. PTX + SPIR-V from the same target-neutral optimized kernel module. */
   {
     MtlcModule *m = build_gpu_module();
     if (!m) {
@@ -2665,7 +2540,7 @@ int main(int argc, char **argv) {
     if (!mtlc_emit(ctx, m, MTLC_ARCH_SPIRV, spv)) {
       return fail("mtlc_emit SPIR-V");
     }
-    const unsigned char spv_magic[4] = {0x03, 0x02, 0x23, 0x07}; /* LE */
+    const unsigned char spv_magic[4] = {0x03, 0x02, 0x23, 0x07};
     if (!file_starts_with(spv, spv_magic, 4)) {
       return fail("SPIR-V output missing the module magic");
     }
@@ -2720,8 +2595,7 @@ int main(int argc, char **argv) {
         !spirv_has_capability(spv, 4431u)) {
       return fail("SPIR-V output missing semantic subgroup collectives");
     }
-    /* OpFunction=54: six helpers + two kernels; OpFunctionCall=57: one
-     * transitive and five scale2 calls. The unreachable function is absent. */
+
     if (spirv_count_opcode(spv, 54u) != 8u ||
         spirv_count_opcode(spv, 57u) != 6u) {
       return fail("SPIR-V device reachability/function-call contract");
@@ -2733,7 +2607,6 @@ int main(int argc, char **argv) {
     mtlc_module_destroy(m);
   }
 
-  /* 2b. Neutral variable-source shuffle with target capability selection. */
   {
     MtlcModule *m = build_subgroup_shuffle_module();
     char *ptx = path_join(outdir, "pubapi_subgroup_shuffle_sm121a.ptx");
@@ -2744,9 +2617,7 @@ int main(int argc, char **argv) {
         file_occurrences(ptx, "shfl.sync.idx.b32") != 2) {
       return fail("public neutral subgroup shuffle PTX construction");
     }
-    /* The neutral operation is not weakened into uniform broadcast. The
-     * current OpenCL 2.0 profile rejects it until a non-uniform-shuffle
-     * capability profile is selected. */
+
     if (mtlc_emit(ctx, m, MTLC_ARCH_SPIRV, spv)) {
       return fail("SPIR-V OpenCL 2.0 silently accepted non-uniform shuffle");
     }
@@ -2755,7 +2626,6 @@ int main(int argc, char **argv) {
     mtlc_module_destroy(m);
   }
 
-  /* 3. AArch64 relocatable ELF object after scalar target-neutral passes. */
   {
     MtlcModule *m = build_arm64_module();
     if (!m) {
@@ -2776,7 +2646,6 @@ int main(int argc, char **argv) {
     mtlc_module_destroy(m);
   }
 
-  /* 4. Typed semantic launch lowered to a provider-neutral host ABI. */
   {
     MtlcModule *m = build_launch_module();
     if (!m) {
@@ -2804,8 +2673,6 @@ int main(int argc, char **argv) {
     mtlc_module_destroy(m);
   }
 
-  /* 5. The shared tensor contract spans the stable WMMA family; PTX chooses
-   * instruction spellings only after checking the requested target profile. */
   {
     if (!tensor_chain_rejects_invalid_connectivity()) {
       return fail("tensor chain accepted disconnected output");
@@ -3039,8 +2906,6 @@ int main(int argc, char **argv) {
     mtlc_module_destroy(m);
   }
 
-  /* 6. Rank-aware movement remains replayable on old PTX, while GB10 selects
-   * tensor maps, transaction barriers, and both TMA directions. */
   {
     if (!tensor_transfer_descriptor_validation())
       return fail("tensor transfer descriptor validation");
@@ -3076,7 +2941,6 @@ int main(int argc, char **argv) {
     mtlc_module_destroy(m);
   }
 
-  /* 7. the ergonomic convenience surface, end to end. */
   {
     if (!composite_types_are_laid_out()) {
       return fail("composite type constructors");

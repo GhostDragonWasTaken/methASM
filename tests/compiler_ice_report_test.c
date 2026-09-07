@@ -4,8 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* crash_handler.c reaches for these, but they live in the freestanding runtime
- * and this harness is an ordinary hosted build that does not link it. */
 void mettle_crash_write_stderr_bytes(const char *text, size_t length);
 void mettle_crash_write_stderr(const char *text);
 long long (*mettle_crash_heap_classifier)(void *address) = NULL;
@@ -19,11 +17,7 @@ void mettle_crash_write_stderr(const char *text) {
 }
 
 #if !defined(_WIN32) && !defined(_WIN64)
-/* Three more of the same: the POSIX arm of the owned runtime backs these for
- * a real compiler, and this harness is a hosted build without it. The report
- * under test is raised deliberately rather than by a fault, so the signal
- * installer is never armed and the readability probe is only consulted while
- * symbolizing. */
+
 #include <signal.h>
 #include <pthread.h>
 

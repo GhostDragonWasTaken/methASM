@@ -159,6 +159,16 @@ Bit access: `f64_bits(x) -> int64`, `f64_from_bits(b) -> float64`,
 
 Every one takes and returns `float64`.
 
+Accuracy: the kernels carry enough terms that their truncation error sits below
+one unit in the last place, so results are accurate to about 1 ulp for arguments
+in the normal range. Trigonometric argument reduction uses a two-part split of
+pi/2, which holds full precision for `|x|` up to roughly 1e8; past that the
+reduction, and so the result, degrades.
+
+The constants are functions rather than `const` bindings because top-level
+`const` is restricted to integers (see [known limitations](known-limitations.md)).
+They fold to a single load, so `PI()` costs nothing over a literal.
+
 ## std/mem
 
 Raw memory moves. Both platforms.
@@ -174,6 +184,14 @@ Raw memory moves. Both platforms.
 | `mem_find_byte(p: cstring, value: int32, n: int64) -> int64` | Offset or -1 |
 | `alloc_zeroed(n: int64) -> rawptr` | Allocate and zero |
 | `buf_dup(src: rawptr, len: int64) -> rawptr` | Allocate a copy |
+
+`mem_copy` requires that the ranges do not overlap; reach for `mem_move` when
+they might.
+
+`memory_region` describes a borrowed region from foreign code so Mettle can
+dereference it under [`--safe`](memory-safety.md). The caller must know the
+whole region is live. Ending the region retires its identity; the foreign owner
+still releases the bytes.
 
 ## std/alloc
 
@@ -213,6 +231,19 @@ A null result is the integer `0`:
 var buf: rawptr = mx_alloc(1024);
 if (buf == 0) { return 1; }
 ```
+
+Thread safety: every public heap operation takes the heap's spinlock, so a
+single `MemHeap`, the process-global one behind the `mx_` names included, is
+safe to share across threads. It is a short-critical-section spinlock, so
+heavily contended workloads do better with a `MemHeap` per thread than with the
+shared one.
+
+A block must be freed to the heap that allocated it. Freeing `0` is a no-op.
+`mem_heap_destroy` does not walk large blocks, so those must already have been
+freed individually. `mem_calloc` and `mx_calloc` reject a `count * size` that
+would overflow `int64`, so a wrapped-around small request can never
+under-allocate behind a large logical size. Freed small blocks are not zeroed;
+the `calloc` names zero explicitly.
 
 ## std/arena
 
@@ -264,6 +295,15 @@ platforms.
 | `utf8_encode(buf: cstring, cp: int32) -> int64` | Write one, return the length |
 | `utf8_string(buf: cstring, cp: int32) -> string` | Write one, return a view |
 
+Malformed input never stops the program and never stalls it. A bad byte decodes
+to U+FFFD and spans exactly one byte, so a walk always advances and garbage
+reads as garbage rather than being invented into text. Over-long encodings,
+surrogate halves and out-of-range code points are refused the same way.
+
+`utf8_offset` is O(length): finding the n'th character in UTF-8 means counting
+the ones before it, which is also why `s[i]` indexes bytes and there is no
+character index.
+
 ## std/osmem
 
 Pages from the operating system, under the heap. Both platforms, with a
@@ -291,7 +331,8 @@ Mutexes: `mutex_create`, `mutex_create_owned`, `mutex_lock(mutex, timeout_ms)`,
 Atomics on an `int32*`: `atomic_compare_exchange_i32`, `atomic_exchange_i32`,
 `atomic_inc_i32`, `atomic_dec_i32`.
 
-Spin locks on an `int32*`: `spin_try_lock`, `spin_lock`, `spin_unlock`.
+Spin locks on an `int32*`: `spin_try_lock`, `spin_lock`, `spin_unlock`. The
+lock variable must be a shared `int32` initialised to 0.
 
 Wait results come back as `WAIT_OBJECT_0()`, `WAIT_TIMEOUT()`, or
 `WAIT_FAILED()`, and `INFINITE()` is the timeout that never expires.
@@ -371,6 +412,14 @@ Addresses: `sockaddr_in(ip: cstring, port: int32) -> Result<cstring, int32>`,
 Options: `set_reuseaddr`, `set_nonblocking`, `set_nodelay`.
 
 Transfer: `send_all(sock: int64, buf: cstring, len: int32) -> Result<int32, int32>`.
+A short write leaves the loop carrying the platform error code, so a partial
+send can never be read as a whole one.
+
+The `Ok` arm of `sockaddr_in` and `sockaddr_in_any` is a 16-byte buffer from
+the heap; the caller frees it.
+
+`net_init` and `net_cleanup` are reference counted and safe to call from more
+than one thread.
 
 The Winsock constants are functions: `AF_INET()`, `SOCK_STREAM()`,
 `SOCK_DGRAM()`, `IPPROTO_TCP()`, `IPPROTO_UDP()`, `SOL_SOCKET()`,

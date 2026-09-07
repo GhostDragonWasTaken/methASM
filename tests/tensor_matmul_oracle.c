@@ -424,9 +424,6 @@ static float sparse_a_at(const float *compressed_a, const uint8_t *metadata,
                                  transpose_a)];
 }
 
-/* Build a conventional dense logical A first.  The region implementation
- * below independently decodes compressed A at each logical q, so agreement is
- * evidence for grouping, selected-value order, transpose, and odd-K tails. */
 static void expand_sparse_a(const float *compressed_a,
                             const uint8_t *metadata, float *dense_a,
                             uint32_t m, uint32_t k, uint32_t lda,
@@ -678,7 +675,6 @@ int main(void) {
              sizeof(expected_fp8_transpose)) != 0)
     return 5;
 
-  /* K=0 is C->D, and a completely out-of-range region is a no-op. */
   memset(tiled_f, 0x3c, sizeof(tiled_f));
   for (uint32_t row = 0; row < M; row += TILE_M)
     for (uint32_t column = 0; column < N; column += TILE_N)

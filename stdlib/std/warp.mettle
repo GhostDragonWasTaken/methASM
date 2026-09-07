@@ -1,19 +1,5 @@
-// Mettle standard library: what a work item shares with its group.
-//
-// This module is device code. A kernel file imports it; a host program does
-// not, because nothing here can run on a host. `std/gpu` is the host side.
-
-// `Uniform<T>` says a value is the same in every work item of the group. It is
-// a declared type, so nothing carries it by assertion: the compiler proves the
-// value depends on no work-item index, no load and nothing that is not itself
-// uniform, and refuses the conversion naming the term that varies. A branch on
-// a `Uniform<bool>` is a group decision and lowers to `bra.uni`.
 export type Uniform<T> = T where uniform(value);
 
-// The layouts a view's type can name, as data. A type says `layout row` or
-// `layout swizzle128` and means one of these; they are constants rather than
-// tokens of their own, so a target that grows another form adds a name here
-// and nothing in the grammar moves.
 export const layout_row: int32 = 1;
 export const layout_col: int32 = 2;
 export const layout_swizzle32: int32 = 3;
@@ -24,11 +10,6 @@ export const layout_fragment_a: int32 = 7;
 export const layout_fragment_b: int32 = 8;
 export const layout_fragment_c: int32 = 9;
 
-// The collectives below speak to a whole group, so each one requires the
-// effect that group exists under. A kernel entry provides `Warp` and `Block`,
-// because a launch starts every work item of a warp and of a block together; a
-// branch or a loop no work item agrees on takes them away again, and a
-// collective reached there is F0002 with the chain that got to it.
 export fn warp_sum_f32(value: float32) -> float32 requires Warp {
   return subgroup_reduce_add(value);
 }

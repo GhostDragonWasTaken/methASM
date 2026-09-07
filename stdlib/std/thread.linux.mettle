@@ -1,44 +1,24 @@
-// Mettle standard library: Threading (native ELF / Linux)
-//
-// Linux counterpart to std/thread. Exposes the SAME public API as std/thread
-// (CreateThread/WaitForSingleObject/CloseHandle/Sleep/CreateMutexA/etc.) so a
-// single `import "std/thread"` works on both Windows and Linux. Underneath it
-// calls the owned runtime, which uses clone and futex directly. No pthread or
-// C runtime library is linked. Interlocked atomics use the same owned
-// mettle_atomic_* symbols as the Windows module.
-//
-// The import resolver picks this file over thread.mettle automatically on the
-// native ELF target.
-
-// ─── Wait constants (Win32 values, exposed identically on Linux) ────────────
 export fn INFINITE() -> uint32 { return 0xFFFFFFFF; }
 export fn WAIT_OBJECT_0() -> uint32 { return 0; }
 export fn WAIT_TIMEOUT() -> uint32 { return 258; }
 export fn WAIT_FAILED() -> uint32 { return 0xFFFFFFFF; }
 
-// ─── Thread lifecycle ────────────────────────────────────────────────────────
-// Win32 shape signatures bound to owned clone and futex helpers.
 export extern fn CreateThread(lpThreadAttributes: cstring, dwStackSize: uint64, lpStartAddress: fn(cstring) -> uint32, lpParameter: cstring, dwCreationFlags: uint32, lpThreadId: uint32*) -> int64 = "mettle_thread_create";
 export extern fn CloseHandle(hObject: int64) -> int32 with none = "mettle_thread_close";
 export extern fn WaitForSingleObject(hHandle: int64, dwMilliseconds: uint32) -> uint32 with none = "mettle_thread_wait";
 export extern fn GetCurrentThreadId() -> uint32 with none = "mettle_thread_current_id";
 export extern fn Sleep(dwMilliseconds: uint32) with none = "mettle_thread_sleep_ms";
 
-// ─── Mutex (CRITICAL_SECTION-like) ──────────────────────────────────────────
 export extern fn CreateMutexA(lpMutexAttributes: cstring, bInitialOwner: int32, lpName: cstring) -> int64 = "mettle_mutex_create";
 export extern fn ReleaseMutex(hMutex: int64) -> int32 with none = "mettle_mutex_release";
 
-// ─── Interlocked atomics ────────────────────────────────────────────────────
-// Shared cross-platform runtime symbols (src/runtime/atomics.c).
 export extern fn InterlockedCompareExchange(target: int32*, exchange: int32, comparand: int32) -> int32 with none = "mettle_atomic_compare_exchange_i32";
 export extern fn InterlockedExchange(target: int32*, value: int32) -> int32 with none = "mettle_atomic_exchange_i32";
 export extern fn InterlockedIncrement(target: int32*) -> int32 with none = "mettle_atomic_inc_i32";
 export extern fn InterlockedDecrement(target: int32*) -> int32 with none = "mettle_atomic_dec_i32";
 
-// posix_yield drives the spin-lock contention path (sched_yield underneath).
 extern fn posix_yield() with none = "posix_yield";
 
-// ─── Thread convenience wrappers (mirror std/thread) ────────────────────────
 export fn thread_close(handle: int64) -> int32 {
   return CloseHandle(handle);
 }
@@ -59,7 +39,6 @@ export fn thread_sleep_ms(milliseconds: uint32) {
   Sleep(milliseconds);
 }
 
-// ─── Mutex wrappers ─────────────────────────────────────────────────────────
 export fn mutex_create() -> int64 {
   return CreateMutexA(0, 0, 0);
 }
@@ -68,7 +47,6 @@ export fn mutex_create_owned() -> int64 {
   return CreateMutexA(0, 1, 0);
 }
 
-// Win32-style wait-with-timeout for a mutex handle.
 extern fn mettle_mutex_wait(handle: int64, ms: uint32) -> uint32 with none = "mettle_mutex_wait";
 
 export fn mutex_lock(mutex: int64, timeout_ms: uint32) -> int32 {
@@ -93,7 +71,6 @@ export fn mutex_close(mutex: int64) -> int32 {
   return mettle_mutex_close(mutex);
 }
 
-// ─── Atomic wrappers (identical to std/thread) ──────────────────────────────
 export fn atomic_compare_exchange_i32(target: int32*, exchange: int32, comparand: int32) -> int32 {
   return InterlockedCompareExchange(target, exchange, comparand);
 }
@@ -110,9 +87,6 @@ export fn atomic_dec_i32(target: int32*) -> int32 {
   return InterlockedDecrement(target);
 }
 
-// ─── Spin lock helpers ──────────────────────────────────────────────────────
-// lock_var must be a shared int32 initialized to 0. Same API as std/thread.
-// The contention path yields via sched_yield on Linux (Sleep(0) on Windows).
 export fn spin_try_lock(lock_var: int32*) -> int32 {
   if (InterlockedCompareExchange(lock_var, 1, 0) == 0) {
     return 1;

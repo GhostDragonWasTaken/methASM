@@ -1,6 +1,4 @@
-/* Drives tests/export_shared_global.mettle from C: writes the exported globals
- * and asks Mettle what it sees. Prints one line per check so a failure names
- * which one. */
+
 #include <stdio.h>
 
 extern long long SHARED;
@@ -32,7 +30,6 @@ int main(void) {
   SHARED_FLOAT = 2.5;
   if (get_float() != 2.5) { printf("float write not seen: %f\n", get_float()); failures++; }
 
-  /* A write from the Mettle side is visible here too. */
   if (bump_shared() != 100) { printf("bump wrong: %lld\n", SHARED); failures++; }
   if (SHARED != 100) { printf("bump not visible in C: %lld\n", SHARED); failures++; }
 

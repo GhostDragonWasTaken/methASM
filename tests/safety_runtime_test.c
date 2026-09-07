@@ -1,10 +1,4 @@
-﻿/* Exercises the checked-access safety runtime on its own.
- *
- * Everything here is a claim about what the runtime must answer, independent
- * of any compiler work: which accesses are inside their allocation, which run
- * off the end, which touch memory that has been freed, and which the runtime
- * has no business judging at all. The real trap ends the process, so this
- * harness supplies its own and jumps back to the case. */
+﻿
 
 #include "runtime/safety.h"
 #include <setjmp.h>
@@ -15,7 +9,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
-/* The standalone harness has no owned thread runtime. */
+
 void *mettle_thread_stack_high(void) { return NULL; }
 #endif
 
@@ -101,8 +95,6 @@ static void report(const char *name, int expected, int actual) {
 
 #define READ METTLE_SAFETY_ACCESS_READ
 
-/* Everything registered is granule aligned, exactly as the compiler arranges
- * for the stack and global objects it registers. */
 static void *aligned_block(size_t size) {
 #if defined(_WIN32) || defined(_WIN64)
   return _aligned_malloc(size, METTLE_SAFETY_GRANULE);
@@ -143,7 +135,6 @@ int main(void) {
     free_block(block);
   });
 
-  /* The last element read at the wrong width is still an overrun. */
   CASE("straddling the end", 1, {
     char *block = (char *)aligned_block(64);
     mettle_safety_register(block, 64);
@@ -160,9 +151,6 @@ int main(void) {
     free_block(block);
   });
 
-  /* The reason the check carries the base pointer rather than just the final
-   * address: running off one live allocation into another is a violation, and
-   * an address-only check would call it fine. */
   CASE("overrun into a neighbour", 1, {
     char *first = (char *)aligned_block(64);
     char *second = (char *)aligned_block(64);
@@ -208,9 +196,6 @@ int main(void) {
     free_block(block);
   });
 
-  /* Memory Mettle never described is allowed through. A foreign library's
-   * pointer is not something the runtime can judge, and trapping on it would
-   * reject correct programs. */
   CASE("untracked memory", 0, {
     char stack_bytes[64];
     mettle_safety_check(stack_bytes, 0, 4, READ, 50);
@@ -250,11 +235,6 @@ int main(void) {
     free_block(block);
   });
 
-  /* A freed allocation keeps its descriptor so a stale pointer can be named,
-   * and gives it up once its memory belongs to someone else. Without that
-   * second half, a program that allocates in a loop would grow the descriptor
-   * table forever. Cases above that trapped jumped out before unregistering,
-   * so the live count is compared against its value going in, not zero. */
   CASE("descriptor recycling stays bounded", 0, {
     uint64_t live_before = mettle_safety_live_region_count();
     uint64_t slots_before = mettle_safety_descriptor_high_water();
@@ -280,7 +260,6 @@ int main(void) {
     }
   });
 
-  /* A large allocation crosses many granules and several shadow tables. */
   CASE("multi megabyte allocation", 0, {
     size_t size = 4u * 1024u * 1024u;
     char *block = (char *)aligned_block(size);
@@ -301,8 +280,6 @@ int main(void) {
     free_block(block);
   });
 
-  /* A length that is not a multiple of the granule must refuse the bytes past
-   * the requested length, not the bytes up to the granule boundary. */
   CASE("unaligned size tail", 1, {
     char *block = (char *)aligned_block(48);
     mettle_safety_register(block, 20);
@@ -376,8 +353,6 @@ int main(void) {
   CloseHandle(g_allocator_entered);
   CloseHandle(g_allocator_release);
 
-  /* Every version permits the read. Readers must never see a half replaced
-   * record, a freed record, or a zero size while registration holds the lock. */
   char *shared = (char *)aligned_block(128);
   mettle_safety_register(shared, 64);
   worker = CreateThread(NULL, 0, registry_thread, shared, 0, NULL);
@@ -499,10 +474,6 @@ int main(void) {
     mettle_safety_value_clear(result, sizeof(result));
   });
 
-  /* The whole-loop check answers for a walk the per-access checks no longer
-   * cover, so the offset it reports has to be the first access that actually
-   * failed rather than the one the loop started from. Getting that wrong is
-   * silent: the trap still fires, and it accuses the wrong element. */
   CASE("an affine walk that stays inside passes once", 0, {
     char *block = (char *)aligned_block(64);
     mettle_safety_register(block, 64);
@@ -541,9 +512,6 @@ int main(void) {
     printf("  FAIL displaced affine walk reported the wrong offset: %s\n", g_message);
   }
 
-  /* A saturated span is what an unbounded trip count turns into. It must reach
-   * the check as an oversized range, and still report the element the walk
-   * would have failed on rather than the saturated length itself. */
   CASE("a saturated span still names the first offset outside", 1, {
     char *block = (char *)aligned_block(64);
     mettle_safety_register(block, 64);
@@ -580,8 +548,6 @@ int main(void) {
     printf("  FAIL affine walk over freed memory: %s\n", g_message);
   }
 
-  /* Shapes the whole-loop form cannot describe fall back to the single access
-   * it was given, so a walk it cannot reason about is never waved through. */
   CASE("an unusable affine shape falls back to the access", 1, {
     char *block = (char *)aligned_block(64);
     mettle_safety_register(block, 64);
@@ -619,7 +585,7 @@ int main(void) {
   });
 
 #ifdef METTLE_SAFETY_TESTING
-  /* Fail the descriptor block, second level, and third level in turn. */
+
   for (volatile int maps = 0; maps < 3; maps++) {
     mettle_safety_reset();
     g_maps_before_failure = maps;
@@ -627,7 +593,7 @@ int main(void) {
       mettle_safety_register((void *)(uintptr_t)0x10000, 64);
     });
     g_maps_before_failure = -1;
-    /* Also proves the failure path released the registry lock. */
+
     mettle_safety_reset();
   }
 #endif

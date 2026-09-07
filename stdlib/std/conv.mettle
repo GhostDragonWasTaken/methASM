@@ -1,21 +1,8 @@
-// Mettle standard library: Conversions
-//
-// String/number conversions, character classification, and encoding helpers.
-//
-// A lookup that finds nothing answers `None`. A parse that cannot read what
-// it was given answers `Err` with the reason.
-
 import "std/core";
 
-// Owned runtime conversions
-// These ABI names bind to Mettle's owned conversion code.
 export extern fn atoi(s: cstring) -> int32 = "atoi";
 export extern fn atol(s: cstring) -> int64 = "atol";
 
-// ─── Integer ↔ character helpers ────────────────────────────────────────────
-
-// The digit character for 0-9, and the value of a digit character. Neither
-// validates: ask is_digit first when the input is not already known good.
 export fn digit_to_char(d: int32) -> char {
   return (char)(d + 48);
 }
@@ -23,15 +10,6 @@ export fn digit_to_char(d: int32) -> char {
 export fn char_to_digit(c: char) -> int32 {
   return c - '0';
 }
-
-// ─── Character classification ───────────────────────────────────────────────
-//
-// These answer `bool`, so they read as the questions they are:
-//
-//     if (is_digit(c) && !is_space(c)) { ... }
-//
-// ASCII only. A byte above 127 is part of some multi-byte encoding this
-// library does not decode, and claiming it is a letter would be a guess.
 
 export fn is_digit(c: char) -> bool {
   return c >= '0' && c <= '9';
@@ -58,8 +36,6 @@ export fn is_space(c: char) -> bool {
           c == (char)12 || c == (char)11);
 }
 
-// ─── Case conversion ────────────────────────────────────────────────────────
-
 export fn to_lower(c: char) -> char {
   if (is_upper(c)) { return (char)(c + 32); }
   return c;
@@ -70,15 +46,6 @@ export fn to_upper(c: char) -> char {
   return c;
 }
 
-// ─── Bytes → string ─────────────────────────────────────────────────────────
-//
-// A `string` is a pointer and a length. Bytes arrive from the outside world
-// with neither shape: `fgets` fills a buffer and terminates it, `read` hands
-// back a count. These two build the view, and because a view borrows, the
-// buffer has to outlive it -- a view of a stack array dies with the frame it
-// was declared in, exactly like a slice of any other string.
-
-// The view of `n` bytes at `p`. Nothing is scanned and nothing is copied.
 export fn str_from_bytes(p: cstring, n: int64) -> string {
   var out: string;
   out.chars = p;
@@ -89,9 +56,6 @@ export fn str_from_bytes(p: cstring, n: int64) -> string {
   return out;
 }
 
-// The view of a NUL-terminated pointer, up to but not including the
-// terminator. This is the one that costs a scan, which is why `print` takes a
-// `string` and `print_cstr` exists separately.
 export fn str_from_cstr(s: cstring) -> string {
   if (s == 0) {
     return str_from_bytes(s, 0);
@@ -99,21 +63,6 @@ export fn str_from_cstr(s: cstring) -> string {
   return str_from_bytes(s, cstr_len(s));
 }
 
-// ─── Strings ────────────────────────────────────────────────────────────────
-//
-// These work on `string`, which is a borrowed view: a pointer and a length,
-// no terminator. Every function here that returns a `string` returns a view
-// INTO ITS INPUT. Nothing allocates, nothing copies, and nothing outlives the
-// bytes it points at, so a view of a heap string dies with the buffer.
-//
-// Equality is the language's own `==`, which compares contents, so there is no
-// str_eq here. The `cstr_*` and `atoi`/`atol` functions below are the C
-// boundary and take `cstring` because that is what a C library will read.
-
-// The view of `s` starting at `start` and running `len` bytes, clamped to what
-// `s` actually holds. A start past the end gives an empty view rather than a
-// pointer past the buffer, so a slice computed from a search that failed is
-// harmless instead of wild.
 export fn str_slice(s: string, start: int64, len: int64) -> string {
   var out: string;
   var n: int64 = (int64)s.length;
@@ -130,8 +79,6 @@ export fn str_slice(s: string, start: int64, len: int64) -> string {
   return out;
 }
 
-// Whether the bytes of `needle` sit at `offset`. Out of range answers 0: a
-// needle cannot match where there is nothing to match against.
 export fn str_eq_at(s: string, offset: int64, needle: string) -> int32 {
   var n: int64 = (int64)s.length;
   var m: int64 = (int64)needle.length;
@@ -155,10 +102,6 @@ export fn str_ends_with(s: string, suffix: string) -> int32 {
   return str_eq_at(s, (int64)s.length - (int64)suffix.length, suffix);
 }
 
-// The index where `needle` first appears. Absence is an ordinary answer here,
-// so it comes back as `None` and cannot be mistaken for position -1. An empty
-// needle matches at 0, which is what makes `str_find(s, "")` agree with
-// `str_starts_with(s, "")`.
 export fn str_find(s: string, needle: string) -> Option<int64> {
   var n: int64 = (int64)s.length;
   var m: int64 = (int64)needle.length;
@@ -180,8 +123,6 @@ export fn str_contains(s: string, needle: string) -> int32 {
   }
 }
 
-// The index of the first byte equal to `c`. Cheaper than str_find for the
-// single-byte case, which is most of them.
 export fn str_find_byte(s: string, c: int32) -> Option<int64> {
   var n: int64 = (int64)s.length;
   var i: int64 = 0;
@@ -215,16 +156,11 @@ export fn str_trim(s: string) -> string {
   return str_trim_start(str_trim_end(s));
 }
 
-// The two halves of a split: what came before the separator and what came
-// after it. Both are views into the string that was split.
 export struct StrSplit {
   head: string;
   tail: string;
 }
 
-// Split at the first `sep`. `None` says the separator is not in `s` at all,
-// which leaves `s` itself as the only sensible reading of the whole and needs
-// no second copy of it handed back.
 export fn str_split_once(s: string, sep: string) -> Option<StrSplit> {
   var at: int64 = 0;
   match (str_find(s, sep)) {
@@ -238,14 +174,6 @@ export fn str_split_once(s: string, sep: string) -> Option<StrSplit> {
   return Some(out);
 }
 
-// Parse a decimal integer, with an optional leading sign. The WHOLE view has
-// to be digits: a partial parse is an error here, because a caller that wanted
-// a prefix can slice one first. Unlike atoi this needs no terminator, so it
-// reads a field out of a buffer without copying.
-//
-// The error arm carries what was wrong, so a caller reporting a bad config
-// line has something to print. Where only the number matters,
-// `str_to_i64_or(s, 0)` reads the fallback in one line.
 export fn str_to_i64(s: string) -> Result<int64, string> {
   var n: int64 = (int64)s.length;
   if (n == 0) { return Err("empty"); }
@@ -260,10 +188,6 @@ export fn str_to_i64(s: string) -> Result<int64, string> {
   }
   if (i >= n) { return Err("sign with no digits"); }
 
-  // The magnitude is accumulated unsigned and checked before each step, so a
-  // number past the type answers Err rather than a wrapped Ok. A Result return
-  // exists to report exactly this, and "99999999999999999999999" used to come
-  // back as Ok(200376420520689663).
   var limit: uint64 = 9223372036854775807;
   if (negative == 1) { limit = 9223372036854775808; }
 
@@ -286,8 +210,6 @@ export fn str_to_i64(s: string) -> Result<int64, string> {
   return Ok((int64)value);
 }
 
-// The parsed value, or `fallback` when the view does not hold a number. For
-// the callers that have a sensible default and no one to report to.
 export fn str_to_i64_or(s: string, fallback: int64) -> int64 {
   match (str_to_i64(s)) {
     case Ok(v): { return v; }
@@ -295,11 +217,6 @@ export fn str_to_i64_or(s: string, fallback: int64) -> int64 {
   }
 }
 
-// Write `n` as decimal into `buf` and return a view of what was written. The
-// caller owns the bytes, so the view lives exactly as long as the buffer does.
-// 21 bytes hold any int64 including the sign. An undersized buffer yields an
-// empty view rather than a truncated number, since a truncated number reads
-// as a different number.
 export fn i64_to_str(n: int64, buf: uint8*, buf_len: int64) -> string {
   var out: string;
   out.chars = buf;
@@ -311,15 +228,6 @@ export fn i64_to_str(n: int64, buf: uint8*, buf_len: int64) -> string {
   return out;
 }
 
-// ─── C string boundary ──────────────────────────────────────────────────────
-//
-// These take `cstring` because a C library reads up to a NUL. Mettle code
-// working in Mettle should reach for the `str_*` functions above.
-
-// Return the length of a null-terminated C string.
-// Named cstr_len, not strlen: the freestanding runtime is linked into every
-// program and already defines strlen, and a module export shares that flat
-// symbol namespace.
 export fn cstr_len(s: cstring) -> int64 {
   var i: int64 = 0;
   while (s[i] != 0) {
@@ -328,8 +236,6 @@ export fn cstr_len(s: cstring) -> int64 {
   return i;
 }
 
-// Convert an integer to decimal ASCII in buf and append a trailing NUL.
-// Returns the number of digits written, excluding the trailing NUL.
 export fn int_to_dec(buf: uint8*, n: int64) -> int32 {
   var tmp: int32[32];
   var value: int64 = n;
@@ -375,9 +281,6 @@ export fn int_to_dec(buf: uint8*, n: int64) -> int32 {
   return pos;
 }
 
-// Copy pattern into buf, replacing %d with the decimal form of value.
-// Returns the number of bytes written excluding the trailing NUL, or -1 if the
-// output would not fit.
 export fn format_i64(buf: uint8*, buf_len: int32, pattern: string, value: int64) -> int32 {
   var num_buf: uint8[32];
   var num_len: int32 = int_to_dec(&num_buf[0], value);
@@ -428,7 +331,6 @@ export fn format_i64(buf: uint8*, buf_len: int32, pattern: string, value: int64)
   return dst;
 }
 
-// Compare two C strings.  Returns 0 if equal, non-zero otherwise.
 export fn streq(a: cstring, b: cstring) -> int32 {
   var i: int64 = 0;
   while (a[i] != 0) {
@@ -439,8 +341,6 @@ export fn streq(a: cstring, b: cstring) -> int32 {
   return 1;
 }
 
-// Compare buf[offset..] with a string, bounded by buf_len.
-// Returns 0 on exact match, non-zero otherwise.
 export fn cstr_ncmp(buf: uint8*, offset: int32, needle: string, buf_len: int32) -> int32 {
   if (offset < 0) { return -1; }
   if (buf_len < 0) { return -1; }

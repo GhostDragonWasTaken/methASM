@@ -1,5 +1,3 @@
-// High-resolution timing for benchmarks (QueryPerformanceCounter on Windows).
-
 var g_bench_qpc_freq: int64 = 0;
 
 extern fn QueryPerformanceCounter(counter: int64*) -> int32 = "QueryPerformanceCounter";

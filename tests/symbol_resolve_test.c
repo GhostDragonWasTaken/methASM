@@ -28,8 +28,7 @@ static int write_object(BinaryEmitter *emitter, const char *path) {
 static int create_imp_symbol_object(const char *path) {
   BinaryEmitter *emitter = NULL;
   size_t text = 0u;
-  /* call rel32; mov rax, [rip+disp32]; ret -- the externals must be
-   * relocated against, or the linker's section GC drops them as unused. */
+
   static const unsigned char code[] = {0xE8u, 0x00u, 0x00u, 0x00u, 0x00u,
                                        0x48u, 0x8Bu, 0x05u, 0x00u, 0x00u,
                                        0x00u, 0x00u, 0xC3u};

@@ -1,47 +1,9 @@
-// Mettle standard library: Networking (Winsock2)
-//
-// Provides raw socket operations for TCP/UDP networking on Windows.
-// The internal PE linker resolves ws2_32.dll directly. External/manual links
-// may still need -lws2_32 or ws2_32.lib.
-//
-// The wrappers here answer `Result`, so the socket and the reason it could not
-// be opened arrive on separate arms and neither can be read as the other:
-//
-//   match (net_init()) {
-//     case Ok(ready): { }
-//     case Err(code): { return code; }
-//   }
-//   var sock: int64 = 0;
-//   match (socket_tcp()) {
-//     case Ok(s): { sock = s; }
-//     case Err(code): { net_cleanup(); return code; }
-//   }
-//   defer closesocket(sock);
-//   ... connect / send / recv ...
-//   net_cleanup();
-//
-// The extern declarations are the operating system's own contract and keep it,
-// so `accept` still answers INVALID_SOCKET() and the code comes from
-// net_last_error():
-//
-//   var client: int64 = accept(server_sock, ...);
-//   if (client != INVALID_SOCKET()) {
-//     defer closesocket(client);
-//     ... handle client ...
-//   }
-
 import "std/core";
 import "std/mem";
 import "std/thread";
 
-// Guard + reference count for thread-safe net_init/net_cleanup.
-// Exported so resolver keeps them when importing modules that use export filtering.
 export var net_ref_count: int32 = 0;
 export var net_ref_lock: int32 = 0;
-
-// ─── Address family / socket type / protocol constants ───────────────────────
-// These are returned as functions because Mettle doesn't have
-// top-level constant expressions yet.
 
 export fn AF_INET() -> int32     { return 2; }
 export fn SOCK_STREAM() -> int32 { return 1; }
@@ -57,55 +19,34 @@ export fn INADDR_ANY() -> int32 { return 0; }
 export fn INVALID_SOCKET() -> int64 { return -1; }
 export fn SOCKET_ERROR() -> int32 { return -1; }
 
-// ─── Winsock2 core functions ─────────────────────────────────────────────────
-// WSAStartup(wVersionRequired, lpWSAData) -> int32
-//   wVersionRequired: typically 0x0202 for Winsock 2.2
-//   lpWSAData: pointer to a 408-byte buffer (WSADATA struct)
 export extern fn WSAStartup(version: int32, wsa_data: cstring) -> int32 = "WSAStartup";
 export extern fn WSACleanup() -> int32 = "WSACleanup";
 export extern fn WSAGetLastError() -> int32 = "WSAGetLastError";
 
-// ─── Socket lifecycle ────────────────────────────────────────────────────────
 export extern fn socket(af: int32, sock_type: int32, protocol: int32) -> int64 = "socket";
 export extern fn closesocket(s: int64) -> int32 = "closesocket";
 export extern fn shutdown(s: int64, how: int32) -> int32 = "shutdown";
 
-// ─── Client operations ──────────────────────────────────────────────────────
 export extern fn connect(s: int64, addr: cstring, addrlen: int32) -> int32 = "connect";
 
-// ─── Server operations ──────────────────────────────────────────────────────
 export extern fn bind(s: int64, addr: cstring, addrlen: int32) -> int32 = "bind";
 export extern fn listen(s: int64, backlog: int32) -> int32 = "listen";
 export extern fn accept(s: int64, addr: cstring, addrlen: cstring) -> int64 = "accept";
 export extern fn setsockopt(s: int64, level: int32, optname: int32, optval: cstring, optlen: int32) -> int32 = "setsockopt";
 
-// ─── Data transfer ──────────────────────────────────────────────────────────
 export extern fn send(s: int64, buf: cstring, len: int32, flags: int32) -> int32 = "send";
 export extern fn recv(s: int64, buf: cstring, len: int32, flags: int32) -> int32 = "recv";
 
-// ─── Socket I/O mode ─────────────────────────────────────────────────────────
-// ioctlsocket(s, cmd, argp) controls blocking mode etc. cmd FIONBIO toggles
-// non-blocking I/O (argp points to a u_long: nonzero = non-blocking).
 export extern fn ioctlsocket(s: int64, cmd: int32, argp: cstring) -> int32 = "ioctlsocket";
-export fn FIONBIO() -> int32 { return (int32)0x8004667E; }  // _IOW('f', 126, u_long)
+export fn FIONBIO() -> int32 { return (int32)0x8004667E; }
 export fn TCP_NODELAY() -> int32 { return 1; }
 
-// ─── Address utilities ──────────────────────────────────────────────────────
 export extern fn htons(hostshort: int32) -> int32 = "htons";
 export extern fn htonl(hostlong: int32) -> int32 = "htonl";
 export extern fn ntohs(netshort: int32) -> int32 = "ntohs";
 export extern fn ntohl(netlong: int32) -> int32 = "ntohl";
 export extern fn inet_addr(cp: cstring) -> int32 = "inet_addr";
 
-// ─── Convenience wrappers ───────────────────────────────────────────────────
-//
-// The extern declarations above are the operating system's own contract and
-// keep it: a socket call answers -1, and the code for why is fetched
-// separately. These wrappers are Mettle's, so they answer `Result` and carry
-// the code in the failure arm, which means a caller cannot use a socket it
-// never got.
-
-// Initialize Winsock 2.2.
 export fn net_init() -> Result<int32, int32> {
   spin_lock(&net_ref_lock);
 
@@ -115,14 +56,12 @@ export fn net_init() -> Result<int32, int32> {
     return Ok(0);
   }
 
-  // WSADATA is 408 bytes on x64 Windows. We allocate a raw buffer.
   var wsa_buf: cstring = malloc(408);
   if (wsa_buf == 0) {
     spin_unlock(&net_ref_lock);
     return Err(0);
   }
 
-  // 0x0202 = version 2.2
   var result: int32 = WSAStartup(514, wsa_buf);
   free(wsa_buf);
   if (result == 0) {
@@ -133,12 +72,10 @@ export fn net_init() -> Result<int32, int32> {
   return Ok(0);
 }
 
-// Shut down Winsock.  Returns 0 on success.
 export fn net_cleanup() -> int32 {
   spin_lock(&net_ref_lock);
 
   if (net_ref_count <= 0) {
-    // Idempotent cleanup: treat extra cleanup calls as no-op.
     spin_unlock(&net_ref_lock);
     return 0;
   }
@@ -158,7 +95,6 @@ export fn net_last_error() -> int32 {
   return WSAGetLastError();
 }
 
-// A TCP or UDP socket, or the error code that stopped one being made.
 export fn socket_tcp() -> Result<int64, int32> {
   var s: int64 = socket(AF_INET(), SOCK_STREAM(), IPPROTO_TCP());
   if (s == INVALID_SOCKET()) { return Err(net_last_error()); }
@@ -181,28 +117,20 @@ export fn net_is_initialized() -> int32 {
   return ready;
 }
 
-// Build a sockaddr_in structure for IPv4.
-// The Ok arm is a malloc'd 16-byte buffer the caller must free() after use.
-//   ip   – dotted-quad string, e.g. "127.0.0.1"
-//   port – port number in host byte order
 export fn sockaddr_in(ip: cstring, port: int32) -> Result<cstring, int32> {
   var buf: cstring = malloc(16);
   if (buf == 0) {
     return Err(0);
   }
-  // Zero it out
   memset(buf, 0, 16);
 
-  // sin_family = AF_INET (2) at offset 0 (2 bytes, little-endian)
   buf[0] = 2;
   buf[1] = 0;
 
-  // sin_port at offset 2 (2 bytes, network byte order)
   var net_port: int32 = htons(port);
   buf[2] = (uint8)net_port;
   buf[3] = (uint8)(net_port / 256);
 
-  // sin_addr at offset 4 (4 bytes)
   var addr: int32 = inet_addr(ip);
   buf[4] = (uint8)addr;
   buf[5] = (uint8)(addr / 256);
@@ -212,7 +140,6 @@ export fn sockaddr_in(ip: cstring, port: int32) -> Result<cstring, int32> {
   return Ok(buf);
 }
 
-// Build sockaddr_in for 0.0.0.0:port.
 export fn sockaddr_in_any(port: int32) -> Result<cstring, int32> {
   var buf: cstring = malloc(16);
   if (buf == 0) {
@@ -230,7 +157,6 @@ export fn sockaddr_in_any(port: int32) -> Result<cstring, int32> {
   return Ok(buf);
 }
 
-// Set SO_REUSEADDR to enabled (1) or disabled (0).
 export fn set_reuseaddr(sock: int64, enabled: int32) -> int32 {
   var opt: uint8[4];
   if (enabled != 0) {
@@ -244,16 +170,12 @@ export fn set_reuseaddr(sock: int64, enabled: int32) -> int32 {
   return setsockopt(sock, SOL_SOCKET(), SO_REUSEADDR(), &opt[0], 4);
 }
 
-// Toggle non-blocking I/O on a socket. enabled != 0 => non-blocking (recv/send
-// return immediately, with WSAEWOULDBLOCK when no data / buffer full).
 export fn set_nonblocking(sock: int64, enabled: int32) -> int32 {
   var v: uint32[1];
   if (enabled != 0) { v[0] = 1; } else { v[0] = 0; }
   return ioctlsocket(sock, FIONBIO(), (cstring)&v[0]);
 }
 
-// Disable Nagle's algorithm on a TCP socket so small packets go out immediately
-// (lower latency for chatty, latency-sensitive traffic like a game state stream).
 export fn set_nodelay(sock: int64, enabled: int32) -> int32 {
   var opt: uint8[4];
   if (enabled != 0) { opt[0] = 1; } else { opt[0] = 0; }
@@ -261,8 +183,6 @@ export fn set_nodelay(sock: int64, enabled: int32) -> int32 {
   return setsockopt(sock, IPPROTO_TCP(), TCP_NODELAY(), &opt[0], 4);
 }
 
-// Send every byte in buf[0..len). A short write is retried; a failed one ends
-// the loop with the code, so a partial send cannot be read as a whole one.
 export fn send_all(sock: int64, buf: cstring, len: int32) -> Result<int32, int32> {
   var total: int32 = 0;
   while (total < len) {
