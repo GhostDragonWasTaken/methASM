@@ -1,4 +1,5 @@
 #include "ir_optimize_internal.h"
+#include "ir_loop_shape.h"
 
 static int ir_fill_value_operand(const IRFunction *function, size_t begin,
                                  size_t end, const IROperand *value,
@@ -167,29 +168,18 @@ static int ir_fill_frame(IRFunction *function, size_t header_index,
                          size_t *compare_out, size_t *branch_out,
                          size_t *jump_out, int *matched) {
   *matched = 0;
-  if (!function || header_index + 4 >= function->instruction_count) {
+  IRLoopShape loop;
+  if (!ir_loop_shape_at(function, header_index, &loop)) {
     return 1;
   }
-  IRInstruction *header = &function->instructions[header_index];
-  if (header->op != IR_OP_LABEL || !ir_label_is_while_header(header->text)) {
+  if (strcmp(loop.compare->text, "<") != 0 ||
+      !loop.branch->text) {
     return 1;
   }
-  size_t compare_index = 0, branch_index = 0;
-  if (!ir_find_next_non_nop(function, header_index + 1, &compare_index) ||
-      !ir_find_next_non_nop(function, compare_index + 1, &branch_index)) {
-    return 1;
-  }
-  IRInstruction *compare = &function->instructions[compare_index];
-  IRInstruction *branch = &function->instructions[branch_index];
-  if (compare->op != IR_OP_BINARY || compare->is_float || !compare->text ||
-      strcmp(compare->text, "<") != 0 ||
-      compare->dest.kind != IR_OPERAND_TEMP || !compare->dest.name ||
-      compare->lhs.kind != IR_OPERAND_SYMBOL || !compare->lhs.name ||
-      branch->op != IR_OP_BRANCH_ZERO ||
-      !ir_operand_is_temp_named(&branch->lhs, compare->dest.name) ||
-      !branch->text) {
-    return 1;
-  }
+  IRInstruction *header = loop.header;
+  IRInstruction *branch = loop.branch;
+  size_t compare_index = loop.compare_index;
+  size_t branch_index = loop.branch_index;
   size_t jump_index = (size_t)-1;
   for (size_t i = branch_index + 1; i < function->instruction_count; i++) {
     if (function->instructions[i].op == IR_OP_JUMP &&

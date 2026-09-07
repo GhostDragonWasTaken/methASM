@@ -1,4 +1,5 @@
 #include "ir_optimize_internal.h"
+#include "ir_loop_shape.h"
 
 const char *ir_function_local_declared_type(const IRFunction *function,
                                                    const char *symbol_name) {
@@ -948,30 +949,19 @@ int ir_simd_byte_map_pass(IRFunction *function, int *changed) {
 
 static int ir_try_vectorize_lcg_at(IRFunction *function, size_t header_index,
                                    int *changed) {
-  if (!function || header_index + 4 >= function->instruction_count) {
+  IRLoopShape loop;
+  if (!ir_loop_shape_at(function, header_index, &loop)) {
     return 1;
   }
-  IRInstruction *header = &function->instructions[header_index];
-  if (header->op != IR_OP_LABEL || !ir_label_is_while_header(header->text)) {
+  if (strcmp(loop.compare->text, "<") != 0) {
     return 1;
   }
-  const char *loop_label = header->text;
-  size_t compare_index = 0, branch_index = 0;
-  if (!ir_find_next_non_nop(function, header_index + 1, &compare_index) ||
-      !ir_find_next_non_nop(function, compare_index + 1, &branch_index)) {
-    return 1;
-  }
-  IRInstruction *compare = &function->instructions[compare_index];
-  IRInstruction *branch = &function->instructions[branch_index];
-  if (compare->op != IR_OP_BINARY || compare->is_float || !compare->text ||
-      strcmp(compare->text, "<") != 0 ||
-      compare->lhs.kind != IR_OPERAND_SYMBOL || !compare->lhs.name ||
-      compare->dest.kind != IR_OPERAND_TEMP || !compare->dest.name ||
-      branch->op != IR_OP_BRANCH_ZERO ||
-      !ir_operand_is_temp_named(&branch->lhs, compare->dest.name)) {
-    return 1;
-  }
-  const char *iv_symbol = compare->lhs.name;
+  IRInstruction *header = loop.header;
+  IRInstruction *compare = loop.compare;
+  IRInstruction *branch = loop.branch;
+  size_t branch_index = loop.branch_index;
+  const char *loop_label = loop.loop_label;
+  const char *iv_symbol = loop.iv_symbol;
   if (compare->rhs.kind != IR_OPERAND_SYMBOL &&
       compare->rhs.kind != IR_OPERAND_INT) {
     return 1;
