@@ -1081,7 +1081,7 @@
     },
     {
       "source": "examples/dot_product/dot_product.mettle",
-      "sha256": "cd0a238c8e61b2d5e25dd71f39ebc225807885cee142fdd4bc3030a7963968bc",
+      "sha256": "63ef7587881b5376c35fa85327a8a4d29a97832af441dc6c20bfdf8e07e59f0a",
       "baseline": {
         "accesses": 34,
         "proved": 0,
@@ -1100,7 +1100,7 @@
     },
     {
       "source": "examples/base64_encode/base64_encode.mettle",
-      "sha256": "e82c4e91c3107ded46748d3832674aa17c3344b6cffc50b02a47375b9a32214c",
+      "sha256": "dedf67085ddbccfada4569185ea37ae757f798e93472edfd259109d71148ff3f",
       "baseline": {
         "accesses": 57,
         "proved": 0,
@@ -1119,7 +1119,7 @@
     },
     {
       "source": "examples/heapsort/heapsort.mettle",
-      "sha256": "f39e65d6f07c0d99a9138916640628c92e24363e2a5e7f2d3d2c3809e8d1b580",
+      "sha256": "062ba9e8c7657c0bf82f29e07c8f1097cc925534e583f47038756606dcb15aa5",
       "baseline": {
         "accesses": 54,
         "proved": 9,
@@ -1138,7 +1138,7 @@
     },
     {
       "source": "examples/crc32/crc32.mettle",
-      "sha256": "39384e2465e4247b89b6f5d6dde97592427ffed50cedbb27920634d8d9d27873",
+      "sha256": "867993f4e9bfebff4a9a28c0f01420a493a73edb497e16c79ac7c10711c53938",
       "baseline": {
         "accesses": 31,
         "proved": 0,
@@ -1157,7 +1157,7 @@
     },
     {
       "source": "examples/binary_search/binary_search.mettle",
-      "sha256": "48877c7e21302499bb7f094683a81fe862041396ee87e9868bdce09d269c0edf",
+      "sha256": "de32ebd384bd5c70f303604599b0596a2a686b4874e1124b8b74f1f57343b4a7",
       "baseline": {
         "accesses": 33,
         "proved": 0,
@@ -1176,7 +1176,7 @@
     },
     {
       "source": "examples/sort_insertion/sort_insertion.mettle",
-      "sha256": "f2a507cc325277fad16c63ae14501f1c16bde467f62d09d1af3dcede2fa7fd7e",
+      "sha256": "d81264eea780e21bd13709fb1054a3a6ce7ec7abb94a4ee08649df8b48246e5a",
       "baseline": {
         "accesses": 45,
         "proved": 9,
@@ -1195,7 +1195,7 @@
     },
     {
       "source": "examples/transpose/transpose.mettle",
-      "sha256": "0e38f2f66727ac17ed5cab0d28dfd0036fe24d6d6056451b14de2ccbfac02d31",
+      "sha256": "665939823454e39e9924912373f67b1a8fcb05bbcd8a3362690a181a8a72090c",
       "baseline": {
         "accesses": 35,
         "proved": 0,
@@ -1214,7 +1214,7 @@
     },
     {
       "source": "examples/aos_sum/aos_sum.mettle",
-      "sha256": "387d1147b0315152cc05cd3368597d9fd81831dca4217b30a2031ee48f5b64c6",
+      "sha256": "548a94d09036c1a0aa8d5c19e2dbefa3f63c15806d918662e73391fb15884686",
       "baseline": {
         "accesses": 42,
         "proved": 0,

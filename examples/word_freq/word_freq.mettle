@@ -1,14 +1,3 @@
-// Mettle word-frequency benchmark (Suite 3)
-//
-// Generates a 1 MB document over a skewed 4096-word vocabulary, tokenizes it,
-// counts every word in an open-addressing hash map that grows and rehashes as
-// it fills, then selects the sixteen most frequent words. The hot path is a
-// probe loop whose next address depends on the hash of bytes just read, so it
-// is latency bound and unpredictable rather than streamable.
-//
-// Build: build.bat
-// Run: word_freq.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

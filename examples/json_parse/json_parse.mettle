@@ -1,13 +1,3 @@
-// Mettle JSON document parser benchmark (Suite 3)
-//
-// Builds a ~350 KB JSON catalogue in memory, then tokenizes and parses it with
-// a recursive-descent parser into a node arena and walks the resulting tree.
-// The document carries escaped strings, exponent-form numbers, ragged arrays,
-// nulls, and irregular whitespace, so no phase reduces to a uniform scan.
-//
-// Build: build.bat
-// Run: json_parse.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";
@@ -98,7 +88,6 @@ fn emit_tag(dst: uint8*, pos: int32, which: int32) -> int32 {
   }
 }
 
-// A literal '{' has to be doubled: a lone brace opens a string interpolation.
 fn gen_doc(dst: uint8*) -> int32 {
   var pos: int32 = 0;
   pos = emit_cstr(dst, pos, "{{\"meta\":{{\"version\":3,\"source\":\"synthetic\",\"records\":");

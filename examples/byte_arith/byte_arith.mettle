@@ -1,11 +1,3 @@
-// New dimension: narrow uint8 arithmetic over a buffer.
-//
-// Reads/writes a 256 KB uint8 buffer doing 8-bit arithmetic (wraps mod 256).
-// Probes narrow-type codegen: does Mettle emit byte ops, or widen to 64-bit
-// and re-mask each time? GCC -O3 packs this into wide SIMD byte lanes.
-//
-// Build: build.bat   Run: byte_arith.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

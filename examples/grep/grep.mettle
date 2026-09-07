@@ -1,11 +1,3 @@
-// Mettle Grep benchmark
-//
-// Counts lines containing "ERROR" in a 1 MiB log buffer, 200 passes.
-// Same algorithm as grep.c: uint64 load + 5-byte mask at 'E', memcmp in the tail.
-//
-// Build: build.bat
-// Run: grep.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

@@ -1,12 +1,3 @@
-// Mettle linked-list pointer-chase benchmark (Suite 2)
-//
-// Builds a 65536-node singly-linked list in a shuffled (non-sequential)
-// memory order and sums node values by chasing `next` pointers. 200 passes.
-// Stresses latency-bound indirect loads rather than sequential bandwidth.
-//
-// Build: build.bat
-// Run: linked_list_sum.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

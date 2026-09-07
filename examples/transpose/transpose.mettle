@@ -1,12 +1,3 @@
-// New dimension: 256x256 int32 matrix transpose (strided stores).
-//
-// b[j*N+i] = a[i*N+j] -- reads stride-1, writes stride-N (cache-unfriendly).
-// Probes 2D index-address arithmetic (i*N+j) and how Mettle schedules
-// strided stores. GCC -O3 may block/vectorize; the index math alone is a
-// common place naive codegen emits redundant imuls.
-//
-// Build: build.bat   Run: transpose.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

@@ -1,15 +1,3 @@
-// Mettle Hello World (GUI)
-//
-// Displays "Hello, world!" in a native Windows GUI window with custom painting.
-//
-// Author: Vinnie Falco
-//
-// Build:
-//   mettle --build --linker internal examples/hello_ui/hello_ui.mettle -o hello_ui.exe
-//
-// Run:
-//   hello_ui.exe
-
 import "std/ui";
 
 fn on_paint(hwnd: int64) {

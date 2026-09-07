@@ -1,12 +1,3 @@
-// New dimension: heavy read-modify-write of GLOBAL variables in a hot loop.
-//
-// The direct-object backend keeps globals scalar/in-memory. C -O3 promotes
-// these to registers across the loop (they don't escape). If Mettle reloads
-// and stores each global every iteration instead of keeping it in a register,
-// this loop pays a memory round-trip per op and should lag badly.
-//
-// Build: build.bat   Run: global_acc.exe
-
 import "std/io";
 import "std/bench";
 

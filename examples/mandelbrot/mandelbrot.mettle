@@ -1,12 +1,3 @@
-// Mettle Mandelbrot benchmark.
-//
-// Escape-time Mandelbrot over a 600x400 grid, max 256 iterations, summing the
-// escape counts. This is float64-heavy with a tight branchy inner loop --
-// exactly what GCC -O3 schedules and partially vectorizes well, and where
-// Mettle's scalar FP codegen is expected to lag.
-//
-// Build: build.bat   Run: mandelbrot.exe
-
 import "std/io";
 import "std/bench";
 

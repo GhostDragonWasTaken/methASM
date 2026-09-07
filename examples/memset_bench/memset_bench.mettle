@@ -1,7 +1,3 @@
-// Mettle memset microbenchmark
-//
-// memset 256 KB buffer with rotating byte, 200 passes.
-
 import "std/io";
 import "std/mem";
 import "std/bench";

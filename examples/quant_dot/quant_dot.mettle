@@ -1,6 +1,3 @@
-// Quantized int8 dot-product microbenchmark.
-// int8 x int8 -> int32 accumulate: the inner loop of quantized GEMM/GEMV,
-// the dominant compute in CPU LLM inference (llama.cpp Q8 style).
 import "std/io";
 import "std/mem";
 import "std/bench";

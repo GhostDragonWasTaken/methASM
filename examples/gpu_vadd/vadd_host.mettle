@@ -1,32 +1,15 @@
-// Host program that drives the GPU through std/gpu (the CUDA Driver API) and
-// launches the Mettle-emitted vadd kernel with the `dispatch` statement.
-//
-// Build (links the CUDA driver import stub; adjust the path to your toolkit):
-//   mettle --emit-ptx vadd_kernel.mettle -o vadd_kernel.ptx \
-//     --emit-kernel-decls=vadd_decls.mettle
-//   mettle --build vadd_host.mettle -o vadd_host.exe \
-//     --link-arg "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/lib/x64/cuda.lib"
-//
-// The kernel build needs no target flag: `mettle --gpu-info` shows which one
-// this machine's driver gets, and --emit-ptx picks it.
 import "std/io";
 import "std/mem";
 import "std/gpu";
 
-// The kernel declarations come from the kernel file itself, written by
-// `--emit-kernel-decls`. A host that imports them cannot disagree with the
-// module it launches about an argument or a block shape.
 import "vadd_decls";
 
 fn main() -> int32 {
-  // Initialize the driver and load the module. Every failure below this line
-  // names itself, including the driver's own PTX JIT log.
   if (gpu_open("vadd_kernel.ptx") == 0) { return 1; }
 
   var buffer: uint8[128];
   println("running on {gpu_device_name(0, &buffer[0], 128)} ({gpu_sm_count(0)} SMs)");
 
-  // host data: a[i]=i, b[i]=2i  ->  expect c[i]=3i
   var n: int32 = 1 << 20;
   var bytes: int64 = (int64)n * 4;
   var ha: float32* = malloc(bytes);
@@ -35,16 +18,12 @@ fn main() -> int32 {
   var i: int32 = 0;
   while (i < n) { ha[i] = (float32)i; hb[i] = (float32)(2 * i); i = i + 1; }
 
-  // device buffers (explicit as you own VRAM)
   var da: int64 = gpu_malloc(bytes);
   var db: int64 = gpu_malloc(bytes);
   var dc: int64 = gpu_malloc(bytes);
   gpu_to_device(da, (uint8*)ha, bytes);
   gpu_to_device(db, (uint8*)hb, bytes);
 
-  // launch: one line instead of parameter packing + cuLaunchKernel. `work: n`
-  // means "one thread per element" and computes the grid from the declared
-  // block. The following blocking copy supplies the completion ordering.
   dispatch vadd[work: n](da, db, dc, n);
 
   gpu_to_host((uint8*)hc, dc, bytes);

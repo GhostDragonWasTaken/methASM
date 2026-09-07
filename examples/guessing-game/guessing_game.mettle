@@ -1,23 +1,11 @@
-// Mettle Number Guessing Game
-//
-// The computer picks a random number 1-100. You guess until you get it right.
-// Demonstrates: std/io, std/conv, std/process, std/bench, control flow, loops, extern.
-//
-// Build: build.bat
-// Run: guessing_game.exe
-//
-// Uses Windows ReadFile for stdin — CRT getchar() returns EOF with -nostartfiles.
-
 import "std/io";
 import "std/conv";
 import "std/process";
-import "std/bench";   // bench_time_us(): the seed, with no CRT clock on the link line
+import "std/bench";
 
 extern fn GetStdHandle(which: int32) -> int64 = "GetStdHandle";
 extern fn ReadFile(h: int64, buf: cstring, len: int32, read: cstring, overlapped: cstring) -> int32 = "ReadFile";
 
-// STD_INPUT_HANDLE = -10
-// Read one byte from console, return -1 on EOF/error
 fn read_char_win() -> int32 {
   var h: int64 = GetStdHandle(-10);
   if (h == -1 || h == 0) { return -1; }
@@ -29,12 +17,6 @@ fn read_char_win() -> int32 {
   return ch[0];
 }
 
-// Read a line from stdin into buf (max 31 chars + null), return length
-// Consumes trailing \n after \r so Windows CRLF doesn't leave empty line in buffer
-// Returns the length read, or -1 at end of input. An empty line and a closed
-// stdin both used to answer 0, so a caller treating 0 as bad input looped on
-// EOF forever: piped into the game with nothing left to read, it printed the
-// invalid-input line a couple of million times a second.
 fn read_line_win(buf: cstring, max_len: int32) -> int32 {
   var i: int32 = 0;
   while (i < max_len) {
@@ -47,7 +29,6 @@ fn read_line_win(buf: cstring, max_len: int32) -> int32 {
       if (c == 13) {
         var next: int32 = read_char_win();
         if (next != 10 && next >= 0) {
-          // Not \n, can't unget - discard (Windows is always \r\n)
         }
       }
       buf[i] = 0;
@@ -60,7 +41,6 @@ fn read_line_win(buf: cstring, max_len: int32) -> int32 {
   return max_len;
 }
 
-// Get random number in range [1, 100] using modulo-like logic: r - (r/100)*100
 fn rand_range_1_100() -> int32 {
   var r: int32 = rand();
   if (r < 0) {
@@ -94,7 +74,6 @@ fn main() -> int32 {
     var buf: uint8[32];
     var len: int32 = read_line_win(&buf[0], 31);
     if (len < 0) {
-      // stdin is closed: there is nobody left to guess.
       return 0;
     }
     if (len == 0) {

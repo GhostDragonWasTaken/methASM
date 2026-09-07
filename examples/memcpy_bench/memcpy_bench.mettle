@@ -1,7 +1,3 @@
-// Mettle memcpy microbenchmark
-//
-// Copy 256 KB src -> dst, 200 passes.
-
 import "std/io";
 import "std/mem";
 import "std/bench";

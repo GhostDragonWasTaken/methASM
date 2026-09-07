@@ -1,14 +1,3 @@
-// Mettle backtracking regex benchmark (Suite 3)
-//
-// Compiles five patterns (literals, wildcards, bracket classes, greedy
-// quantifiers, anchors) into instruction programs, then matches each one
-// against 4000 generated log lines at every start offset. The matcher is
-// recursive with greedy backtracking, so the work per position depends on the
-// text it just read and the call depth changes constantly.
-//
-// Build: build.bat
-// Run: regex_match.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

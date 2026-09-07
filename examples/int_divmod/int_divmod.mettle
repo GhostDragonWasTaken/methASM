@@ -1,13 +1,3 @@
-// Mettle integer division/modulo benchmark.
-//
-// A hot loop dominated by 64-bit unsigned div + mod with a runtime-varying
-// divisor, so neither compiler can strength-reduce it to a magic multiply.
-// This is pure DIV-instruction throughput: latency hiding, register
-// scheduling, and avoiding redundant divs. Expected to be close, but a good
-// probe of how tightly Mettle schedules around a long-latency instruction.
-//
-// Build: build.bat   Run: int_divmod.exe
-
 import "std/io";
 import "std/bench";
 

@@ -1,11 +1,3 @@
-// Mettle CRC32 benchmark (Suite 2)
-//
-// CRC-32 (bit-by-bit, IEEE 802.3 polynomial) over a 256 KB buffer.
-// 200 passes.
-//
-// Build: build.bat
-// Run: crc32.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

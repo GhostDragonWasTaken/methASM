@@ -1,16 +1,3 @@
-// Nim distinct-type equivalent in Mettle
-//
-// Nim:
-//   type Foo = distinct int32;
-//   type Bar = distinct int32;
-//   const a: Foo = 1;
-//   const b: Bar = 2;
-//   const c = cast[Bar]a + b;
-//   const d: Foo = cast b;
-//
-// Mettle has no distinct types; single-field structs are the newtype pattern.
-// Casts are explicit helper functions (Mettle's (Type)expr works on numerics/pointers).
-
 import "std/io";
 
 struct Foo {

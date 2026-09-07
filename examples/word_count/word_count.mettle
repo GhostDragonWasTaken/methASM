@@ -1,16 +1,7 @@
-// Mettle Word Count benchmark
-//
-// Parses a raw byte buffer to count words (non-empty runs of non-whitespace).
-// Exercises: malloc, buffer iteration, byte classification, branching.
-//
-// Build: build.bat
-// Run: word_count.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";
 
-// Count words in buf[0..len-1]. Word = non-empty sequence of non-whitespace bytes.
 fn word_count(buf: cstring, len: int64) -> int64 {
   var count: int64 = 0;
   var i: int64 = 0;

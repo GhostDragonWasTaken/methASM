@@ -1,12 +1,3 @@
-// New dimension: int<->float conversion-heavy loop.
-//
-// Each iteration converts int->float64, does a little FP, then float64->int.
-// fp_div hinted Mettle's per-op FP path is costly; this isolates the
-// cvtsi2sd/cvttsd2si conversion traffic specifically. GCC -O3 keeps values in
-// xmm and can vectorize the conversions.
-//
-// Build: build.bat   Run: i2f_conv.exe
-
 import "std/io";
 import "std/bench";
 

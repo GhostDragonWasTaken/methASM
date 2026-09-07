@@ -1,11 +1,3 @@
-// New dimension: single-precision float32 reduction + map.
-//
-// float_sum showed float64 loses 3.4x. This asks whether float32 is handled
-// natively (packed ss/ps, 2x the lanes) or just promoted to float64 / done
-// scalar. A big gap vs the float64 result would point at missing f32 codegen.
-//
-// Build: build.bat   Run: float32_sum.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

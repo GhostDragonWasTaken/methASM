@@ -1,24 +1,6 @@
-// ============================================================================
-// A GGUF model reader, in Mettle.
-//
-// GGUF is the llama.cpp model container. This parses the header, all metadata
-// key/value pairs, and the tensor table of a real .gguf file -- the first step
-// any inference engine needs. It reads only the leading metadata region (a few
-// MB), never the multi-GB tensor data, so it is fast even on a 12B model.
-//
-// Format (all little-endian):
-//   magic "GGUF" | u32 version | u64 tensor_count | u64 metadata_kv_count
-//   metadata_kv_count x { string key; u32 value_type; value }
-//   tensor_count    x { string name; u32 n_dims; u64 dims[n_dims];
-//                       u32 ggml_type; u64 offset }
-// A gguf string is { u64 length; bytes }. value_type 9 is an array
-// { u32 elem_type; u64 count; elements }.
-// ============================================================================
-
 import "std/io";
 import "std/mem";
 
-// ---- little-endian decoders ----------------------------------------------
 fn le_u32(b: uint8*) -> int64 {
   return (int64)b[0] | ((int64)b[1] << 8) | ((int64)b[2] << 16) | ((int64)b[3] << 24);
 }
@@ -26,8 +8,6 @@ fn le_u64(b: uint8*) -> int64 {
   return le_u32(b) | (le_u32(&b[4]) << 32);
 }
 
-// Consume n bytes from the stream without keeping them (chunked through scr,
-// which must be >= 64 bytes).
 fn skip_bytes(fp: cstring, scr: uint8*, n: int64) {
   var left: int64 = n;
   while (left > 0) {
@@ -38,8 +18,6 @@ fn skip_bytes(fp: cstring, scr: uint8*, n: int64) {
   }
 }
 
-// Read a gguf string: u64 length then bytes. Store up to cap-1 bytes into out
-// (null-terminated for printing); skip any remainder. Returns the full length.
 fn read_str(fp: cstring, lenbuf: uint8*, scr: uint8*, out: uint8*,
                   cap: int64) -> int64 {
   fread(lenbuf, 1, 8, fp);
@@ -61,12 +39,11 @@ fn read_u64v(fp: cstring, b: uint8*) -> int64 {
   return le_u64(b);
 }
 
-// Byte size of a scalar GGUF metadata value type (0..12); strings/arrays are 0.
 fn scalar_size(t: int64) -> int64 {
-  if (t == 0 || t == 1 || t == 7) { return 1; }  // u8 / i8 / bool
-  if (t == 2 || t == 3) { return 2; }            // u16 / i16
-  if (t == 4 || t == 5 || t == 6) { return 4; }  // u32 / i32 / f32
-  if (t == 10 || t == 11 || t == 12) { return 8; } // u64 / i64 / f64
+  if (t == 0 || t == 1 || t == 7) { return 1; }
+  if (t == 2 || t == 3) { return 2; }
+  if (t == 4 || t == 5 || t == 6) { return 4; }
+  if (t == 10 || t == 11 || t == 12) { return 8; }
   return 0;
 }
 fn is_int_type(t: int64) -> int32 {
@@ -74,7 +51,6 @@ fn is_int_type(t: int64) -> int32 {
   return 0;
 }
 
-// Print a known ggml tensor type name (the dtype of the weights), else the id.
 fn print_ggml_type(t: int64) {
   if (t == 0) { print("F32"); return; }
   if (t == 1) { print("F16"); return; }
@@ -93,15 +69,13 @@ fn main() -> int32 {
     return 1;
   }
 
-  // scratch buffers
-  var b: uint8* = malloc(16);     // small int reads
-  var scr: uint8* = malloc(128);  // skip chunks
-  var key: uint8* = malloc(128);  // metadata keys / tensor names
-  var val: uint8* = malloc(256);  // string values
+  var b: uint8* = malloc(16);
+  var scr: uint8* = malloc(128);
+  var key: uint8* = malloc(128);
+  var val: uint8* = malloc(256);
 
-  // ---- header ----
   fread(b, 1, 4, fp);
-  if (b[0] != 71 || b[1] != 71 || b[2] != 85 || b[3] != 70) { // "GGUF"
+  if (b[0] != 71 || b[1] != 71 || b[2] != 85 || b[3] != 70) {
     println("not a GGUF file");
     fclose(fp);
     return 1;
@@ -116,7 +90,6 @@ fn main() -> int32 {
   println(" metadata entries");
   println("------------------------------------------------------------");
 
-  // ---- metadata key/value pairs ----
   var i: int64 = 0;
   while (i < n_kv) {
     read_str(fp, b, scr, key, 128);
@@ -126,15 +99,14 @@ fn main() -> int32 {
     print_cstr((cstring)key);
     print(" = ");
 
-    if (vtype == 8) {                       // string
+    if (vtype == 8) {
       read_str(fp, b, scr, val, 256);
       println_cstr((cstring)val);
-    } else if (vtype == 9) {                // array
+    } else if (vtype == 9) {
       var et: int64 = read_u32v(fp, b);
       var cnt: int64 = read_u64v(fp, b);
       print("[array of "); print("{cnt}");
       print(" x type#"); print("{et}"); println("]");
-      // skip the elements
       if (et == 8) {
         var k: int64 = 0;
         while (k < cnt) {
@@ -145,7 +117,7 @@ fn main() -> int32 {
       } else {
         skip_bytes(fp, scr, cnt * scalar_size(et));
       }
-    } else if (is_int_type(vtype) == 1) {   // integer scalar
+    } else if (is_int_type(vtype) == 1) {
       var sz: int64 = scalar_size(vtype);
       fread(b, 1, sz, fp);
       var v: int64 = 0;
@@ -154,14 +126,13 @@ fn main() -> int32 {
       else if (sz == 2) { v = (int64)b[0] | ((int64)b[1] << 8); }
       else { v = (int64)b[0]; }
       println("{v}");
-    } else {                                // float scalar (f32/f64)
+    } else {
       skip_bytes(fp, scr, scalar_size(vtype));
       println("(float)");
     }
     i = i + 1;
   }
 
-  // ---- tensor table ----
   println("------------------------------------------------------------");
   println("tensors (first 12):");
   var hist: int64* = malloc(40 * 8);
@@ -181,7 +152,7 @@ fn main() -> int32 {
       dd = dd + 1;
     }
     var gt: int64 = read_u32v(fp, b);
-    read_u64v(fp, b);  // data offset (unused here)
+    read_u64v(fp, b);
     if (gt >= 0 && gt < 40) { hist[gt] = hist[gt] + 1; }
 
     if (t < 12) {

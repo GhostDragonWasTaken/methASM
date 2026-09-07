@@ -1,19 +1,4 @@
-﻿// Mettle particle simulation benchmark (Suite 3)
-//
-// A game-engine step loop: bucket 8192 particles into a 64x64 uniform grid with
-// a counting sort, resolve collisions against the nine neighbouring cells, then
-// integrate and bounce off the walls. Integer bucketing feeds float64 pair
-// tests through an indirection, so the float work never sees a contiguous run.
-//
-// The collision response is written in its sqrt-free form (the normal impulse
-// is (v_rel . delta) / |delta|^2 * delta, which needs only the squared
-// distance) so both languages perform the identical IEEE sequence. Every float
-// constant here is exactly representable in binary for the same reason: a
-// decimal like 0.35 must round, and the two front ends need not round it the
-// same way.
-//
-// Build: build.bat
-// Run: physics_grid.exe
+﻿
 
 import "std/io";
 import "std/mem";

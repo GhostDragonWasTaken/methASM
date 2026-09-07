@@ -1,5 +1,3 @@
-// Quantized int8 matrix multiply: int8 x int8 -> int32 (the quantized GEMM
-// that dominates CPU LLM inference). 32x32, col-unrolled by 4 (SLP shape).
 import "std/io";
 import "std/mem";
 import "std/bench";

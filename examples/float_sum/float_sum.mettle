@@ -1,12 +1,3 @@
-// Mettle float64 array reduction benchmark.
-//
-// Sums a 65536-element float64 array, 4000 passes. This is a textbook
-// auto-vectorization target: GCC -O3 packs the doubles into SSE/AVX lanes
-// and reduces with parallel accumulators. Mettle's vectorizer is int-focused,
-// so this is expected to favor C.
-//
-// Build: build.bat   Run: float_sum.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

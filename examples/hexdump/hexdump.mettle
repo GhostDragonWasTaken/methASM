@@ -1,23 +1,10 @@
-// Mettle Hex Dump Utility
-//
-// Displays file contents in canonical hex dump format:
-//   offset   hex bytes (16 per line)   ASCII
-//
-// Usage: hexdump.exe <filename>
-//
-// Demonstrates: argc/argv, file I/O, buffered reads, hex formatting, defer.
-// Build: build.bat
-// Run: hexdump.exe somefile.bin
-
 import "std/io";
 
-// Convert nibble (0-15) to hex char
 fn nibble_to_hex(n: int64) -> uint8 {
   if (n < 10) { return (uint8)(n + 48); }
   return (uint8)(n + 87);
 }
 
-// Write one byte as two hex chars to buf at offset, advance
 fn byte_to_hex(buf: cstring, offset: int32, b: uint8) -> int32 {
   var v: int32 = b;
   var hi: int32 = v / 16;
@@ -27,7 +14,6 @@ fn byte_to_hex(buf: cstring, offset: int32, b: uint8) -> int32 {
   return offset + 2;
 }
 
-// Format 16 bytes as hex string into buf, return length
 fn format_hex_line(buf: cstring, data: cstring, count: int32) -> int32 {
   var i: int32 = 0;
   var pos: int32 = 0;
@@ -48,7 +34,6 @@ fn format_hex_line(buf: cstring, data: cstring, count: int32) -> int32 {
   return pos;
 }
 
-// Format 16 bytes as ASCII (printable or '.')
 fn format_ascii_line(buf: cstring, data: cstring, count: int32) -> int32 {
   var i: int32 = 0;
   while (i < 16) {
@@ -67,7 +52,6 @@ fn format_ascii_line(buf: cstring, data: cstring, count: int32) -> int32 {
   return 16;
 }
 
-// Format offset as 8 hex digits (right-to-left, LS nibble first)
 fn format_offset(buf: cstring, off: int64) -> int32 {
   var i: int32 = 7;
   var val: int64 = off;

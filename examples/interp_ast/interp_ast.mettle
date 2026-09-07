@@ -1,14 +1,3 @@
-// Mettle AST interpreter benchmark (Suite 3)
-//
-// A complete small-language pipeline: generate an ~80 KB program text, lex it
-// into a token array, parse the tokens into an AST arena with precedence
-// climbing, then walk the tree to run it. Every pass redoes all three phases,
-// so the time is split between byte scanning, recursive descent, and
-// switch-dispatched evaluation rather than sitting in one loop.
-//
-// Build: build.bat
-// Run: interp_ast.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";
@@ -131,7 +120,6 @@ fn emit_var(dst: uint8*, pos: int32, which: int32) -> int32 {
   return pos + 2;
 }
 
-// A literal '{' has to be doubled: a lone brace opens a string interpolation.
 fn gen_source(dst: uint8*) -> int32 {
   var pos: int32 = 0;
   var v: int32 = 0;

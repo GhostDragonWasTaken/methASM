@@ -1,17 +1,3 @@
-// Random-gather reduction (Suite 2): sum += A[B[i]].
-//
-// A is 16,777,216 int32 values (64 MB, far beyond LLC); B is a shuffled
-// permutation of [0, N). Each iteration loads B[i] (sequential, cheap) and
-// then A[B[i]] (random, a guaranteed cache + TLB miss). 20 passes.
-//
-// This is the canonical indirect-access pattern software prefetching targets:
-// B[i + D] is already known D iterations early, so `prefetcht0 A[B[i+D]]`
-// overlaps the miss latency with useful work. The address stream is
-// unpredictable to hardware prefetchers, so the compiler either issues
-// software prefetches or eats the full memory latency every element.
-//
-// Build: build.bat   Run: gather_sum.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";
@@ -77,8 +63,6 @@ fn main() -> int32 {
   var bench_sum: int64 = 0;
   var p: int32 = 0;
   while (p < passes) {
-    // Mutate the table each pass so no compiler can hoist the pure gather
-    // out of the timing loop.
     a[p] = a[p] + 1;
     bench_sum = bench_sum + gather(a, idx, count);
     p = p + 1;

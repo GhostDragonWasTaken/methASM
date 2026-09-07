@@ -1,12 +1,3 @@
-// Triangulation: bytecode interpreter with a switch dispatch loop.
-//
-// A 4096-op program of (opcode, operand) pairs run repeatedly through a
-// switch. This is the classic interpreter dispatch pattern: a hard-to-predict
-// indirect branch plus per-op work. Probes how Mettle lowers switch (jump
-// table vs if-chain) and branch density relative to GCC.
-//
-// Build: build.bat   Run: switch_vm.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

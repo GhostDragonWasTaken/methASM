@@ -1,15 +1,6 @@
-// Mettle Sum-of-Squares benchmark
-//
-// Computes 1² + 2² + ... + n² for n=100000.
-// Formula: n(n+1)(2n+1)/6. Benchmarks 50 full passes.
-//
-// Build: build.bat
-// Run: sum_squares.exe
-
 import "std/io";
 import "std/bench";
 
-// Returns 1² + 2² + ... + n² (iterative, no formula)
 fn sum_squares(n: int64) -> int64 {
   var sum: int64 = 0;
   var i: int64 = 1;

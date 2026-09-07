@@ -1,14 +1,3 @@
-// Direct-object backend smoke test.
-//
-// Exercises the currently supported subset:
-// - scalar integer parameters
-// - internal direct calls
-// - intra-function control flow
-// - integer return values
-//
-// Build and run with:
-//   examples\direct_object_smoke\build.bat
-
 fn choose(flag: int32, when_zero: int32, when_nonzero: int32) -> int32 {
   if (flag) {
     return when_nonzero;

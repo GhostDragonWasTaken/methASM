@@ -1,6 +1,3 @@
-// are-we-fast-yet :: Bounce  (ported from rochus-keller/are-we-fast-yet C port)
-// 100 balls, 50 steps. Verified result 1331. AWFY config: iters 1500.
-
 import "std/io";
 import "std/bench";
 import "std/math";

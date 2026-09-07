@@ -1,11 +1,3 @@
-// Mettle Tracy Demo
-//
-// Simulates a frame-based app with nested zones, plots, memory tracking,
-// background loading on a worker thread, and intentional frame hitches.
-//
-// Build: examples\tracy_demo\build.bat
-// Run Tracy Profiler, connect to tracy_demo.exe, then explore the timeline.
-
 import "std/io";
 import "std/mem";
 import "std/bench";

@@ -1,11 +1,3 @@
-// Mettle run-length-encode benchmark (Suite 2)
-//
-// RLE-encodes a 256 KB buffer of runs (byte, count-as-byte pairs, counts
-// capped at 255) into a scratch output buffer. 200 passes.
-//
-// Build: build.bat
-// Run: rle_encode.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

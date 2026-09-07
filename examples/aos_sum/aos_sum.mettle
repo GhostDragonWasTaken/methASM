@@ -1,13 +1,3 @@
-// New dimension: array-of-structs field access via pointer (NOT by-value).
-//
-// struct_byval (43x) measured copying whole structs through the ABI. This
-// instead walks an array of 32-byte structs and reads/writes individual fields
-// in place -- no aggregate copy. Distinguishes "by-value ABI is slow" from
-// "any struct field load/store is slow". GCC -O3 keeps base+offset addressing
-// tight; if Mettle is also bad here, the struct problem is broader than the ABI.
-//
-// Build: build.bat   Run: aos_sum.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

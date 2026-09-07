@@ -1,10 +1,3 @@
-// Mettle base64-encode benchmark (Suite 2)
-//
-// Base64-encodes a 256 KB buffer into a scratch output buffer. 200 passes.
-//
-// Build: build.bat
-// Run: base64_encode.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

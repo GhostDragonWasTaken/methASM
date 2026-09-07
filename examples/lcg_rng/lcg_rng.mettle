@@ -1,7 +1,3 @@
-// Mettle LCG RNG microbenchmark
-//
-// Linear congruential generator, 1M iterations x 200 passes.
-
 import "std/io";
 import "std/bench";
 

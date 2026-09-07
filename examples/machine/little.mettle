@@ -1,15 +1,3 @@
-// A machine that does not exist, described in Mettle, compiled to, and run.
-//
-// Eight registers, six instructions, and a program that computes the tenth
-// Fibonacci number. Nothing here is a compiler concept: the registers are an
-// ordinary global array, each instruction's meaning is an ordinary function,
-// and the encoding is a string. What the compiler contributes is reading the
-// description, refusing one that cannot be decoded back, assembling the
-// program into those bytes, and running it by calling the semantics functions
-// in the compile-time interpreter.
-//
-//   mettle machine examples/machine/little.mettle
-//   mettle emulate examples/machine/little.mettle
 import "std/io";
 import "std/machine";
 

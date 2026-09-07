@@ -1,15 +1,3 @@
-// An engine: the job system with a frame around it.
-//
-// Everything the compiler is told here is a thing it checks. The frame is a
-// `const` of `std/schedule`, so the dispatcher for each thread and the
-// quiesce point at every phase boundary are generated from the order the
-// program wrote. Each phase carries an effect, so a call reaching across a
-// phase is refused with the chain that got there. A slot stays in the ring
-// because its type says so. The blend names what its longest path may cost.
-// One global is written from two phases, and the lock that orders them is an
-// effect both writers require rather than a convention. The worker is handed
-// nothing that lives in the frame that spawned it. Two rules say the things
-// the compiler has no word for.
 import "std/io";
 import "std/rule";
 import "std/schedule";

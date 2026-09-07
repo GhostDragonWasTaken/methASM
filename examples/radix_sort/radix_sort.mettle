@@ -1,11 +1,3 @@
-// Mettle radix-sort benchmark (Suite 2)
-//
-// LSD radix sort (4 passes of 8-bit digits) over 4096 uint32 values
-// (deterministic pseudo-random fill). 200 outer passes.
-//
-// Build: build.bat
-// Run: radix_sort.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

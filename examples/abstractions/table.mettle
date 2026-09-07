@@ -1,10 +1,3 @@
-// A table declared once, with its accessors generated.
-//
-// The columns are written down as a `const` table. One `comptime for` reads
-// the rows and writes a getter and a setter per column; a second reads the
-// generated record's own fields and writes the printer. Nothing here is a
-// macro: the generated declarations are checked as the program they expand
-// into, and `mettle expand` prints them as ordinary Mettle.
 import "std/io";
 
 struct Column {

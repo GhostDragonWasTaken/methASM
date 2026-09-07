@@ -1,9 +1,3 @@
-// Mettle UI Demo — Documentation Browser
-//
-// Scans docs/ at runtime and renders Markdown in a readable native viewer.
-//
-// Build: examples\ui_demo\build.bat
-
 import "std/ui";
 import "std/io";
 import "std/conv";
@@ -1406,7 +1400,6 @@ fn utf8_skip_multibyte(src: cstring, read: int32) -> int32 {
   return read + 1;
 }
 
-// DrawTextA expects ANSI; docs are UTF-8. Map common punctuation to ASCII.
 fn utf8_normalize_ascii(src: cstring, out: cstring, out_len: int32) {
   var read: int32 = 0;
   var write: int32 = 0;

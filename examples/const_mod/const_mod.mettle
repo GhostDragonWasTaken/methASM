@@ -1,12 +1,3 @@
-// New dimension: division/modulo by COMPILE-TIME CONSTANTS.
-//
-// int_divmod used a runtime divisor (true DIV instruction). This uses literal
-// constants, which an optimizer should strength-reduce to a magic-number
-// multiply + shift (no DIV at all). Tests whether Mettle does that classic
-// reduction; if not, expect a large gap from emitting real divs.
-//
-// Build: build.bat   Run: const_mod.exe
-
 import "std/io";
 import "std/bench";
 

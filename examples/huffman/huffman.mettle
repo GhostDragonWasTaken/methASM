@@ -1,14 +1,3 @@
-// Mettle Huffman codec benchmark (Suite 3)
-//
-// A whole compressor: histogram a 128 KB skewed buffer, build the Huffman tree
-// through a binary min-heap, assign codes by walking the tree, bit-pack the
-// input, then decode the bitstream one bit at a time and verify the roundtrip.
-// The encode and decode loops carry a serial bit accumulator and a data
-// dependent tree walk, so neither widens into a vector.
-//
-// Build: build.bat
-// Run: huffman.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

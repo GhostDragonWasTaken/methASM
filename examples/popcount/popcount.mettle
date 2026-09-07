@@ -1,7 +1,3 @@
-// Mettle popcount microbenchmark
-//
-// Population count over 256 KB byte buffer, 200 passes.
-
 import "std/io";
 import "std/mem";
 import "std/bench";

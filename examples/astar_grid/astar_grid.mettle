@@ -1,14 +1,3 @@
-// Mettle A* pathfinding benchmark (Suite 3)
-//
-// Grows a 192x192 cave with a cellular automaton, assigns terrain costs, then
-// runs sixteen A* searches over it with a binary min-heap open set and lazy
-// deletion, reconstructing each path through its parent chain. Node expansion
-// order depends on the frontier, so the loads scatter across the grid and the
-// heap sift path is branch-unpredictable.
-//
-// Build: build.bat
-// Run: astar_grid.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

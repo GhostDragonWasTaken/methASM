@@ -1,7 +1,3 @@
-// Mettle scale-i32 microbenchmark
-//
-// dst[i] = src[i] * 3 + 7 over 65536 int32 values, 200 passes.
-
 import "std/io";
 import "std/mem";
 import "std/bench";

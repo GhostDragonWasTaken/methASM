@@ -1,13 +1,3 @@
-// Mettle binary-search-tree benchmark (Suite 2)
-//
-// Builds a BST from 4096 pseudo-random int32 values (node pool, no per-node
-// malloc) and repeatedly walks it with a recursive in-order sum. 200 passes.
-// Stresses recursive tree traversal + branchy pointer comparisons, distinct
-// from the flat pointer-chase of linked_list_sum.
-//
-// Build: build.bat
-// Run: bst_insert.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

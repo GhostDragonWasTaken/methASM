@@ -1,25 +1,11 @@
-// One transformer feed-forward block, on the GPU, in Mettle.
-//
-//   mettle -O --emit-ptx decode_kernels.mettle -o decode_kernels.ptx \
-//     --emit-kernel-decls=decode_decls.mettle
-//   mettle --build --release decode_host.mettle -o decode_host.exe \
-//     --link-arg "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9/lib/x64/cuda.lib"
-//
-// The chain is rmsnorm -> gate/up projections -> SwiGLU -> down projection ->
-// softmax: five launches whose shapes never change from one token to the next.
-// That is the case launch graphs exist for, so the same chain is measured
-// twice, once launched per step and once replayed from a single capture.
 import "std/io";
 import "std/mem";
 import "std/gpu";
 import "decode_decls";
 
-// The CPU reference needs the same two functions the kernels use; Mettle's
-// runtime carries both, so the host declares them and links nothing extra.
 extern fn sqrtf(x: float32) -> float32 = "sqrtf";
 extern fn expf(x: float32) -> float32 = "expf";
 
-// A decode step's weights, sized like a small Llama-shaped block.
 const DIM: int32 = 1024;
 const HIDDEN: int32 = 2816;
 const STEPS: int32 = 200;
@@ -54,8 +40,6 @@ fn cpu_silu_mul(gate: float32*, up: float32*, out: float32*, n: int32) {
   }
 }
 
-// A cheap deterministic filler: no RNG dependency, but not so smooth that a
-// wrong index would still land near the right answer.
 fn fill(buffer: float32*, n: int32, seed: int32) {
   var state: int32 = seed;
   for i in 0..n {
@@ -78,7 +62,6 @@ fn main() -> int32 {
   var hidden_bytes: int64 = (int64)HIDDEN * 4;
   var projection_bytes: int64 = (int64)HIDDEN * (int64)DIM * 4;
 
-  // Host-side weights and the reference the GPU has to match.
   var h_x: float32* = malloc(vector_bytes);
   var h_norm_weight: float32* = malloc(vector_bytes);
   var h_gate_w: float32* = malloc(projection_bytes);
@@ -90,7 +73,6 @@ fn main() -> int32 {
   fill(h_up_w, HIDDEN * DIM, 4);
   fill(h_down_w, HIDDEN * DIM, 5);
 
-  // Device buffers. VRAM is explicit here, the way it is in any real engine.
   var d_x: int64 = gpu_malloc(vector_bytes);
   var d_norm_weight: int64 = gpu_malloc(vector_bytes);
   var d_normed: int64 = gpu_malloc(vector_bytes);
@@ -112,11 +94,6 @@ fn main() -> int32 {
 
   var stream: int64 = gpu_stream_create();
 
-  // ---- one step, checked against the CPU ----
-  //
-  // `work:` sizes each grid from the kernel's own declared block. matvec was
-  // declared `per = warp`, so its grid divides by subgroups per block: one
-  // output row per subgroup, not per thread.
   dispatch rmsnorm[1, 256](d_x, d_norm_weight, d_normed, DIM) on stream;
   dispatch matvec[work: HIDDEN](d_gate_w, d_normed, d_gate, HIDDEN, DIM) on stream;
   dispatch matvec[work: HIDDEN](d_up_w, d_normed, d_up, HIDDEN, DIM) on stream;
@@ -139,8 +116,6 @@ fn main() -> int32 {
   cpu_silu_mul(ref_gate, ref_up, ref_activated, HIDDEN);
   cpu_matvec(h_down_w, ref_activated, ref_down, DIM, HIDDEN);
 
-  // The GPU softmaxed the last projection; softmax the reference the same way
-  // and compare the distributions.
   var largest: float32 = ref_down[0];
   for i in 0..DIM {
     if (ref_down[i] > largest) { largest = ref_down[i]; }
@@ -151,8 +126,6 @@ fn main() -> int32 {
     total = total + ref_down[i];
   }
 
-  // Reduction order differs between 32 lanes and one CPU loop, so the check is
-  // a relative one over a chain that has already crossed 3M multiply-adds.
   var worst: float32 = (float32)0.0;
   var worst_at: int32 = 0;
   for i in 0..DIM {
@@ -172,8 +145,6 @@ fn main() -> int32 {
   }
   println("correct  worst relative error {worst} over {DIM} outputs");
 
-  // ---- the same chain, timed two ways ----
-
   var start: int64 = gpu_event_create();
   var finish: int64 = gpu_event_create();
 
@@ -191,9 +162,6 @@ fn main() -> int32 {
   var launched_ms: float32 = (float32)0.0;
   gpu_event_elapsed_ms(start, finish, &launched_ms);
 
-  // A capture records the sequence rather than running it. Buffer addresses
-  // are baked in, contents are not, which is what lets one capture serve every
-  // token. Nothing between begin and end may synchronize.
   if (gpu_graph_capture_begin(stream) != 0) {
     println("stream capture unavailable");
     return 1;

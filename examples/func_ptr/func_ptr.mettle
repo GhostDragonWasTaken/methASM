@@ -1,10 +1,3 @@
-// Triangulation: same leaf work as leaf_call, but dispatched through a
-// function pointer so NEITHER compiler can inline or devirtualize it. Isolates
-// raw indirect-call ABI cost. Compare against leaf_call to separate
-// "Mettle won't inline" from "Mettle's call sequence is expensive".
-//
-// Build: build.bat   Run: func_ptr.exe
-
 import "std/io";
 import "std/bench";
 

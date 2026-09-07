@@ -1,11 +1,3 @@
-// Mettle quicksort benchmark (Suite 2)
-//
-// Recursive quicksort (Lomuto partition) over 2048 int32 values
-// (deterministic pseudo-random fill). 200 passes.
-//
-// Build: build.bat
-// Run: quicksort.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

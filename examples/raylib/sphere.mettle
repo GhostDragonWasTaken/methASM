@@ -1,28 +1,3 @@
-// A rotating, lit, textured sphere drawn through the raylib bindings.
-//
-//   examples\raylib\build.bat
-//   examples\raylib\sphere.exe
-//   examples\raylib\sphere.exe --bench=10 --rings=192 --slices=192
-//
-// The mesh is generated here rather than by GenMeshSphere, so the tessellation
-// is a runtime knob and the vertex/index buffers are Mettle's own work. The
-// model matrix is built here too: raymath is header-only C, so nothing in it is
-// callable across the ABI, which turns out to be a two-function loss.
-//
-// Flags:
-//   --bench[=SECONDS]   run uncapped for SECONDS and print frame statistics
-//   --rings=N --slices=N  sphere tessellation (default 128)
-//   --width=N --height=N  window size (default 1280x720)
-//   --spheres=N         draw an NxN grid of spheres instead of one
-//   --vsync             wait for the display refresh
-//   --plain             use raylib's default shader instead of sphere.fs
-//   --hud               keep the overlay on while benchmarking
-//   --nomsaa            drop the 4x MSAA hint
-//   --empty             draw no geometry, to measure raylib's frame floor
-//   --shot=FILE.png     write a screenshot after the first second
-//
-// Keys: V vsync, T shader, UP/DOWN tessellation, S screenshot, ESC quit.
-
 import "raylib";
 import "std/io";
 import "std/mem";
@@ -30,7 +5,7 @@ import "std/conv";
 import "std/math";
 
 const MAX_RINGS = 254;
-const HIST_SIZE = 262144;   // one bucket per microsecond of frame time
+const HIST_SIZE = 262144;
 
 var g_width: int32 = 1280;
 var g_height: int32 = 720;
@@ -48,14 +23,6 @@ var g_want_shot: int32 = 0;
 
 var g_hud: uint8* = 0;
 var g_hist: int32* = 0;
-
-// ---------------------------------------------------------------------------
-// Mesh generation
-//
-// A UV sphere with a duplicated seam column so the texture coordinate can wrap.
-// Vertex count is (rings+1)*(slices+1), which the 16-bit index buffer caps at
-// 65535, so the tessellation knob stops at 254.
-// ---------------------------------------------------------------------------
 
 fn build_sphere(rings: int32, slices: int32) -> Mesh {
   var mesh: Mesh;
@@ -126,13 +93,6 @@ fn build_sphere(rings: int32, slices: int32) -> Mesh {
   return mesh;
 }
 
-// ---------------------------------------------------------------------------
-// Model matrix
-//
-// raylib's Matrix stores row 0 as m0, m4, m8, m12. This is Rx(pitch)*Ry(yaw)
-// scaled uniformly, with the translation in the last column.
-// ---------------------------------------------------------------------------
-
 fn model_matrix(yaw: float64, pitch: float64, scale: float64,
                 tx: float64, ty: float64, tz: float64) -> Matrix {
   var cy: float64 = cos(yaw);
@@ -162,11 +122,6 @@ fn model_matrix(yaw: float64, pitch: float64, scale: float64,
   m.m15 = 1.0;
   return m;
 }
-
-// ---------------------------------------------------------------------------
-// Small text helpers: raylib takes NUL-terminated text, so the HUD lines are
-// assembled into one reused buffer.
-// ---------------------------------------------------------------------------
 
 fn hud(label: string, value: int64, suffix: string) -> cstring {
   var n: int32 = 0;
@@ -257,11 +212,6 @@ fn parse_args(argc: int32, argv: cstring*) {
   if (g_rings < 3) { g_rings = 3; }
   if (g_slices < 3) { g_slices = 3; }
 }
-
-// ---------------------------------------------------------------------------
-// Frame time statistics: one bucket per microsecond, so a percentile is a walk
-// over the histogram rather than a sort of every frame.
-// ---------------------------------------------------------------------------
 
 fn percentile_us(total_frames: int64, fraction: float64) -> int64 {
   var target: int64 = (int64)((float64)total_frames * fraction);
@@ -364,7 +314,6 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     BeginMode3D(camera);
 
     if (g_empty == 1) {
-      // nothing: measures raylib's own per-frame floor
     } else if (g_grid <= 1) {
       DrawMesh(mesh, material, model_matrix(yaw, pitch, 1.7, 0.0, 0.0, 0.0));
     } else {

@@ -1,15 +1,6 @@
-// Mettle Collatz benchmark
-//
-// Collatz sequence: n -> n/2 (if even) or 3n+1 (if odd), until n==1.
-// Counts steps for n=1..100000, sums them. Benchmarks 10 full passes.
-//
-// Build: build.bat
-// Run: collatz.exe
-
 import "std/io";
 import "std/bench";
 
-// Returns number of steps to reach 1 from n (n >= 1)
 fn collatz_steps(n: int64) -> int64 {
   var count: int64 = 0;
   var x: int64 = n;

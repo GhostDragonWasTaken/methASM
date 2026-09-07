@@ -1,7 +1,3 @@
-// Mettle byte-compare microbenchmark
-//
-// Compare two 256 KB buffers in 4 KB chunks, 200 passes (manual loop).
-
 import "std/io";
 import "std/mem";
 import "std/bench";

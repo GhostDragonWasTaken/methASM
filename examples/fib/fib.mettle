@@ -1,12 +1,3 @@
-// Mettle Fibonacci benchmark
-//
-// - fib(n): iterative loop (matches fib.c)
-// - fib35(): fully unrolled fib(35)
-// - bench_looped / bench_unrolled: no I/O, no calls in hot path (fair vs C timing)
-//
-// Build: build.bat
-// Run: fib.exe
-
 import "std/io";
 import "std/bench";
 
@@ -68,7 +59,6 @@ fn fib35() -> int64 {
   return b;
 }
 
-// Inner while (i <= 35) is unrolled by the optimizer; hot path has no calls.
 fn bench_looped(iter: int32) -> int64 {
   var bench_sum: int64 = 0;
   var j: int32 = 0;
@@ -89,7 +79,6 @@ fn bench_looped(iter: int32) -> int64 {
   return bench_sum;
 }
 
-// Stress-test: 10M x unrolled fib(35) body (no calls).
 fn bench_unrolled(iter: int32) -> int64 {
   var bench_sum: int64 = 0;
   var j: int32 = 0;

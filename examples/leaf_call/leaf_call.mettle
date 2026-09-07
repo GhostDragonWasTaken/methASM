@@ -1,12 +1,3 @@
-// Triangulation: direct call to a tiny leaf function in a hot loop.
-//
-// 60M iterations of a trivial arithmetic leaf with a carried dependency
-// (so it can't be hoisted/folded). GCC -O3 inlines `mix` and the loop becomes
-// pure ALU. If Mettle's inliner fires, this is parity; if not, it isolates
-// fixed per-call cost separately from recursion (see rec_fib).
-//
-// Build: build.bat   Run: leaf_call.exe
-
 import "std/io";
 import "std/bench";
 

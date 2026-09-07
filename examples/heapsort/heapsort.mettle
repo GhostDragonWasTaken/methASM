@@ -1,11 +1,3 @@
-// Mettle heapsort benchmark (Suite 2)
-//
-// In-place binary-heap sort over 2048 int32 values (deterministic
-// pseudo-random fill). 200 passes.
-//
-// Build: build.bat
-// Run: heapsort.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

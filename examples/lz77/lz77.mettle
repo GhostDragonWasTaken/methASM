@@ -1,15 +1,3 @@
-// Mettle LZ77 compressor benchmark (Suite 3)
-//
-// The match finder a real deflate-class compressor uses: a 3-byte rolling hash
-// into a head table, hash chains through a 32 KB window, and a bounded chain
-// walk that compares candidate strings byte by byte. Compresses a 256 KB
-// redundant buffer, decompresses it back with overlapping copies, and verifies.
-// Every candidate visit depends on the previous one, so the search is a pointer
-// chase with an unpredictable exit.
-//
-// Build: build.bat
-// Run: lz77.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";

@@ -1,7 +1,3 @@
-// Mettle dot-product microbenchmark
-//
-// int32 dot product of two 65536-element vectors, 200 passes.
-
 import "std/io";
 import "std/mem";
 import "std/bench";

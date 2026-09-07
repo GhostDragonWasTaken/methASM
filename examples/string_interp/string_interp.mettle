@@ -1,12 +1,3 @@
-// String interpolation: "{expr}" inside a string literal embeds the value.
-//
-// The parser desugars the literal to '+' concatenation with one runtime
-// conversion per expression part, so an interpolated literal is an ordinary
-// string expression. Integers, bool, floats, and strings interpolate; '{{'
-// writes a literal '{'.
-//
-// Build: mettle --build string_interp.mettle -o string_interp.exe
-
 import "std/io";
 
 fn main() -> int32 {

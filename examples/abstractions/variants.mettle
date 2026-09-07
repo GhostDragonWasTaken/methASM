@@ -1,11 +1,3 @@
-// A set of variants with a completeness check.
-//
-// The state machine's `step` has to decide every state. It carries a
-// `default:` arm, so the compiler's own exhaustiveness check is satisfied and
-// a new variant would quietly fall into it. A `@rule` reads the checked
-// program, asks which variants `step` actually named, and fails the build on
-// the one it did not: adding a variant without adding an arm is a build that
-// stops, not a bug that waits.
 import "std/io";
 import "std/rule";
 

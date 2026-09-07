@@ -1,10 +1,3 @@
-// Mettle matrix-multiply benchmark
-//
-// 32x32 int32 matrix multiply (naive triple loop). 200 passes.
-//
-// Build: build.bat
-// Run: matrix_mul.exe
-
 import "std/io";
 import "std/bench";
 

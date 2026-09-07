@@ -1,12 +1,3 @@
-// Mettle recursive Fibonacci benchmark.
-//
-// Genuinely recursive fib(34) -- ~18M calls. Unlike the iterative fib example,
-// this can't be reduced to a counted loop, so it measures raw function-call
-// overhead (prologue/epilogue, ABI spills, no inlining of recursion). Stresses
-// the call path rather than the optimizer's loop machinery.
-//
-// Build: build.bat   Run: rec_fib.exe
-
 import "std/io";
 import "std/bench";
 

@@ -1,11 +1,3 @@
-// Mettle byte-hash benchmark (djb2)
-//
-// Hashes a 256 KB buffer with djb2 (hash = hash * 33 + byte, seed 5381).
-// Same workload as byte_hash.c: 200 passes over the filled buffer.
-//
-// Build: build.bat
-// Run: byte_hash.exe
-
 import "std/io";
 import "std/mem";
 import "std/bench";
