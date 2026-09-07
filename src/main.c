@@ -6173,26 +6173,80 @@ static int compile_stage_deadlines(CompileContext *ctx) {
   return 1;
 }
 
-static int compile_stage_device_targets(CompileContext *ctx) {
-  CompilerOptions *options = ctx->options;
-  if (options->emit_ptx) {
-    return compile_emit_ptx(ctx->ir_program, ctx->program, ctx->code_generator,
-                            options, ctx->input_filename, ctx->output_filename,
-                            &ctx->profile);
+typedef enum {
+  MTLC_BACKEND_DEVICE = 0,
+  MTLC_BACKEND_HOST
+} MtlcBackendFamily;
+
+typedef struct {
+  const char *name;
+  MtlcBackendFamily family;
+  int (*selected)(const CompilerOptions *options);
+  int (*run)(CompileContext *ctx);
+} MtlcBackend;
+
+static int backend_ptx_selected(const CompilerOptions *options) {
+  return options->emit_ptx;
+}
+
+static int backend_ptx_run(CompileContext *ctx) {
+  return compile_emit_ptx(ctx->ir_program, ctx->program, ctx->code_generator,
+                          ctx->options, ctx->input_filename,
+                          ctx->output_filename, &ctx->profile);
+}
+
+static int backend_spirv_selected(const CompilerOptions *options) {
+  return options->emit_spirv;
+}
+
+static int backend_spirv_run(CompileContext *ctx) {
+  return compile_emit_spirv(ctx->ir_program, ctx->program, ctx->code_generator,
+                            ctx->options, ctx->output_filename, &ctx->profile);
+}
+
+static int backend_arm64_selected(const CompilerOptions *options) {
+  return options->emit_arm64;
+}
+
+static int backend_arm64_run(CompileContext *ctx) {
+  return compile_emit_arm64(ctx->ir_program, ctx->program, ctx->options,
+                            ctx->output_filename);
+}
+
+static const MtlcBackend MTLC_BACKENDS[] = {
+    {"PTX", MTLC_BACKEND_DEVICE, backend_ptx_selected, backend_ptx_run},
+    {"SPIR-V", MTLC_BACKEND_DEVICE, backend_spirv_selected, backend_spirv_run},
+    {"AArch64", MTLC_BACKEND_HOST, backend_arm64_selected, backend_arm64_run},
+};
+
+#define MTLC_BACKEND_COUNT                                                     \
+  (sizeof(MTLC_BACKENDS) / sizeof(MTLC_BACKENDS[0]))
+
+static const MtlcBackend *mtlc_backend_selected(const CompilerOptions *options,
+                                                MtlcBackendFamily family) {
+  for (size_t i = 0; i < MTLC_BACKEND_COUNT; i++) {
+    if (MTLC_BACKENDS[i].family == family &&
+        MTLC_BACKENDS[i].selected(options)) {
+      return &MTLC_BACKENDS[i];
+    }
   }
-  if (options->emit_spirv) {
-    return compile_emit_spirv(ctx->ir_program, ctx->program,
-                              ctx->code_generator, options,
-                              ctx->output_filename, &ctx->profile);
+  return NULL;
+}
+
+static int compile_stage_device_targets(CompileContext *ctx) {
+  const MtlcBackend *backend =
+      mtlc_backend_selected(ctx->options, MTLC_BACKEND_DEVICE);
+  if (backend) {
+    return backend->run(ctx);
   }
   if (!ir_program_lower_gpu_launches(ctx->ir_program)) {
     fprintf(stderr,
             "Error: Failed to lower GPU launches for the host runtime\n");
     return 1;
   }
-  if (options->emit_arm64) {
-    return compile_emit_arm64(ctx->ir_program, ctx->program, options,
-                              ctx->output_filename);
+  backend = mtlc_backend_selected(ctx->options, MTLC_BACKEND_HOST);
+  if (backend) {
+    return backend->run(ctx);
   }
   return COMPILE_CONTINUE;
 }
