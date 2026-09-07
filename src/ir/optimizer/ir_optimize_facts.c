@@ -3,6 +3,9 @@
 
 #include <string.h>
 
+static void ir_facts_check_fresh(const IRFacts *facts, const char *name,
+                                 IROperandKind kind, size_t answered);
+
 int ir_facts_build(IRFacts *facts, const IRFunction *function) {
   if (!facts || !function) {
     return 0;
@@ -63,7 +66,11 @@ size_t ir_facts_symbol_def_count(const IRFacts *facts, const char *name) {
   if (!facts || !facts->valid || !name) {
     return 0;
   }
-  return ir_name_index_find(&facts->symbol_defs, name, &count) ? count : 0;
+  if (!ir_name_index_find(&facts->symbol_defs, name, &count)) {
+    count = 0;
+  }
+  ir_facts_check_fresh(facts, name, IR_OPERAND_SYMBOL, count);
+  return count;
 }
 
 size_t ir_facts_temp_def_count(const IRFacts *facts, const char *name) {
@@ -71,7 +78,11 @@ size_t ir_facts_temp_def_count(const IRFacts *facts, const char *name) {
   if (!facts || !facts->valid || !name) {
     return 0;
   }
-  return ir_name_index_find(&facts->temp_defs, name, &count) ? count : 0;
+  if (!ir_name_index_find(&facts->temp_defs, name, &count)) {
+    count = 0;
+  }
+  ir_facts_check_fresh(facts, name, IR_OPERAND_TEMP, count);
+  return count;
 }
 
 int ir_facts_symbol_single_def(const IRFacts *facts, const char *name,
@@ -138,4 +149,48 @@ const IRFacts *ir_facts_of(const IRFunction *function) {
   g_facts_function = function;
   g_facts_built_generation = g_facts_generation;
   return &g_facts;
+}
+
+static int ir_facts_verify_enabled(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    cached = getenv("METTLE_VERIFY_FACTS") ? 1 : 0;
+  }
+  return cached;
+}
+
+static size_t ir_facts_scan_def_count(const IRFunction *function,
+                                      const char *name, IROperandKind kind) {
+  size_t count = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *ins = &function->instructions[i];
+    if (ins->op == IR_OP_DECLARE_LOCAL ||
+        !ir_instruction_writes_destination(ins)) {
+      continue;
+    }
+    if (ins->dest.kind == kind && ins->dest.name &&
+        strcmp(ins->dest.name, name) == 0) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static void ir_facts_check_fresh(const IRFacts *facts, const char *name,
+                                 IROperandKind kind, size_t answered) {
+  size_t truth;
+  if (!ir_facts_verify_enabled() || facts != &g_facts || !g_facts_function ||
+      !name) {
+    return;
+  }
+  truth = ir_facts_scan_def_count(g_facts_function, name, kind);
+  if (truth == answered) {
+    return;
+  }
+  fprintf(stderr,
+          "FACTS-STALE: %s '%s' in %s: index says %zu, scan says %zu\n",
+          kind == IR_OPERAND_SYMBOL ? "symbol" : "temp", name,
+          g_facts_function->name ? g_facts_function->name : "?", answered,
+          truth);
+  abort();
 }
