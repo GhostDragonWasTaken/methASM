@@ -1332,6 +1332,34 @@ static void emit_call_device(SpvFn *fn, const IRInstruction *in, SpvMod *m, cons
   mod_error(m, "SPIR-V: unsupported call '%s'", callee ? callee : "?");
 }
 
+static int emit_call_atomic_rejects(SpvMod *m, const IRInstruction *in,
+                                    int scope_value, int semantics_value,
+                                    int failure_semantics_value,
+                                    int is_load, int is_store,
+                                    int is_cas) {
+  if (scope_value < 0 || semantics_value < 0 ||
+      (is_load && in->memory_order != MTLC_MEMORY_ORDER_RELAXED &&
+       in->memory_order != MTLC_MEMORY_ORDER_ACQUIRE &&
+       in->memory_order != MTLC_MEMORY_ORDER_SEQ_CST) ||
+      (is_store && in->memory_order != MTLC_MEMORY_ORDER_RELAXED &&
+       in->memory_order != MTLC_MEMORY_ORDER_RELEASE &&
+       in->memory_order != MTLC_MEMORY_ORDER_SEQ_CST) ||
+      (is_cas && (failure_semantics_value < 0 ||
+                  !spv_compare_exchange_failure_valid(
+                      in->memory_order, in->failure_memory_order))) ||
+      in->address_space == MTLC_ADDRESS_SPACE_CONSTANT ||
+      in->address_space == MTLC_ADDRESS_SPACE_PRIVATE ||
+      (in->address_space == MTLC_ADDRESS_SPACE_WORKGROUP &&
+       in->memory_scope > MTLC_MEMORY_SCOPE_WORKGROUP)) {
+    mod_error(m,
+              "SPIR-V: invalid atomic memory contract (space=%d success=%d failure=%d scope=%d)",
+              (int)in->address_space, (int)in->memory_order,
+              (int)in->failure_memory_order, (int)in->memory_scope);
+    return 0;
+  }
+  return 1;
+}
+
 static void emit_call_atomic(SpvFn *fn, const IRInstruction *in,
                              SpvMod *m, const char *callee,
                              MtlcIntrinsic intrinsic) {
@@ -1361,24 +1389,9 @@ static void emit_call_atomic(SpvFn *fn, const IRInstruction *in,
         is_cas ? spv_atomic_semantics(in->failure_memory_order,
                                       in->address_space)
                : 0;
-    if (scope_value < 0 || semantics_value < 0 ||
-        (is_load && in->memory_order != MTLC_MEMORY_ORDER_RELAXED &&
-         in->memory_order != MTLC_MEMORY_ORDER_ACQUIRE &&
-         in->memory_order != MTLC_MEMORY_ORDER_SEQ_CST) ||
-        (is_store && in->memory_order != MTLC_MEMORY_ORDER_RELAXED &&
-         in->memory_order != MTLC_MEMORY_ORDER_RELEASE &&
-         in->memory_order != MTLC_MEMORY_ORDER_SEQ_CST) ||
-        (is_cas && (failure_semantics_value < 0 ||
-                    !spv_compare_exchange_failure_valid(
-                        in->memory_order, in->failure_memory_order))) ||
-        in->address_space == MTLC_ADDRESS_SPACE_CONSTANT ||
-        in->address_space == MTLC_ADDRESS_SPACE_PRIVATE ||
-        (in->address_space == MTLC_ADDRESS_SPACE_WORKGROUP &&
-         in->memory_scope > MTLC_MEMORY_SCOPE_WORKGROUP)) {
-      mod_error(m,
-                "SPIR-V: invalid atomic memory contract (space=%d success=%d failure=%d scope=%d)",
-                (int)in->address_space, (int)in->memory_order,
-                (int)in->failure_memory_order, (int)in->memory_scope);
+    if (!emit_call_atomic_rejects(m, in, scope_value, semantics_value,
+                                 failure_semantics_value, is_load,
+                                 is_store, is_cas)) {
       return;
     }
     uint32_t p = typed_memory_ptr(fn, addr, vk, in->address_space);
@@ -1546,107 +1559,7 @@ static void emit_call_memory(SpvFn *fn, const IRInstruction *in,
   emit_call_atomic(fn, in, m, callee, intrinsic);
 }
 
-static void emit_call_arithmetic(SpvFn *fn, const IRInstruction *in, SpvMod *m, const char *callee, MtlcIntrinsic intrinsic) {
-  if ((intrinsic == MTLC_INTRINSIC_GPU_DP4A_U32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32) &&
-      in->argument_count >= 3) {
-    int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32;
-    MtlcTypeKind kind = is_signed ? MTLC_TYPE_INT32 : MTLC_TYPE_UINT32;
-    uint32_t a = materialize(fn, &in->arguments[0], kind);
-    uint32_t b = materialize(fn, &in->arguments[1], kind);
-    uint32_t acc = materialize(fn, &in->arguments[2], kind);
-    uint32_t i32 = type_int(m, 32);
-    for (unsigned byte = 0; byte < 4; byte++) {
-      uint32_t ea;
-      uint32_t eb;
-      if (is_signed) {
-        uint32_t left = const_u32(m, 24u - byte * 8u);
-        uint32_t right = const_u32(m, 24u);
-        uint32_t la = new_id(m);
-        emitv(&m->functions, Op_ShiftLeftLogical, 4, i32, la, a, left);
-        ea = new_id(m);
-        emitv(&m->functions, Op_ShiftRightArithmetic, 4, i32, ea, la, right);
-        uint32_t lb = new_id(m);
-        emitv(&m->functions, Op_ShiftLeftLogical, 4, i32, lb, b, left);
-        eb = new_id(m);
-        emitv(&m->functions, Op_ShiftRightArithmetic, 4, i32, eb, lb, right);
-      } else {
-        uint32_t shift = const_u32(m, byte * 8u);
-        uint32_t mask = const_u32(m, 0xFFu);
-        uint32_t sa = new_id(m);
-        emitv(&m->functions, Op_ShiftRightLogical, 4, i32, sa, a, shift);
-        ea = new_id(m);
-        emitv(&m->functions, Op_BitwiseAnd, 4, i32, ea, sa, mask);
-        uint32_t sb = new_id(m);
-        emitv(&m->functions, Op_ShiftRightLogical, 4, i32, sb, b, shift);
-        eb = new_id(m);
-        emitv(&m->functions, Op_BitwiseAnd, 4, i32, eb, sb, mask);
-      }
-      uint32_t product = new_id(m);
-      emitv(&m->functions, Op_IMul, 4, i32, product, ea, eb);
-      uint32_t next = new_id(m);
-      emitv(&m->functions, Op_IAdd, 4, i32, next, acc, product);
-      acc = next;
-    }
-    if (in->dest.name) store_name(fn, in->dest.name, acc);
-    return;
-  }
-  if ((intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_U32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_S32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32) &&
-      in->argument_count >= 3) {
-    int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_S32 ||
-                    intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32;
-    int is_high = intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32;
-    MtlcTypeKind kind = is_signed ? MTLC_TYPE_INT32 : MTLC_TYPE_UINT32;
-    uint32_t a = materialize(fn, &in->arguments[0], kind);
-    uint32_t b = materialize(fn, &in->arguments[1], kind);
-    uint32_t acc = materialize(fn, &in->arguments[2], kind);
-    uint32_t i32 = type_int(m, 32);
-    for (unsigned half = 0; half < 2; half++) {
-      uint32_t ea;
-      uint32_t eb;
-      unsigned byte_index = (is_high ? 2u : 0u) + half;
-      if (is_signed) {
-        uint32_t half_left = const_u32(m, 16u - half * 16u);
-        uint32_t half_right = const_u32(m, 16u);
-        uint32_t byte_left = const_u32(m, 24u - byte_index * 8u);
-        uint32_t byte_right = const_u32(m, 24u);
-        uint32_t la = new_id(m);
-        emitv(&m->functions, Op_ShiftLeftLogical, 4, i32, la, a, half_left);
-        ea = new_id(m);
-        emitv(&m->functions, Op_ShiftRightArithmetic, 4, i32, ea, la,
-              half_right);
-        uint32_t lb = new_id(m);
-        emitv(&m->functions, Op_ShiftLeftLogical, 4, i32, lb, b, byte_left);
-        eb = new_id(m);
-        emitv(&m->functions, Op_ShiftRightArithmetic, 4, i32, eb, lb,
-              byte_right);
-      } else {
-        uint32_t half_shift = const_u32(m, half * 16u);
-        uint32_t half_mask = const_u32(m, 0xFFFFu);
-        uint32_t byte_shift = const_u32(m, byte_index * 8u);
-        uint32_t byte_mask = const_u32(m, 0xFFu);
-        uint32_t sa = new_id(m);
-        emitv(&m->functions, Op_ShiftRightLogical, 4, i32, sa, a, half_shift);
-        ea = new_id(m);
-        emitv(&m->functions, Op_BitwiseAnd, 4, i32, ea, sa, half_mask);
-        uint32_t sb = new_id(m);
-        emitv(&m->functions, Op_ShiftRightLogical, 4, i32, sb, b, byte_shift);
-        eb = new_id(m);
-        emitv(&m->functions, Op_BitwiseAnd, 4, i32, eb, sb, byte_mask);
-      }
-      uint32_t product = new_id(m);
-      emitv(&m->functions, Op_IMul, 4, i32, product, ea, eb);
-      uint32_t next = new_id(m);
-      emitv(&m->functions, Op_IAdd, 4, i32, next, acc, product);
-      acc = next;
-    }
-    if (in->dest.name) store_name(fn, in->dest.name, acc);
-    return;
-  }
+static void emit_call_half_pack(SpvFn *fn, const IRInstruction *in, SpvMod *m, const char *callee, MtlcIntrinsic intrinsic) {
   if ((intrinsic == MTLC_INTRINSIC_GPU_HADD2 ||
        intrinsic == MTLC_INTRINSIC_GPU_HMUL2 ||
        intrinsic == MTLC_INTRINSIC_GPU_HFMA2) &&
@@ -1783,49 +1696,164 @@ static void emit_call_arithmetic(SpvFn *fn, const IRInstruction *in, SpvMod *m, 
   emit_call_memory(fn, in, m, callee, intrinsic);
 }
 
+static void emit_call_arithmetic(SpvFn *fn, const IRInstruction *in, SpvMod *m, const char *callee, MtlcIntrinsic intrinsic) {
+  if ((intrinsic == MTLC_INTRINSIC_GPU_DP4A_U32 ||
+       intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32) &&
+      in->argument_count >= 3) {
+    int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32;
+    MtlcTypeKind kind = is_signed ? MTLC_TYPE_INT32 : MTLC_TYPE_UINT32;
+    uint32_t a = materialize(fn, &in->arguments[0], kind);
+    uint32_t b = materialize(fn, &in->arguments[1], kind);
+    uint32_t acc = materialize(fn, &in->arguments[2], kind);
+    uint32_t i32 = type_int(m, 32);
+    for (unsigned byte = 0; byte < 4; byte++) {
+      uint32_t ea;
+      uint32_t eb;
+      if (is_signed) {
+        uint32_t left = const_u32(m, 24u - byte * 8u);
+        uint32_t right = const_u32(m, 24u);
+        uint32_t la = new_id(m);
+        emitv(&m->functions, Op_ShiftLeftLogical, 4, i32, la, a, left);
+        ea = new_id(m);
+        emitv(&m->functions, Op_ShiftRightArithmetic, 4, i32, ea, la, right);
+        uint32_t lb = new_id(m);
+        emitv(&m->functions, Op_ShiftLeftLogical, 4, i32, lb, b, left);
+        eb = new_id(m);
+        emitv(&m->functions, Op_ShiftRightArithmetic, 4, i32, eb, lb, right);
+      } else {
+        uint32_t shift = const_u32(m, byte * 8u);
+        uint32_t mask = const_u32(m, 0xFFu);
+        uint32_t sa = new_id(m);
+        emitv(&m->functions, Op_ShiftRightLogical, 4, i32, sa, a, shift);
+        ea = new_id(m);
+        emitv(&m->functions, Op_BitwiseAnd, 4, i32, ea, sa, mask);
+        uint32_t sb = new_id(m);
+        emitv(&m->functions, Op_ShiftRightLogical, 4, i32, sb, b, shift);
+        eb = new_id(m);
+        emitv(&m->functions, Op_BitwiseAnd, 4, i32, eb, sb, mask);
+      }
+      uint32_t product = new_id(m);
+      emitv(&m->functions, Op_IMul, 4, i32, product, ea, eb);
+      uint32_t next = new_id(m);
+      emitv(&m->functions, Op_IAdd, 4, i32, next, acc, product);
+      acc = next;
+    }
+    if (in->dest.name) store_name(fn, in->dest.name, acc);
+    return;
+  }
+  if ((intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_U32 ||
+       intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_S32 ||
+       intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
+       intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32) &&
+      in->argument_count >= 3) {
+    int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_S32 ||
+                    intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32;
+    int is_high = intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
+                  intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32;
+    MtlcTypeKind kind = is_signed ? MTLC_TYPE_INT32 : MTLC_TYPE_UINT32;
+    uint32_t a = materialize(fn, &in->arguments[0], kind);
+    uint32_t b = materialize(fn, &in->arguments[1], kind);
+    uint32_t acc = materialize(fn, &in->arguments[2], kind);
+    uint32_t i32 = type_int(m, 32);
+    for (unsigned half = 0; half < 2; half++) {
+      uint32_t ea;
+      uint32_t eb;
+      unsigned byte_index = (is_high ? 2u : 0u) + half;
+      if (is_signed) {
+        uint32_t half_left = const_u32(m, 16u - half * 16u);
+        uint32_t half_right = const_u32(m, 16u);
+        uint32_t byte_left = const_u32(m, 24u - byte_index * 8u);
+        uint32_t byte_right = const_u32(m, 24u);
+        uint32_t la = new_id(m);
+        emitv(&m->functions, Op_ShiftLeftLogical, 4, i32, la, a, half_left);
+        ea = new_id(m);
+        emitv(&m->functions, Op_ShiftRightArithmetic, 4, i32, ea, la,
+              half_right);
+        uint32_t lb = new_id(m);
+        emitv(&m->functions, Op_ShiftLeftLogical, 4, i32, lb, b, byte_left);
+        eb = new_id(m);
+        emitv(&m->functions, Op_ShiftRightArithmetic, 4, i32, eb, lb,
+              byte_right);
+      } else {
+        uint32_t half_shift = const_u32(m, half * 16u);
+        uint32_t half_mask = const_u32(m, 0xFFFFu);
+        uint32_t byte_shift = const_u32(m, byte_index * 8u);
+        uint32_t byte_mask = const_u32(m, 0xFFu);
+        uint32_t sa = new_id(m);
+        emitv(&m->functions, Op_ShiftRightLogical, 4, i32, sa, a, half_shift);
+        ea = new_id(m);
+        emitv(&m->functions, Op_BitwiseAnd, 4, i32, ea, sa, half_mask);
+        uint32_t sb = new_id(m);
+        emitv(&m->functions, Op_ShiftRightLogical, 4, i32, sb, b, byte_shift);
+        eb = new_id(m);
+        emitv(&m->functions, Op_BitwiseAnd, 4, i32, eb, sb, byte_mask);
+      }
+      uint32_t product = new_id(m);
+      emitv(&m->functions, Op_IMul, 4, i32, product, ea, eb);
+      uint32_t next = new_id(m);
+      emitv(&m->functions, Op_IAdd, 4, i32, next, acc, product);
+      acc = next;
+    }
+    if (in->dest.name) store_name(fn, in->dest.name, acc);
+    return;
+  }
+  emit_call_half_pack(fn, in, m, callee, intrinsic);
+}
+
+static int spv_is_subgroup_reduction(MtlcIntrinsic intrinsic) {
+  return intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_U32 ||
+         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32 ||
+         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_U32 ||
+         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32 ||
+         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_U32 ||
+         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32 ||
+         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_U32 ||
+         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32 ||
+         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32 ||
+         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32;
+}
+
+static void emit_call_subgroup_reduction(SpvFn *fn,
+                                         const IRInstruction *in,
+                                         SpvMod *m,
+                                         MtlcIntrinsic intrinsic) {
+  int is_float = intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32 ||
+                 intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32 ||
+                 intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32 ||
+                 intrinsic ==
+                     MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32 ||
+                 intrinsic ==
+                     MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32;
+  int is_min = intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_U32 ||
+               intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32;
+  int is_max = intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_U32 ||
+               intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32;
+  unsigned group_operation =
+      (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_U32 ||
+       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32)
+          ? 1u
+      : (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32 ||
+         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32)
+          ? 2u
+          : 0u;
+  unsigned opcode = is_min ? (is_float ? Op_GroupFMin : Op_GroupUMin)
+                    : is_max ? (is_float ? Op_GroupFMax : Op_GroupUMax)
+                             : (is_float ? Op_GroupFAdd : Op_GroupIAdd);
+  MtlcTypeKind value_kind = is_float ? MTLC_TYPE_FLOAT32 : MTLC_TYPE_UINT32;
+  uint32_t result_type = kind_type(m, value_kind);
+  uint32_t value = materialize(fn, &in->arguments[0], value_kind);
+  uint32_t result = new_id(m);
+  uint32_t scope = const_u32(m, Scope_Subgroup);
+  m->use_subgroups = 1;
+  emitv(&m->functions, opcode, 5, result_type, result, scope,
+        group_operation, value);
+  if (in->dest.name) store_name(fn, in->dest.name, result);
+  return;
+}
+
 static void emit_call_subgroup_reduce(SpvFn *fn, const IRInstruction *in, SpvMod *m, const char *callee, MtlcIntrinsic intrinsic) {
-  if ((intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_U32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_U32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_U32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_U32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32 ||
-       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32) &&
-      in->argument_count >= 1) {
-    int is_float = intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32 ||
-                   intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32 ||
-                   intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32 ||
-                   intrinsic ==
-                       MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32 ||
-                   intrinsic ==
-                       MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32;
-    int is_min = intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_U32 ||
-                 intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32;
-    int is_max = intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_U32 ||
-                 intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32;
-    unsigned group_operation =
-        (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_U32 ||
-         intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32)
-            ? 1u
-        : (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32 ||
-           intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32)
-            ? 2u
-            : 0u;
-    unsigned opcode = is_min ? (is_float ? Op_GroupFMin : Op_GroupUMin)
-                      : is_max ? (is_float ? Op_GroupFMax : Op_GroupUMax)
-                               : (is_float ? Op_GroupFAdd : Op_GroupIAdd);
-    MtlcTypeKind value_kind = is_float ? MTLC_TYPE_FLOAT32 : MTLC_TYPE_UINT32;
-    uint32_t result_type = kind_type(m, value_kind);
-    uint32_t value = materialize(fn, &in->arguments[0], value_kind);
-    uint32_t result = new_id(m);
-    uint32_t scope = const_u32(m, Scope_Subgroup);
-    m->use_subgroups = 1;
-    emitv(&m->functions, opcode, 5, result_type, result, scope,
-          group_operation, value);
-    if (in->dest.name) store_name(fn, in->dest.name, result);
+  if (spv_is_subgroup_reduction(intrinsic) && in->argument_count >= 1) {
+    emit_call_subgroup_reduction(fn, in, m, intrinsic);
     return;
   }
   if (intrinsic == MTLC_INTRINSIC_GPU_WORKGROUP_BARRIER) {
