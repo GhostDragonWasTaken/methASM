@@ -17,7 +17,6 @@
     "src/codegen/binary/encoders.c::binary_emit_imul_imm_scratch_width": 53,
     "src/codegen/binary/globals.c::code_generator_emit_binary_global_variable": 61,
     "src/codegen/binary/mir_annotate.c::analyze_function": 45,
-    "src/codegen/binary/mir_annotate.c::decode_one": 251,
     "src/codegen/binary/mir_annotate.c::render_inst": 47,
     "src/codegen/binary/mir_annotate.c::write_line_query": 59,
     "src/codegen/binary/mir_encode.c::encode_mov": 91,

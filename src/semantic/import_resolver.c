@@ -1239,7 +1239,7 @@ static void collect_declaration_dependency_names(ASTNode *node, char ***names,
                                                  size_t *count,
                                                  size_t *capacity);
 
-static int rewrite_node_names(ASTNode *node, const NameRewrite *rewrites,
+static int rewrite_branch_names(ASTNode *node, const NameRewrite *rewrites,
                               size_t rewrite_count,
                               const NamespaceBinding *bindings,
                               size_t binding_count, RewriteScope *scope,
@@ -1249,388 +1249,6 @@ static int rewrite_node_names(ASTNode *node, const NameRewrite *rewrites,
   }
 
   switch (node->type) {
-  case AST_PROGRAM:
-    return rewrite_program_names(node, rewrites, rewrite_count, bindings,
-                                 binding_count, scope, program_creates_scope);
-
-  case AST_VAR_DECLARATION: {
-    VarDeclaration *var_decl = (VarDeclaration *)node->data;
-    if (!var_decl) {
-      return 1;
-    }
-
-    if (!rewrite_type_string_in_place(&var_decl->type_name, rewrites,
-                                      rewrite_count, bindings, binding_count)) {
-      return 0;
-    }
-
-    if (var_decl->initializer &&
-        !rewrite_node_names(var_decl->initializer, rewrites, rewrite_count,
-                            bindings, binding_count, scope, 1)) {
-      return 0;
-    }
-
-    if (scope) {
-      return scope_add_name(scope, var_decl->name);
-    }
-
-    return rename_string_if_needed(&var_decl->name, rewrites, rewrite_count);
-  }
-
-  case AST_FUNCTION_DECLARATION:
-  case AST_METHOD_DECLARATION:
-  case AST_STRUCT_DECLARATION:
-  case AST_ENUM_DECLARATION:
-  case AST_TYPE_DECLARATION:
-  case AST_EFFECT_DECLARATION:
-  case AST_TRAIT_DECLARATION:
-  case AST_IMPL_DECLARATION:
-    return rewrite_declaration_names(node, rewrites, rewrite_count, bindings,
-                                     binding_count, scope,
-                                     program_creates_scope);
-
-  case AST_ASSIGNMENT: {
-    Assignment *assignment = (Assignment *)node->data;
-    if (!assignment) {
-      return 1;
-    }
-
-    if (assignment->target &&
-        !rewrite_node_names(assignment->target, rewrites, rewrite_count,
-                            bindings, binding_count, scope, 1)) {
-      return 0;
-    }
-
-    if (assignment->value &&
-        !rewrite_node_names(assignment->value, rewrites, rewrite_count, bindings,
-                            binding_count, scope, 1)) {
-      return 0;
-    }
-
-    if (assignment->variable_name &&
-        !scope_contains(scope, assignment->variable_name) &&
-        !rename_string_if_needed(&assignment->variable_name, rewrites,
-                                 rewrite_count)) {
-      return 0;
-    }
-
-    return 1;
-  }
-
-  case AST_FUNCTION_CALL: {
-    CallExpression *call = (CallExpression *)node->data;
-    if (!call) {
-      return 1;
-    }
-
-    for (size_t i = 0; i < call->type_arg_count; i++) {
-      if (!rewrite_type_string_in_place(&call->type_args[i], rewrites,
-                                        rewrite_count, bindings,
-                                        binding_count)) {
-        return 0;
-      }
-    }
-
-    if (call->object &&
-        !rewrite_node_names(call->object, rewrites, rewrite_count, bindings,
-                            binding_count, scope, 1)) {
-      return 0;
-    }
-
-    for (size_t i = 0; i < call->argument_count; i++) {
-      if (!rewrite_node_names(call->arguments[i], rewrites, rewrite_count,
-                              bindings, binding_count, scope, 1)) {
-        return 0;
-      }
-    }
-
-    if (call->object && call->object->type == AST_IDENTIFIER) {
-      Identifier *object_ident = (Identifier *)call->object->data;
-      if (object_ident && object_ident->name &&
-          !scope_contains(scope, object_ident->name) &&
-          namespace_binding_allows_member(bindings, binding_count,
-                                          object_ident->name,
-                                          call->function_name)) {
-        char *qualified =
-            build_qualified_name(object_ident->name, call->function_name);
-        if (!qualified) {
-          return 0;
-        }
-        if (!replace_interned_string(&call->function_name, qualified)) {
-          free(qualified);
-          return 0;
-        }
-        free(qualified);
-        call->object = NULL;
-        if (!rebuild_call_children(node)) {
-          return 0;
-        }
-        return 1;
-      }
-    }
-
-    if (!call->object && call->function_name &&
-        !scope_contains(scope, call->function_name) &&
-        !rename_string_if_needed(&call->function_name, rewrites,
-                                 rewrite_count)) {
-      return 0;
-    }
-
-    return 1;
-  }
-
-  case AST_FUNC_PTR_CALL: {
-    FuncPtrCall *fp_call = (FuncPtrCall *)node->data;
-    if (!fp_call) {
-      return 1;
-    }
-
-    if (fp_call->function &&
-        !rewrite_node_names(fp_call->function, rewrites, rewrite_count,
-                            bindings, binding_count, scope, 1)) {
-      return 0;
-    }
-    for (size_t i = 0; i < fp_call->argument_count; i++) {
-      if (!rewrite_node_names(fp_call->arguments[i], rewrites, rewrite_count,
-                              bindings, binding_count, scope, 1)) {
-        return 0;
-      }
-    }
-    return 1;
-  }
-
-  case AST_GPU_LAUNCH:
-    for (size_t i = 0; i < node->child_count; i++) {
-      if (!rewrite_node_names(node->children[i], rewrites, rewrite_count,
-                              bindings, binding_count, scope, 1)) {
-        return 0;
-      }
-    }
-    return 1;
-
-  case AST_IDENTIFIER: {
-    Identifier *identifier = (Identifier *)node->data;
-    if (!identifier || !identifier->name ||
-        scope_contains(scope, identifier->name)) {
-      return 1;
-    }
-    return rename_string_if_needed(&identifier->name, rewrites, rewrite_count);
-  }
-
-  case AST_MEMBER_ACCESS: {
-    MemberAccess *member = (MemberAccess *)node->data;
-    ASTNode **old_children = NULL;
-
-    if (!member) {
-      return 1;
-    }
-
-    if (member->object &&
-        !rewrite_node_names(member->object, rewrites, rewrite_count, bindings,
-                            binding_count, scope, 1)) {
-      return 0;
-    }
-
-    if (member->object && member->object->type == AST_IDENTIFIER) {
-      Identifier *object_ident = (Identifier *)member->object->data;
-      if (object_ident && object_ident->name &&
-          !scope_contains(scope, object_ident->name) &&
-          namespace_binding_allows_member(bindings, binding_count,
-                                          object_ident->name,
-                                          member->member)) {
-        Identifier *identifier = NULL;
-        char *qualified = build_qualified_name(object_ident->name, member->member);
-        if (!qualified) {
-          return 0;
-        }
-
-        old_children = node->children;
-        node->children = NULL;
-        node->child_count = 0;
-
-        ast_destroy_node(member->object);
-        free(old_children);
-
-        mettle_free_string(member->member);
-        free(member);
-
-        identifier = malloc(sizeof(Identifier));
-        if (!identifier) {
-          free(qualified);
-          return 0;
-        }
-        identifier->name = (char *)string_intern(qualified);
-        identifier->scope_id = AST_SCOPE_ID_UNRESOLVED;
-        free(qualified);
-        if (!identifier->name) {
-          free(identifier);
-          return 0;
-        }
-
-        node->type = AST_IDENTIFIER;
-        node->data = identifier;
-      }
-    }
-
-    return 1;
-  }
-
-  case AST_BINARY_EXPRESSION: {
-    BinaryExpression *binary = (BinaryExpression *)node->data;
-    if (!binary) {
-      return 1;
-    }
-    return rewrite_node_names(binary->left, rewrites, rewrite_count, bindings,
-                              binding_count, scope, 1) &&
-           rewrite_node_names(binary->right, rewrites, rewrite_count, bindings,
-                              binding_count, scope, 1);
-  }
-
-  case AST_UNARY_EXPRESSION: {
-    UnaryExpression *unary = (UnaryExpression *)node->data;
-    if (!unary) {
-      return 1;
-    }
-    return rewrite_node_names(unary->operand, rewrites, rewrite_count, bindings,
-                              binding_count, scope, 1);
-  }
-
-  case AST_INDEX_EXPRESSION: {
-    ArrayIndexExpression *index_expr = (ArrayIndexExpression *)node->data;
-    if (!index_expr) {
-      return 1;
-    }
-    return rewrite_node_names(index_expr->array, rewrites, rewrite_count,
-                              bindings, binding_count, scope, 1) &&
-           rewrite_node_names(index_expr->index, rewrites, rewrite_count,
-                              bindings, binding_count, scope, 1);
-  }
-
-  case AST_NEW_EXPRESSION: {
-    NewExpression *new_expr = (NewExpression *)node->data;
-    if (!new_expr) {
-      return 1;
-    }
-    return rewrite_type_string_in_place(&new_expr->type_name, rewrites,
-                                        rewrite_count, bindings, binding_count);
-  }
-
-  case AST_CAST_EXPRESSION: {
-    CastExpression *cast_expr = (CastExpression *)node->data;
-    if (!cast_expr) {
-      return 1;
-    }
-    if (!rewrite_type_string_in_place(&cast_expr->type_name, rewrites,
-                                      rewrite_count, bindings, binding_count)) {
-      return 0;
-    }
-    return rewrite_node_names(cast_expr->operand, rewrites, rewrite_count,
-                              bindings, binding_count, scope, 1);
-  }
-
-  case AST_RETURN_STATEMENT: {
-    ReturnStatement *ret = (ReturnStatement *)node->data;
-    if (!ret || !ret->value) {
-      return 1;
-    }
-    return rewrite_node_names(ret->value, rewrites, rewrite_count, bindings,
-                              binding_count, scope, 1);
-  }
-
-  case AST_IF_STATEMENT: {
-    IfStatement *if_stmt = (IfStatement *)node->data;
-    if (!if_stmt) {
-      return 1;
-    }
-    if (if_stmt->condition &&
-        !rewrite_node_names(if_stmt->condition, rewrites, rewrite_count,
-                            bindings, binding_count, scope, 1)) {
-      return 0;
-    }
-    if (if_stmt->then_branch &&
-        !rewrite_node_names(if_stmt->then_branch, rewrites, rewrite_count,
-                            bindings, binding_count, scope, 1)) {
-      return 0;
-    }
-    for (size_t i = 0; i < if_stmt->else_if_count; i++) {
-      if (if_stmt->else_ifs[i].condition &&
-          !rewrite_node_names(if_stmt->else_ifs[i].condition, rewrites,
-                              rewrite_count, bindings, binding_count, scope,
-                              1)) {
-        return 0;
-      }
-      if (if_stmt->else_ifs[i].body &&
-          !rewrite_node_names(if_stmt->else_ifs[i].body, rewrites,
-                              rewrite_count, bindings, binding_count, scope,
-                              1)) {
-        return 0;
-      }
-    }
-    if (if_stmt->else_branch &&
-        !rewrite_node_names(if_stmt->else_branch, rewrites, rewrite_count,
-                            bindings, binding_count, scope, 1)) {
-      return 0;
-    }
-    return 1;
-  }
-
-  case AST_WHILE_STATEMENT: {
-    WhileStatement *while_stmt = (WhileStatement *)node->data;
-    if (!while_stmt) {
-      return 1;
-    }
-    if (while_stmt->condition &&
-        !rewrite_node_names(while_stmt->condition, rewrites, rewrite_count,
-                            bindings, binding_count, scope, 1)) {
-      return 0;
-    }
-    if (while_stmt->body &&
-        !rewrite_node_names(while_stmt->body, rewrites, rewrite_count, bindings,
-                            binding_count, scope, 1)) {
-      return 0;
-    }
-    return 1;
-  }
-
-  case AST_FOR_STATEMENT: {
-    ForStatement *for_stmt = (ForStatement *)node->data;
-    RewriteScope loop_scope;
-    if (!for_stmt) {
-      return 1;
-    }
-
-    memset(&loop_scope, 0, sizeof(loop_scope));
-    loop_scope.parent = scope;
-
-    if (for_stmt->initializer &&
-        !rewrite_node_names(for_stmt->initializer, rewrites, rewrite_count,
-                            bindings, binding_count, &loop_scope, 1)) {
-      scope_cleanup(&loop_scope);
-      return 0;
-    }
-    if (for_stmt->condition &&
-        !rewrite_node_names(for_stmt->condition, rewrites, rewrite_count,
-                            bindings, binding_count, &loop_scope, 1)) {
-      scope_cleanup(&loop_scope);
-      return 0;
-    }
-    if (for_stmt->increment &&
-        !rewrite_node_names(for_stmt->increment, rewrites, rewrite_count,
-                            bindings, binding_count, &loop_scope, 1)) {
-      scope_cleanup(&loop_scope);
-      return 0;
-    }
-    if (for_stmt->body &&
-        !rewrite_node_names(for_stmt->body, rewrites, rewrite_count, bindings,
-                            binding_count, &loop_scope, 1)) {
-      scope_cleanup(&loop_scope);
-      return 0;
-    }
-
-    scope_cleanup(&loop_scope);
-    return 1;
-  }
-
   case AST_SWITCH_STATEMENT: {
     SwitchStatement *switch_stmt = (SwitchStatement *)node->data;
     if (!switch_stmt) {
@@ -1752,6 +1370,478 @@ static int rewrite_node_names(ASTNode *node, const NameRewrite *rewrites,
     return 1;
   }
 }
+
+static int rewrite_statement_names(ASTNode *node, const NameRewrite *rewrites,
+                              size_t rewrite_count,
+                              const NamespaceBinding *bindings,
+                              size_t binding_count, RewriteScope *scope,
+                              int program_creates_scope) {
+  if (!node) {
+    return 1;
+  }
+
+  switch (node->type) {
+  case AST_IF_STATEMENT: {
+    IfStatement *if_stmt = (IfStatement *)node->data;
+    if (!if_stmt) {
+      return 1;
+    }
+    if (if_stmt->condition &&
+        !rewrite_node_names(if_stmt->condition, rewrites, rewrite_count,
+                            bindings, binding_count, scope, 1)) {
+      return 0;
+    }
+    if (if_stmt->then_branch &&
+        !rewrite_node_names(if_stmt->then_branch, rewrites, rewrite_count,
+                            bindings, binding_count, scope, 1)) {
+      return 0;
+    }
+    for (size_t i = 0; i < if_stmt->else_if_count; i++) {
+      if (if_stmt->else_ifs[i].condition &&
+          !rewrite_node_names(if_stmt->else_ifs[i].condition, rewrites,
+                              rewrite_count, bindings, binding_count, scope,
+                              1)) {
+        return 0;
+      }
+      if (if_stmt->else_ifs[i].body &&
+          !rewrite_node_names(if_stmt->else_ifs[i].body, rewrites,
+                              rewrite_count, bindings, binding_count, scope,
+                              1)) {
+        return 0;
+      }
+    }
+    if (if_stmt->else_branch &&
+        !rewrite_node_names(if_stmt->else_branch, rewrites, rewrite_count,
+                            bindings, binding_count, scope, 1)) {
+      return 0;
+    }
+    return 1;
+  }
+
+  case AST_WHILE_STATEMENT: {
+    WhileStatement *while_stmt = (WhileStatement *)node->data;
+    if (!while_stmt) {
+      return 1;
+    }
+    if (while_stmt->condition &&
+        !rewrite_node_names(while_stmt->condition, rewrites, rewrite_count,
+                            bindings, binding_count, scope, 1)) {
+      return 0;
+    }
+    if (while_stmt->body &&
+        !rewrite_node_names(while_stmt->body, rewrites, rewrite_count, bindings,
+                            binding_count, scope, 1)) {
+      return 0;
+    }
+    return 1;
+  }
+
+  case AST_FOR_STATEMENT: {
+    ForStatement *for_stmt = (ForStatement *)node->data;
+    RewriteScope loop_scope;
+    if (!for_stmt) {
+      return 1;
+    }
+
+    memset(&loop_scope, 0, sizeof(loop_scope));
+    loop_scope.parent = scope;
+
+    if (for_stmt->initializer &&
+        !rewrite_node_names(for_stmt->initializer, rewrites, rewrite_count,
+                            bindings, binding_count, &loop_scope, 1)) {
+      scope_cleanup(&loop_scope);
+      return 0;
+    }
+    if (for_stmt->condition &&
+        !rewrite_node_names(for_stmt->condition, rewrites, rewrite_count,
+                            bindings, binding_count, &loop_scope, 1)) {
+      scope_cleanup(&loop_scope);
+      return 0;
+    }
+    if (for_stmt->increment &&
+        !rewrite_node_names(for_stmt->increment, rewrites, rewrite_count,
+                            bindings, binding_count, &loop_scope, 1)) {
+      scope_cleanup(&loop_scope);
+      return 0;
+    }
+    if (for_stmt->body &&
+        !rewrite_node_names(for_stmt->body, rewrites, rewrite_count, bindings,
+                            binding_count, &loop_scope, 1)) {
+      scope_cleanup(&loop_scope);
+      return 0;
+    }
+
+    scope_cleanup(&loop_scope);
+    return 1;
+  }
+
+  default:
+    break;
+  }
+  return rewrite_branch_names(node, rewrites, rewrite_count, bindings, binding_count, scope,
+                            program_creates_scope);
+}
+
+
+static int rewrite_operator_names(ASTNode *node, const NameRewrite *rewrites,
+                              size_t rewrite_count,
+                              const NamespaceBinding *bindings,
+                              size_t binding_count, RewriteScope *scope,
+                              int program_creates_scope) {
+  if (!node) {
+    return 1;
+  }
+
+  switch (node->type) {
+  case AST_BINARY_EXPRESSION: {
+    BinaryExpression *binary = (BinaryExpression *)node->data;
+    if (!binary) {
+      return 1;
+    }
+    return rewrite_node_names(binary->left, rewrites, rewrite_count, bindings,
+                              binding_count, scope, 1) &&
+           rewrite_node_names(binary->right, rewrites, rewrite_count, bindings,
+                              binding_count, scope, 1);
+  }
+
+  case AST_UNARY_EXPRESSION: {
+    UnaryExpression *unary = (UnaryExpression *)node->data;
+    if (!unary) {
+      return 1;
+    }
+    return rewrite_node_names(unary->operand, rewrites, rewrite_count, bindings,
+                              binding_count, scope, 1);
+  }
+
+  case AST_INDEX_EXPRESSION: {
+    ArrayIndexExpression *index_expr = (ArrayIndexExpression *)node->data;
+    if (!index_expr) {
+      return 1;
+    }
+    return rewrite_node_names(index_expr->array, rewrites, rewrite_count,
+                              bindings, binding_count, scope, 1) &&
+           rewrite_node_names(index_expr->index, rewrites, rewrite_count,
+                              bindings, binding_count, scope, 1);
+  }
+
+  case AST_NEW_EXPRESSION: {
+    NewExpression *new_expr = (NewExpression *)node->data;
+    if (!new_expr) {
+      return 1;
+    }
+    return rewrite_type_string_in_place(&new_expr->type_name, rewrites,
+                                        rewrite_count, bindings, binding_count);
+  }
+
+  case AST_CAST_EXPRESSION: {
+    CastExpression *cast_expr = (CastExpression *)node->data;
+    if (!cast_expr) {
+      return 1;
+    }
+    if (!rewrite_type_string_in_place(&cast_expr->type_name, rewrites,
+                                      rewrite_count, bindings, binding_count)) {
+      return 0;
+    }
+    return rewrite_node_names(cast_expr->operand, rewrites, rewrite_count,
+                              bindings, binding_count, scope, 1);
+  }
+
+  case AST_RETURN_STATEMENT: {
+    ReturnStatement *ret = (ReturnStatement *)node->data;
+    if (!ret || !ret->value) {
+      return 1;
+    }
+    return rewrite_node_names(ret->value, rewrites, rewrite_count, bindings,
+                              binding_count, scope, 1);
+  }
+
+  default:
+    break;
+  }
+  return rewrite_statement_names(node, rewrites, rewrite_count, bindings, binding_count, scope,
+                            program_creates_scope);
+}
+
+static int rewrite_member_names(ASTNode *node, const NameRewrite *rewrites,
+                              size_t rewrite_count,
+                              const NamespaceBinding *bindings,
+                              size_t binding_count, RewriteScope *scope,
+                              int program_creates_scope) {
+  if (!node) {
+    return 1;
+  }
+
+  switch (node->type) {
+  case AST_MEMBER_ACCESS: {
+    MemberAccess *member = (MemberAccess *)node->data;
+    ASTNode **old_children = NULL;
+
+    if (!member) {
+      return 1;
+    }
+
+    if (member->object &&
+        !rewrite_node_names(member->object, rewrites, rewrite_count, bindings,
+                            binding_count, scope, 1)) {
+      return 0;
+    }
+
+    if (member->object && member->object->type == AST_IDENTIFIER) {
+      Identifier *object_ident = (Identifier *)member->object->data;
+      if (object_ident && object_ident->name &&
+          !scope_contains(scope, object_ident->name) &&
+          namespace_binding_allows_member(bindings, binding_count,
+                                          object_ident->name,
+                                          member->member)) {
+        Identifier *identifier = NULL;
+        char *qualified = build_qualified_name(object_ident->name, member->member);
+        if (!qualified) {
+          return 0;
+        }
+
+        old_children = node->children;
+        node->children = NULL;
+        node->child_count = 0;
+
+        ast_destroy_node(member->object);
+        free(old_children);
+
+        mettle_free_string(member->member);
+        free(member);
+
+        identifier = malloc(sizeof(Identifier));
+        if (!identifier) {
+          free(qualified);
+          return 0;
+        }
+        identifier->name = (char *)string_intern(qualified);
+        identifier->scope_id = AST_SCOPE_ID_UNRESOLVED;
+        free(qualified);
+        if (!identifier->name) {
+          free(identifier);
+          return 0;
+        }
+
+        node->type = AST_IDENTIFIER;
+        node->data = identifier;
+      }
+    }
+
+    return 1;
+  }
+
+  default:
+    break;
+  }
+  return rewrite_operator_names(node, rewrites, rewrite_count, bindings, binding_count, scope,
+                            program_creates_scope);
+}
+
+static int rewrite_call_names(ASTNode *node, const NameRewrite *rewrites,
+                              size_t rewrite_count,
+                              const NamespaceBinding *bindings,
+                              size_t binding_count, RewriteScope *scope,
+                              int program_creates_scope) {
+  if (!node) {
+    return 1;
+  }
+
+  switch (node->type) {
+  case AST_FUNCTION_CALL: {
+    CallExpression *call = (CallExpression *)node->data;
+    if (!call) {
+      return 1;
+    }
+
+    for (size_t i = 0; i < call->type_arg_count; i++) {
+      if (!rewrite_type_string_in_place(&call->type_args[i], rewrites,
+                                        rewrite_count, bindings,
+                                        binding_count)) {
+        return 0;
+      }
+    }
+
+    if (call->object &&
+        !rewrite_node_names(call->object, rewrites, rewrite_count, bindings,
+                            binding_count, scope, 1)) {
+      return 0;
+    }
+
+    for (size_t i = 0; i < call->argument_count; i++) {
+      if (!rewrite_node_names(call->arguments[i], rewrites, rewrite_count,
+                              bindings, binding_count, scope, 1)) {
+        return 0;
+      }
+    }
+
+    if (call->object && call->object->type == AST_IDENTIFIER) {
+      Identifier *object_ident = (Identifier *)call->object->data;
+      if (object_ident && object_ident->name &&
+          !scope_contains(scope, object_ident->name) &&
+          namespace_binding_allows_member(bindings, binding_count,
+                                          object_ident->name,
+                                          call->function_name)) {
+        char *qualified =
+            build_qualified_name(object_ident->name, call->function_name);
+        if (!qualified) {
+          return 0;
+        }
+        if (!replace_interned_string(&call->function_name, qualified)) {
+          free(qualified);
+          return 0;
+        }
+        free(qualified);
+        call->object = NULL;
+        if (!rebuild_call_children(node)) {
+          return 0;
+        }
+        return 1;
+      }
+    }
+
+    if (!call->object && call->function_name &&
+        !scope_contains(scope, call->function_name) &&
+        !rename_string_if_needed(&call->function_name, rewrites,
+                                 rewrite_count)) {
+      return 0;
+    }
+
+    return 1;
+  }
+
+  case AST_FUNC_PTR_CALL: {
+    FuncPtrCall *fp_call = (FuncPtrCall *)node->data;
+    if (!fp_call) {
+      return 1;
+    }
+
+    if (fp_call->function &&
+        !rewrite_node_names(fp_call->function, rewrites, rewrite_count,
+                            bindings, binding_count, scope, 1)) {
+      return 0;
+    }
+    for (size_t i = 0; i < fp_call->argument_count; i++) {
+      if (!rewrite_node_names(fp_call->arguments[i], rewrites, rewrite_count,
+                              bindings, binding_count, scope, 1)) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+
+  case AST_GPU_LAUNCH:
+    for (size_t i = 0; i < node->child_count; i++) {
+      if (!rewrite_node_names(node->children[i], rewrites, rewrite_count,
+                              bindings, binding_count, scope, 1)) {
+        return 0;
+      }
+    }
+    return 1;
+
+  case AST_IDENTIFIER: {
+    Identifier *identifier = (Identifier *)node->data;
+    if (!identifier || !identifier->name ||
+        scope_contains(scope, identifier->name)) {
+      return 1;
+    }
+    return rename_string_if_needed(&identifier->name, rewrites, rewrite_count);
+  }
+
+  default:
+    break;
+  }
+  return rewrite_member_names(node, rewrites, rewrite_count, bindings, binding_count, scope,
+                            program_creates_scope);
+}
+
+
+static int rewrite_node_names(ASTNode *node, const NameRewrite *rewrites,
+                              size_t rewrite_count,
+                              const NamespaceBinding *bindings,
+                              size_t binding_count, RewriteScope *scope,
+                              int program_creates_scope) {
+  if (!node) {
+    return 1;
+  }
+
+  switch (node->type) {
+  case AST_PROGRAM:
+    return rewrite_program_names(node, rewrites, rewrite_count, bindings,
+                                 binding_count, scope, program_creates_scope);
+
+  case AST_VAR_DECLARATION: {
+    VarDeclaration *var_decl = (VarDeclaration *)node->data;
+    if (!var_decl) {
+      return 1;
+    }
+
+    if (!rewrite_type_string_in_place(&var_decl->type_name, rewrites,
+                                      rewrite_count, bindings, binding_count)) {
+      return 0;
+    }
+
+    if (var_decl->initializer &&
+        !rewrite_node_names(var_decl->initializer, rewrites, rewrite_count,
+                            bindings, binding_count, scope, 1)) {
+      return 0;
+    }
+
+    if (scope) {
+      return scope_add_name(scope, var_decl->name);
+    }
+
+    return rename_string_if_needed(&var_decl->name, rewrites, rewrite_count);
+  }
+
+  case AST_FUNCTION_DECLARATION:
+  case AST_METHOD_DECLARATION:
+  case AST_STRUCT_DECLARATION:
+  case AST_ENUM_DECLARATION:
+  case AST_TYPE_DECLARATION:
+  case AST_EFFECT_DECLARATION:
+  case AST_TRAIT_DECLARATION:
+  case AST_IMPL_DECLARATION:
+    return rewrite_declaration_names(node, rewrites, rewrite_count, bindings,
+                                     binding_count, scope,
+                                     program_creates_scope);
+
+  case AST_ASSIGNMENT: {
+    Assignment *assignment = (Assignment *)node->data;
+    if (!assignment) {
+      return 1;
+    }
+
+    if (assignment->target &&
+        !rewrite_node_names(assignment->target, rewrites, rewrite_count,
+                            bindings, binding_count, scope, 1)) {
+      return 0;
+    }
+
+    if (assignment->value &&
+        !rewrite_node_names(assignment->value, rewrites, rewrite_count, bindings,
+                            binding_count, scope, 1)) {
+      return 0;
+    }
+
+    if (assignment->variable_name &&
+        !scope_contains(scope, assignment->variable_name) &&
+        !rename_string_if_needed(&assignment->variable_name, rewrites,
+                                 rewrite_count)) {
+      return 0;
+    }
+
+    return 1;
+  }
+
+  default:
+    break;
+  }
+  return rewrite_call_names(node, rewrites, rewrite_count, bindings, binding_count, scope,
+                            program_creates_scope);
+}
+
+
+
 
 static int rewrite_declaration_names(ASTNode *node,
                                      const NameRewrite *rewrites,

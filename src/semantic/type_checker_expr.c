@@ -1623,15 +1623,386 @@ static int type_checker_tensor_unsigned_scalar(const Type *type) {
          type->kind == TYPE_UINT32 || type->kind == TYPE_UINT64;
 }
 
+typedef struct {
+  int m;
+  int n;
+  int k;
+  int a;
+  int b;
+  int accumulator;
+  int result;
+  int shape;
+  int stride[4];
+} TensorHave;
+
+static int type_checker_tensor_scope_option(TypeChecker *checker,
+                                      CallExpression *call, size_t i,
+                                      const char *operation,
+                                      size_t positional_count,
+                                      int is_matmul,
+                                      MtlcTensorMmaDesc *desc,
+                                      TensorHave *have, const char *option,
+                                      const char *identifier, ASTNode *value) {
+  if (!strcmp(option, "scope")) {
+    if (identifier && !strcmp(identifier, "subgroup"))
+      desc->scope = MTLC_MEMORY_SCOPE_SUBGROUP;
+    else if (identifier && !strcmp(identifier, "workgroup"))
+      desc->scope = MTLC_MEMORY_SCOPE_WORKGROUP;
+    else {
+      type_checker_set_error_at_location(checker, value->location,
+                                         "Tensor scope must be subgroup or workgroup");
+      return 0;
+    }
+  } else if (!strcmp(option, "metadata")) {
+    call->tensor_metadata_argument = i;
+  } else if (!strcmp(option, "a_scale")) {
+    call->tensor_a_scale_argument = i;
+  } else if (!strcmp(option, "b_scale")) {
+    call->tensor_b_scale_argument = i;
+  } else {
+    type_checker_set_error_at_location(checker, value->location,
+                                       "Unknown tensor option '%s'", option);
+    return 0;
+  }
+  return 1;
+}
+
+static int type_checker_tensor_scale_option(TypeChecker *checker,
+                                      CallExpression *call, size_t i,
+                                      const char *operation,
+                                      size_t positional_count,
+                                      int is_matmul,
+                                      MtlcTensorMmaDesc *desc,
+                                      TensorHave *have, const char *option,
+                                      const char *identifier, ASTNode *value) {
+  if (!strcmp(option, "a_scale_mode") ||
+             !strcmp(option, "b_scale_mode")) {
+    MtlcTensorScaleMode mode = MTLC_TENSOR_SCALE_NONE;
+    if (identifier && !strcmp(identifier, "none"))
+      mode = MTLC_TENSOR_SCALE_NONE;
+    else if (identifier && !strcmp(identifier, "per_tensor"))
+      mode = MTLC_TENSOR_SCALE_PER_TENSOR;
+    else if (identifier && !strcmp(identifier, "block16"))
+      mode = MTLC_TENSOR_SCALE_BLOCK_16;
+    else if (identifier && !strcmp(identifier, "block32"))
+      mode = MTLC_TENSOR_SCALE_BLOCK_32;
+    else {
+      type_checker_set_error_at_location(checker, value->location,
+                                         "Unknown tensor scale mode");
+      return 0;
+    }
+    if (option[0] == 'a') desc->a_scale_mode = mode;
+    else desc->b_scale_mode = mode;
+  } else if (!strcmp(option, "a_scale_type") ||
+             !strcmp(option, "b_scale_type")) {
+    MtlcTensorElement element = type_checker_tensor_element_name(identifier);
+    if (element != MTLC_TENSOR_ELEMENT_SCALE_UE8M0 &&
+        element != MTLC_TENSOR_ELEMENT_SCALE_UE4M3) {
+      type_checker_set_error_at_location(
+          checker, value->location,
+          "Tensor scale type must be ue8m0 or ue4m3");
+      return 0;
+    }
+    if (option[0] == 'a') desc->a_scale_element = element;
+    else desc->b_scale_element = element;
+  } else if (!strcmp(option, "a_packing") ||
+             !strcmp(option, "b_packing")) {
+    MtlcTensorPacking packing;
+    if (identifier && (!strcmp(identifier, "logical") ||
+                       !strcmp(identifier, "unpacked")))
+      packing = MTLC_TENSOR_PACKING_LOGICAL;
+    else if (identifier && (!strcmp(identifier, "packed") ||
+                            !strcmp(identifier, "dense_subbyte")))
+      packing = MTLC_TENSOR_PACKING_DENSE_SUBBYTE;
+    else {
+      type_checker_set_error_at_location(
+          checker, value->location,
+          "Tensor packing must be logical or dense_subbyte");
+      return 0;
+    }
+    if (option[0] == 'a') desc->a_packing = packing;
+    else desc->b_packing = packing;
+  } else if (!strcmp(option, "ldsa") || !strcmp(option, "ldsb") ||
+             !strcmp(option, "a_scale_ld") ||
+             !strcmp(option, "b_scale_ld")) {
+    uint32_t dimension = 0;
+    if (!type_checker_tensor_option_u32(checker, value, option, UINT32_MAX,
+                                        &dimension))
+      return 0;
+    if (option[0] == 'a' || option[3] == 'a')
+      desc->a_scale_leading_dimension = dimension;
+    else
+      desc->b_scale_leading_dimension = dimension;
+  } else if (!strcmp(option, "transpose_a") ||
+             !strcmp(option, "transpose_b")) {
+    uint8_t transpose = 0;
+    if (!type_checker_tensor_option_bool(checker, value, option, &transpose))
+      return 0;
+    if (option[10] == 'a') desc->transpose_a = transpose;
+    else desc->transpose_b = transpose;
+  } else {
+    return type_checker_tensor_scope_option(checker, call, i, operation, positional_count, is_matmul, desc, have, option, identifier, value);
+  }
+  return 1;
+}
+
+
+static int type_checker_tensor_mode_option(TypeChecker *checker,
+                                      CallExpression *call, size_t i,
+                                      const char *operation,
+                                      size_t positional_count,
+                                      int is_matmul,
+                                      MtlcTensorMmaDesc *desc,
+                                      TensorHave *have, const char *option,
+                                      const char *identifier, ASTNode *value) {
+  if (!strcmp(option, "math")) {
+    if (identifier && !strcmp(identifier, "multiply_add"))
+      desc->math_mode = MTLC_TENSOR_MATH_MULTIPLY_ADD;
+    else if (identifier && !strcmp(identifier, "xor_popcount"))
+      desc->math_mode = MTLC_TENSOR_MATH_XOR_POPCOUNT;
+    else if (identifier && !strcmp(identifier, "and_popcount"))
+      desc->math_mode = MTLC_TENSOR_MATH_AND_POPCOUNT;
+    else {
+      type_checker_set_error_at_location(checker, value->location,
+                                         "Unknown tensor math mode");
+      return 0;
+    }
+  } else if (!strcmp(option, "sparsity")) {
+    if (identifier && !strcmp(identifier, "dense"))
+      desc->sparsity = MTLC_TENSOR_SPARSITY_DENSE;
+    else if (identifier && !strcmp(identifier, "structured_1_to_2"))
+      desc->sparsity = MTLC_TENSOR_SPARSITY_STRUCTURED_1_TO_2;
+    else if (identifier && !strcmp(identifier, "structured_2_to_4"))
+      desc->sparsity = MTLC_TENSOR_SPARSITY_STRUCTURED_2_TO_4;
+    else if (identifier && !strcmp(identifier, "structured_4_to_8"))
+      desc->sparsity = MTLC_TENSOR_SPARSITY_STRUCTURED_4_TO_8;
+    else {
+      type_checker_set_error_at_location(checker, value->location,
+                                         "Unknown tensor sparsity mode");
+      return 0;
+    }
+  } else if (!strcmp(option, "rounding")) {
+    if (identifier && !strcmp(identifier, "default"))
+      desc->rounding = MTLC_TENSOR_ROUND_DEFAULT;
+    else if (identifier && !strcmp(identifier, "nearest_even"))
+      desc->rounding = MTLC_TENSOR_ROUND_NEAREST_EVEN;
+    else if (identifier && !strcmp(identifier, "toward_zero"))
+      desc->rounding = MTLC_TENSOR_ROUND_TOWARD_ZERO;
+    else if (identifier && !strcmp(identifier, "down"))
+      desc->rounding = MTLC_TENSOR_ROUND_DOWN;
+    else if (identifier && !strcmp(identifier, "up"))
+      desc->rounding = MTLC_TENSOR_ROUND_UP;
+    else {
+      type_checker_set_error_at_location(checker, value->location,
+                                         "Unknown tensor rounding mode");
+      return 0;
+    }
+  } else if (!strcmp(option, "overflow")) {
+    if (identifier && !strcmp(identifier, "wrap"))
+      desc->overflow = MTLC_TENSOR_OVERFLOW_WRAP;
+    else if (identifier && !strcmp(identifier, "saturate_finite"))
+      desc->overflow = MTLC_TENSOR_OVERFLOW_SATURATE_FINITE;
+    else {
+      type_checker_set_error_at_location(checker, value->location,
+                                         "Unknown tensor overflow mode");
+      return 0;
+    }
+  } else {
+    return type_checker_tensor_scale_option(checker, call, i, operation, positional_count, is_matmul, desc, have, option, identifier, value);
+  }
+  return 1;
+}
+
+
+static int type_checker_tensor_type_option(TypeChecker *checker,
+                                      CallExpression *call, size_t i,
+                                      const char *operation,
+                                      size_t positional_count,
+                                      int is_matmul,
+                                      MtlcTensorMmaDesc *desc,
+                                      TensorHave *have, const char *option,
+                                      const char *identifier, ASTNode *value) {
+  if (!strcmp(option, "input_type") ||
+             !strcmp(option, "a_type") || !strcmp(option, "b_type") ||
+             !strcmp(option, "output_type") ||
+             !strcmp(option, "accumulator_type") ||
+             !strcmp(option, "result_type")) {
+    MtlcTensorElement element = type_checker_tensor_element_name(identifier);
+    if (element == MTLC_TENSOR_ELEMENT_INVALID) {
+      type_checker_set_error_at_location(checker, value->location,
+                                         "Unknown tensor element format");
+      return 0;
+    }
+    if (!strcmp(option, "input_type")) {
+      desc->a_element = desc->b_element = element;
+      have->a = have->b = 1;
+    } else if (!strcmp(option, "a_type")) {
+      desc->a_element = element;
+      have->a = 1;
+    } else if (!strcmp(option, "b_type")) {
+      desc->b_element = element;
+      have->b = 1;
+    } else if (!strcmp(option, "output_type")) {
+      desc->accumulator_element = desc->result_element = element;
+      have->accumulator = have->result = 1;
+    } else if (!strcmp(option, "accumulator_type")) {
+      desc->accumulator_element = element;
+      have->accumulator = 1;
+    } else {
+      desc->result_element = element;
+      have->result = 1;
+    }
+  } else if (!strcmp(option, "a_layout") ||
+             !strcmp(option, "b_layout") ||
+             !strcmp(option, "c_layout") ||
+             !strcmp(option, "d_layout")) {
+    MtlcTensorLayout layout = type_checker_tensor_layout_name(identifier);
+    if (layout == MTLC_TENSOR_LAYOUT_INVALID) {
+      type_checker_set_error_at_location(checker, value->location,
+                                         "Tensor layout must be row or col");
+      return 0;
+    }
+    if (option[0] == 'a') desc->a_layout = layout;
+    if (option[0] == 'b') desc->b_layout = layout;
+    if (option[0] == 'c') desc->c_layout = layout;
+    if (option[0] == 'd') desc->d_layout = layout;
+  } else if (!strcmp(option, "lda") || !strcmp(option, "ldb") ||
+             !strcmp(option, "ldc") || !strcmp(option, "ldd")) {
+    int slot = option[2] - 'a';
+    long long constant = 0;
+    uint32_t *descriptor_stride =
+        slot == 0   ? &desc->a_leading_dimension
+        : slot == 1 ? &desc->b_leading_dimension
+        : slot == 2 ? &desc->c_leading_dimension
+                    : &desc->d_leading_dimension;
+    size_t *runtime_argument =
+        slot == 0   ? &call->tensor_a_stride_argument
+        : slot == 1 ? &call->tensor_b_stride_argument
+        : slot == 2 ? &call->tensor_c_stride_argument
+                    : &call->tensor_d_stride_argument;
+    have->stride[slot] = 1;
+    if (type_checker_eval_integer_constant(value, &constant)) {
+      if (constant <= 0 || (unsigned long long)constant > UINT32_MAX) {
+        type_checker_set_error_at_location(
+            checker, value->location,
+            "Tensor option '%s' must be an integer in [1, %u] or a runtime integer expression",
+            option, UINT32_MAX);
+        return 0;
+      }
+      *descriptor_stride = (uint32_t)constant;
+    } else {
+      Type *stride_type = type_checker_infer_type(checker, value);
+      if (!stride_type || !type_checker_is_integer_type(stride_type)) {
+        type_checker_set_error_at_location(
+            checker, value->location,
+            "Runtime tensor option '%s' must have integer type", option);
+        return 0;
+      }
+      *descriptor_stride = 0;
+      *runtime_argument = i;
+    }
+  } else {
+    return type_checker_tensor_mode_option(checker, call, i, operation, positional_count, is_matmul, desc, have, option, identifier, value);
+  }
+  return 1;
+}
+
+static int type_checker_tensor_option(TypeChecker *checker,
+                                      CallExpression *call, size_t i,
+                                      const char *operation,
+                                      size_t positional_count,
+                                      int is_matmul,
+                                      MtlcTensorMmaDesc *desc,
+                                      TensorHave *have) {
+  const char *option = call->argument_names ? call->argument_names[i] : NULL;
+  ASTNode *value = call->arguments[i];
+  const char *identifier = type_checker_tensor_option_identifier(value);
+  if (!option) {
+    type_checker_set_error_at_location(
+        checker, value->location,
+        "Tensor configuration arguments after the positional operands must be named");
+    return 0;
+  }
+  for (size_t prior = positional_count; prior < i; prior++) {
+    if (call->argument_names[prior] &&
+        strcmp(call->argument_names[prior], option) == 0) {
+      type_checker_set_error_at_location(checker, value->location,
+                                         "Duplicate tensor option '%s'",
+                                         option);
+      return 0;
+    }
+  }
+  if (!strcmp(option, "shape")) {
+    unsigned m = 0, n = 0, k = 0;
+    char tail = 0;
+    if (!identifier ||
+        sscanf(identifier, "m%un%uk%u%c", &m, &n, &k, &tail) != 3 ||
+        m == 0 || n == 0 || k == 0 || m > UINT16_MAX || n > UINT16_MAX ||
+        k > UINT16_MAX || have->m || have->n || have->k) {
+      type_checker_set_error_at_location(
+          checker, value->location,
+          "Tensor shape must be an identifier like m16n16k16 and cannot be mixed with m/n/k");
+      return 0;
+    }
+    desc->m = (uint16_t)m;
+    desc->n = (uint16_t)n;
+    desc->k = (uint16_t)k;
+    have->m = have->n = have->k = have->shape = 1;
+  } else if (!strcmp(option, "m") || !strcmp(option, "n") ||
+             !strcmp(option, "k")) {
+    uint32_t dimension = 0;
+    if (have->shape ||
+        !type_checker_tensor_option_u32(checker, value, option, UINT16_MAX,
+                                        &dimension)) {
+      if (have->shape)
+        type_checker_set_error_at_location(
+            checker, value->location,
+            "Tensor shape cannot be mixed with explicit m/n/k options");
+      return 0;
+    }
+    if (!strcmp(option, "m")) desc->m = (uint16_t)dimension, have->m = 1;
+    if (!strcmp(option, "n")) desc->n = (uint16_t)dimension, have->n = 1;
+    if (!strcmp(option, "k")) desc->k = (uint16_t)dimension, have->k = 1;
+  } else {
+    return type_checker_tensor_type_option(
+        checker, call, i, operation, positional_count, is_matmul, desc,
+        have, option, identifier, value);
+  }
+  return 1;
+}
+
+
+
+static int type_checker_tensor_required(TypeChecker *checker,
+                                        ASTNode *expression,
+                                        const char *operation,
+                                        int is_matmul,
+                                        const TensorHave *have) {
+  if (!have->m || !have->n || !have->k || !have->a || !have->b ||
+      !have->accumulator || !have->result) {
+    type_checker_set_error_at_location(
+        checker, expression->location,
+        "%s requires shape (or m/n/k), input types, and accumulator/result types",
+        operation);
+    return 0;
+  }
+  if (is_matmul &&
+      (!have->stride[0] || !have->stride[1] || !have->stride[2] ||
+       !have->stride[3])) {
+    type_checker_set_error_at_location(
+        checker, expression->location,
+        "tensor_matmul requires explicit lda, ldb, ldc, and ldd for whole matrices");
+    return 0;
+  }
+  return 1;
+}
+
 static Type *type_checker_tensor_mma_builtin(TypeChecker *checker,
                                              ASTNode *expression,
                                              CallExpression *call,
                                              int *handled) {
   MtlcTensorMmaDesc desc = {0};
-  int have_m = 0, have_n = 0, have_k = 0;
-  int have_a = 0, have_b = 0, have_accumulator = 0, have_result = 0;
-  int have_shape = 0;
-  int have_stride[4] = {0, 0, 0, 0};
+  TensorHave have = {0};
   *handled = 0;
   if (!call || !call->function_name || call->object) {
     return NULL;
@@ -1687,287 +2058,14 @@ static Type *type_checker_tensor_mma_builtin(TypeChecker *checker,
   call->tensor_d_stride_argument = SIZE_MAX;
 
   for (size_t i = positional_count; i < call->argument_count; i++) {
-    const char *option = call->argument_names ? call->argument_names[i] : NULL;
-    ASTNode *value = call->arguments[i];
-    const char *identifier = type_checker_tensor_option_identifier(value);
-    if (!option) {
-      type_checker_set_error_at_location(
-          checker, value->location,
-          "Tensor configuration arguments after the positional operands must be named");
-      return NULL;
-    }
-    for (size_t prior = positional_count; prior < i; prior++) {
-      if (call->argument_names[prior] &&
-          strcmp(call->argument_names[prior], option) == 0) {
-        type_checker_set_error_at_location(checker, value->location,
-                                           "Duplicate tensor option '%s'",
-                                           option);
-        return NULL;
-      }
-    }
-    if (!strcmp(option, "shape")) {
-      unsigned m = 0, n = 0, k = 0;
-      char tail = 0;
-      if (!identifier ||
-          sscanf(identifier, "m%un%uk%u%c", &m, &n, &k, &tail) != 3 ||
-          m == 0 || n == 0 || k == 0 || m > UINT16_MAX || n > UINT16_MAX ||
-          k > UINT16_MAX || have_m || have_n || have_k) {
-        type_checker_set_error_at_location(
-            checker, value->location,
-            "Tensor shape must be an identifier like m16n16k16 and cannot be mixed with m/n/k");
-        return NULL;
-      }
-      desc.m = (uint16_t)m;
-      desc.n = (uint16_t)n;
-      desc.k = (uint16_t)k;
-      have_m = have_n = have_k = have_shape = 1;
-    } else if (!strcmp(option, "m") || !strcmp(option, "n") ||
-               !strcmp(option, "k")) {
-      uint32_t dimension = 0;
-      if (have_shape ||
-          !type_checker_tensor_option_u32(checker, value, option, UINT16_MAX,
-                                          &dimension)) {
-        if (have_shape)
-          type_checker_set_error_at_location(
-              checker, value->location,
-              "Tensor shape cannot be mixed with explicit m/n/k options");
-        return NULL;
-      }
-      if (!strcmp(option, "m")) desc.m = (uint16_t)dimension, have_m = 1;
-      if (!strcmp(option, "n")) desc.n = (uint16_t)dimension, have_n = 1;
-      if (!strcmp(option, "k")) desc.k = (uint16_t)dimension, have_k = 1;
-    } else if (!strcmp(option, "input_type") ||
-               !strcmp(option, "a_type") || !strcmp(option, "b_type") ||
-               !strcmp(option, "output_type") ||
-               !strcmp(option, "accumulator_type") ||
-               !strcmp(option, "result_type")) {
-      MtlcTensorElement element = type_checker_tensor_element_name(identifier);
-      if (element == MTLC_TENSOR_ELEMENT_INVALID) {
-        type_checker_set_error_at_location(checker, value->location,
-                                           "Unknown tensor element format");
-        return NULL;
-      }
-      if (!strcmp(option, "input_type")) {
-        desc.a_element = desc.b_element = element;
-        have_a = have_b = 1;
-      } else if (!strcmp(option, "a_type")) {
-        desc.a_element = element;
-        have_a = 1;
-      } else if (!strcmp(option, "b_type")) {
-        desc.b_element = element;
-        have_b = 1;
-      } else if (!strcmp(option, "output_type")) {
-        desc.accumulator_element = desc.result_element = element;
-        have_accumulator = have_result = 1;
-      } else if (!strcmp(option, "accumulator_type")) {
-        desc.accumulator_element = element;
-        have_accumulator = 1;
-      } else {
-        desc.result_element = element;
-        have_result = 1;
-      }
-    } else if (!strcmp(option, "a_layout") ||
-               !strcmp(option, "b_layout") ||
-               !strcmp(option, "c_layout") ||
-               !strcmp(option, "d_layout")) {
-      MtlcTensorLayout layout = type_checker_tensor_layout_name(identifier);
-      if (layout == MTLC_TENSOR_LAYOUT_INVALID) {
-        type_checker_set_error_at_location(checker, value->location,
-                                           "Tensor layout must be row or col");
-        return NULL;
-      }
-      if (option[0] == 'a') desc.a_layout = layout;
-      if (option[0] == 'b') desc.b_layout = layout;
-      if (option[0] == 'c') desc.c_layout = layout;
-      if (option[0] == 'd') desc.d_layout = layout;
-    } else if (!strcmp(option, "lda") || !strcmp(option, "ldb") ||
-               !strcmp(option, "ldc") || !strcmp(option, "ldd")) {
-      int slot = option[2] - 'a';
-      long long constant = 0;
-      uint32_t *descriptor_stride =
-          slot == 0   ? &desc.a_leading_dimension
-          : slot == 1 ? &desc.b_leading_dimension
-          : slot == 2 ? &desc.c_leading_dimension
-                      : &desc.d_leading_dimension;
-      size_t *runtime_argument =
-          slot == 0   ? &call->tensor_a_stride_argument
-          : slot == 1 ? &call->tensor_b_stride_argument
-          : slot == 2 ? &call->tensor_c_stride_argument
-                      : &call->tensor_d_stride_argument;
-      have_stride[slot] = 1;
-      if (type_checker_eval_integer_constant(value, &constant)) {
-        if (constant <= 0 || (unsigned long long)constant > UINT32_MAX) {
-          type_checker_set_error_at_location(
-              checker, value->location,
-              "Tensor option '%s' must be an integer in [1, %u] or a runtime integer expression",
-              option, UINT32_MAX);
-          return NULL;
-        }
-        *descriptor_stride = (uint32_t)constant;
-      } else {
-        Type *stride_type = type_checker_infer_type(checker, value);
-        if (!stride_type || !type_checker_is_integer_type(stride_type)) {
-          type_checker_set_error_at_location(
-              checker, value->location,
-              "Runtime tensor option '%s' must have integer type", option);
-          return NULL;
-        }
-        *descriptor_stride = 0;
-        *runtime_argument = i;
-      }
-    } else if (!strcmp(option, "math")) {
-      if (identifier && !strcmp(identifier, "multiply_add"))
-        desc.math_mode = MTLC_TENSOR_MATH_MULTIPLY_ADD;
-      else if (identifier && !strcmp(identifier, "xor_popcount"))
-        desc.math_mode = MTLC_TENSOR_MATH_XOR_POPCOUNT;
-      else if (identifier && !strcmp(identifier, "and_popcount"))
-        desc.math_mode = MTLC_TENSOR_MATH_AND_POPCOUNT;
-      else {
-        type_checker_set_error_at_location(checker, value->location,
-                                           "Unknown tensor math mode");
-        return NULL;
-      }
-    } else if (!strcmp(option, "sparsity")) {
-      if (identifier && !strcmp(identifier, "dense"))
-        desc.sparsity = MTLC_TENSOR_SPARSITY_DENSE;
-      else if (identifier && !strcmp(identifier, "structured_1_to_2"))
-        desc.sparsity = MTLC_TENSOR_SPARSITY_STRUCTURED_1_TO_2;
-      else if (identifier && !strcmp(identifier, "structured_2_to_4"))
-        desc.sparsity = MTLC_TENSOR_SPARSITY_STRUCTURED_2_TO_4;
-      else if (identifier && !strcmp(identifier, "structured_4_to_8"))
-        desc.sparsity = MTLC_TENSOR_SPARSITY_STRUCTURED_4_TO_8;
-      else {
-        type_checker_set_error_at_location(checker, value->location,
-                                           "Unknown tensor sparsity mode");
-        return NULL;
-      }
-    } else if (!strcmp(option, "rounding")) {
-      if (identifier && !strcmp(identifier, "default"))
-        desc.rounding = MTLC_TENSOR_ROUND_DEFAULT;
-      else if (identifier && !strcmp(identifier, "nearest_even"))
-        desc.rounding = MTLC_TENSOR_ROUND_NEAREST_EVEN;
-      else if (identifier && !strcmp(identifier, "toward_zero"))
-        desc.rounding = MTLC_TENSOR_ROUND_TOWARD_ZERO;
-      else if (identifier && !strcmp(identifier, "down"))
-        desc.rounding = MTLC_TENSOR_ROUND_DOWN;
-      else if (identifier && !strcmp(identifier, "up"))
-        desc.rounding = MTLC_TENSOR_ROUND_UP;
-      else {
-        type_checker_set_error_at_location(checker, value->location,
-                                           "Unknown tensor rounding mode");
-        return NULL;
-      }
-    } else if (!strcmp(option, "overflow")) {
-      if (identifier && !strcmp(identifier, "wrap"))
-        desc.overflow = MTLC_TENSOR_OVERFLOW_WRAP;
-      else if (identifier && !strcmp(identifier, "saturate_finite"))
-        desc.overflow = MTLC_TENSOR_OVERFLOW_SATURATE_FINITE;
-      else {
-        type_checker_set_error_at_location(checker, value->location,
-                                           "Unknown tensor overflow mode");
-        return NULL;
-      }
-    } else if (!strcmp(option, "a_scale_mode") ||
-               !strcmp(option, "b_scale_mode")) {
-      MtlcTensorScaleMode mode = MTLC_TENSOR_SCALE_NONE;
-      if (identifier && !strcmp(identifier, "none"))
-        mode = MTLC_TENSOR_SCALE_NONE;
-      else if (identifier && !strcmp(identifier, "per_tensor"))
-        mode = MTLC_TENSOR_SCALE_PER_TENSOR;
-      else if (identifier && !strcmp(identifier, "block16"))
-        mode = MTLC_TENSOR_SCALE_BLOCK_16;
-      else if (identifier && !strcmp(identifier, "block32"))
-        mode = MTLC_TENSOR_SCALE_BLOCK_32;
-      else {
-        type_checker_set_error_at_location(checker, value->location,
-                                           "Unknown tensor scale mode");
-        return NULL;
-      }
-      if (option[0] == 'a') desc.a_scale_mode = mode;
-      else desc.b_scale_mode = mode;
-    } else if (!strcmp(option, "a_scale_type") ||
-               !strcmp(option, "b_scale_type")) {
-      MtlcTensorElement element = type_checker_tensor_element_name(identifier);
-      if (element != MTLC_TENSOR_ELEMENT_SCALE_UE8M0 &&
-          element != MTLC_TENSOR_ELEMENT_SCALE_UE4M3) {
-        type_checker_set_error_at_location(
-            checker, value->location,
-            "Tensor scale type must be ue8m0 or ue4m3");
-        return NULL;
-      }
-      if (option[0] == 'a') desc.a_scale_element = element;
-      else desc.b_scale_element = element;
-    } else if (!strcmp(option, "a_packing") ||
-               !strcmp(option, "b_packing")) {
-      MtlcTensorPacking packing;
-      if (identifier && (!strcmp(identifier, "logical") ||
-                         !strcmp(identifier, "unpacked")))
-        packing = MTLC_TENSOR_PACKING_LOGICAL;
-      else if (identifier && (!strcmp(identifier, "packed") ||
-                              !strcmp(identifier, "dense_subbyte")))
-        packing = MTLC_TENSOR_PACKING_DENSE_SUBBYTE;
-      else {
-        type_checker_set_error_at_location(
-            checker, value->location,
-            "Tensor packing must be logical or dense_subbyte");
-        return NULL;
-      }
-      if (option[0] == 'a') desc.a_packing = packing;
-      else desc.b_packing = packing;
-    } else if (!strcmp(option, "ldsa") || !strcmp(option, "ldsb") ||
-               !strcmp(option, "a_scale_ld") ||
-               !strcmp(option, "b_scale_ld")) {
-      uint32_t dimension = 0;
-      if (!type_checker_tensor_option_u32(checker, value, option, UINT32_MAX,
-                                          &dimension))
-        return NULL;
-      if (option[0] == 'a' || option[3] == 'a')
-        desc.a_scale_leading_dimension = dimension;
-      else
-        desc.b_scale_leading_dimension = dimension;
-    } else if (!strcmp(option, "transpose_a") ||
-               !strcmp(option, "transpose_b")) {
-      uint8_t transpose = 0;
-      if (!type_checker_tensor_option_bool(checker, value, option, &transpose))
-        return NULL;
-      if (option[10] == 'a') desc.transpose_a = transpose;
-      else desc.transpose_b = transpose;
-    } else if (!strcmp(option, "scope")) {
-      if (identifier && !strcmp(identifier, "subgroup"))
-        desc.scope = MTLC_MEMORY_SCOPE_SUBGROUP;
-      else if (identifier && !strcmp(identifier, "workgroup"))
-        desc.scope = MTLC_MEMORY_SCOPE_WORKGROUP;
-      else {
-        type_checker_set_error_at_location(checker, value->location,
-                                           "Tensor scope must be subgroup or workgroup");
-        return NULL;
-      }
-    } else if (!strcmp(option, "metadata")) {
-      call->tensor_metadata_argument = i;
-    } else if (!strcmp(option, "a_scale")) {
-      call->tensor_a_scale_argument = i;
-    } else if (!strcmp(option, "b_scale")) {
-      call->tensor_b_scale_argument = i;
-    } else {
-      type_checker_set_error_at_location(checker, value->location,
-                                         "Unknown tensor option '%s'", option);
+    if (!type_checker_tensor_option(checker, call, i, operation,
+                                    positional_count, is_matmul, &desc,
+                                    &have)) {
       return NULL;
     }
   }
-  if (!have_m || !have_n || !have_k || !have_a || !have_b ||
-      !have_accumulator || !have_result) {
-    type_checker_set_error_at_location(
-        checker, expression->location,
-        "%s requires shape (or m/n/k), input types, and accumulator/result types",
-        operation);
-    return NULL;
-  }
-  if (is_matmul &&
-      (!have_stride[0] || !have_stride[1] || !have_stride[2] ||
-       !have_stride[3])) {
-    type_checker_set_error_at_location(
-        checker, expression->location,
-        "tensor_matmul requires explicit lda, ldb, ldc, and ldd for whole matrices");
+  if (!type_checker_tensor_required(checker, expression, operation,
+                                   is_matmul, &have)) {
     return NULL;
   }
   uint32_t a_storage_k = desc.k;
@@ -1977,16 +2075,16 @@ static Type *type_checker_tensor_mma_builtin(TypeChecker *checker,
   uint32_t a_columns = desc.transpose_a ? desc.m : a_storage_k;
   uint32_t b_rows = desc.transpose_b ? desc.n : desc.k;
   uint32_t b_columns = desc.transpose_b ? desc.k : desc.n;
-  if (!have_stride[0])
+  if (!have.stride[0])
     desc.a_leading_dimension =
         desc.a_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR ? a_columns : a_rows;
-  if (!have_stride[1])
+  if (!have.stride[1])
     desc.b_leading_dimension =
         desc.b_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR ? b_columns : b_rows;
-  if (!have_stride[2])
+  if (!have.stride[2])
     desc.c_leading_dimension =
         desc.c_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR ? desc.n : desc.m;
-  if (!have_stride[3])
+  if (!have.stride[3])
     desc.d_leading_dimension =
         desc.d_layout == MTLC_TENSOR_LAYOUT_ROW_MAJOR ? desc.n : desc.m;
   if (!mtlc_tensor_mma_desc_is_valid(&desc)) {
