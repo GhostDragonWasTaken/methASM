@@ -7890,7 +7890,6 @@ static void ptx_emit_call(IRProgram *program, IRFunction *func, PtxFn *fn,
   (void)target_arch;
   switch (in->op) {
   case IR_OP_CALL: {
-    const char *callee = in->text;
     MtlcIntrinsic intrinsic = in->intrinsic;
     const char *sreg = sreg_for_intrinsic(intrinsic);
     if (sreg) {
@@ -8289,127 +8288,158 @@ static void ptx_emit_result(IRProgram *program, IRFunction *func, PtxFn *fn,
   }
 }
 
-static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
-                           FILE *out, int target_arch, char target_variant,
-                           int isa_major, int isa_minor,
-                           int tensor_tuple_budget, char **error) {
-  (void)gen;
-  IRFunction *func = program->functions[fi];
-  PtxFn fn = {0};
-  const IRModuleSymbol *function_symbol =
-      ir_program_lookup_symbol(program, func->name);
-  const MtlcType *return_type =
-      ptx_function_return_type(program, func, function_symbol);
-  int returns_void =
-      ptx_type_is_void(return_type, func ? func->return_type_name : NULL);
-  fn.program = program;
-  fn.function = func;
-  fn.function_symbol = function_symbol;
-  fn.target_arch = target_arch;
-  fn.target_variant = target_variant;
-  fn.isa_major = isa_major;
-  fn.isa_minor = isa_minor;
-  fn.tensor_tuple_budget = tensor_tuple_budget;
-  fn.return_desc = returns_void ? (PtxVal){0}
-                                : (return_type
-                                       ? descriptor_from_type(return_type)
-                                       : descriptor_from_typename(
-                                             func->return_type_name));
-  if (!returns_void && ptx_type_is_aggregate(return_type)) {
-    fn.return_desc = (PtxVal){0};
-    fn.return_desc.cls = PC_B64;
-    fn.return_desc.elem = MTLC_TYPE_VOID;
-    fn.return_desc.mem_local = 1;
-    fn.return_desc.mem_aggregate = 1;
-    fn.return_desc.mem_size = mtlc_type_size(return_type);
-    fn.return_desc.mem_align = mtlc_type_alignment(return_type);
-    if (!fn.return_desc.mem_align) {
-      fn.return_desc.mem_align = 1;
-    }
-  }
+typedef void (*PtxHandler)(IRProgram *program, IRFunction *func, PtxFn *fn,
+                           const IRInstruction *in, size_t *ii, char **error,
+                           int target_arch, int returns_void,
+                           const char *ename, int *handled);
 
+static const PtxHandler PTX_HANDLERS[] = {
+    ptx_emit_device, ptx_emit_control, ptx_emit_assign, ptx_emit_memory,
+    ptx_emit_arith,  ptx_emit_call,    ptx_emit_result,
+};
+
+typedef struct {
+  IRProgram *program;
+  IRFunction *func;
+  PtxFn fn;
+  const IRModuleSymbol *symbol;
+  int returns_void;
   char ename[256];
-  sanitize_into(func->name ? func->name : "kernel", ename, sizeof(ename));
+  Sb sig;
+  PtxVal *param_descs;
+  size_t dynamic_alignment;
+  char dynamic_storage[512];
+} PtxEmit;
 
-  Sb sig = {0};
-  if (func->is_kernel) {
-    sb_printf(&sig, ".visible .entry %s(", ename);
-  } else if (returns_void) {
-    sb_printf(&sig, ".func %s(", ename);
-  } else if (fn.return_desc.mem_aggregate) {
-    sb_printf(&sig, ".func (.param .align %zu .b8 %s_ret[%zu]) %s(",
-              fn.return_desc.mem_align, ename, fn.return_desc.mem_size, ename);
+static const char *ptx_emit_name(const PtxEmit *e) {
+  return e->func->name ? e->func->name : "?";
+}
+
+static PtxVal ptx_aggregate_descriptor(const MtlcType *type) {
+  PtxVal d = {0};
+  d.cls = PC_B64;
+  d.elem = MTLC_TYPE_VOID;
+  d.mem_local = 1;
+  d.mem_aggregate = 1;
+  d.mem_size = mtlc_type_size(type);
+  d.mem_align = mtlc_type_alignment(type);
+  if (!d.mem_align) {
+    d.mem_align = 1;
+  }
+  return d;
+}
+
+static void ptx_emit_return_descriptor(PtxEmit *e) {
+  const MtlcType *return_type =
+      ptx_function_return_type(e->program, e->func, e->symbol);
+  e->returns_void = ptx_type_is_void(
+      return_type, e->func ? e->func->return_type_name : NULL);
+  e->fn.return_desc =
+      e->returns_void
+          ? (PtxVal){0}
+          : (return_type ? descriptor_from_type(return_type)
+                         : descriptor_from_typename(e->func->return_type_name));
+  if (!e->returns_void && ptx_type_is_aggregate(return_type)) {
+    e->fn.return_desc = ptx_aggregate_descriptor(return_type);
+  }
+}
+
+static void ptx_emit_signature_head(PtxEmit *e) {
+  if (e->func->is_kernel) {
+    sb_printf(&e->sig, ".visible .entry %s(", e->ename);
+  } else if (e->returns_void) {
+    sb_printf(&e->sig, ".func %s(", e->ename);
+  } else if (e->fn.return_desc.mem_aggregate) {
+    sb_printf(&e->sig, ".func (.param .align %zu .b8 %s_ret[%zu]) %s(",
+              e->fn.return_desc.mem_align, e->ename,
+              e->fn.return_desc.mem_size, e->ename);
   } else {
-    sb_printf(&sig, ".func (.param .%s %s_ret) %s(",
-              device_param_storage_type(fn.return_desc), ename, ename);
+    sb_printf(&e->sig, ".func (.param .%s %s_ret) %s(",
+              device_param_storage_type(e->fn.return_desc), e->ename,
+              e->ename);
   }
-  PtxVal *param_descs = calloc(func->parameter_count + 1, sizeof(PtxVal));
-  for (size_t p = 0; p < func->parameter_count; p++) {
-    const char *tn = func->parameter_types ? func->parameter_types[p] : NULL;
-    const MtlcType *pt = function_symbol &&
-                                 function_symbol->kind == IR_MODSYM_FUNCTION &&
-                                 p < function_symbol->param_count
-                             ? function_symbol->param_types[p]
-                             : NULL;
-    PtxVal d = pt ? descriptor_from_type(pt) : descriptor_from_typename(tn);
-    if (!func->is_kernel && d.is_ptr &&
-        (!pt || pt->address_space == MTLC_ADDRESS_SPACE_DEFAULT)) {
-      d.address_space = MTLC_ADDRESS_SPACE_GENERIC;
+}
+
+static const MtlcType *ptx_parameter_type(const PtxEmit *e, size_t p) {
+  return e->symbol && e->symbol->kind == IR_MODSYM_FUNCTION &&
+                 p < e->symbol->param_count
+             ? e->symbol->param_types[p]
+             : NULL;
+}
+
+static PtxVal ptx_parameter_descriptor(PtxEmit *e, size_t p,
+                                       const MtlcType *pt) {
+  const char *tn = e->func->parameter_types ? e->func->parameter_types[p]
+                                            : NULL;
+  PtxVal d = pt ? descriptor_from_type(pt) : descriptor_from_typename(tn);
+  if (!e->func->is_kernel && d.is_ptr &&
+      (!pt || pt->address_space == MTLC_ADDRESS_SPACE_DEFAULT)) {
+    d.address_space = MTLC_ADDRESS_SPACE_GENERIC;
+  }
+  if (ptx_type_is_aggregate(pt)) {
+    d = ptx_aggregate_descriptor(pt);
+    if (!d.mem_size) {
+      fn_error(&e->fn, "PTX: parameter %zu of '%s' has an empty record type",
+               p, ptx_emit_name(e));
     }
-    if (ptx_type_is_aggregate(pt)) {
-      d = (PtxVal){0};
-      d.cls = PC_B64;
-      d.elem = MTLC_TYPE_VOID;
-      d.mem_local = 1;
-      d.mem_aggregate = 1;
-      d.mem_size = mtlc_type_size(pt);
-      d.mem_align = mtlc_type_alignment(pt);
-      if (!d.mem_size) {
-        fn_error(&fn, "PTX: parameter %zu of '%s' has an empty record type", p,
-                 func->name ? func->name : "?");
-      }
-      if (!d.mem_align) {
-        d.mem_align = 1;
-      }
-    }
-    param_descs[p] = d;
-    if (p) {
-      sb_puts(&sig, ",");
-    }
-    if (d.mem_aggregate) {
-      sb_printf(&sig, "\n    .param .align %zu .b8 %s_p%zu[%zu]", d.mem_align,
-                ename, p, d.mem_size);
-    } else if (func->is_kernel && d.is_ptr) {
-      const char *space = ptx_memory_space(d.address_space);
-      size_t alignment = pt && pt->pointee_align ? pt->pointee_align
-                         : pt && pt->base_type && pt->base_type->alignment
-                             ? pt->base_type->alignment
-                             : 4;
-      if (!space) {
-        fn_error(&fn, "PTX: invalid address space %d on parameter %zu",
-                 (int)d.address_space, p);
-      } else {
-        sb_printf(&sig, "\n    .param .%s .ptr%s.align %zu %s_p%zu",
-                  param_storage_type(d), space, alignment, ename, p);
-      }
+  }
+  return d;
+}
+
+static void ptx_signature_parameter(PtxEmit *e, size_t p, PtxVal d,
+                                    const MtlcType *pt) {
+  if (p) {
+    sb_puts(&e->sig, ",");
+  }
+  if (d.mem_aggregate) {
+    sb_printf(&e->sig, "\n    .param .align %zu .b8 %s_p%zu[%zu]", d.mem_align,
+              e->ename, p, d.mem_size);
+    return;
+  }
+  if (e->func->is_kernel && d.is_ptr) {
+    const char *space = ptx_memory_space(d.address_space);
+    size_t alignment = pt && pt->pointee_align ? pt->pointee_align
+                       : pt && pt->base_type && pt->base_type->alignment
+                           ? pt->base_type->alignment
+                           : 4;
+    if (!space) {
+      fn_error(&e->fn, "PTX: invalid address space %d on parameter %zu",
+               (int)d.address_space, p);
     } else {
-      sb_printf(&sig, "\n    .param .%s %s_p%zu",
-                func->is_kernel ? param_storage_type(d)
-                                : device_param_storage_type(d),
-                ename, p);
+      sb_printf(&e->sig, "\n    .param .%s .ptr%s.align %zu %s_p%zu",
+                param_storage_type(d), space, alignment, e->ename, p);
     }
+    return;
   }
-  sb_puts(&sig, "\n)\n");
+  sb_printf(&e->sig, "\n    .param .%s %s_p%zu",
+            e->func->is_kernel ? param_storage_type(d)
+                               : device_param_storage_type(d),
+            e->ename, p);
+}
+
+static void ptx_emit_signature(PtxEmit *e) {
+  IRFunction *func = e->func;
+  ptx_emit_signature_head(e);
+  e->param_descs = calloc(func->parameter_count + 1, sizeof(PtxVal));
+  for (size_t p = 0; p < func->parameter_count; p++) {
+    const MtlcType *pt = ptx_parameter_type(e, p);
+    PtxVal d = ptx_parameter_descriptor(e, p, pt);
+    e->param_descs[p] = d;
+    ptx_signature_parameter(e, p, d, pt);
+  }
+  sb_puts(&e->sig, "\n)\n");
   if (func->is_kernel && func->kernel_block[0] > 0) {
-    sb_printf(&sig, ".reqntid %d, %d, %d\n", func->kernel_block[0],
+    sb_printf(&e->sig, ".reqntid %d, %d, %d\n", func->kernel_block[0],
               func->kernel_block[1] > 0 ? func->kernel_block[1] : 1,
               func->kernel_block[2] > 0 ? func->kernel_block[2] : 1);
   }
+}
 
-  size_t dynamic_workgroup_alignment = 0;
-  char dynamic_workgroup_storage[512] = {0};
-  for (size_t i = 0; i < func->instruction_count && !fn.error; i++) {
+static void ptx_emit_dynamic_workgroup(PtxEmit *e) {
+  IRFunction *func = e->func;
+  for (size_t i = 0; i < func->instruction_count && !e->fn.error; i++) {
     const IRInstruction *in = &func->instructions[i];
+    size_t alignment = 0;
     if (in->op != IR_OP_ADDRESS_SPACE_ALLOC ||
         in->rhs.kind != IR_OPERAND_INT || in->rhs.int_value != 0) {
       continue;
@@ -8420,175 +8450,214 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
         in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP ||
         in->value_type->address_space != MTLC_ADDRESS_SPACE_WORKGROUP ||
         mtlc_type_size(in->value_type->base_type) == 0) {
-      fn_error(&fn, "PTX: invalid dynamic workgroup view in '%s'",
-               func->name ? func->name : "?");
+      fn_error(&e->fn, "PTX: invalid dynamic workgroup view in '%s'",
+               ptx_emit_name(e));
       break;
     }
-    size_t alignment = mtlc_type_alignment(in->value_type->base_type);
+    alignment = mtlc_type_alignment(in->value_type->base_type);
     if (alignment < 32) alignment = 32;
-    if (alignment > dynamic_workgroup_alignment) {
-      dynamic_workgroup_alignment = alignment;
+    if (alignment > e->dynamic_alignment) {
+      e->dynamic_alignment = alignment;
     }
   }
-  if (dynamic_workgroup_alignment && !fn.error) {
+  if (e->dynamic_alignment && !e->fn.error) {
     char raw[512];
-    snprintf(raw, sizeof(raw), "%s_dynamic_workgroup_storage", ename);
-    sanitize_into(raw, dynamic_workgroup_storage,
-                  sizeof(dynamic_workgroup_storage));
+    snprintf(raw, sizeof(raw), "%s_dynamic_workgroup_storage", e->ename);
+    sanitize_into(raw, e->dynamic_storage, sizeof(e->dynamic_storage));
   }
-  for (size_t i = 0; i < func->instruction_count && !fn.error; i++) {
+}
+
+static int ptx_allocation_is_valid(PtxEmit *e, const IRInstruction *in,
+                                   int is_dynamic) {
+  if (!e->func->is_kernel || !in->dest.name || !in->value_type ||
+      in->value_type->kind != MTLC_TYPE_POINTER ||
+      !in->value_type->base_type || in->rhs.kind != IR_OPERAND_INT ||
+      in->rhs.int_value < 0 ||
+      (in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP &&
+       in->address_space != MTLC_ADDRESS_SPACE_PRIVATE) ||
+      in->value_type->address_space != in->address_space ||
+      (is_dynamic && in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP)) {
+    fn_error(&e->fn, "PTX: invalid address-space allocation in '%s'",
+             ptx_emit_name(e));
+    return 0;
+  }
+  return 1;
+}
+
+static void ptx_emit_allocations(PtxEmit *e) {
+  IRFunction *func = e->func;
+  for (size_t i = 0; i < func->instruction_count && !e->fn.error; i++) {
     const IRInstruction *in = &func->instructions[i];
+    size_t elem_size = 0, alignment = 0, count = 0;
+    PtxVal pointer;
+    int is_dynamic = 0;
     if (in->op != IR_OP_ADDRESS_SPACE_ALLOC) continue;
-    int is_dynamic =
-        in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 0;
-    if (!func->is_kernel || !in->dest.name ||
-        !in->value_type || in->value_type->kind != MTLC_TYPE_POINTER ||
-        !in->value_type->base_type || in->rhs.kind != IR_OPERAND_INT ||
-        in->rhs.int_value < 0 ||
-        (in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP &&
-         in->address_space != MTLC_ADDRESS_SPACE_PRIVATE) ||
-        in->value_type->address_space != in->address_space ||
-        (is_dynamic && in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP)) {
-      fn_error(&fn, "PTX: invalid address-space allocation in '%s'",
-               func->name ? func->name : "?");
-      break;
-    }
-    size_t elem_size = mtlc_type_size(in->value_type->base_type);
-    size_t alignment = mtlc_type_alignment(in->value_type->base_type);
+    is_dynamic = in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 0;
+    if (!ptx_allocation_is_valid(e, in, is_dynamic)) break;
+    elem_size = mtlc_type_size(in->value_type->base_type);
+    alignment = mtlc_type_alignment(in->value_type->base_type);
     if (in->address_space == MTLC_ADDRESS_SPACE_WORKGROUP && alignment < 32)
       alignment = 32;
-    size_t count = (size_t)in->rhs.int_value;
+    count = (size_t)in->rhs.int_value;
     if (!elem_size || (!is_dynamic && count > SIZE_MAX / elem_size)) {
-      fn_error(&fn, "PTX: address-space allocation '%s' overflows",
+      fn_error(&e->fn, "PTX: address-space allocation '%s' overflows",
                in->dest.name);
       break;
     }
     if (!is_dynamic) {
       char raw[512], storage[512];
-      snprintf(raw, sizeof(raw), "%s_%s_storage", ename, in->dest.name);
+      snprintf(raw, sizeof(raw), "%s_%s_storage", e->ename, in->dest.name);
       sanitize_into(raw, storage, sizeof(storage));
-      sb_printf(&fn.body, "\t%s .align %zu .b8 %s[%zu];\n",
+      sb_printf(&e->fn.body, "\t%s .align %zu .b8 %s[%zu];\n",
                 in->address_space == MTLC_ADDRESS_SPACE_WORKGROUP ? ".shared"
-                                                                   : ".local",
+                                                                  : ".local",
                 alignment ? alignment : 1, storage, elem_size * count);
     }
-    PtxVal pointer = descriptor_from_type(in->value_type);
-    pointer.idx = new_reg(&fn, PC_B64);
-    bind_value(&fn, in->dest.name, pointer);
+    pointer = descriptor_from_type(in->value_type);
+    pointer.idx = new_reg(&e->fn, PC_B64);
+    bind_value(&e->fn, in->dest.name, pointer);
   }
+}
 
-  int needs_tensor_transfer_barrier = 0;
+static void ptx_emit_transfer_barrier(PtxEmit *e) {
+  IRFunction *func = e->func;
+  char barrier_name[512];
   for (size_t i = 0; i < func->instruction_count; i++) {
     const IRInstruction *in = &func->instructions[i];
-    if (in->op == IR_OP_TENSOR_TRANSFER &&
-        IR_TENSOR_TRANSFER(in).direction ==
-            MTLC_TENSOR_TRANSFER_GLOBAL_TO_WORKGROUP &&
-        ptx_tensor_transfer_native_capable(
-            &fn, &IR_TENSOR_TRANSFER(in),
+    if (in->op != IR_OP_TENSOR_TRANSFER ||
+        IR_TENSOR_TRANSFER(in).direction !=
+            MTLC_TENSOR_TRANSFER_GLOBAL_TO_WORKGROUP ||
+        !ptx_tensor_transfer_native_capable(
+            &e->fn, &IR_TENSOR_TRANSFER(in),
             in->tensor_transfer_has_prepared_view)) {
-      needs_tensor_transfer_barrier = 1;
-      break;
-    }
-  }
-  if (needs_tensor_transfer_barrier) {
-    char barrier_name[512];
-    ptx_tensor_transfer_barrier_name(&fn, barrier_name,
-                                     sizeof(barrier_name));
-    sb_printf(&fn.body, "\t.shared .align 8 .b8 %s[8];\n", barrier_name);
-  }
-
-  for (size_t p = 0; p < func->parameter_count && !fn.error; p++) {
-    PtxVal d = param_descs[p];
-    if (d.mem_aggregate) {
-      char raw[512], storage[512], pointer[24], source[512];
-      snprintf(raw, sizeof(raw), "%s_p%zu_local", ename, p);
-      sanitize_into(raw, storage, sizeof(storage));
-      sb_printf(&fn.body, "\t.local .align %zu .b8 %s[%zu];\n", d.mem_align,
-                storage, d.mem_size);
-      d.mem_addr = new_reg(&fn, PC_B64);
-      reg_name(PC_B64, d.mem_addr, pointer);
-      sb_printf(&fn.body, "\tmov.u64 %s, %s;\n", pointer, storage);
-      snprintf(source, sizeof(source), "%s_p%zu", ename, p);
-      ptx_block_copy(&fn, ".local", pointer, ".param", source, d.mem_size,
-                     d.mem_align);
-      if (func->parameter_names && func->parameter_names[p]) {
-        bind_value(&fn, func->parameter_names[p], d);
-      }
       continue;
     }
-    d.idx = new_reg(&fn, d.cls);
-    char rn[24];
-    reg_name(d.cls, d.idx, rn);
-    if (!d.is_ptr && (d.elem == MTLC_TYPE_FLOAT16 || d.elem == MTLC_TYPE_BFLOAT16)) {
-      char tmp[24];
-      reg_name(PC_B16, new_reg(&fn, PC_B16), tmp);
-      sb_printf(&fn.body, "\tld.param.b16 %s, [%s_p%zu];\n", tmp, ename, p);
-      sb_printf(&fn.body, "\tcvt.f32.%s %s, %s;\n",
-                d.elem == MTLC_TYPE_FLOAT16 ? "f16" : "bf16", rn, tmp);
+    ptx_tensor_transfer_barrier_name(&e->fn, barrier_name,
+                                     sizeof(barrier_name));
+    sb_printf(&e->fn.body, "\t.shared .align 8 .b8 %s[8];\n", barrier_name);
+    return;
+  }
+}
+
+static void ptx_emit_aggregate_parameter(PtxEmit *e, size_t p, PtxVal d) {
+  char raw[512], storage[512], pointer[24], source[512];
+  snprintf(raw, sizeof(raw), "%s_p%zu_local", e->ename, p);
+  sanitize_into(raw, storage, sizeof(storage));
+  sb_printf(&e->fn.body, "\t.local .align %zu .b8 %s[%zu];\n", d.mem_align,
+            storage, d.mem_size);
+  d.mem_addr = new_reg(&e->fn, PC_B64);
+  reg_name(PC_B64, d.mem_addr, pointer);
+  sb_printf(&e->fn.body, "\tmov.u64 %s, %s;\n", pointer, storage);
+  snprintf(source, sizeof(source), "%s_p%zu", e->ename, p);
+  ptx_block_copy(&e->fn, ".local", pointer, ".param", source, d.mem_size,
+                 d.mem_align);
+  if (e->func->parameter_names && e->func->parameter_names[p]) {
+    bind_value(&e->fn, e->func->parameter_names[p], d);
+  }
+}
+
+static void ptx_emit_scalar_parameter(PtxEmit *e, size_t p, PtxVal d) {
+  char rn[24];
+  d.idx = new_reg(&e->fn, d.cls);
+  reg_name(d.cls, d.idx, rn);
+  if (!d.is_ptr &&
+      (d.elem == MTLC_TYPE_FLOAT16 || d.elem == MTLC_TYPE_BFLOAT16)) {
+    char tmp[24];
+    reg_name(PC_B16, new_reg(&e->fn, PC_B16), tmp);
+    sb_printf(&e->fn.body, "\tld.param.b16 %s, [%s_p%zu];\n", tmp, e->ename, p);
+    sb_printf(&e->fn.body, "\tcvt.f32.%s %s, %s;\n",
+              d.elem == MTLC_TYPE_FLOAT16 ? "f16" : "bf16", rn, tmp);
+  } else {
+    sb_printf(&e->fn.body, "\tld.param.%s %s, [%s_p%zu];\n",
+              e->func->is_kernel ? param_storage_type(d)
+                                 : device_param_storage_type(d),
+              rn, e->ename, p);
+  }
+  if (e->func->parameter_names && e->func->parameter_names[p]) {
+    bind_value(&e->fn, e->func->parameter_names[p], d);
+  }
+}
+
+static void ptx_emit_parameter_loads(PtxEmit *e) {
+  for (size_t p = 0; p < e->func->parameter_count && !e->fn.error; p++) {
+    PtxVal d = e->param_descs[p];
+    if (d.mem_aggregate) {
+      ptx_emit_aggregate_parameter(e, p, d);
     } else {
-      sb_printf(&fn.body, "\tld.param.%s %s, [%s_p%zu];\n",
-                func->is_kernel ? param_storage_type(d)
-                                : device_param_storage_type(d),
-                rn, ename, p);
-    }
-    if (func->parameter_names && func->parameter_names[p]) {
-      bind_value(&fn, func->parameter_names[p], d);
+      ptx_emit_scalar_parameter(e, p, d);
     }
   }
+}
 
-  for (size_t i = 0; i < func->instruction_count && !fn.error; i++) {
+static void ptx_emit_allocation_pointers(PtxEmit *e) {
+  IRFunction *func = e->func;
+  for (size_t i = 0; i < func->instruction_count && !e->fn.error; i++) {
     const IRInstruction *in = &func->instructions[i];
-    if (in->op != IR_OP_ADDRESS_SPACE_ALLOC || !in->dest.name) continue;
-    PtxBinding *binding = find_binding(&fn, in->dest.name);
+    PtxBinding *binding = NULL;
     char raw[512], storage[512], pointer[24];
+    if (in->op != IR_OP_ADDRESS_SPACE_ALLOC || !in->dest.name) continue;
+    binding = find_binding(&e->fn, in->dest.name);
     if (in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 0) {
-      snprintf(storage, sizeof(storage), "%s", dynamic_workgroup_storage);
+      snprintf(storage, sizeof(storage), "%s", e->dynamic_storage);
     } else {
-      snprintf(raw, sizeof(raw), "%s_%s_storage", ename, in->dest.name);
+      snprintf(raw, sizeof(raw), "%s_%s_storage", e->ename, in->dest.name);
       sanitize_into(raw, storage, sizeof(storage));
     }
     if (!binding) {
-      fn_error(&fn, "PTX: allocation '%s' has no pointer binding",
+      fn_error(&e->fn, "PTX: allocation '%s' has no pointer binding",
                in->dest.name);
       break;
     }
     reg_name(PC_B64, binding->val.idx, pointer);
-    sb_printf(&fn.body, "\tmov.u64 %s, %s;\n", pointer, storage);
+    sb_printf(&e->fn.body, "\tmov.u64 %s, %s;\n", pointer, storage);
   }
+}
 
-  for (size_t i = 0; i < func->instruction_count && !fn.error; i++) {
+static int ptx_local_extent(PtxEmit *e, const IRInstruction *in, int aggregate,
+                            size_t *size, size_t *alignment) {
+  *size = 0;
+  *alignment = 0;
+  if (in->value_type) {
+    *size = mtlc_type_size(in->value_type);
+    *alignment = mtlc_type_alignment(in->value_type);
+  }
+  if (!*size && !aggregate) {
+    PtxVal s = descriptor_from_typename(in->text);
+    *size = ptx_class_width(s.cls);
+    *alignment = *size;
+  }
+  if (!*size) {
+    fn_error(&e->fn, "PTX: local '%s' has unsupported type '%s'",
+             in->dest.name, in->text ? in->text : "?");
+    return 0;
+  }
+  if (!*alignment) *alignment = 1;
+  return 1;
+}
+
+static void ptx_emit_locals(PtxEmit *e) {
+  IRFunction *func = e->func;
+  for (size_t i = 0; i < func->instruction_count && !e->fn.error; i++) {
     const IRInstruction *in = &func->instructions[i];
-    if (in->op != IR_OP_DECLARE_LOCAL || !in->dest.name) continue;
-    if (find_binding(&fn, in->dest.name)) continue;
-    int aggregate = ptx_type_is_aggregate(in->value_type);
-    if (!aggregate && !ptx_local_address_taken(func, in->dest.name)) continue;
-    size_t size = 0, alignment = 0;
-    if (in->value_type) {
-      size = mtlc_type_size(in->value_type);
-      alignment = mtlc_type_alignment(in->value_type);
-    }
-    if (!size && !aggregate) {
-      PtxVal s = descriptor_from_typename(in->text);
-      size = ptx_class_width(s.cls);
-      alignment = size;
-    }
-    if (!size) {
-      fn_error(&fn, "PTX: local '%s' has unsupported type '%s'", in->dest.name,
-               in->text ? in->text : "?");
-      break;
-    }
-    if (!alignment) alignment = 1;
     char raw[512], storage[512], pointer[24];
-    snprintf(raw, sizeof(raw), "%s_%s_local", ename, in->dest.name);
+    size_t size = 0, alignment = 0;
+    int aggregate = 0;
+    PtxVal v;
+    if (in->op != IR_OP_DECLARE_LOCAL || !in->dest.name) continue;
+    if (find_binding(&e->fn, in->dest.name)) continue;
+    aggregate = ptx_type_is_aggregate(in->value_type);
+    if (!aggregate && !ptx_local_address_taken(func, in->dest.name)) continue;
+    if (!ptx_local_extent(e, in, aggregate, &size, &alignment)) break;
+    snprintf(raw, sizeof(raw), "%s_%s_local", e->ename, in->dest.name);
     sanitize_into(raw, storage, sizeof(storage));
-    sb_printf(&fn.body, "\t.local .align %zu .b8 %s[%zu];\n", alignment,
+    sb_printf(&e->fn.body, "\t.local .align %zu .b8 %s[%zu];\n", alignment,
               storage, size);
-    PtxVal v = aggregate ? (PtxVal){0}
-                         : (in->value_type ? descriptor_from_type(in->value_type)
-                                           : descriptor_from_typename(in->text));
+    v = aggregate ? (PtxVal){0}
+                  : (in->value_type ? descriptor_from_type(in->value_type)
+                                    : descriptor_from_typename(in->text));
     v.mem_local = 1;
     v.mem_aggregate = aggregate;
-    v.mem_addr = new_reg(&fn, PC_B64);
+    v.mem_addr = new_reg(&e->fn, PC_B64);
     v.mem_size = size;
     v.mem_align = alignment;
     if (aggregate) {
@@ -8596,144 +8665,158 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
       v.elem = MTLC_TYPE_VOID;
     }
     reg_name(PC_B64, v.mem_addr, pointer);
-    sb_printf(&fn.body, "\tmov.u64 %s, %s;\n", pointer, storage);
-    bind_value(&fn, in->dest.name, v);
+    sb_printf(&e->fn.body, "\tmov.u64 %s, %s;\n", pointer, storage);
+    bind_value(&e->fn, in->dest.name, v);
   }
+}
 
+static void ptx_emit_vector_load(PtxEmit *e, size_t ii,
+                                 const PtxVectorPlan *plan) {
+  IRFunction *func = e->func;
+  const IRInstruction *in = &func->instructions[ii];
+  unsigned char width = plan[ii].width;
+  const IROperand *base = NULL;
+  const MtlcType *pointer_type = NULL;
+  long long offset = 0;
+  char addrreg[24];
+  char names[4][24];
+  char list[128];
+  size_t used = 0;
+  int is_unsigned = 0;
+  PtxClass cls;
+  MtlcTypeKind elem;
+  const char *space;
+
+  ptx_address_parts(func, ii, &in->lhs, &base, &offset);
+  pointer_type = ptx_load_pointer_type(e->program, func, base);
+  elem = pointer_type && pointer_type->base_type ? pointer_type->base_type->kind
+                                                 : MTLC_TYPE_VOID;
+  cls = elem_class(elem, &is_unsigned);
+  space = ptx_load_space(pointer_type ? pointer_type->address_space
+                                      : MTLC_ADDRESS_SPACE_GENERIC);
+  use_as(&e->fn, base, PC_B64, addrreg);
+  list[0] = '\0';
+  for (unsigned char k = 0; k < width; k++) {
+    const IRInstruction *member = &func->instructions[plan[ii].members[k]];
+    PtxVal dv = {0};
+    dv.cls = cls;
+    dv.is_unsigned = is_unsigned;
+    dv = destination_value(&e->fn, &member->dest, dv);
+    reg_name(cls, dv.idx, names[k]);
+    if (member->dest.name) {
+      bind_value(&e->fn, member->dest.name, dv);
+    }
+    used += (size_t)snprintf(list + used, sizeof(list) - used, "%s%s",
+                             k ? ", " : "", names[k]);
+  }
+  sb_printf(&e->fn.body, "\tld%s.v%u.%s {%s}, [%s+%lld];\n", space,
+            (unsigned)width, mem_type_suffix(elem), list, addrreg, offset);
+  g_ptx_spaced_accesses++;
+  g_ptx_vector_groups++;
+  g_ptx_vector_loads_saved += width - 1;
+}
+
+static void ptx_emit_instruction(PtxEmit *e, size_t *ii, char **error,
+                                 int target_arch) {
+  const IRInstruction *in = &e->func->instructions[*ii];
+  for (size_t h = 0; h < sizeof(PTX_HANDLERS) / sizeof(PTX_HANDLERS[0]); h++) {
+    int handled = 1;
+    PTX_HANDLERS[h](e->program, e->func, &e->fn, in, ii, error, target_arch,
+                    e->returns_void, e->ename, &handled);
+    if (handled) {
+      return;
+    }
+  }
+}
+
+static void ptx_emit_body(PtxEmit *e, char **error, int target_arch) {
   clock_t analysis_start = clock();
-  PtxVectorPlan *vector_plan = ptx_plan_vector_loads(program, func);
+  PtxVectorPlan *plan = ptx_plan_vector_loads(e->program, e->func);
   g_ptx_analysis_seconds +=
       (double)(clock() - analysis_start) / (double)CLOCKS_PER_SEC;
-  for (size_t ii = 0; ii < func->instruction_count && !fn.error; ii++) {
-    const IRInstruction *in = &func->instructions[ii];
-    if (vector_plan && in->op == IR_OP_LOAD && vector_plan[ii].absorbed) {
+  for (size_t ii = 0; ii < e->func->instruction_count && !e->fn.error; ii++) {
+    const IRInstruction *in = &e->func->instructions[ii];
+    if (plan && in->op == IR_OP_LOAD && plan[ii].absorbed) {
       continue;
     }
-    if (vector_plan && in->op == IR_OP_LOAD && vector_plan[ii].width) {
-      unsigned char width = vector_plan[ii].width;
-      const IROperand *base = NULL;
-      long long offset = 0;
-      const MtlcType *pointer_type;
-      char addrreg[24];
-      char names[4][24];
-      char list[128];
-      size_t used = 0;
-      int is_unsigned = 0;
-      PtxClass cls;
-      MtlcTypeKind elem;
-      const char *space;
-      ptx_address_parts(func, ii, &in->lhs, &base, &offset);
-      pointer_type = ptx_load_pointer_type(program, func, base);
-      elem = pointer_type && pointer_type->base_type
-                 ? pointer_type->base_type->kind
-                 : MTLC_TYPE_VOID;
-      cls = elem_class(elem, &is_unsigned);
-      space = ptx_load_space(pointer_type ? pointer_type->address_space
-                                          : MTLC_ADDRESS_SPACE_GENERIC);
-      use_as(&fn, base, PC_B64, addrreg);
-      list[0] = '\0';
-      for (unsigned char k = 0; k < width; k++) {
-        const IRInstruction *member =
-            &func->instructions[vector_plan[ii].members[k]];
-        PtxVal dv = {0};
-        dv.cls = cls;
-        dv.is_unsigned = is_unsigned;
-        dv = destination_value(&fn, &member->dest, dv);
-        reg_name(cls, dv.idx, names[k]);
-        if (member->dest.name) {
-          bind_value(&fn, member->dest.name, dv);
-        }
-        used += (size_t)snprintf(list + used, sizeof(list) - used, "%s%s",
-                                 k ? ", " : "", names[k]);
-      }
-      sb_printf(&fn.body, "\tld%s.v%u.%s {%s}, [%s+%lld];\n", space,
-                (unsigned)width, mem_type_suffix(elem), list, addrreg, offset);
-      g_ptx_spaced_accesses++;
-      g_ptx_vector_groups++;
-      g_ptx_vector_loads_saved += width - 1;
+    if (plan && in->op == IR_OP_LOAD && plan[ii].width) {
+      ptx_emit_vector_load(e, ii, plan);
       continue;
     }
-    {
-      int handled = 1;
-      ptx_emit_device(program, func, &fn, in, &ii, error, target_arch,
-                       returns_void, ename, &handled);
-      if (!handled) {
-        handled = 1;
-        ptx_emit_control(program, func, &fn, in, &ii, error, target_arch,
-                       returns_void, ename, &handled);
-      }
-      if (!handled) {
-        handled = 1;
-        ptx_emit_assign(program, func, &fn, in, &ii, error, target_arch,
-                       returns_void, ename, &handled);
-      }
-      if (!handled) {
-        handled = 1;
-        ptx_emit_memory(program, func, &fn, in, &ii, error, target_arch,
-                       returns_void, ename, &handled);
-      }
-      if (!handled) {
-        handled = 1;
-        ptx_emit_arith(program, func, &fn, in, &ii, error, target_arch,
-                       returns_void, ename, &handled);
-      }
-      if (!handled) {
-        handled = 1;
-        ptx_emit_call(program, func, &fn, in, &ii, error, target_arch,
-                       returns_void, ename, &handled);
-      }
-      if (!handled) {
-        handled = 1;
-        ptx_emit_result(program, func, &fn, in, &ii, error, target_arch,
-                       returns_void, ename, &handled);
-      }
-    }
+    ptx_emit_instruction(e, &ii, error, target_arch);
   }
+  free(plan);
+}
 
-  free(vector_plan);
-
-  if (fn.error) {
-    if (error) {
-      *error = fn.error;
-    } else {
-      free(fn.error);
-    }
-    free(sig.data);
-    free(fn.body.data);
-    free(fn.declarations.data);
-    free(param_descs);
-    for (size_t i = 0; i < fn.nbinds; i++) {
-      free(fn.binds[i].name);
-    }
-    free(fn.binds);
-    free(fn.tensor_residencies);
-    return;
-  }
-
-  fputs(sig.data, out);
-  fputs("{\n", out);
+static void ptx_emit_write(PtxEmit *e, FILE *out) {
   static const PtxClass classes[6] = {PC_PRED, PC_B16, PC_B32,
                                       PC_B64,  PC_F32, PC_F64};
+  fputs(e->sig.data, out);
+  fputs("{\n", out);
   for (int c = 0; c < 6; c++) {
     PtxClass cc = classes[c];
-    if (fn.count[cc] > 0) {
+    if (e->fn.count[cc] > 0) {
       fprintf(out, "\t.reg %s %s<%d>;\n", cls_regtype(cc), cls_prefix(cc),
-              fn.count[cc]);
+              e->fn.count[cc]);
     }
   }
-  fputs(fn.declarations.data ? fn.declarations.data : "", out);
-  fputs(fn.body.data ? fn.body.data : "", out);
-  fputs(func->is_kernel ? "\tret;\n}\n\n" : "}\n\n", out);
+  fputs(e->fn.declarations.data ? e->fn.declarations.data : "", out);
+  fputs(e->fn.body.data ? e->fn.body.data : "", out);
+  fputs(e->func->is_kernel ? "\tret;\n}\n\n" : "}\n\n", out);
+}
 
-  free(sig.data);
-  free(fn.body.data);
-  free(fn.declarations.data);
-  free(param_descs);
-  for (size_t i = 0; i < fn.nbinds; i++) {
-    free(fn.binds[i].name);
+static void ptx_emit_release(PtxEmit *e) {
+  free(e->sig.data);
+  free(e->fn.body.data);
+  free(e->fn.declarations.data);
+  free(e->param_descs);
+  for (size_t i = 0; i < e->fn.nbinds; i++) {
+    free(e->fn.binds[i].name);
   }
-  free(fn.binds);
-  free(fn.tensor_residencies);
+  free(e->fn.binds);
+  free(e->fn.tensor_residencies);
+}
+
+static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
+                          FILE *out, int target_arch, char target_variant,
+                          int isa_major, int isa_minor,
+                          int tensor_tuple_budget, char **error) {
+  PtxEmit e = {0};
+  (void)gen;
+  e.program = program;
+  e.func = program->functions[fi];
+  e.symbol = ir_program_lookup_symbol(program, e.func->name);
+  e.fn.program = program;
+  e.fn.function = e.func;
+  e.fn.function_symbol = e.symbol;
+  e.fn.target_arch = target_arch;
+  e.fn.target_variant = target_variant;
+  e.fn.isa_major = isa_major;
+  e.fn.isa_minor = isa_minor;
+  e.fn.tensor_tuple_budget = tensor_tuple_budget;
+  ptx_emit_return_descriptor(&e);
+  sanitize_into(e.func->name ? e.func->name : "kernel", e.ename,
+                sizeof(e.ename));
+
+  ptx_emit_signature(&e);
+  ptx_emit_dynamic_workgroup(&e);
+  ptx_emit_allocations(&e);
+  ptx_emit_transfer_barrier(&e);
+  ptx_emit_parameter_loads(&e);
+  ptx_emit_allocation_pointers(&e);
+  ptx_emit_locals(&e);
+  ptx_emit_body(&e, error, target_arch);
+
+  if (e.fn.error) {
+    if (error) {
+      *error = e.fn.error;
+    } else {
+      free(e.fn.error);
+    }
+  } else {
+    ptx_emit_write(&e, out);
+  }
+  ptx_emit_release(&e);
 }
 
 static void emit_binary(PtxFn *fn, const IRInstruction *in) {
