@@ -1,0 +1,87 @@
+import "std/io";
+
+struct Cursor {
+  text: uint8*;
+  len: int32;
+  pos: int32;
+  failed: int32;
+}
+
+@inline fn scan_quoted(c: Cursor*, out_off: int32*, out_len: int32*) -> int32 {
+  if (c->pos >= c->len || c->text[c->pos] != 34) {
+    c->failed = 1;
+    return 0;
+  }
+  c->pos += 1;
+  var start: int32 = c->pos;
+  var escapes: int32 = 0;
+  while (c->pos < c->len) {
+    var ch: int32 = (int32)c->text[c->pos];
+    if (ch == 92) {
+      escapes += 1;
+      c->pos += 2;
+    } else if (ch == 34) {
+      *out_off = start;
+      *out_len = c->pos - start - escapes;
+      c->pos += 1;
+      return 1;
+    } else {
+      c->pos += 1;
+    }
+  }
+  c->failed = 1;
+  return 0;
+}
+
+fn first_site(c: Cursor*) -> int32 {
+  var off: int32 = 0;
+  var len: int32 = 0;
+  if (scan_quoted(c, &off, &len) == 0) {
+    return -1;
+  }
+  return off * 1000 + len;
+}
+
+fn second_site(c: Cursor*) -> int32 {
+  var off: int32 = 0;
+  var len: int32 = 0;
+  if (scan_quoted(c, &off, &len) == 0) {
+    return -2;
+  }
+  return off * 10 + len;
+}
+
+fn main() -> int32 {
+  var buf: uint8[16];
+  buf[0] = 34;
+  buf[1] = 104;
+  buf[2] = 105;
+  buf[3] = 34;
+
+  var c: Cursor;
+  c.text = &buf[0];
+  c.len = 4;
+  c.pos = 0;
+  c.failed = 0;
+
+  var a: int32 = first_site(&c);
+  c.pos = 0;
+  var b: int32 = second_site(&c);
+
+  println("a={a} b={b} failed={c.failed}");
+
+  if (a != 1002) {
+    println("FAIL a: an inlined callee returning from inside a loop lost its result");
+    return 1;
+  }
+  if (b != 12) {
+    println("FAIL b: the second inline site lost its result");
+    return 1;
+  }
+  if (c.failed != 0) {
+    println("FAIL: the scan reported failure on well-formed input");
+    return 1;
+  }
+  println("PASS");
+  return 0;
+}

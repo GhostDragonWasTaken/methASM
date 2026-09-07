@@ -519,6 +519,12 @@ $cases = @(
     Pattern       = "may hold only .asm. blocks"
   },
   @{ Name = "array_index"; Path = "tests/test_array_index.mettle"; ShouldSucceed = $true },
+  # An inlined callee that returns from inside a loop. The store-back tail the
+  # loop-memory promotion appends sits after the join in linear order, so a
+  # propagation pass that rewrites before its dataflow settles sees one
+  # incoming edge and folds the result away. The debug/release run differential
+  # is the oracle: debug does not inline, so only release lost the result.
+  @{ Name = "inline_return_from_loop"; Path = "tests/test_inline_return_from_loop.mettle"; ShouldSucceed = $true },
   @{ Name = "control_flow"; Path = "tests/test_control_flow.mettle"; ShouldSucceed = $true },
   @{ Name = "nested_switch_loop"; Path = "tests/test_nested_switch_loop.mettle"; ShouldSucceed = $true },
   @{ Name = "elseif_chaining"; Path = "tests/test_elseif.mettle"; ShouldSucceed = $true },

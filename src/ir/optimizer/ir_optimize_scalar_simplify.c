@@ -768,8 +768,10 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
   }
 
   int any_changed = 0;
-  for (int iteration = 0; iteration < 8; iteration++) {
+  int flow_settled = 0;
+  for (int iteration = 0; iteration < 17; iteration++) {
     int flow_changed = 0;
+    const int rewrite = flow_settled;
     ir_temp_value_map_clear(&map);
     ir_temp_value_map_clear(&symbol_map);
     ir_temp_value_map_clear(&temp_last_use);
@@ -843,7 +845,8 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
         ir_temp_value_map_clear(&symbol_map);
       }
 
-      if (!ir_propagate_instruction_operands(&map, &symbol_map, instruction,
+      if (rewrite &&
+          !ir_propagate_instruction_operands(&map, &symbol_map, instruction,
                                              &any_changed)) {
         ir_label_value_map_destroy(&label_in);
         ir_temp_value_map_destroy(&map);
@@ -855,9 +858,11 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
         return 0;
       }
 
-      ir_cp_fold_constant_binary(function, &map, &symbol_map, instruction,
-                                 &any_changed);
-      ir_cp_wrap_assign_to_home(function, instruction, &any_changed);
+      if (rewrite) {
+        ir_cp_fold_constant_binary(function, &map, &symbol_map, instruction,
+                                   &any_changed);
+        ir_cp_wrap_assign_to_home(function, instruction, &any_changed);
+      }
 
       if (ir_instruction_writes_temp(instruction) && instruction->dest.name) {
         ir_temp_value_map_remove(&map, instruction->dest.name);
@@ -953,8 +958,11 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
       }
     }
 
-    if (!flow_changed) {
+    if (rewrite) {
       break;
+    }
+    if (!flow_changed) {
+      flow_settled = 1;
     }
   }
 
