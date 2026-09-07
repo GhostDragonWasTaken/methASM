@@ -19,13 +19,8 @@ static int symbol_table_names_equal(const char *lhs, const char *rhs) {
   return strcmp(lhs, rhs) == 0;
 }
 
-/* Scopes below this size keep the plain linear scan: building and probing a
- * hash index costs more than a handful of strcmp calls. Function and block
- * scopes almost always stay under this; the global scope (thousands of
- * symbols across all modules) is what the index exists for. */
 #define SYMBOL_NAME_INDEX_MIN_SYMBOLS 24
 
-/* Rebuilds a scope's hash index from its current symbol array. */
 static int scope_name_index_rebuild(Scope *scope, size_t bucket_count) {
   size_t *buckets = calloc(bucket_count, sizeof(size_t));
   if (!buckets) {
@@ -48,11 +43,9 @@ static int scope_name_index_rebuild(Scope *scope, size_t bucket_count) {
   return 1;
 }
 
-/* Ensures the index exists and has room for one more symbol. Returns 0 only on
- * allocation failure; on failure the caller must fall back to a linear scan. */
 static int scope_name_index_ensure(Scope *scope) {
   if (scope->symbol_count < SYMBOL_NAME_INDEX_MIN_SYMBOLS) {
-    return 0; /* deliberately unindexed: linear scan is cheaper here */
+    return 0;
   }
   if (scope->name_index_bucket_count == 0 ||
       ((scope->symbol_count + 1) * 10) >=
@@ -67,12 +60,6 @@ static int scope_name_index_ensure(Scope *scope) {
   return 1;
 }
 
-/* Called immediately after a symbol is appended at `new_index`. Keeps the
- * scope's name index consistent: ensure() rebuilds and reindexes every
- * symbol (including this one) when the scope first crosses the size threshold
- * or exceeds its load factor, otherwise we insert just the new entry. On
- * allocation failure the index is left empty and lookups fall back to a
- * linear scan, so correctness is preserved either way. */
 static void scope_register_appended_symbol(Scope *scope, size_t new_index) {
   if (!scope_name_index_ensure(scope)) {
     return;
@@ -80,21 +67,17 @@ static void scope_register_appended_symbol(Scope *scope, size_t new_index) {
   if (scope->name_index_bucket_count == 0) {
     return;
   }
-  /* If a rebuild ran inside ensure() it already placed this symbol; detect
-   * that so we don't insert a duplicate bucket entry. */
   size_t mask = scope->name_index_bucket_count - 1;
   size_t pos = mettle_fnv1a_hash(scope->symbols[new_index]->name) & mask;
   while (scope->name_index[pos] != 0) {
     if (scope->name_index[pos] == new_index + 1) {
-      return; /* already indexed by the rebuild */
+      return;
     }
     pos = (pos + 1) & mask;
   }
   scope->name_index[pos] = new_index + 1;
 }
 
-/* O(1) name lookup within a single scope. Returns the symbol or NULL. Falls
- * back to a linear scan when the scope is small or unindexed. */
 static Symbol *scope_lookup_symbol(Scope *scope, const char *name) {
   if (scope->name_index && scope->name_index_bucket_count > 0) {
     size_t mask = scope->name_index_bucket_count - 1;
@@ -258,26 +241,18 @@ static void scope_destroy(Scope *scope) {
   if (!scope)
     return;
 
-  // Free all symbols in this scope
   for (size_t i = 0; i < scope->symbol_count; i++) {
     Symbol *symbol = scope->symbols[i];
     if (symbol) {
       mettle_free_string(symbol->name);
       mettle_free_string(symbol->link_name);
       if (symbol->kind == SYMBOL_FUNCTION) {
-        // Free function parameter names (strings we own)
         for (size_t j = 0; j < symbol->data.function.parameter_count; j++) {
           free(symbol->data.function.parameter_names[j]);
-          // Note: parameter_types[j] are shared builtin types owned by
-          // the type checker, do NOT type_destroy them here.
         }
         free(symbol->data.function.parameter_names);
         free(symbol->data.function.parameter_types);
-        // Note: return_type is also a shared builtin type, do NOT destroy.
       }
-      // Only destroy types owned by the symbol (struct types).
-      // Builtin types (int32, float64, etc.) are shared singletons
-      // owned by the type checker, which destroys them separately.
       if (symbol->kind == SYMBOL_STRUCT) {
         type_destroy(symbol->type);
       }
@@ -293,7 +268,6 @@ void symbol_table_destroy(SymbolTable *table) {
   if (!table)
     return;
 
-  // Free all scopes starting from current and going up to global
   Scope *current = table->current_scope;
   while (current && current != table->global_scope) {
     Scope *parent = current->parent;
@@ -301,7 +275,6 @@ void symbol_table_destroy(SymbolTable *table) {
     current = parent;
   }
 
-  // Free global scope
   scope_destroy(table->global_scope);
   free(table);
 }
@@ -341,38 +314,32 @@ void symbol_table_exit_scope(SymbolTable *table) {
   Scope *old_scope = table->current_scope;
   table->current_scope = old_scope->parent;
 
-  // Properly free the old scope
   scope_destroy(old_scope);
 }
 
 int symbol_table_declare(SymbolTable *table, Symbol *symbol) {
   if (!table || !symbol || !table->current_scope) {
-    return 0; // Failure
+    return 0;
   }
 
-  // Validate the declaration
   if (!symbol_table_validate_declaration(table, symbol)) {
-    return 0; // Invalid declaration
+    return 0;
   }
 
-  // Check for duplicate declaration in current scope only
   Symbol *existing = scope_lookup_symbol(table->current_scope, symbol->name);
   if (existing) {
-    // Allow forward declaration resolution for functions
     if (symbol->kind == SYMBOL_FUNCTION && existing->kind == SYMBOL_FUNCTION &&
         existing->is_forward_declaration) {
       if (!symbol_table_function_signatures_match(existing, symbol)) {
-        return 0; // Mismatched function signature vs forward declaration
+        return 0;
       }
-      // Resolve the forward declaration
       existing->is_forward_declaration = 0;
       existing->is_initialized = 1;
-      return 1; // Successfully resolved forward declaration
+      return 1;
     }
-    return 0; // Duplicate declaration
+    return 0;
   }
 
-  // Resize symbols array if needed
   if (table->current_scope->symbol_count >=
       table->current_scope->symbol_capacity) {
     size_t new_capacity = table->current_scope->symbol_capacity == 0
@@ -381,22 +348,20 @@ int symbol_table_declare(SymbolTable *table, Symbol *symbol) {
     Symbol **new_symbols =
         realloc(table->current_scope->symbols, new_capacity * sizeof(Symbol *));
     if (!new_symbols) {
-      return 0; // Memory allocation failure
+      return 0;
     }
     table->current_scope->symbols = new_symbols;
     table->current_scope->symbol_capacity = new_capacity;
   }
 
-  // Set the symbol's scope
   symbol->scope = table->current_scope;
 
-  // Add symbol to current scope
   size_t new_index = table->current_scope->symbol_count;
   table->current_scope->symbols[new_index] = symbol;
   table->current_scope->symbol_count++;
   scope_register_appended_symbol(table->current_scope, new_index);
 
-  return 1; // Success
+  return 1;
 }
 
 Symbol *symbol_table_lookup(SymbolTable *table, const char *name) {
@@ -404,7 +369,6 @@ Symbol *symbol_table_lookup(SymbolTable *table, const char *name) {
     return NULL;
   }
 
-  // Search from current scope up to global scope
   Scope *current_scope = table->current_scope;
   while (current_scope) {
     Symbol *found = scope_lookup_symbol(current_scope, name);
@@ -412,18 +376,13 @@ Symbol *symbol_table_lookup(SymbolTable *table, const char *name) {
       found->is_used = 1;
       return found;
     }
-    // Move to parent scope
     current_scope = current_scope->parent;
   }
 
-  return NULL; // Symbol not found
+  return NULL;
 }
 
 Type *type_create(TypeKind kind, const char *name) {
-  /* Zeroed rather than filled in field by field: the refinement half of this
-     struct grew several times and each addition had to be remembered here.
-     A field nobody sets now reads as absent instead of as whatever the
-     allocator left. */
   Type *type = calloc(1, sizeof(Type));
   if (!type)
     return NULL;
@@ -455,7 +414,6 @@ Type *type_create(TypeKind kind, const char *name) {
   type->fn_require_count = 0;
   type->fn_effect_signature = NULL;
 
-  // Initialize struct-specific fields
   type->field_names = NULL;
   type->field_types = NULL;
   type->field_offsets = NULL;
@@ -482,7 +440,6 @@ Type *type_create(TypeKind kind, const char *name) {
   type->refine_max = 0;
   type->refine_uniform = 0;
 
-  // Set default sizes
   switch (kind) {
   case TYPE_INT8:
   case TYPE_UINT8:
@@ -519,7 +476,6 @@ Type *type_create(TypeKind kind, const char *name) {
 
 void type_destroy(Type *type) {
   if (type) {
-    // Clean up struct-specific fields
     if (type->field_names) {
       for (size_t i = 0; i < type->field_count; i++) {
         mettle_free_string(type->field_names[i]);
@@ -528,8 +484,6 @@ void type_destroy(Type *type) {
     }
 
     if (type->field_types) {
-      // Note: Don't destroy field types as they might be shared/referenced
-      // elsewhere
       free(type->field_types);
     }
 
@@ -626,7 +580,6 @@ char *symbol_table_suggest_similar(SymbolTable *table, const char *name,
   if (!table || !name || name[0] == '\0')
     return NULL;
 
-  /* Collect candidate names across the whole visible scope chain. */
   size_t capacity = 32;
   size_t count = 0;
   const char **names = malloc(capacity * sizeof(*names));
@@ -678,7 +631,7 @@ Symbol *symbol_create(const char *name, SymbolKind kind, Type *type) {
 
   symbol->kind = kind;
   symbol->type = type;
-  symbol->scope = NULL; // Will be set when declared
+  symbol->scope = NULL;
   symbol->is_initialized = 0;
   symbol->is_forward_declaration = 0;
   symbol->is_extern = 0;
@@ -695,7 +648,6 @@ Symbol *symbol_create(const char *name, SymbolKind kind, Type *type) {
   symbol->constant_initializer = NULL;
   symbol->is_comptime_binding = 0;
 
-  // Initialize union data based on symbol kind
   switch (kind) {
   case SYMBOL_VARIABLE:
   case SYMBOL_PARAMETER:
@@ -713,7 +665,6 @@ Symbol *symbol_create(const char *name, SymbolKind kind, Type *type) {
     break;
   case SYMBOL_STRUCT:
   case SYMBOL_ENUM:
-    // No specific data for struct/enum symbols
     break;
   case SYMBOL_CONSTANT:
     symbol->data.constant.value = 0;
@@ -742,17 +693,13 @@ void symbol_destroy(Symbol *symbol) {
   mettle_free_string(symbol->link_name);
 
   if (symbol->kind == SYMBOL_FUNCTION) {
-    // Free function parameter names (strings we own)
     for (size_t i = 0; i < symbol->data.function.parameter_count; i++) {
       free(symbol->data.function.parameter_names[i]);
-      // Note: parameter_types[i] are shared builtin types, do NOT destroy
     }
     free(symbol->data.function.parameter_names);
     free(symbol->data.function.parameter_types);
-    // Note: return_type is a shared builtin type, do NOT destroy
   }
 
-  // Only destroy types owned by the symbol (struct types)
   if (symbol->kind == SYMBOL_STRUCT) {
     type_destroy(symbol->type);
   }
@@ -765,7 +712,6 @@ Symbol *symbol_table_lookup_current_scope(SymbolTable *table,
     return NULL;
   }
 
-  // Search only in current scope
   return scope_lookup_symbol(table->current_scope, name);
 }
 
@@ -774,7 +720,6 @@ void symbol_table_insert(SymbolTable *table, Symbol *symbol) {
     return;
   }
 
-  // Resize symbols array if needed
   if (table->current_scope->symbol_count >=
       table->current_scope->symbol_capacity) {
     size_t new_capacity = table->current_scope->symbol_capacity == 0
@@ -783,16 +728,14 @@ void symbol_table_insert(SymbolTable *table, Symbol *symbol) {
     Symbol **new_symbols =
         realloc(table->current_scope->symbols, new_capacity * sizeof(Symbol *));
     if (!new_symbols) {
-      return; // Memory allocation failure
+      return;
     }
     table->current_scope->symbols = new_symbols;
     table->current_scope->symbol_capacity = new_capacity;
   }
 
-  // Set the symbol's scope
   symbol->scope = table->current_scope;
 
-  // Add symbol to current scope
   size_t new_index = table->current_scope->symbol_count;
   table->current_scope->symbols[new_index] = symbol;
   table->current_scope->symbol_count++;
@@ -801,55 +744,48 @@ void symbol_table_insert(SymbolTable *table, Symbol *symbol) {
 
 int symbol_table_declare_forward(SymbolTable *table, Symbol *symbol) {
   if (!table || !symbol || !table->current_scope) {
-    return 0; // Failure
+    return 0;
   }
 
-  // Only functions can be forward declared
   if (symbol->kind != SYMBOL_FUNCTION) {
-    return 0; // Only functions can be forward declared
+    return 0;
   }
 
-  // Check if symbol already exists in current scope
   Symbol *existing = symbol_table_lookup_current_scope(table, symbol->name);
   if (existing) {
-    // If it's already a forward declaration, check compatibility
     if (existing->kind == SYMBOL_FUNCTION && existing->is_forward_declaration) {
       return symbol_table_function_signatures_match(existing, symbol);
     } else {
-      return 0; // Already defined
+      return 0;
     }
   }
 
-  // Mark as forward declaration
   symbol->is_forward_declaration = 1;
 
-  // Declare the symbol
   return symbol_table_declare(table, symbol);
 }
 
 int symbol_table_resolve_forward_declaration(SymbolTable *table,
                                              Symbol *symbol) {
   if (!table || !symbol || symbol->kind != SYMBOL_FUNCTION) {
-    return 0; // Failure
+    return 0;
   }
 
-  // Look for existing forward declaration
   Symbol *existing = symbol_table_lookup_current_scope(table, symbol->name);
   if (existing && existing->kind == SYMBOL_FUNCTION &&
       existing->is_forward_declaration) {
     if (!symbol_table_function_signatures_match(existing, symbol)) {
-      return 0; // Forward declaration and definition signatures differ
+      return 0;
     }
     existing->is_forward_declaration = 0;
     existing->is_initialized = 1;
-    return 1; // Successfully resolved
+    return 1;
   }
 
   if (existing) {
-    return 0; // Already defined in this scope
+    return 0;
   }
 
-  // No forward declaration found, declare normally
   symbol->is_forward_declaration = 0;
   symbol->is_initialized = 1;
   return symbol_table_declare(table, symbol);
@@ -857,53 +793,44 @@ int symbol_table_resolve_forward_declaration(SymbolTable *table,
 
 int symbol_table_validate_declaration(SymbolTable *table, Symbol *symbol) {
   if (!table || !symbol) {
-    return 0; // Invalid parameters
+    return 0;
   }
 
-  // Check if name is valid (not empty)
   if (!symbol->name || strlen(symbol->name) == 0) {
-    return 0; // Invalid name
+    return 0;
   }
 
-  // Check if type is valid
   if (!symbol->type) {
-    return 0; // Invalid type
+    return 0;
   }
 
-  // For functions, validate parameter information
   if (symbol->kind == SYMBOL_FUNCTION) {
-    // If parameter count > 0, must have parameter arrays
     if (symbol->data.function.parameter_count > 0) {
       if (!symbol->data.function.parameter_names ||
           !symbol->data.function.parameter_types) {
-        return 0; // Invalid function parameters
+        return 0;
       }
 
-      // Check each parameter
       for (size_t i = 0; i < symbol->data.function.parameter_count; i++) {
         if (!symbol->data.function.parameter_names[i] ||
             !symbol->data.function.parameter_types[i]) {
-          return 0; // Invalid parameter
+          return 0;
         }
       }
     }
   }
 
-  // Check for duplicate declaration in current scope
   Symbol *existing = symbol_table_lookup_current_scope(table, symbol->name);
   if (existing) {
-    // Allow forward declaration resolution for functions
     if (symbol->kind == SYMBOL_FUNCTION && existing->kind == SYMBOL_FUNCTION &&
         existing->is_forward_declaration) {
       return symbol_table_function_signatures_match(existing, symbol);
     }
-    return 0; // Duplicate declaration
+    return 0;
   }
 
-  return 1; // Valid declaration
+  return 1;
 }
-
-// Struct type creation and manipulation functions
 
 Type *type_create_struct(const char *name, char **field_names,
                          Type **field_types, size_t field_count) {
@@ -955,7 +882,7 @@ Type *type_get_field_type(Type *struct_type, const char *field_name) {
     return struct_type->field_types[1]->base_type;
   }
 
-  return NULL; // Field not found
+  return NULL;
 }
 
 size_t type_view_rank(const Type *type) {
@@ -983,7 +910,7 @@ size_t type_get_field_offset(Type *struct_type, const char *field_name) {
     }
   }
 
-  return 0; // Field not found
+  return 0;
 }
 
 int type_is_comptime_only(const Type *type) {

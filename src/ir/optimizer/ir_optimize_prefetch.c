@@ -1,31 +1,5 @@
 #include "ir_optimize_internal.h"
-#include "../../common.h" // mettle_free_string
-
-/* ---- Software prefetching for indirect memory accesses ----------------------
- *
- * A counted loop whose body loads A[f(B[i])] pays the full memory latency on
- * every A-access: the address depends on a value loaded this iteration, so
- * neither the hardware prefetcher (random address stream) nor out-of-order
- * execution (the chain is serial) can hide it. But B[i + D] is already
- * computable D iterations early. Following Ainsworth & Jones (CGO'17), this
- * pass duplicates the address-computation slice at distance D and issues an
- * advisory prefetcht0 for the future element:
- *
- *   t  = i + D
- *   if (t < n) {                 // same bound as the loop: B[t] stays in-bounds
- *     addr = A + f(B[t])         // the cloned slice; B-load is a real load
- *     prefetch addr              // never faults; A[garbage] costs nothing
- *   }
- *
- * The clone's B-load is guarded by the loop's own bound, so it reads only
- * elements the loop itself will read. The A-prefetch needs no guard.
- *
- * Strictly shape-gated: counted `while (i < n)` with a unit increment, iv
- * provably 0 at entry, straight-line body (no other control flow), and an
- * address slice containing exactly one interior load. Runs LAST in the
- * post-fixpoint stage so every vectorizer has had its chance first (loops
- * they claim are gone by now; loops with indirect loads are ones they can
- * never claim). METTLE_PREFETCH_DIST overrides the distance (default 16). */
+#include "../../common.h"
 
 #define IR_PREFETCH_MAX_SLICE 12
 #define IR_PREFETCH_DEFAULT_DIST 64
@@ -74,11 +48,6 @@ static int ir_prefetch_slice_contains(const IRPrefetchSlice *slice,
   return 0;
 }
 
-/* Collect the producer slice of `temp` (searching backwards from `at`, staying
- * inside the loop body [body_start, at]). An operand terminates recursion when
- * it is: an INT literal, the loop iv, or a symbol not written in the body
- * (loop-invariant base). Every slice instruction must be a BINARY/CAST/LOAD
- * over such operands. Returns 0 if the slice is unbounded or ill-shaped. */
 static int ir_prefetch_collect_slice(const IRFunction *function,
                                      size_t body_start, size_t body_end,
                                      size_t at, const char *temp,
@@ -91,7 +60,7 @@ static int ir_prefetch_collect_slice(const IRFunction *function,
   }
   size_t prod_index = (size_t)(producer - function->instructions);
   if (prod_index < body_start || prod_index >= body_end) {
-    return 0; /* address computed outside the body: not per-iteration */
+    return 0;
   }
   if (ir_prefetch_slice_contains(slice, prod_index)) {
     return 1;
@@ -128,7 +97,7 @@ static int ir_prefetch_collect_slice(const IRFunction *function,
       }
       if (!ir_affine_symbol_written_in(function, body_start, body_end,
                                          op->name)) {
-        continue; /* loop-invariant base (array pointer, bound, scale) */
+        continue;
       }
       return 0;
     }
@@ -146,9 +115,6 @@ static int ir_prefetch_collect_slice(const IRFunction *function,
   return 1;
 }
 
-/* The slice must actually depend on the iv (otherwise the address is loop-
- * invariant and prefetching is pointless) -- check any slice instruction
- * reads it. */
 static int ir_prefetch_slice_uses_iv(const IRFunction *function,
                                      const IRPrefetchSlice *slice,
                                      const char *iv_symbol) {
@@ -168,10 +134,6 @@ static char *ir_prefetch_temp_name(void) {
   return mettle_strdup(buf);
 }
 
-/* Append a clone of `src` into `vec` with dest renamed to a fresh temp and
- * every TEMP operand that names an earlier slice dest rewritten via `names`,
- * plus iv -> lookahead substitution. Returns the fresh dest name (borrowed
- * from the appended instruction) or NULL. */
 static const char *ir_prefetch_emit_clone(IRInstructionVector *vec,
                                           const IRInstruction *src,
                                           IRNameMap *names,
@@ -197,7 +159,6 @@ static const char *ir_prefetch_emit_clone(IRInstructionVector *vec,
       }
     } else if (op->kind == IR_OPERAND_SYMBOL && op->name &&
                strcmp(op->name, iv_symbol) == 0) {
-      /* iv -> the look-ahead index temp */
       mettle_free_string(op->name);
       op->kind = IR_OPERAND_TEMP;
       op->name = mettle_strdup(lookahead_temp);
@@ -224,18 +185,12 @@ static const char *ir_prefetch_emit_clone(IRInstructionVector *vec,
 }
 
 typedef struct {
-  size_t insert_after; /* branch index: sequence goes at the body top */
+  size_t insert_after;
   IRInstructionVector seq;
 } IRPrefetchPlan;
 
-/* Try to plan a prefetch for the counted loop at header_index. On success the
- * plan's instruction sequence is filled and 1 is returned. */
 static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
                                  IRPrefetchPlan *plan) {
-  /* Straight-line body: an early exit or interior branch could make the
-   * cloned B-load read an element the loop never touches. Unit increment +
-   * iv from 0 keeps i+D bounded by n+D with no wrap, and the bound has to
-   * hold still while the loop runs. All read off the shared model. */
   IRAffineLoop loop;
   if (!ir_affine_model_loop(function, header_index, &loop) ||
       !ir_affine_straight_line_body(&loop) || !ir_affine_unit_step(&loop) ||
@@ -249,8 +204,6 @@ static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
   size_t body_end = loop.body_end;
   IRWhileLoopBounds bounds = loop.bounds;
 
-  /* Find the indirect load: a LOAD whose address slice contains exactly one
-   * interior load and depends on the iv. Take the first such. */
   size_t target_load = (size_t)-1;
   IRPrefetchSlice slice;
   for (size_t i = body_start; i < body_end; i++) {
@@ -274,8 +227,6 @@ static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
     return 0;
   }
 
-  /* Slice indices were pushed post-order (leaves first), so emitting in
-   * recorded order respects dependencies. */
   IRNameMap names = {0};
   IRInstructionVector *seq = &plan->seq;
   memset(seq, 0, sizeof(*seq));
@@ -292,7 +243,6 @@ static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
   snprintf(skip_label, sizeof(skip_label), "ir_pf_skip_%zu", g_prefetch_id++);
   int ok = ahead && cond;
 
-  /* ahead = iv + D */
   if (ok) {
     IRInstruction add = {0};
     add.op = IR_OP_BINARY;
@@ -307,7 +257,6 @@ static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
       ir_instruction_destroy_storage(&add);
     }
   }
-  /* cond = ahead < bound */
   if (ok) {
     IRInstruction cmp = {0};
     cmp.op = IR_OP_BINARY;
@@ -327,7 +276,6 @@ static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
       ir_instruction_destroy_storage(&cmp);
     }
   }
-  /* branch_zero cond -> skip */
   if (ok) {
     IRInstruction br = {0};
     br.op = IR_OP_BRANCH_ZERO;
@@ -339,7 +287,6 @@ static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
       ir_instruction_destroy_storage(&br);
     }
   }
-  /* The cloned slice with iv -> ahead. */
   const char *final_addr = NULL;
   for (size_t s = 0; ok && s < slice.count; s++) {
     final_addr = ir_prefetch_emit_clone(
@@ -347,7 +294,6 @@ static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
         ahead);
     ok = final_addr != NULL;
   }
-  /* prefetch <cloned address of the target load>. */
   if (ok) {
     const char *addr_name = ir_name_map_lookup(
         &names, function->instructions[target_load].lhs.name);
@@ -363,7 +309,6 @@ static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
       }
     }
   }
-  /* skip: */
   if (ok) {
     IRInstruction lbl = {0};
     lbl.op = IR_OP_LABEL;
@@ -402,7 +347,6 @@ int ir_prefetch_indirect_pass(IRFunction *function, int *changed) {
       continue;
     }
 
-    /* Rebuild the stream with the sequence spliced in after the loop branch. */
     IRInstructionVector vec = {0};
     int ok = 1;
     for (size_t k = 0; k < function->instruction_count && ok; k++) {
@@ -444,7 +388,6 @@ int ir_prefetch_indirect_pass(IRFunction *function, int *changed) {
     if (changed) {
       *changed = 1;
     }
-    /* Skip past this loop: i now points at the same header (clone kept it). */
   }
   return 1;
 }

@@ -1,9 +1,5 @@
 #include "ir_optimize_internal.h"
 
-/* -------------------------------------------------------------------------- */
-/* int32 array horizontal sum -> IR_OP_SIMD_SUM_I32                           */
-/* -------------------------------------------------------------------------- */
-
 const char *ir_function_local_declared_type(const IRFunction *function,
                                                    const char *symbol_name) {
   const IRInstruction *declaration =
@@ -48,11 +44,6 @@ int ir_function_symbol_is_inlined_param(const IRFunction *function,
   return tag != NULL;
 }
 
-/* A local nothing reassigns holds one value for the whole function, which is
- * what a base pointer or a trip count has to do. This is the property the two
- * predicates below want; they used to ask for a name instead, matching the
- * inliner's `_param_data` and `_param_len` suffixes, so a local that held the
- * same value under any other name was refused. */
 static int ir_symbol_assigned_once(const IRFunction *function,
                                    const char *symbol_name) {
   int writes = 0;
@@ -90,11 +81,6 @@ int ir_symbol_is_sum_loop_bound(const IRFunction *function,
          ir_symbol_is_settled_local(function, symbol_name, "int64");
 }
 
-/* The per-loop version: a bound only has to hold still for THIS loop's
- * duration. A counter the enclosing loop advances between entries -- the
- * usual shape of a length-sweeping test driver -- is a perfectly good bound
- * for the inner loop it feeds, and the fused kernel reads it at the same
- * point the scalar compare would have. */
 int ir_symbol_is_loop_bound(const IRFunction *function,
                             const char *symbol_name, size_t header_index,
                             size_t jump_index) {
@@ -136,11 +122,6 @@ int ir_label_is_while_header(const char *label) {
   if (strstr(label, "_lbl_ir_while_") != NULL) {
     return 1;
   }
-  /* Counted `for` loops (including desugared range-for, `for i in lo..hi`)
-   * lower to the same header/compare/branch_zero/body/increment/back-jump shape
-   * as a `while` once the unused step label is cleaned up. Treat their cond
-   * header as a loop header too so every vectorizer considers them; each
-   * recognizer still fully validates the loop's structure before firing. */
   if (strncmp(label, "ir_for_cond_", 12) == 0) {
     return 1;
   }
@@ -195,9 +176,6 @@ int ir_loop_body_is_unclaimable(IRFunction *function, size_t start,
   return ir_range_has_safety_call(function, start, end);
 }
 
-/* True if the reduction accumulator `sym` is declared int64 (a local). Used to
- * admit the cast-free widening sum `s += a[i]` only when `s` is genuinely 64-bit
- * (so summing int32 into int64 cannot overflow-diverge from the scalar loop). */
 static int ir_sum_accumulator_is_int64(const IRFunction *function,
                                        const char *sym) {
   const char *t = ir_function_local_declared_type(function, sym);
@@ -253,10 +231,6 @@ static int ir_try_vectorize_sum_i32_at(IRFunction *function, size_t header_index
   iv_symbol = compare->lhs.name;
   exit_label = branch->text;
 
-  /* A literal trip count is as good a bound as a symbol: the kernel takes
-   * the count as an operand either way. The bound only has to hold still for
-   * THIS loop, so the range-aware check runs once the latch is known. */
-
   for (size_t i = branch_index + 1; i < function->instruction_count; i++) {
     if (function->instructions[i].op == IR_OP_JUMP &&
         function->instructions[i].text &&
@@ -279,7 +253,7 @@ static int ir_try_vectorize_sum_i32_at(IRFunction *function, size_t header_index
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, exit_label)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
 
   if (ir_loop_body_is_unclaimable(function, branch_index + 1, jump_index)) {
@@ -301,13 +275,6 @@ static int ir_try_vectorize_sum_i32_at(IRFunction *function, size_t header_index
     return 1;
   }
 
-  /* Body must be: idx = iv << 2; ptr = base + idx; load; cast (int64); sum += cast.
-   * The load that feeds the accumulator and the load at the iv-indexed
-   * address are matched separately below; they MUST be the same instruction,
-   * and the only load in the body. Otherwise an indirect gather
-   * `s += a[idx[i]]` pairs the sum with the a-load but the address with the
-   * idx-load and the kernel silently sums idx[0..n) instead (a real
-   * --release miscompile caught by the gather_sum benchmark). */
   sum_symbol = NULL;
   base_symbol = NULL;
   size_t sum_load_index = (size_t)-1;
@@ -336,17 +303,12 @@ static int ir_try_vectorize_sum_i32_at(IRFunction *function, size_t header_index
       if (prod && prod->op == IR_OP_CAST && prod->text &&
           strcmp(prod->text, "int64") == 0 &&
           prod->lhs.kind == IR_OPERAND_TEMP && prod->lhs.name) {
-        /* s += (int64)a[i]: the cast operand must be a signed int32 (non-float)
-         * load. A FLOAT load here is a float->int CONVERSION the vpaddd kernel
-         * does not perform -- it bit-adds the lanes, summing the raw IEEE bits
-         * (a silent miscompile); an UNSIGNED load would zero-extend, diverging
-         * from the kernel's sign-extending int32->int64 widening. */
         const IRInstruction *load =
             ir_find_temp_producer_before(function, i, prod->lhs.name);
         if (load && load->op == IR_OP_LOAD &&
             load->rhs.kind == IR_OPERAND_INT && load->rhs.int_value == 4 &&
             !load->is_float && !load->is_unsigned) {
-          ok = 1; /* s += (int64)a[i] */
+          ok = 1;
           sum_load_index = (size_t)(load - function->instructions);
         }
       } else if (prod && prod->op == IR_OP_LOAD &&
@@ -354,20 +316,12 @@ static int ir_try_vectorize_sum_i32_at(IRFunction *function, size_t header_index
                  prod->rhs.int_value == 4 && !prod->is_float &&
                  !prod->is_unsigned &&
                  ir_sum_accumulator_is_int64(function, ins->dest.name)) {
-        /* s += a[i] : a signed int32 load widened directly into an int64
-         * accumulator -- semantically identical to the (int64)-cast form (the
-         * kernel sums int32 into int64 with sign-extension). Lets the natural
-         * cast-free reduction vectorize. */
         ok = 1;
         sum_load_index = (size_t)(prod - function->instructions);
       } else if (prod && prod->op == IR_OP_CAST && prod->text &&
                  strcmp(prod->text, "int32") == 0 &&
                  prod->lhs.kind == IR_OPERAND_TEMP && prod->lhs.name &&
                  ir_sum_accumulator_is_int64(function, ins->dest.name)) {
-        /* s += (int32)a[i] with an int64 accumulator: when the cast's operand
-         * is itself a signed int32 load, the cast is a no-op and this is the
-         * cast-free widening form again. Common after a user retypes an
-         * int16 array to int32 and keeps the old (int32) cast. */
         const IRInstruction *load =
             ir_find_temp_producer_before(function, i, prod->lhs.name);
         if (load && load->op == IR_OP_LOAD &&
@@ -414,9 +368,6 @@ static int ir_try_vectorize_sum_i32_at(IRFunction *function, size_t header_index
   if (!sum_symbol || !base_symbol || !has_int64_cast || !has_indexed_load) {
     return 1;
   }
-  /* The accumulator's load and the iv-indexed load must be one and the same
-   * instruction, and the body's only load -- otherwise this is an indirect
-   * access (`s += a[idx[i]]`), not a unit-stride sum. */
   if (sum_load_index != indexed_load_index || body_load_count != 1) {
     return 1;
   }
@@ -475,13 +426,6 @@ int ir_simd_sum_i32_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* uint8 array horizontal sum -> IR_OP_SIMD_SUM_U8                            */
-/* -------------------------------------------------------------------------- */
-
-/* True if @name is a uint8* parameter or local. vpsadbw sums bytes as
- * unsigned, so this gate keeps the kernel bit-identical to the scalar
- * (int64)(uint8)load reduction (an int8* would sign-extend and diverge). */
 static int ir_symbol_is_uint8_ptr(const IRFunction *function,
                                   const char *name) {
   if (!function || !name) {
@@ -502,13 +446,6 @@ static int ir_symbol_is_uint8_ptr(const IRFunction *function,
   }
 }
 
-/* True if @iv is provably 0 at the loop header: the nearest preceding write to
- * @iv (in straight-line order) is `iv <- 0` (directly, or via an integer
- * cast-of-0 temp, the shape int64 ivs and inlined inits lower to). Bails on any
- * control-flow join before finding it, so a fused kernel only ever touches
- * base[0..len). EVERY recognizer that replays a counted loop as 0..bound must
- * call this (or prove the start some other way): `var j = 3; while (j < n)`
- * silently summing/mapping the skipped prefix was a real --release miscompile. */
 int ir_instruction_is_safety_scaffolding(const IRInstruction *instruction) {
   if (!instruction) {
     return 0;
@@ -603,9 +540,6 @@ static int ir_try_vectorize_sum_u8_at(IRFunction *function, size_t header_index,
   iv_symbol = compare->lhs.name;
   exit_label = branch->text;
 
-  /* A literal trip count is as good a bound as a symbol: the kernel takes
-   * the count as an operand either way. The bound only has to hold still for
-   * THIS loop, so the range-aware check runs once the latch is known. */
   if (!ir_iv_zero_at_header(function, header_index, iv_symbol)) {
     return 1;
   }
@@ -632,7 +566,7 @@ static int ir_try_vectorize_sum_u8_at(IRFunction *function, size_t header_index,
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, exit_label)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
 
   if (ir_loop_body_is_unclaimable(function, branch_index + 1, jump_index)) {
@@ -651,11 +585,6 @@ static int ir_try_vectorize_sum_u8_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* Body must be: addr = base + iv; load[1]; cast(int64); sum += cast. The only
-   * memory op is that single byte load; reject stores, calls, other loads.
-   * As in the i32 form, the load feeding the accumulator's cast and the
-   * iv-indexed load must be the SAME instruction (an indirect gather pairs
-   * them differently and would sum the wrong array). */
   size_t sum_load_index = (size_t)-1;
   size_t indexed_load_index = (size_t)-1;
   size_t body_load_count = 0;
@@ -767,13 +696,8 @@ int ir_simd_sum_u8_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* uint8 in-place element-wise map -> IR_OP_SIMD_BYTE_MAP                      */
-/* -------------------------------------------------------------------------- */
-
 #define BYTE_MAP_MAX_STEPS 16
 
-/* An integer type name, for the cast pass-through below. */
 static int ir_type_name_is_integer(const char *name) {
   return name && (strcmp(name, "int8") == 0 || strcmp(name, "uint8") == 0 ||
                   strcmp(name, "int16") == 0 || strcmp(name, "uint16") == 0 ||
@@ -782,8 +706,6 @@ static int ir_type_name_is_integer(const char *name) {
                   strcmp(name, "bool") == 0);
 }
 
-/* Maps a binary operator's text to its IRByteMapOp, or -1 if unsupported.
- * *commutative_out reports whether the constant may be on either side. */
 static int ir_byte_map_op_code(const char *text, int *commutative_out) {
   if (!text) {
     return -1;
@@ -808,12 +730,12 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
   const char *loop_label = NULL;
   const char *exit_label = NULL;
   const char *addr_temp = NULL;
-  const char *cur = NULL; /* temp holding the live byte value */
+  const char *cur = NULL;
   int op_codes[BYTE_MAP_MAX_STEPS];
   int op_consts[BYTE_MAP_MAX_STEPS];
   int nsteps = 0;
   int have_store = 0;
-  int dirty = 0; /* a chain op has run since the last store of `cur` */
+  int dirty = 0;
   IRInstruction fused = {0};
 
   if (!function || header_index + 4 >= function->instruction_count) {
@@ -846,9 +768,6 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
   iv_symbol = compare->lhs.name;
   exit_label = branch->text;
 
-  /* A literal trip count is as good a bound as a symbol: the kernel takes
-   * the count as an operand either way. The bound only has to hold still for
-   * THIS loop, so the range-aware check runs once the latch is known. */
   if (!ir_iv_zero_at_header(function, header_index, iv_symbol)) {
     return 1;
   }
@@ -876,7 +795,7 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, exit_label)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
 
   increment_index = jump_index;
@@ -891,9 +810,6 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
     return 1;
   }
 
-  /* Walk the body, extracting one straight-line chain from the byte load to the
-   * final byte store. Anything outside the {address, byte load/store, chain op,
-   * loop increment} shapes aborts the match. */
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op == IR_OP_NOP || ins->op == IR_OP_DECLARE_LOCAL ||
@@ -901,7 +817,6 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
       continue;
     }
 
-    /* addr = base + iv (either operand order). */
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
         !ins->is_float && ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
         ins->lhs.kind == IR_OPERAND_SYMBOL && ins->rhs.kind == IR_OPERAND_SYMBOL) {
@@ -921,7 +836,6 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
       continue;
     }
 
-    /* v = *addr [1] (load or reload). */
     if (ins->op == IR_OP_LOAD && ins->rhs.kind == IR_OPERAND_INT &&
         ins->rhs.int_value == 1 && addr_temp &&
         ir_operand_is_temp_named(&ins->lhs, addr_temp) &&
@@ -930,7 +844,6 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
       continue;
     }
 
-    /* *addr <- cur [1] (store of the live value). */
     if (ins->op == IR_OP_STORE && ins->rhs.kind == IR_OPERAND_INT &&
         ins->rhs.int_value == 1 && addr_temp &&
         ir_operand_is_temp_named(&ins->dest, addr_temp) && cur &&
@@ -940,11 +853,6 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
       continue;
     }
 
-    /* cur = (intN)cur. Every operator in the chain is low-byte-determined and
-     * the only store is one byte wide, so an integer cast anywhere in the
-     * chain cannot change what is written. `buf[i] = (uint8)(buf[i] * 3 + 7);`
-     * is the same kernel as the uncast form, and now that a narrowing store
-     * has to say so, it is the form the source is written in. */
     if (ins->op == IR_OP_CAST && !ins->is_float && cur &&
         ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
         ir_operand_is_temp_named(&ins->lhs, cur) &&
@@ -953,7 +861,6 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
       continue;
     }
 
-    /* cur = cur <op> const (one constant operand, the other is the live value). */
     if (ins->op == IR_OP_BINARY && !ins->is_float &&
         ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name && cur) {
       int commutative = 0;
@@ -983,7 +890,6 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
       }
     }
 
-    /* Anything else in the body defeats the match. */
     return 1;
   }
 
@@ -991,7 +897,6 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
       !ir_symbol_is_uint8_ptr(function, base_symbol)) {
     return 1;
   }
-  /* The loop counter must be dead after the loop (the fused op drops it). */
   if (ir_symbol_live_after_loop(function, jump_index + 1, iv_symbol)) {
     return 1;
   }
@@ -1041,12 +946,6 @@ int ir_simd_byte_map_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Linear-congruential recurrence reduction -> IR_OP_SIMD_LCG_U32            */
-/* Matches `state = state*A + C; sum += (int64)(state & MASK); i++` over a    */
-/* counted loop carrying a uint32 state, and replaces it with the 8-lane      */
-/* closed-form kernel (state_{k+8} = A^8*state_k + (A^7+..+1)*C, mod 2^32).   */
-/* -------------------------------------------------------------------------- */
 static int ir_try_vectorize_lcg_at(IRFunction *function, size_t header_index,
                                    int *changed) {
   if (!function || header_index + 4 >= function->instruction_count) {
@@ -1095,7 +994,7 @@ static int ir_try_vectorize_lcg_at(IRFunction *function, size_t header_index,
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, branch->text)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
 
   const char *state_sym = NULL, *sum_sym = NULL;
@@ -1200,8 +1099,6 @@ static int ir_try_vectorize_lcg_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* Every other body instruction must write only a known temp/symbol of the
-   * matched chain (no loads/stores/calls/extra state). */
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *in = &function->instructions[i];
     if (in->op == IR_OP_NOP) {
@@ -1241,8 +1138,6 @@ static int ir_try_vectorize_lcg_at(IRFunction *function, size_t header_index,
   fused.op = IR_OP_SIMD_LCG_U32;
   fused.location = header->location;
   fused.dest = ir_operand_symbol(sum_sym);
-  /* Duplicate the bound operand: a shallow copy would share compare->rhs.name,
-   * which is freed when the loop body is NOP'd below (double-free). */
   if (compare->rhs.kind == IR_OPERAND_INT) {
     fused.lhs = ir_operand_int(compare->rhs.int_value);
   } else {

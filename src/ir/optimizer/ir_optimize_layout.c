@@ -1,40 +1,5 @@
 #include "ir_optimize_internal.h"
 
-/* ---- Allocation-site layout factorization ----------------------------------
- *
- * A heap pool allocated as `malloc(N*S)` and accessed only through the affine
- * family `base + i*S + c` (constant stride S, constant field offsets c) is a
- * hand-rolled array-of-structs. When the whole program's uses of that pointer
- * are provably confined to that family, the interior layout of the allocation
- * is unobservable and can be re-mapped:
- *
- *   COMPACT: repack the field offsets to a denser stride S' = sum of field
- *            widths, shrinking the working set when the source stride carried
- *            padding (16-byte nodes with 8 live bytes -> 8-byte nodes).
- *   SOA:     partition the SAME allocation into one contiguous array per
- *            field (base + P_k + i*w_k). Traversals that read a subset of the
- *            fields stop pulling the cold fields through the cache, and every
- *            field array becomes unit-stride for the vectorizers.
- *
- * Both rewrites stay inside the original allocation (SOA keeps partition 0 at
- * byte 0 and sum(n*w_k) <= n*S always holds), so free(base) and null checks
- * are untouched.
- *
- * Eligibility is a whole-program pointer-use analysis in the spirit of SROA:
- * the base pointer is tracked through copies, casts, and call arguments into
- * program-defined callees; every transitive use must be an affine deref, a
- * compare against 0, free(base), or a tracked call. Any other use (escape
- * into memory, extern call, return, arithmetic outside the family, mixed
- * strides, overlapping fields) disqualifies the allocation. Callees whose
- * bodies get rewritten must receive this pool at every call site in the
- * program, which is only knowable in a whole-program (executable) build.
- *
- * This pass runs OUTSIDE per-function --verify validation by design: it
- * preserves program-observable behavior but changes the buffer's byte image,
- * which the per-function validator treats as an observation (and a
- * multi-function rewrite must not be quarantined per function, which would
- * mix layouts). METTLE_SKIP_PASS=layout_factor disables it. */
-
 #define IR_LAYOUT_MAX_CLASSES 12
 #define IR_LAYOUT_MAX_ALIASES 256
 #define IR_LAYOUT_MAX_DERIVED 4096
@@ -46,7 +11,7 @@
 typedef struct {
   long long offset;
   int width;
-  long long new_offset; /* COMPACT: offset within S'; SOA: partition base P_k */
+  long long new_offset;
   int seen_in_load;
 } IRLayoutClass;
 
@@ -56,14 +21,13 @@ typedef struct {
   IROperandKind kind;
 } IRLayoutAlias;
 
-/* A temp holding base + (i*S)? + c inside one function. */
 typedef struct {
   IRFunction *fn;
   const char *temp;
   const char *base_name;
   IROperandKind base_kind;
   int has_index;
-  IROperand index; /* the operand the original code scaled by S (borrowed) */
+  IROperand index;
   long long offset;
 } IRLayoutDerived;
 
@@ -74,7 +38,7 @@ typedef struct {
   long long offset;
   int width;
   int has_index;
-  IROperand index;     /* borrowed from the derived record */
+  IROperand index;
   const char *base_name;
   IROperandKind base_kind;
   size_t class_index;
@@ -90,7 +54,7 @@ typedef struct {
   IRFunction *alloc_fn;
   size_t alloc_index;
   long long alloc_size;
-  long long stride; /* S; 0 until the first indexed deref pins it */
+  long long stride;
 
   IRLayoutAlias aliases[IR_LAYOUT_MAX_ALIASES];
   size_t alias_count;
@@ -108,7 +72,6 @@ typedef struct {
 
 static size_t g_layout_temp_id;
 
-/* METTLE_LAYOUT_DEBUG=1: trace candidate decisions to stderr. */
 static int ir_layout_debug_enabled(void) {
   static int cached = -1;
   if (cached < 0) {
@@ -184,11 +147,6 @@ static IRLayoutDerived *ir_layout_find_derived(IRLayoutCandidate *cand,
   return NULL;
 }
 
-/* Whole-function symbol constant: exactly one write anywhere in `fn`, and it
- * is `ASSIGN sym <- INT`, with the address never taken and the name not a
- * parameter. Covers locals initialized once from a folded read-only global
- * when the block-local symbol map has been invalidated by earlier control
- * flow. */
 static int ir_layout_symbol_single_const(IRFunction *fn, const char *name,
                                          long long *out) {
   if (!name || ir_function_symbol_is_parameter(fn, name)) {
@@ -220,11 +178,6 @@ static int ir_layout_symbol_single_const(IRFunction *fn, const char *name,
   return 1;
 }
 
-/* Resolve `op` (at instruction `at` in `fn`) to a compile-time integer.
- * Handles INT literals, symbols with a known value at `at` (via the caller's
- * prebuilt symbol map, falling back to the whole-function single-write
- * analysis), and temps produced by straight-line CAST/int BINARY chains over
- * resolvable operands. */
 static int ir_layout_resolve_const(IRFunction *fn, size_t at,
                                    const IRSymbolValueMap *symbol_map,
                                    const IROperand *op, int depth,
@@ -287,7 +240,6 @@ static int ir_layout_resolve_const(IRFunction *fn, size_t at,
   return 0;
 }
 
-/* A pointer-width cast target: copying the pool through it cannot lose bits. */
 static int ir_layout_cast_preserves_pointer(const char *type_name) {
   if (!type_name) {
     return 0;
@@ -299,8 +251,6 @@ static int ir_layout_cast_preserves_pointer(const char *type_name) {
          strcmp(type_name, "uint64") == 0;
 }
 
-/* Match `op` as a scaled index: a temp produced by `X * CONST` or
- * `X << CONST` before `at`. Writes the scale and the unscaled operand. */
 static int ir_layout_match_scaled_index(IRFunction *fn, size_t at,
                                         const IROperand *op,
                                         long long *scale_out,
@@ -341,7 +291,7 @@ static int ir_layout_note_class(IRLayoutCandidate *cand, long long offset,
   for (size_t i = 0; i < cand->class_count; i++) {
     if (cand->classes[i].offset == offset) {
       if (cand->classes[i].width != width) {
-        return 0; /* mixed widths at one offset: not a clean field */
+        return 0;
       }
       if (is_load) {
         cand->classes[i].seen_in_load = 1;
@@ -421,9 +371,6 @@ static int ir_layout_edge_add(IRLayoutCandidate *cand, IRFunction *callee,
   return 1;
 }
 
-/* Grow the alias/derived sets for one function until stable. Returns 0 on
- * a shape that disqualifies the candidate (only shapes that create records
- * are judged here; the validation sweep judges every remaining use). */
 static int ir_layout_grow_function(IRLayoutCandidate *cand, IRFunction *fn) {
   for (int round = 0; round < 8; round++) {
     int grew = 0;
@@ -453,8 +400,6 @@ static int ir_layout_grow_function(IRLayoutCandidate *cand, IRFunction *fn) {
         continue;
       }
 
-      /* Pointer-type cast of a derived address (`(int32*)(base+i*S+c)` right
-       * before the deref): the cast result is the same interior pointer. */
       if (insn->op == IR_OP_CAST && insn->dest.kind == IR_OPERAND_TEMP &&
           insn->dest.name) {
         IRLayoutDerived *src = ir_layout_find_derived(cand, fn, &insn->lhs);
@@ -520,13 +465,13 @@ static int ir_layout_grow_function(IRLayoutCandidate *cand, IRFunction *fn) {
           IROperand index = {0};
           if (!ir_layout_match_scaled_index(fn, i, add_side, &scale, &index)) {
             ir_layout_debug_insn("non-affine pointer add", fn, insn);
-            return 0; /* pointer + unrecognized value: not the affine family */
+            return 0;
           }
           if (cand->stride == 0) {
             cand->stride = scale;
           } else if (cand->stride != scale) {
             ir_layout_debug("mixed stride %s: %lld", fn->name, scale);
-            return 0; /* mixed strides across the pool's derefs */
+            return 0;
           }
           d->has_index = 1;
           d->index = index;
@@ -536,10 +481,6 @@ static int ir_layout_grow_function(IRLayoutCandidate *cand, IRFunction *fn) {
         continue;
       }
 
-      /* Extension: derived + CONST (either operand order). The offset side may
-       * be a temp that resolves to a compile-time constant through its
-       * producer chain -- inlining leaves `field*4` unfolded because this
-       * pass runs before the const-fold fixpoint. */
       IRLayoutDerived *base = ir_layout_find_derived(cand, fn, &insn->lhs);
       const IROperand *const_side = &insn->rhs;
       if (!base) {
@@ -584,15 +525,12 @@ static int ir_layout_operand_mentions(const IRLayoutCandidate *cand,
   return ir_layout_find_derived((IRLayoutCandidate *)cand, fn, &probe) != NULL;
 }
 
-/* Validate every use of every alias/derived temp in `fn`, recording derefs
- * and interprocedural edges. Runs only after the alias closure is complete;
- * any use it cannot classify disqualifies the candidate (returns 0). */
 static int ir_layout_validate_function(IRLayoutCandidate *cand,
                                        IRFunction *fn) {
   for (size_t i = 0; i < fn->instruction_count; i++) {
     const IRInstruction *insn = &fn->instructions[i];
     if (fn == cand->alloc_fn && i == cand->alloc_index) {
-      continue; /* the candidate's own malloc call defines the base */
+      continue;
     }
     int mentions = 0;
     if (ir_layout_operand_mentions(cand, fn, &insn->dest) ||
@@ -611,24 +549,19 @@ static int ir_layout_validate_function(IRLayoutCandidate *cand,
 
     switch (insn->op) {
     case IR_OP_DECLARE_LOCAL:
-      continue; /* declaring an alias local carries no value */
+      continue;
 
     case IR_OP_NOP:
-      continue; /* @simd/loop markers reference nothing */
+      continue;
 
     case IR_OP_ASSIGN:
     case IR_OP_CAST:
-      /* Only the recorded alias-copy shape is legal: alias -> alias. An
-       * alias DEST being overwritten from a non-alias source would fork the
-       * symbol's meaning mid-function; a derived temp on either side
-       * escapes the family. */
       if (ir_layout_operand_is_alias(cand, fn, &insn->lhs) &&
           ir_layout_operand_is_alias(cand, fn, &insn->dest) &&
           !ir_layout_find_derived(cand, fn, &insn->lhs) &&
           !ir_layout_find_derived(cand, fn, &insn->dest)) {
         continue;
       }
-      /* The recorded derived->derived pointer cast. */
       if (insn->op == IR_OP_CAST &&
           ir_layout_find_derived(cand, fn, &insn->lhs) &&
           insn->dest.kind == IR_OPERAND_TEMP) {
@@ -644,9 +577,8 @@ static int ir_layout_validate_function(IRLayoutCandidate *cand,
       IROperand probe = insn->dest;
       if (insn->dest.kind == IR_OPERAND_TEMP &&
           ir_layout_find_derived(cand, fn, &probe)) {
-        continue; /* a recorded derived-pointer producer */
+        continue;
       }
-      /* Pointer compare against literal 0 (null checks). */
       if (insn->text &&
           (strcmp(insn->text, "==") == 0 || strcmp(insn->text, "!=") == 0) &&
           !ir_layout_operand_mentions(cand, fn, &insn->dest)) {
@@ -694,7 +626,7 @@ static int ir_layout_validate_function(IRLayoutCandidate *cand,
     case IR_OP_STORE: {
       if (ir_layout_operand_mentions(cand, fn, &insn->lhs) ||
           ir_layout_operand_mentions(cand, fn, &insn->rhs)) {
-        return 0; /* the pool pointer stored as a VALUE escapes */
+        return 0;
       }
       IRLayoutDerived *d = ir_layout_find_derived(cand, fn, &insn->dest);
       int width = ir_layout_deref_width(&insn->rhs);
@@ -727,24 +659,22 @@ static int ir_layout_validate_function(IRLayoutCandidate *cand,
         const IROperand *arg = &insn->arguments[a];
         IROperand probe = *arg;
         if (ir_layout_find_derived(cand, fn, &probe)) {
-          return 0; /* interior pointer passed out */
+          return 0;
         }
         if (!ir_layout_operand_is_alias(cand, fn, arg)) {
           continue;
         }
         if (strcmp(insn->text, "free") == 0 && insn->argument_count == 1) {
-          continue; /* whole-block free of the base pointer */
+          continue;
         }
         IRFunction *callee = ir_program_find_function(cand->program, insn->text);
         if (!callee || a >= callee->parameter_count ||
             !callee->parameter_names[a]) {
-          return 0; /* extern or shape mismatch */
+          return 0;
         }
         if (!ir_layout_edge_add(cand, callee, a)) {
           return 0;
         }
-        /* The closure must already know this edge; a fresh discovery here
-         * means the fixpoint missed something -- bail, never guess. */
         if (!ir_layout_func_tracked(cand, callee)) {
           return 0;
         }
@@ -760,15 +690,12 @@ static int ir_layout_validate_function(IRLayoutCandidate *cand,
 
     default:
       ir_layout_debug_insn("escape (op)", fn, insn);
-      return 0; /* RETURN, INLINE_ASM, SIMD kernels, memcpy, ... */
+      return 0;
     }
   }
   return 1;
 }
 
-/* Every call site of every tracked callee must pass this candidate's pool at
- * the tracked parameter position, and no instruction anywhere may reference a
- * tracked callee as a value (function pointer / dispatch-by-name). */
 static int ir_layout_check_call_completeness(IRLayoutCandidate *cand) {
   for (size_t e = 0; e < cand->edge_count; e++) {
     IRFunction *callee = cand->edges[e].callee;
@@ -788,8 +715,6 @@ static int ir_layout_check_call_completeness(IRLayoutCandidate *cand) {
           }
           continue;
         }
-        /* Any non-call reference to the callee's name (function pointers,
-         * indirect dispatch) makes its call sites unknowable. */
         const IROperand *ops[3] = {&insn->dest, &insn->lhs, &insn->rhs};
         for (size_t o = 0; o < 3; o++) {
           if ((ops[o]->kind == IR_OPERAND_SYMBOL ||
@@ -818,10 +743,6 @@ static int ir_layout_class_cmp_offset(const void *a, const void *b) {
   return ca->offset < cb->offset ? -1 : (ca->offset > cb->offset ? 1 : 0);
 }
 
-/* Assign new offsets. mode 1 = COMPACT (returns new stride S'), mode 2 = SOA
- * (returns 0; class new_offset holds the partition base P_k). Classes are
- * assigned in descending width order so every offset lands naturally
- * aligned. */
 static long long ir_layout_assign_offsets(IRLayoutCandidate *cand, int mode,
                                           long long element_count) {
   size_t order[IR_LAYOUT_MAX_CLASSES];
@@ -877,9 +798,6 @@ static int ir_layout_emit_binary(IRInstructionVector *vec,
   return 1;
 }
 
-/* Emit the replacement address chain for one deref and return the final
- * address temp name (owned by the caller). mode/stride per the candidate's
- * decision; per-class new offsets already assigned. */
 static char *ir_layout_emit_address(IRInstructionVector *vec,
                                     const IRLayoutDeref *deref,
                                     const IRLayoutClass *cls, int mode,
@@ -929,8 +847,6 @@ static char *ir_layout_emit_address(IRInstructionVector *vec,
     return current;
   }
   if (add_const == 0 && !current) {
-    /* Address is exactly the base: reuse it via a plain copy temp so the
-     * LOAD/STORE operand rewrite stays uniform. */
     char *copy = ir_layout_temp_name();
     if (!copy) {
       return NULL;
@@ -970,9 +886,6 @@ static char *ir_layout_emit_address(IRInstructionVector *vec,
   return final_name;
 }
 
-/* Rewrite one function: rebuild the stream, inserting a fresh address chain
- * before each recorded deref and pointing the LOAD/STORE at it. The old
- * chains die and later dead-temp cleanup sweeps them. */
 static int ir_layout_rewrite_function(IRLayoutCandidate *cand, IRFunction *fn,
                                       int mode, long long new_stride) {
   int any = 0;
@@ -1038,8 +951,6 @@ static int ir_layout_rewrite_function(IRLayoutCandidate *cand, IRFunction *fn,
   return ir_function_replace_instructions(fn, &vec);
 }
 
-/* Analyze one malloc site. Returns 1 and fills the candidate when the pool
- * qualifies (analysis only; no rewrite). */
 static int ir_layout_analyze_candidate(IRLayoutCandidate *cand,
                                        IRProgram *program, IRFunction *fn,
                                        size_t call_index) {
@@ -1078,11 +989,6 @@ static int ir_layout_analyze_candidate(IRLayoutCandidate *cand,
   }
   cand->funcs[cand->func_count++] = fn;
 
-  /* Alias closure to a true fixpoint: growing one function's alias set can
-   * turn a call argument elsewhere into an alias, which pulls in a new callee,
-   * whose param alias can unlock more derived records anywhere. Iterate
-   * grow-all + peek-all until nothing changes, THEN validate everything.
-   * Validation refuses any use the closure didn't already know about. */
   for (int round = 0; round < IR_LAYOUT_MAX_FUNCS + 2; round++) {
     size_t before_aliases = cand->alias_count;
     size_t before_funcs = cand->func_count;
@@ -1166,10 +1072,9 @@ static int ir_layout_analyze_candidate(IRLayoutCandidate *cand,
             cand->classes[i + 1].offset) {
       ir_layout_debug("overlapping fields %s (%lld)", "",
                       cand->classes[i].offset);
-      return 0; /* overlapping fields */
+      return 0;
     }
   }
-  /* Re-key each deref to its (now sorted) class. */
   for (size_t d = 0; d < cand->deref_count; d++) {
     int found = 0;
     for (size_t c = 0; c < cand->class_count; c++) {
@@ -1198,9 +1103,6 @@ int ir_layout_factor_pass(IRProgram *program, int *changed) {
     return 0;
   }
 
-  /* Claimed malloc sites (keyed by function + result name, which rewrites
-   * never rename) so a transformed pool is not re-analyzed this run. The
-   * name is copied out because the rewrite replaces the instruction array. */
   const IRFunction *claimed_fn[8];
   char claimed_dest[8][64];
   size_t claimed_count = 0;
@@ -1236,17 +1138,12 @@ int ir_layout_factor_pass(IRProgram *program, int *changed) {
         continue;
       }
 
-      /* Capture site facts now: the rewrite replaces instruction arrays and
-       * `insn` dangles afterwards. */
       char site_dest[64];
       snprintf(site_dest, sizeof(site_dest), "%s", insn->dest.name);
       SourceLocation site_location = insn->location;
 
       long long n = cand->alloc_size / cand->stride;
 
-      /* Mode selection: SOA when the program's loads touch a strict subset
-       * of the fields (traversals can skip the cold arrays); otherwise
-       * COMPACT when packing removes padding; otherwise leave it alone. */
       size_t load_classes = 0;
       long long packed_width = 0;
       for (size_t c = 0; c < cand->class_count; c++) {
@@ -1311,9 +1208,6 @@ int ir_layout_factor_pass(IRProgram *program, int *changed) {
         *changed = 1;
       }
       free(cand);
-      /* The rewrite replaced this function's instruction array (and possibly
-       * other functions'); restart the scan of this function so the loop
-       * index never walks a stale array. Claims stop re-transforms. */
       i = (size_t)-1;
     }
   }

@@ -5,35 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* -------------------------------------------------------------------------- */
-/* Whole-program alias facts                                                    */
-/*                                                                              */
-/* Inside one function the redundancy pass already knows that `&a` and `&b`     */
-/* name different variables and therefore never overlap. What it loses is that  */
-/* fact crossing a call: both arguments arrive as opaque parameters, so a store  */
-/* through one is assumed to reach anything read through the other. This pass   */
-/* carries the fact across. A whole-program compile can see every call site, so  */
-/* the set of allocations a parameter can hold is enumerable.                    */
-/*                                                                              */
-/* A root is one allocation the program can name: the address of a declared     */
-/* variable, or one call site of an allocator (every execution of a `malloc`    */
-/* returns storage distinct from every variable, which is all this needs). A    */
-/* parameter's root set is the union, over every call site, of the roots its    */
-/* argument can carry. Arguments are usually forwarded parameters, so the sets  */
-/* are computed to a fixpoint.                                                  */
-/*                                                                              */
-/* Anything the walk cannot name poisons a set to "unknown", and an unknown set  */
-/* proves nothing: a loaded pointer, arithmetic on an unresolved base, a call    */
-/* the compiler cannot resolve, more roots than the set holds. A function        */
-/* reachable from outside the program starts poisoned, because its callers are   */
-/* not part of this compile: `export`, `main`, anything whose address is taken,  */
-/* and every function in a program that calls through a pointer.                */
-/*                                                                              */
-/* Two parameters are distinct when both sets are known and disjoint. The same   */
-/* comparison answers a parameter against a local variable's address, which is   */
-/* what lets a caller's out-parameter stop killing a callee's cached fields.     */
-/* -------------------------------------------------------------------------- */
-
 #define IR_ALIAS_MAX_ROOTS 8
 #define IR_ALIAS_MAX_DEPTH 6
 #define IR_ALIAS_MAX_ROUNDS 8
@@ -41,29 +12,22 @@
 typedef struct {
   int unknown;
   int count;
-  int roots[IR_ALIAS_MAX_ROOTS]; /* ascending */
+  int roots[IR_ALIAS_MAX_ROOTS];
 } IRAliasRootSet;
 
 typedef struct {
   IRAliasRootSet *params;
   size_t param_count;
-  int poisoned; /* callers outside the program */
+  int poisoned;
 } IRAliasFunction;
 
 typedef struct {
   IRProgram *program;
   IRAliasFunction *functions;
   size_t function_count;
-  /* Callee pointer -> its slot, open addressed. The propagation rounds resolve
-   * one slot per call site per round; a scan of every function there is
-   * quadratic in a program that is mostly functions. */
   const IRFunction **slot_keys;
   size_t *slot_values;
   size_t slot_count;
-  /* Function name -> every slot holding it, open addressed with one entry per
-   * function so a repeated name simply occupies several probes. Poisoning
-   * consults this once per symbol operand in the program; scanning every
-   * function there is quadratic in a program that is mostly functions. */
   const char **name_keys;
   size_t *name_values;
   size_t name_count;
@@ -74,8 +38,6 @@ typedef struct {
 } IRAliasFacts;
 
 static IRAliasFacts g_alias;
-
-/* ------------------------------------------------------------ root interning */
 
 static int alias_root_intern(IRAliasFacts *facts, const char *owner,
                              const char *what) {
@@ -106,8 +68,6 @@ static int alias_root_intern(IRAliasFacts *facts, const char *owner,
   }
   return (int)facts->root_count++;
 }
-
-/* ---------------------------------------------------------------- root sets */
 
 static void alias_set_poison(IRAliasRootSet *set) {
   set->unknown = 1;
@@ -189,8 +149,6 @@ static int alias_set_contains(const IRAliasRootSet *set, int root) {
   return 0;
 }
 
-/* ------------------------------------------------------------------- lookups */
-
 static size_t alias_slot_hash(const IRFunction *function, size_t mask) {
   uintptr_t bits = (uintptr_t)function;
   bits ^= bits >> 33;
@@ -224,7 +182,7 @@ static void alias_slot_index_build(IRAliasFacts *facts) {
   facts->slot_values = calloc(want, sizeof(*facts->slot_values));
   if (!facts->slot_keys || !facts->slot_values) {
     alias_slot_index_destroy(facts);
-    return; /* lookups fall back to the scan below */
+    return;
   }
   facts->name_keys = calloc(want, sizeof(*facts->name_keys));
   facts->name_values = calloc(want, sizeof(*facts->name_values));
@@ -244,7 +202,7 @@ static void alias_slot_index_build(IRAliasFacts *facts) {
     i = alias_slot_hash(function, mask);
     while (facts->slot_keys[i]) {
       if (facts->slot_keys[i] == function) {
-        break; /* first slot for a repeated pointer wins, as the scan did */
+        break;
       }
       i = (i + 1) & mask;
     }
@@ -255,8 +213,6 @@ static void alias_slot_index_build(IRAliasFacts *facts) {
     if (!function->name) {
       continue;
     }
-    /* One entry per function, never deduplicated: two functions sharing a name
-     * must both be reachable, because the scan this replaces poisoned both. */
     i = mettle_fnv1a_hash(function->name) & mask;
     while (facts->name_keys[i]) {
       i = (i + 1) & mask;
@@ -320,9 +276,6 @@ static int alias_function_parameter_index(const IRFunction *function,
   return -1;
 }
 
-/* Allocators whose every call yields storage distinct from every variable and
- * from every other call. `realloc` is absent on purpose: it may hand back the
- * block it was given. */
 static int alias_name_is_fresh_allocator(const char *name) {
   static const char *const fresh[] = {"malloc",   "calloc",
                                       "aligned_alloc", "_aligned_malloc",
@@ -336,24 +289,12 @@ static int alias_name_is_fresh_allocator(const char *name) {
   return 0;
 }
 
-/* ---------------------------------------------------------- root resolution */
-
-/* How many times this function writes `name` as a destination. A pointer
- * assigned once can be looked through; one reassigned in a loop cannot. */
-/* Writers of every function, indexed by name.
- *
- * Asking who wrote a name by scanning the function is the shape this
- * repository has been retiring everywhere else, and the alias walk asks it for
- * every call-site argument on every propagation round. The IR does not move
- * while the facts are being built, so the answers are collected once per
- * function and read back from a table. Up to four writers are remembered; a
- * name written more often is not one the walk can settle anyway. */
 #define ALIAS_DEF_MAX_WRITERS 4
 
 typedef struct {
-  const char *key; /* borrowed operand name, NULL when free */
+  const char *key;
   int kind;
-  int count; /* > ALIAS_DEF_MAX_WRITERS means "more than it remembers" */
+  int count;
   int at[ALIAS_DEF_MAX_WRITERS];
 } AliasDefSlot;
 
@@ -381,9 +322,6 @@ static void alias_defs_destroy(void) {
   g_alias_def_table_count = 0;
 }
 
-/* The slot arrays are sized here; a function's own table is filled the first
- * time something asks about it. Most of a program's functions are never asked,
- * and indexing them all made a small compile pay for a large one. */
 static void alias_defs_build_all(IRAliasFacts *facts) {
   IRProgram *program = facts->program;
   alias_defs_destroy();
@@ -480,7 +418,7 @@ static int alias_symbol_def_count(const IRFunction *function,
       return slot->count;
     }
     if (g_alias_def_tables) {
-      return 0; /* indexed, and this name writes nothing */
+      return 0;
     }
   }
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -506,7 +444,7 @@ static const IRInstruction *alias_unique_def(const IRFunction *function,
       return slot->count == 1 ? &function->instructions[slot->at[0]] : NULL;
     }
     if (g_alias_def_tables) {
-      return NULL; /* indexed, and this name writes nothing */
+      return NULL;
     }
   }
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -529,10 +467,6 @@ static void alias_roots_of(IRAliasFacts *facts, IRFunction *owner,
                            const IROperand *operand, IRAliasRootSet *out,
                            int depth);
 
-/* Which storage a name refers to. A local belongs to its function; a global is
- * one object no matter who spells its name, so it interns under a fixed owner
- * or two functions would each mint their own root for it and the sets would
- * look disjoint when they name the same memory. */
 static const char *alias_symbol_owner(const IRFunction *function,
                                       const char *name) {
   if (ir_function_symbol_is_parameter(function, name) ||
@@ -560,8 +494,6 @@ static void alias_roots_of_def(IRAliasFacts *facts, IRFunction *owner,
   if ((def->op == IR_OP_CALL && def->text &&
        alias_name_is_fresh_allocator(def->text)) ||
       def->op == IR_OP_NEW) {
-    /* One root per call site: two sites never collide, and one site compared
-     * against itself stays "may alias", which is what a loop needs. */
     char site[64];
     snprintf(site, sizeof(site), "alloc@%zu",
              (size_t)(def - owner->instructions));
@@ -612,8 +544,6 @@ static void alias_roots_of(IRAliasFacts *facts, IRFunction *owner,
   alias_set_poison(out);
 }
 
-/* ------------------------------------------------------------------ building */
-
 static void alias_poison_named_function(IRAliasFacts *facts,
                                         const IROperand *operand) {
   IRProgram *program = facts->program;
@@ -639,12 +569,6 @@ static void alias_poison_named_function(IRAliasFacts *facts,
   }
 }
 
-/* Which functions have callers this compile cannot see. `export` and `main`
- * are entered from outside by definition. Everything else gets in through a
- * function pointer, and a pointer to a function exists only where the program
- * spells its name somewhere other than the callee slot of a direct call, so
- * naming one as an operand is what poisons it. An indirect call reaches only
- * addresses that were taken, so it needs no separate rule. */
 static void alias_poison_escaping_functions(IRAliasFacts *facts) {
   IRProgram *program = facts->program;
 
@@ -761,36 +685,6 @@ void ir_alias_facts_reset(void) {
   alias_defs_destroy();
 }
 
-/* ========================================================================== */
-/* Type-based disambiguation                                                   */
-/*                                                                             */
-/* A store of an int32 cannot change a slot that holds a pointer, because no   */
-/* correct program writes one over the other. That is the classic type-based   */
-/* rule, and the classic reason to distrust it is that C leaves punning        */
-/* undefined and then miscompiles the programs that do it anyway. Here the     */
-/* premise is checked: a whole-program compile can look for the punning        */
-/* directly, and any class it finds punned stops disambiguating against        */
-/* everything, program-wide. A program that deliberately views one allocation  */
-/* as two types keeps working, at the speed it had before.                     */
-/*                                                                             */
-/* What creates two views of one address is a value reaching two pointer types */
-/* with different pointee classes. That covers the explicit cast `(N**)p` and  */
-/* the `rawptr` idiom every allocation uses, which carries no cast at all:     */
-/*                                                                             */
-/*     var m: rawptr = malloc(64);                                             */
-/*     var a: int32* = m;      // one view                                     */
-/*     var b: float64* = m;    // a second view of the same bytes              */
-/*                                                                             */
-/* Both are the same event once a destination's declared pointee type is       */
-/* attributed to the root value it came from, so one walk finds both. Two      */
-/* separate `malloc` calls are separate roots and stay disambiguated, which is */
-/* what keeps the ordinary typed-allocation idiom fast. Roots the walk cannot  */
-/* name share one pessimistic bucket, so an unresolvable conversion weakens    */
-/* the rule rather than escaping it.                                           */
-/* ========================================================================== */
-
-/* Lowering records these on each load and store; the numbering lives in ir.h
- * so both sides agree. */
 typedef IRAliasClassId IRAliasClass;
 #define ALIAS_CLASS_UNKNOWN IR_ALIAS_CLASS_NONE
 #define ALIAS_CLASS_POINTER IR_ALIAS_CLASS_POINTER
@@ -829,8 +723,6 @@ static IRAliasClass alias_class_of_type(const MtlcType *type) {
   case MTLC_TYPE_BFLOAT16:
     return IR_ALIAS_CLASS_BF16;
   default:
-    /* Aggregates and enums carry their members' storage; a whole-aggregate
-     * move is not a typed scalar access and never disambiguates. */
     return ALIAS_CLASS_UNKNOWN;
   }
 }
@@ -848,8 +740,6 @@ static IRAliasClass alias_pointee_class(const IRProgram *program,
   if (type && type->kind == MTLC_TYPE_POINTER) {
     return alias_class_of_type(type->base_type);
   }
-  /* A name the registry does not carry: read the spelling. Only a single
-   * trailing star is a scalar view; `T**` points at a pointer. */
   length = strlen(pointer_type_name);
   if (length < 2 || pointer_type_name[length - 1] != '*' ||
       length - 1 >= sizeof(stem)) {
@@ -871,7 +761,6 @@ static IRAliasClass alias_pointee_class(const IRProgram *program,
   return ALIAS_CLASS_UNKNOWN;
 }
 
-/* Every conversion into a typed pointer, keyed by the value it converted. */
 typedef struct {
   char *root;
   int classes[ALIAS_CLASS_COUNT];
@@ -905,7 +794,7 @@ static void alias_views_note(IRAliasViews *views, const char *root,
     IRAliasViewEntry *grown =
         realloc(views->items, capacity * sizeof(IRAliasViewEntry));
     if (!grown) {
-      alias_punn_everything(); /* losing a conversion would lose a bridge */
+      alias_punn_everything();
       return;
     }
     views->items = grown;
@@ -921,9 +810,6 @@ static void alias_views_note(IRAliasViews *views, const char *root,
   views->count++;
 }
 
-/* Name the value an operand ultimately came from. Two conversions naming the
- * same root convert the same address; conversions the walk cannot resolve all
- * land on one shared name, so they bridge each other rather than nothing. */
 static void alias_view_root(const IRFunction *function,
                             const IROperand *operand, char *out, size_t size,
                             int depth) {
@@ -938,8 +824,6 @@ static void alias_view_root(const IRFunction *function,
       return;
     }
     if (alias_symbol_def_count(function, operand->name) != 1) {
-      /* Every assignment to it converts the same variable, so one name for
-       * all of them is exactly right. */
       snprintf(out, size, "sym@%s#%s", function->name, operand->name);
       return;
     }
@@ -970,8 +854,6 @@ static void alias_view_root(const IRFunction *function,
                (size_t)(def - function->instructions));
       return;
     }
-    /* Two calls to one function can hand back one address, so its results
-     * share a root. */
     snprintf(out, size, "ret@%s", def->text);
     return;
   }
@@ -1014,7 +896,7 @@ static void alias_collect_views(IRAliasFacts *facts, IRAliasViews *views) {
       char root[256];
 
       if (ins->op == IR_OP_INLINE_ASM) {
-        alias_punn_everything(); /* it can write anything as anything */
+        alias_punn_everything();
         continue;
       }
 
@@ -1054,9 +936,6 @@ static void alias_collect_views(IRAliasFacts *facts, IRAliasViews *views) {
   }
 }
 
-/* A tagged enum lays its variants' payloads over one another, so one slot
- * really does hold different types at different times. Every class that shares
- * such a union with another is punned. */
 static void alias_punn_overlapping_payloads(IRAliasFacts *facts) {
   IRProgram *program = facts->program;
   for (size_t t = 0; t < program->type_registry_count; t++) {
@@ -1188,11 +1067,6 @@ void ir_alias_facts_build(IRProgram *program) {
   }
 }
 
-/* -------------------------------------------------------------------- query */
-
-/* The redundancy pass spells a resolved base as one tag character followed by
- * a name: '&' for the address of a variable, 's' for a symbol holding the
- * address, 't' for a temp. Only the first two can be reasoned about here. */
 static int alias_base_root_set(const IRFunction *function, const char *base,
                                IRAliasRootSet *out) {
   size_t slot;
@@ -1217,9 +1091,6 @@ static int alias_base_root_set(const IRFunction *function, const char *base,
     out->unknown = 0;
     out->count = 0;
     if (root < 0) {
-      /* No call site ever carried this variable's address, so no parameter
-       * can hold it. An empty set stays empty: the caller reads it through
-       * alias_set_contains, never through disjointness. */
       return 2;
     }
     out->roots[out->count++] = root;
@@ -1256,18 +1127,16 @@ int ir_alias_bases_distinct(const IRFunction *function, const char *base_a,
     return 0;
   }
   if (kind_a == 2 && kind_b == 2) {
-    return 0; /* the pass already knows two variables are distinct */
+    return 0;
   }
   if (kind_a == 2 || kind_b == 2) {
-    /* A variable's address against a parameter: distinct when the parameter's
-     * roots are known and that variable is not among them. */
     const IRAliasRootSet *var = kind_a == 2 ? &a : &b;
     const IRAliasRootSet *param = kind_a == 2 ? &b : &a;
     if (param->unknown) {
       return 0;
     }
     if (var->count == 0) {
-      return 1; /* the address never reached any call */
+      return 1;
     }
     return !alias_set_contains(param, var->roots[0]);
   }

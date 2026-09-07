@@ -40,8 +40,6 @@ typedef enum {
   IR_RULE_OVER_TRACE
 } IRRuleKind;
 
-/* A verdict may carry a replacement line. --fix writes it; without the flag it
-   is printed as a note and nothing is touched. */
 void ir_rules_set_apply_fixes(int on);
 size_t ir_rules_proposal_count(void);
 int ir_rules_apply_fixes(FILE *out);
@@ -54,18 +52,13 @@ int ir_rules_run(IRProgram *program, const IRRuleImage *image,
                  ErrorReporter *reporter, FILE *report, long long budget,
                  IRRuleStats *stats);
 
-/* As above, and when `cross_check` is set every rule is run twice more over a
-   freshly placed image and a verdict that moves is reported as R0005. */
 int ir_rules_run_checked(IRProgram *program, const IRRuleImage *image,
                          ErrorReporter *reporter, FILE *report,
                          long long budget, int cross_check,
                          IRRuleStats *stats);
 
-/* Run only the rules that ask for `kind`. The image has to be the one that
-   kind names; nothing here checks that, because the caller built both. */
 int ir_rules_run_kind(IRProgram *program, const IRRuleImage *image,
                       ErrorReporter *reporter, FILE *report, long long budget,
                       int cross_check, IRRuleKind kind, IRRuleStats *stats);
-
 
 #endif

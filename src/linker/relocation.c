@@ -3,10 +3,6 @@
 #include "../common.h"
 #include "linker/symbol_resolve.h"
 
-/* Supported AMD64 relocation kinds here match object input after
- * binary_emitter_map_relocation_kind() in binary_emitter.c. Summary:
- * docs/linker-build-pipelines.md */
-
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>

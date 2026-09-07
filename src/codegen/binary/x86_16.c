@@ -185,10 +185,6 @@ static int x86_narrow_symbol_is_global(X86NarrowEmitter *emitter,
   return x86_narrow_global_symbol(emitter, name) != NULL;
 }
 
-/* Bytes a global scalar occupies in the image, or 0 when it is not a global or
- * not a scalar smaller than a word. A global holds exactly its declared size,
- * so a `uint8` one is a single byte with the next global right after it, and a
- * whole-word access there reads and writes its neighbour. */
 static int x86_narrow_sub_word_global_size(X86NarrowEmitter *emitter,
                                            const char *name) {
   const CgSym *symbol = x86_narrow_global_symbol(emitter, name);
@@ -229,10 +225,6 @@ static int x86_narrow_operand_text(X86NarrowEmitter *emitter,
     if (x86_narrow_symbol_is_global(emitter, operand->name)) {
       const char *link_name =
           code_generator_get_link_symbol_name(emitter->generator, operand->name);
-      /* A sub-word global cannot be spelled as a whole-word memory operand:
-       * the access has to carry its own size, which only the load and store
-       * paths below can arrange. Refusing here turns what was a neighbour-
-       * clobbering word access into a diagnostic. */
       if (x86_narrow_sub_word_global_size(emitter, operand->name)) {
         return 0;
       }
@@ -249,8 +241,6 @@ static int x86_narrow_operand_text(X86NarrowEmitter *emitter,
   }
 }
 
-/* The 8- and 16-bit names of a general register: "ax" gives "al" and "ax",
- * "eax" gives "al" and "ax". */
 static void x86_narrow_sub_registers(const X86NarrowEmitter *emitter,
                                      const char *reg, char *byte_name,
                                      char *word_name, size_t size) {
@@ -275,9 +265,6 @@ static int x86_narrow_global_is_signed(X86NarrowEmitter *emitter,
              : 1;
 }
 
-/* Read a global narrower than a word into `reg`, widened to the whole register
- * by its own signedness. The 8086 has no movzx/movsx, so the 16-bit path
- * widens by hand; the 32-bit path uses the 386 instructions. */
 static int x86_narrow_load_sub_word_global(X86NarrowEmitter *emitter,
                                            const char *reg, const char *name,
                                            int bytes) {
@@ -297,8 +284,6 @@ static int x86_narrow_load_sub_word_global(X86NarrowEmitter *emitter,
     return x86_narrow_emit(emitter, "xor %s, %s\nmov %s, byte ptr [%s]\n", reg,
                            reg, byte_name, symbol);
   }
-  /* cbw is the only 8086 sign extension and it widens AL into AX alone, so a
-   * load into any other register borrows AX and gives it back. */
   if (strcmp(reg, emitter->accumulator) == 0) {
     return x86_narrow_emit(emitter, "mov al, byte ptr [%s]\ncbw\n", symbol);
   }
@@ -745,11 +730,6 @@ static int x86_narrow_branch_eq(X86NarrowEmitter *emitter,
 
 static int x86_narrow_cast(X86NarrowEmitter *emitter,
                          const IRInstruction *instruction) {
-  /* A narrow local lives in a whole-word slot here, so the store never
-   * truncates and the cast is the only place the width is applied. Treating
-   * it as an assignment left `(uint8)321` answering 321 and `(int8)200`
-   * answering 200. Truncate in the accumulator, then extend by the target's
-   * signedness so the word slot holds the value the type says it does. */
   const MtlcType *target =
       instruction->text ? code_generator_named_type(emitter->generator,
                                                     instruction->text)
@@ -865,9 +845,6 @@ static int x86_narrow_load(X86NarrowEmitter *emitter,
     return 0;
   }
   if (width == 1 && emitter->word == 2) {
-    /* movzx and movsx are 386 instructions. A 16-bit image that used them
-     * ran on nothing the target names: the project's own real-mode emulator
-     * reports an unimplemented opcode, and so would an 8086. */
     if (!x86_narrow_emit(emitter,
                          instruction->is_unsigned
                              ? "xor ax, ax\nmov al, byte ptr [%s]\n"

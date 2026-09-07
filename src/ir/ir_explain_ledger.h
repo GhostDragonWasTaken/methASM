@@ -12,8 +12,6 @@ void ir_explain_effect_held(const char *function, const char *performs,
                             const char *needs);
 void ir_explain_rule_ran(const char *rule, const char *verdict,
                          long long steps);
-/* An optimization a declared type earned: what was not emitted or what was
-   allowed, the type that proved it, and the pass that consumed the proof. */
 void ir_explain_type_payoff(const char *file, size_t line,
                             const char *function_name, const char *type_name,
                             const char *what, const char *detail);

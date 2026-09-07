@@ -4,18 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Cross-platform symbolized crash-traceback support.
- *
- * The compiler emits calls to these symbols only when `-d`, `-s`, or `-g` is
- * active (or when an IR null/bounds check is lowered, which uses
- * mettle_crash_trap). Programs compiled without those flags do not link
- * this object.
- *
- * Windows uses a vectored SEH filter; POSIX uses a sigaction handler on an
- * alternate signal stack. Both produce the same symbolized backtrace format
- * from the same embedded debug-info tables. */
-
-#define METTLE_CRASH_DEBUG_MAGIC 0x4742544Du /* 'MTBG' little-endian */
+#define METTLE_CRASH_DEBUG_MAGIC 0x4742544Du
 #define METTLE_CRASH_DEBUG_VERSION 1u
 
 typedef enum {
@@ -95,4 +84,4 @@ void mettle_crash_trap_ex(uint32_t kind, const char *message,
 void mettle_crash_write_stderr_bytes(const char *text, size_t length);
 void mettle_crash_write_stderr(const char *text);
 
-#endif /* METTLE_CRASH_HANDLER_H */
+#endif

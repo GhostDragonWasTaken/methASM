@@ -25,7 +25,7 @@
 #include "runtime/verify_owned.h"
 #include "tracy_build.h"
 #include "ir/ir.h"
-#include "ir/ir_lowering.h" // ir_lower_program / ir_lowering_set_explain (frontend boundary)
+#include "ir/ir_lowering.h"
 #include "ir/ir_optimize.h"
 #include "ir/ir_explain_memory.h"
 #include "ir/ir_profile.h"
@@ -57,7 +57,6 @@
 #include <io.h>
 #include <sys/stat.h>
 #if !defined(__MINGW32__)
-/* Avoid windows.h here: winnt.h defines TokenType, which clashes with lexer.h. */
 typedef long long MettleQpcTicks;
 __declspec(dllimport) int __stdcall QueryPerformanceFrequency(MettleQpcTicks *frequency);
 __declspec(dllimport) int __stdcall QueryPerformanceCounter(MettleQpcTicks *counter);
@@ -69,7 +68,6 @@ __declspec(dllimport) int __stdcall QueryPerformanceCounter(MettleQpcTicks *coun
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
-/* clang's limits.h only chains to the host header when __STDC_HOSTED__ is 1. */
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -104,16 +102,11 @@ __declspec(dllimport) int __stdcall QueryPerformanceCounter(MettleQpcTicks *coun
 
 static int explain_rule_code(const char *code, const char *path);
 
-/* A rule over the machine survives the first rule phase and every pass after
-   it, because what it reads does not exist until code generation is done. */
 static int main_keep_machine_rule(const IRFunction *rule) {
   IRRuleKind kind = ir_rule_kind(rule);
   return kind == IR_RULE_OVER_MACHINE || kind == IR_RULE_OVER_TRACE;
 }
 
-/* Asked before lowering, because lowering is where the loop markers the
-   verdict machinery reports on are put in. A rule that reads the machine needs
-   those markers, so the question cannot wait until the IR exists. */
 static int program_declares_machine_rule(const ASTNode *program) {
   const Program *data;
   if (!program || program->type != AST_PROGRAM || !program->data) {
@@ -150,10 +143,6 @@ static int compiler_options_use_profile_runtime(const CompilerOptions *options) 
          (options->profile_runtime || options->profile_runtime_ops);
 }
 
-/* Does this build install the crash handler at startup? Either the programmer
- * asked for full stack traces, or the default function-granularity report is
- * in effect -- which needs this driver to be the one producing the executable,
- * since it is the link built here that carries crash_handler.o. */
 static int compiler_options_install_crash_handler(const CompilerOptions *options) {
   if (!options) {
     return 0;
@@ -390,8 +379,6 @@ static char *infer_default_runtime_directory(const char *argv0) {
   return infer_default_sibling_directory(argv0, "runtime", NULL);
 }
 
-/* Point the ML optimizer at its bundled model/libraries (bin/mlopt by the exe, or
- * tools/mlopt in a dev tree) via env vars; a user-set value always wins. */
 static void ml_opt_set_default_paths(const char *argv0) {
   char *dir = infer_default_sibling_directory(argv0, "mlopt", "tools/mlopt");
   if (!dir) {
@@ -414,7 +401,7 @@ static void ml_opt_set_default_paths(const char *argv0) {
       char *kv = malloc(strlen(resources[i].env) + strlen(path) + 2);
       if (kv) {
         sprintf(kv, "%s=%s", resources[i].env, path);
-        putenv(kv); /* putenv keeps the pointer; intentionally not freed */
+        putenv(kv);
       }
       free(path);
     }
@@ -444,8 +431,6 @@ static void print_doc_reference(const char *argv0, const char *relative_path) {
   free(docs_dir);
 }
 
-/* Single source of truth for the help-topic list. Referenced by print_usage,
- * the topic dispatcher, and the unknown-topic error so they cannot drift. */
 #define METTLE_HELP_TOPICS "build, runtime (alias: heap, gc), interop, stdlib, web, diagnostics (alias: errors), verify, test (alias: trace)"
 
 static int print_help_topic(const char *program_name, const char *argv0,
@@ -669,9 +654,6 @@ static char *replace_extension(const char *path, const char *extension) {
   return result;
 }
 
-/* Does this host emit ELF? Ask this rather than comparing against one ELF
- * format: a native AArch64 Linux build reports ELF_ARM64, and a test written
- * against ELF_X64 alone quietly hands it the Windows answer. */
 int target_argument_is_description(const char *argument);
 int load_target_description(CompilerOptions *options);
 
@@ -681,11 +663,6 @@ static int host_target_is_elf(void) {
          format == BINARY_TARGET_FORMAT_ELF_ARM64;
 }
 
-/* Where `--build` writes when the caller passed no -o. COFF hosts name the
- * product `.exe`; an ELF host has no such suffix, so the product takes the
- * source's stem. Returns NULL when that stem would be the source file itself,
- * because the caller named a source with no extension and writing the product
- * over it would destroy their input. */
 static char *default_executable_filename(const char *input_filename) {
   if (!input_filename || input_filename[0] == '\0') {
     return NULL;
@@ -748,9 +725,6 @@ static int parse_linker_mode(const char *text, LinkerMode *mode_out) {
   return 0;
 }
 
-/* Which bundled runtime objects a finished program actually references.
- * Both link paths, PE and ELF, ask these, so they sit above the platform
- * split rather than inside either arm of it. */
 static int object_has_undefined_symbol_prefix(const char *object_path,
                                               const char *prefix) {
   LinkObject *object = NULL;
@@ -799,12 +773,6 @@ static unsigned long long read_u64_le(const unsigned char *p) {
          ((unsigned long long)read_u32_le(p + 4) << 32);
 }
 
-/* Reads an ELF64 relocatable object and reports whether it leaves any symbol
- * undefined whose name starts with `prefix`. This is the ELF counterpart of
- * the COFF scan above, and it decides the same thing: which bundled runtime
- * objects a program actually references, so the link pulls in only those.
- * Unreadable or malformed input answers 1, which links the object rather than
- * risking an undefined symbol at link time. */
 static int elf_object_has_undefined_symbol_prefix(const char *object_path,
                                                   const char *prefix) {
   static const unsigned char elf_magic[4] = {0x7f, 'E', 'L', 'F'};
@@ -844,8 +812,6 @@ static int elf_object_has_undefined_symbol_prefix(const char *object_path,
     goto cleanup;
   }
 
-  /* ELFCLASS64 little-endian relocatable objects only; the backend emits no
-   * other shape, and anything else falls through to the conservative answer. */
   if (memcmp(data, elf_magic, sizeof(elf_magic)) != 0 || data[4] != 2 ||
       data[5] != 1) {
     goto cleanup;
@@ -873,7 +839,7 @@ static int elf_object_has_undefined_symbol_prefix(const char *object_path,
     size_t string_size = 0u;
     size_t symbol = 0u;
 
-    if (read_u32_le(header + 4) != 2u) { /* SHT_SYMTAB */
+    if (read_u32_le(header + 4) != 2u) {
       continue;
     }
     symbol_table_offset = (size_t)read_u64_le(header + 0x18);
@@ -903,7 +869,7 @@ static int elf_object_has_undefined_symbol_prefix(const char *object_path,
       size_t name_offset = (size_t)read_u32_le(entry);
       const char *name = NULL;
 
-      if (read_u16_le(entry + 6) != 0u) { /* st_shndx != SHN_UNDEF */
+      if (read_u16_le(entry + 6) != 0u) {
         continue;
       }
       if (name_offset == 0u || name_offset >= string_size) {
@@ -951,21 +917,14 @@ static int object_needs_safety_runtime(const char *object_path) {
   return object_needs_runtime_object(object_path, "mettle_safety_");
 }
 
-/* `--record-trace` names mettle_trace_; a program built without it names
- * none of them and links none of this. */
 static int object_needs_trace_runtime(const char *object_path) {
   return object_needs_runtime_object(object_path, "mettle_trace_");
 }
 
-/* `quiesce;` lowers to mettle_swap_apply, and staging reaches
- * mettle_swap_stage. A program with no swap point names neither and does not
- * link this object, which is the whole of what opting in costs. */
 static int object_needs_swap_runtime(const char *object_path) {
   return object_needs_runtime_object(object_path, "mettle_swap_");
 }
 
-/* `==` and `!=` on strings compare contents through mettle_string_eq. A
- * program that never compares strings never names it. */
 static int object_needs_string_runtime(const char *object_path) {
   return object_needs_runtime_object(object_path, "mettle_string_");
 }
@@ -974,9 +933,6 @@ static int object_needs_tracy_helpers(const char *object_path) {
   return object_needs_runtime_object(object_path, "mettle_tracy_");
 }
 
-
-/* mettle_link_elf_native: the failure was already reported in full and no
- * fallback link should follow it. */
 #define MTLC_ELF_LINK_REPORTED 2
 
 #define METTLE_DEFAULT_ELF_INTERPRETER "/lib64/ld-linux-x86-64.so.2"
@@ -989,11 +945,6 @@ static int mettle_elf_dynamic_link_requested(const CompilerOptions *options) {
 #ifndef _WIN32
 #define METTLE_ELF_DYNAMIC_LINKER "/lib64/ld-linux-x86-64.so.2"
 
-/* Runs `gcc -print-file-name=<file>` and returns the strdup'd path, or NULL
- * when gcc is missing or does not ship the file (gcc echoes the bare name
- * back, without a '/', when it has no path for it). <file> is always a
- * compiled-in literal, so the popen command cannot be influenced by user
- * input. */
 static char *mettle_gcc_print_file_name(const char *file) {
   char command[256];
   char line[1024];
@@ -1023,8 +974,6 @@ static char *mettle_gcc_print_file_name(const char *file) {
   return strdup(line);
 }
 
-/* Returns dirname(reference) + "/" + file (file may be "" to get the bare
- * directory prefix for -L). */
 static char *mettle_sibling_path(const char *reference, const char *file) {
   const char *slash = strrchr(reference, '/');
   size_t dir_len;
@@ -1043,11 +992,6 @@ static char *mettle_sibling_path(const char *reference, const char *file) {
   return out;
 }
 
-/* Plain builds get their ELF symbol table stripped at link: .symtab/.strtab
- * (every function and string-literal label) are dead weight at runtime and
- * outweigh the program's actual section content several times over for small
- * binaries. This matches the Windows internal PE linker, which never emits a
- * symbol table. Debug/trace/profile builds keep symbols for tooling. */
 static int mettle_elf_keep_symbols(const CompilerOptions *options) {
   return options &&
          (options->debug_mode || options->generate_debug_symbols ||
@@ -1064,9 +1008,6 @@ static int mettle_elf_external_linker_requested(const CompilerOptions *options) 
          options->linker_mode == LINKER_MODE_MSVC;
 }
 
-/* Turns each -l/--library value into a file. A value naming a path is used as
- * given; a bare name is looked up as lib<name>.so along -L and then the
- * platform directories, the way ld resolves one. */
 static char **mettle_resolve_shared_libraries(const CompilerOptions *options,
                                               size_t *count_out) {
   size_t count = options ? options->shared_library_count : 0u;
@@ -1171,9 +1112,6 @@ static int mettle_link_elf_native(const char *startup_object,
     emission_options.runpath_count = options->runpath_count;
   }
 
-  /* --image-base: a freestanding image is placed where its loader puts it, not
-   * where a hosted operating system would. An ELF segment is mapped by page, so
-   * a base that is not page-aligned cannot be loaded at all. */
   if (mtlc_target()->image_base_set) {
     if (mtlc_target()->image_base % 0x1000u) {
       fprintf(stderr,
@@ -1250,7 +1188,6 @@ static int mettle_link_elf_native(const char *startup_object,
   return result;
 }
 
-/* Link a static ELF image from Mettle owned startup and runtime objects. */
 static int mettle_link_elf_direct(const char *startup_object,
                                   const char *object_filename,
                                   const char *executable_filename,
@@ -1297,11 +1234,6 @@ static int mettle_link_elf_direct(const char *startup_object,
   return result;
 }
 
-/* Links a native ELF executable from Mettle's startup, freestanding runtime,
- * and generated object. The direct path invokes ld. The fallback invokes gcc
- * only as a linker driver with startup files, default libraries, and compiler
- * support libraries disabled. The finished ELF must pass the dependency gate.
- * Used on ELF hosts. Returns 0 on success. */
 static void elf_select_runtime_helpers(const char *runtime_directory,
                                        const char *object_filename,
                                        int stack_trace, int profile_runtime,
@@ -1380,12 +1312,6 @@ static int elf_append_runtime_helpers(int stack_trace, int profile_runtime,
     return 0;
   }
 
-  /* Everything appended past on_demand_object_count is owned by its own
-   * variable, so cleanup frees only what the on-demand loop allocated. */
-
-  /* crash_handler and profile join the same list so both link paths carry one
-   * ordered set of runtime objects. safety.o calls into the crash handler, so
-   * it must precede it here. */
   if (crash_handler_object) {
     extra_objects[(*extra_object_count)++] = crash_handler_object;
   }
@@ -1404,7 +1330,6 @@ static int mettle_link_elf_executable(const char *object_filename,
   char *profile_object = NULL;
   char *freestanding_object = NULL;
   char *startup_object = NULL;
-  /* string, swap, safety, debug, atomics, crash_handler, profile. */
   char *extra_objects[8];
   size_t extra_object_count = 0u;
   size_t on_demand_object_count = 0u;
@@ -1418,21 +1343,12 @@ static int mettle_link_elf_executable(const char *object_filename,
 
   memset(extra_objects, 0, sizeof(extra_objects));
 
-  /* The bundled runtime owns the Linux ABI used by the standard library. Its
-   * threads use clone and futex. Its files, clocks, sockets, and processes use
-   * direct system calls. No host library appears on the link line.
-   */
   if (runtime_directory) {
-    /* A shared object gets the build of the runtime that keeps no thread-local
-     * state, because a loaded library cannot reach one. */
     freestanding_object = join_paths(runtime_directory,
                                      options && options->shared_output
                                          ? "freestanding_shared.o"
                                          : "freestanding.o");
 
-    /* Same on-demand rule the Windows link follows: an object joins the link
-     * only when the program leaves one of its symbols undefined. Naming none
-     * of them is what makes a bare compute program cost nothing. */
     needs_safety = object_needs_safety_runtime(object_filename);
     elf_select_runtime_helpers(runtime_directory, object_filename, stack_trace,
                                profile_runtime, needs_safety,
@@ -1452,9 +1368,6 @@ static int mettle_link_elf_executable(const char *object_filename,
             runtime_directory ? runtime_directory : "");
     goto cleanup;
   }
-  /* A shared object has no program entry: whoever loads it already has one,
-   * and _start would pull in a reference to a main this library does not
-   * define. */
   if (!(options && options->shared_output)) {
     startup_object = replace_extension(executable_filename, ".startup.o");
     if (!startup_object ||
@@ -1466,9 +1379,6 @@ static int mettle_link_elf_executable(const char *object_filename,
     }
   }
 
-  /* The generated startup object defines _start and passes argc and argv to
-   * main. The backend emits non-position-independent code, so the fallback
-   * driver receives -no-pie as well as all three no-runtime switches. */
   if (!elf_append_runtime_helpers(stack_trace, profile_runtime,
                                  crash_handler_object, profile_object,
                                  extra_objects, &extra_object_count)) {
@@ -1487,15 +1397,10 @@ static int mettle_link_elf_executable(const char *object_filename,
     }
   }
 
-  /* A name nothing provides is not something a second linker can find. Falling
-   * back would fail the same way and bury the diagnostic under its noise. */
   if (native_status == MTLC_ELF_LINK_REPORTED) {
     goto cleanup;
   }
 
-  /* A link that binds shared libraries, or that emits one, has no fallback:
-   * ld and gcc would produce an image whose runtime this compiler does not
-   * own, so a failure here is reported rather than papered over. */
   if (mettle_elf_dynamic_link_requested(options)) {
     if (result != 0) {
       fprintf(stderr,
@@ -1514,16 +1419,7 @@ static int mettle_link_elf_executable(const char *object_filename,
     result = 0;
   }
 
-  /* Build the argv vector directly and exec the compiler via fork/execvp
-   * instead of handing a constructed command string to system(). Because no
-   * shell ever interprets the arguments, none of the caller-controlled
-   * strings, the object/executable filenames or the user-supplied
-   * --link-arg values, can inject shell commands (CWE-78) or be word-split
-   * into unintended options (CWE-88). Each --link-arg is forwarded as exactly
-   * one argv element, matching how it was collected at parse time. */
   if (result != 0) {
-    /* Upper bound for controls, output, runtime objects, caller arguments,
-     * and the NULL terminator. */
     size_t max_args = 20u + 8u + 6u + 1u +
                        (options ? options->link_argument_count : 0u);
     size_t argc_used = 0u;
@@ -1534,7 +1430,6 @@ static int mettle_link_elf_executable(const char *object_filename,
       goto cleanup;
     }
 
-    /* execvp does not modify argv contents; the const casts are safe. */
     argv_list[argc_used++] = (char *)cc;
     argv_list[argc_used++] = (char *)"-nostdlib";
     argv_list[argc_used++] = (char *)"-nostartfiles";
@@ -1590,11 +1485,8 @@ cleanup:
   free(startup_object);
   return result;
 }
-#endif /* !_WIN32 */
+#endif
 
-/* Set when the linker that produced the executable already proved it owns
- * its runtime, so the driver does not open the finished file to prove it
- * again: on Windows that second open is what a virus scanner charges for. */
 static int g_link_output_ownership_verified;
 
 #ifdef _WIN32
@@ -2060,9 +1952,6 @@ static int write_internal_startup_object(const char *path, int profile_runtime,
                                              main_wants_argc_argv);
 }
 
-/* Build-to-link routing is documented in docs/linker-build-pipelines.md (asm+GCC
- * vs emit-obj+internal vs emit-obj+external GCC). */
-
 static int mettle_link_internal(const char **object_paths,
                                   const unsigned char *object_is_runtime_default,
                                   size_t object_count,
@@ -2113,7 +2002,6 @@ static int mettle_link_internal(const char **object_paths,
   if (options && options->windows_subsystem) {
     emission_options.subsystem = 2u;
   }
-  /* A PE is relocated in 64K granules, so its ImageBase must sit on one. */
   if (mtlc_target()->image_base_set) {
     if (mtlc_target()->image_base % 0x10000u) {
       fprintf(stderr,
@@ -2235,10 +2123,6 @@ static int mettle_link_object_with_gcc(const char *object_filename,
                                         size_t runtime_object_count,
                                         const CompilerOptions *options) {
   size_t link_argument_count = options ? options->link_argument_count : 0u;
-  /* The fixed arguments are: gcc, three -no* flags, two -Wl flags, an optional
-   * subsystem flag, the object, -o, the executable, six libraries, and the NULL
-   * terminator. Eighteen, and the old bound of twelve was already one short
-   * whenever the subsystem flag was present and nothing followed it. */
   size_t capacity = 24u + runtime_object_count + link_argument_count;
   const char **arguments = calloc(capacity, sizeof(*arguments));
   size_t count = 0u;
@@ -2265,11 +2149,6 @@ static int mettle_link_object_with_gcc(const char *object_filename,
   }
   arguments[count++] = "-o";
   arguments[count++] = executable_filename;
-  /* The same system libraries the internal linker resolves imports against
-   * (collect_internal_link_imports) and the Tracy link step already passes.
-   * Only -lkernel32 was here, so a program using std/ui or std/net linked with
-   * --linker internal and failed with --linker gcc on every Win32 entry point
-   * it named. --gc-sections drops what a program does not reach. */
   arguments[count++] = "-lkernel32";
   arguments[count++] = "-luser32";
   arguments[count++] = "-lgdi32";
@@ -2433,9 +2312,6 @@ static int mettle_link_object_file(const char *object_filename,
     needs_crash = 1;
   }
 
-  /* --debug-hooks: the program references mettle_dbg_* hooks resolved by the
-   * bundled debug runtime object (same auto-link pattern as the profiler).
-   * Stack buffers, so the error paths above/below need no extra frees. */
   char debug_gcc_object[1024];
   char debug_msvc_object[1024];
   char freestanding_gcc_object[1024];
@@ -2447,9 +2323,6 @@ static int mettle_link_object_file(const char *object_filename,
   snprintf(debug_msvc_object, sizeof(debug_msvc_object), "%s/debug.obj",
            runtime_directory);
 
-  /* --safe: the shadow map behind mettle_safety_check. A program whose checks
-   * all compiled to constant-extent comparisons never names it and does not
-   * pay for it. It reports through the crash handler, so it drags that in. */
   char safety_gcc_object[1024];
   char safety_msvc_object[1024];
   int needs_safety = object_needs_safety_runtime(object_filename);
@@ -2665,19 +2538,10 @@ static int mettle_link_object_file(const char *object_filename,
   }
 
   if (linker_mode == LINKER_MODE_INTERNAL || linker_mode == LINKER_MODE_AUTO) {
-    /* Startup, the freestanding runtime, the program, and one slot each for
-     * the crash, atomics, profile, debug, safety, trace, swap and string
-     * runtime objects, plus one of slack: the default marker for an entry is
-     * written at the index after it. A short list overruns both arrays, and
-     * what that does depends on the heap, so it shows up as a crash whose
-     * cause looks like whatever was allocated next. */
     size_t object_capacity =
         12u + (use_tracy ? 2u : (needs_tracy_helpers ? 1u : 0u)) +
         (options ? options->link_argument_count : 0u);
     const char **object_paths = calloc(object_capacity, sizeof(const char *));
-    /* Parallel to object_paths: 1 marks a bundled runtime object, whose
-     * definitions a program object is allowed to replace. calloc leaves the
-     * program's own objects (and any -Wl object arguments) at 0. */
     unsigned char *object_is_default = calloc(object_capacity, 1u);
     const char *crash_object = NULL;
     const char *atomics_object = NULL;
@@ -2702,7 +2566,6 @@ static int mettle_link_object_file(const char *object_filename,
     }
 
     if (want_shared) {
-      /* A DLL has no mettle_start entry; the export table is the interface. */
     } else if (!startup_object) {
       if (linker_mode == LINKER_MODE_INTERNAL || (!has_gcc && !has_link)) {
         fprintf(stderr,
@@ -2884,13 +2747,8 @@ static int mettle_link_object_file(const char *object_filename,
       if (mettle_link_internal(object_paths, object_is_default, object_count,
                                  executable_filename, 0, options) == 0) {
         build_result = 0;
-        /* The internal PE emitter checked the image it wrote, from the handle
-         * it already had. Reopening the file to check it again is what a virus
-         * scanner charges for. */
         g_link_output_ownership_verified = 1;
       } else if (linker_mode == LINKER_MODE_INTERNAL) {
-        /* The detailed diagnostic is already on stderr; a second generic line
-         * would only restate the failure without naming the symbol. */
         (void)0;
       } else if (!has_gcc && !has_link) {
         fprintf(stderr,
@@ -3194,15 +3052,6 @@ static int add_link_argument(CompilerOptions *options, const char *argument) {
   return 1;
 }
 
-/* Resolve the default PTX target from the local GPU when the user gave no
- * --gpu-arch. Queries the driver for the device's compute capability and maps
- * it to the matching sm_ target, taking the architecture-specific `a` variant
- * where one exists (sm_90 onward) so the full instruction surface (block-scaled
- * MMA and friends) is available on the machine that will run the output.
- * Returns 1 and fills `out` on success; returns 0 when no NVIDIA driver is
- * visible or its answer is unparseable, in which case the caller keeps the
- * project default (GB10 sm_121a), preserving cross-compile behavior on hosts
- * with no GPU. */
 static int detect_gpu_sm_count(void) {
   const GpuDetectResult *local = gpu_detect_local();
   if (!local->available || local->device_count <= 0) return 0;
@@ -3210,21 +3059,6 @@ static int detect_gpu_sm_count(void) {
   return count > 0 && count < 100000 ? count : 0;
 }
 
-/* --report-occupancy: assemble the just-written PTX with `ptxas -v` and print
- * each kernel's registers per thread plus the occupancy ceiling they imply.
- * The resource model is the documented 12.x upper bound (64K 32-bit registers
- * and 48 resident warps per SM, 100KB shared memory, 24 resident blocks,
- * 32-lane warps, register allocation unit 1), so the printed ceiling is an
- * upper bound: real granularity can only lower it. A `kernel(block = ...)`
- * declaration tightens the bound to whole resident blocks.
- *
- * The per-SM ceiling says nothing about whether a launch carries enough work
- * to reach it -- a 16-block launch on a 36-SM card is work-limited at any
- * residency. When the SM count is known (--sms=N, or the local driver when
- * the flag is absent), each line also prints the whole-card fill threshold,
- * so a reader can put their grid size next to it. */
-/* `ptxas -v` writes its resource numbers as "<N> bytes <what>". Scan back from
- * the label to the digits that belong to it. */
 static long long ptxas_bytes_before(const char *line, const char *label) {
   const char *found = strstr(line, label);
   if (!found) return -1;
@@ -3279,10 +3113,6 @@ static void report_ptx_occupancy(const IRProgram *program,
       stack_frame = 0;
       continue;
     }
-    /* The "Function properties" line precedes this entry's "Used" line and
-     * carries the stack frame and spill traffic. Spilling to local memory is
-     * a worse signal than any occupancy percentage: it is a per-access
-     * memory round trip the register allocator could not avoid. */
     long long stores = ptxas_bytes_before(line, "bytes spill stores");
     if (stores >= 0) {
       long long loads = ptxas_bytes_before(line, "bytes spill loads");
@@ -3345,8 +3175,6 @@ static void report_ptx_occupancy(const IRProgram *program,
              entry, registers, block, warps_per_block, blocks, warps,
              warps * 100 / 48, limiter);
       if (sm_count > 0 && blocks > 0) {
-        /* The whole-card fill threshold: launches below this many blocks
-         * cannot reach the ceiling above no matter what it says. */
         printf("; full card = %lld blocks (%d SMs x %lld)",
                (long long)sm_count * blocks, sm_count, blocks);
       }
@@ -3391,14 +3219,6 @@ static int detect_host_gpu_ptx_target(char *out, size_t out_size) {
   return gpu_detect_ptx_target(0, out, out_size);
 }
 
-/* --emit-kernel-decls: write the host-side `extern kernel` declaration for
- * every kernel in the module just compiled. A host that imports the generated
- * file cannot disagree with the kernels it launches about their arguments or
- * their block shape, because the declarations are the kernels. Returns 1 on
- * success. */
-/* The bare type name a parameter or field spelling refers to: `Ray*` and
- * `Ray[8]` both name `Ray`. Returns the length written, 0 when the spelling
- * names nothing a struct declaration could match. */
 static size_t kernel_decl_base_type(const char *spelling, char *out,
                                     size_t capacity) {
   if (!spelling || !out || capacity == 0) return 0;
@@ -3412,9 +3232,6 @@ static size_t kernel_decl_base_type(const char *spelling, char *out,
   return n;
 }
 
-/* Mark `name`'s struct declaration, and every struct its fields reach, as one
- * the generated file has to carry. The host cannot import a declaration that
- * names a record it has never seen. */
 static void kernel_decl_mark_record(Program *prog, char *wanted,
                                     const char *name) {
   if (!prog || !wanted || !name || !*name) return;
@@ -3453,8 +3270,6 @@ static int write_kernel_declarations(ASTNode *program, const char *path,
           "// re-emit it whenever the kernels change.\n\n",
           source_name ? source_name : "a GPU module");
 
-  /* Kernel parameters may name records, so those declarations come first and
-   * the file stays self-contained. */
   char *wanted = prog->declaration_count
                      ? (char *)calloc(prog->declaration_count, 1)
                      : NULL;
@@ -3540,7 +3355,6 @@ static int write_kernel_declarations(ASTNode *program, const char *path,
   return 1;
 }
 
-/* Round a byte count to the nearest tenth of a GiB for the report below. */
 static void gpu_info_format_memory(long long bytes, char *out, size_t out_size) {
   if (bytes <= 0) {
     snprintf(out, out_size, "unknown");
@@ -3550,10 +3364,6 @@ static void gpu_info_format_memory(long long bytes, char *out, size_t out_size) 
   snprintf(out, out_size, "%lld.%lld GiB", tenths / 10, tenths % 10);
 }
 
-/* --gpu-info: everything the toolchain knows about this machine's GPUs and
- * the target it would pick without --gpu-arch. Answers "will my kernels run
- * here, and as what?" before a single line is compiled. Returns the process
- * exit status: 0 when a device was found, 1 when none was. */
 static int report_gpu_info(const char *default_target, int isa_major,
                            int isa_minor) {
   const GpuDetectResult *local = gpu_detect_local();
@@ -3808,9 +3618,6 @@ static DriverFlagResult parse_flag_diagnostics(CompilerOptions *options,
     options->ml_opt = 1;
     options->optimize = 1;
   } else if (strcmp(argv[i], "--ml-opt-speculative") == 0) {
-    /* Unlocks the model's unproven actions (dead-code DELETE). They exist
-     * only on the validator's word, so this implies --ml-opt; ml_gnn reads
-     * the env to emit the speculative dispositions. */
     options->ml_opt = 1;
     options->optimize = 1;
     putenv("METTLE_ML_SPECULATIVE=1");
@@ -3848,41 +3655,24 @@ static DriverFlagResult parse_flag_diagnostics(CompilerOptions *options,
   } else if (strcmp(argv[i], "--explain") == 0) {
     options->explain = 1;
   } else if (strncmp(argv[i], "--explain=", 10) == 0) {
-    /* A whole program's report runs to hundreds of lines. The selector cuts
-     * the prose down to the slice asked for; the JSON sidecar stays whole. */
     options->explain = 1;
     options->explain_filter = argv[i] + 10;
   } else if (strcmp(argv[i], "--explain-all") == 0) {
-    /* Whole-program report: no focus-file filter, so imported modules'
-     * loops and calls are analyzed too (stdlib included). */
     options->explain = 1;
     options->explain_all = 1;
   } else if (strcmp(argv[i], "--explain-json") == 0) {
-    /* Machine-readable sidecar (<output-stem>.explain.json) alongside the
-     * prose report; implies --explain. */
     options->explain = 1;
     options->explain_json = 1;
   } else if (strcmp(argv[i], "--annotate-asm") == 0) {
-    /* Codegen provenance listing + <stem>.annot.json sidecar. Needs the
-     * optimizer's decisions (and remarks) to be interesting, so it implies
-     * -O and collects --explain remarks (retained past optimization for the
-     * codegen join). The default syntax is both Intel and AT&T (toggle). */
     options->annotate_asm = 1;
-    /* Reflect the codegen users actually ship: --release enables every
-     * vectorizer/idiom, so the annotation matches release output (otherwise a
-     * loop shown "not vectorized" at -O would mislead). */
     options->optimize = 1;
     options->release = 1;
     options->explain = 1;
-    options->asm_syntax = 2; /* both */
+    options->asm_syntax = 2;
   } else if (strncmp(argv[i], "--annotate-lines=", 17) == 0) {
-    /* Focused codegen report for a source line range (LLM-facing): asm + cost
-     * + covering loops + live registers + decisions for just those lines.
-     * Accepts "A" (single line) or "A-B". Implies --annotate-asm. */
     const char *v = argv[i] + 17;
     int a = 0, b = 0;
     if (sscanf(v, "%d-%d", &a, &b) == 2) {
-      /* range */
     } else if (sscanf(v, "%d", &a) == 1) {
       b = a;
     } else {
@@ -3899,7 +3689,7 @@ static DriverFlagResult parse_flag_diagnostics(CompilerOptions *options,
     options->optimize = 1;
     options->release = 1;
     options->explain = 1;
-    if (!options->asm_syntax) options->asm_syntax = 0; /* intel-only is terser */
+    if (!options->asm_syntax) options->asm_syntax = 0;
   } else if (strncmp(argv[i], "--annotate-fn=", 14) == 0) {
     options->annotate_q_fn = argv[i] + 14;
     options->annotate_asm = 1;
@@ -3908,7 +3698,6 @@ static DriverFlagResult parse_flag_diagnostics(CompilerOptions *options,
     options->explain = 1;
   } else if (strcmp(argv[i], "--annotate-hot") == 0 ||
              strncmp(argv[i], "--annotate-hot=", 15) == 0) {
-    /* Top-N hotspots across the program (LLM-facing "where is the time"). */
     int n = 8;
     if (argv[i][14] == '=') n = atoi(argv[i] + 15);
     if (n <= 0) n = 8;
@@ -3948,7 +3737,6 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
   if (strcmp(argv[i], "--emit-ptx") == 0) {
     options->emit_ptx = 1;
   } else if (strncmp(argv[i], "--emit-kernel-decls", 19) == 0) {
-    /* Bare, the declarations land next to the PTX as <output>.mettle. */
     options->emit_kernel_decls =
         argv[i][19] == '=' ? argv[i] + 20 : "";
     if (argv[i][19] != '\0' && argv[i][19] != '=') {
@@ -3959,18 +3747,12 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     const char *arch = argv[i] + 11;
     flags->gpu_arch_explicit = 1;
     if (strcmp(arch, "gb10") == 0) {
-      /* GB10's compatible sm_121 profile excludes its architecture-specific
-       * FP4/block-scaled MMA forms. The named performance target must retain
-       * the `a` suffix; callers needing compatible PTX can request sm_121. */
       options->ptx_target = "sm_121a";
       if (!flags->ptx_version_explicit) {
         options->ptx_isa_major = 8;
         options->ptx_isa_minor = 8;
       }
     } else if (strcmp(arch, "native") == 0) {
-      /* The default already prefers the local GPU. Asking for it by name
-       * says the build is meant for this machine, so a missing driver is an
-       * error here rather than a silent fall back to the GB10 default. */
       if (!gpu_detect_ptx_target(0, flags->detected_ptx_target,
                                  sizeof(flags->detected_ptx_target))) {
         fprintf(stderr,
@@ -3981,8 +3763,6 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
       }
       options->ptx_target = flags->detected_ptx_target;
     } else if (strcmp(arch, "portable") == 0) {
-      /* Virtual Turing ISA is the oldest forward-compatible baseline still
-       * supported for offline assembly by current CUDA 13 toolchains. */
       options->ptx_target = "compute_75";
       if (!flags->ptx_version_explicit) {
         options->ptx_isa_major = 6;
@@ -4108,8 +3888,6 @@ static DriverFlagResult parse_flag_checks(CompilerOptions *options,
       fprintf(stderr, "--expansion-budget must not be negative\n");
       return DRIVER_FLAG_FAILED;
     }
-    /* 0 is a real budget (expand nothing), so remember that one was asked
-       for rather than inferring it from the number. */
     options->expansion_budget = (size_t)budget;
     options->expansion_budget_set = 1;
   } else if (strncmp(argv[i], "--sms=", 6) == 0) {
@@ -4320,8 +4098,6 @@ static int parse_arguments(CompilerOptions *options, DriverFlags *flags,
 
 static int mettle_check_target_options(CompilerOptions *options,
                                        DriverFlags *flags) {
-  /* A flat image IS the linked product: there is nothing left for a linker to
-   * do to it, and no container for a linker to put it in. */
   if (options->flat_output && flags->build_executable) {
     fprintf(stderr,
             "Error: --emit-flat writes the linked image itself; drop --build\n");
@@ -4330,9 +4106,6 @@ static int mettle_check_target_options(CompilerOptions *options,
     return 1;
   }
 
-  /* No object format here carries 16- or 32-bit relocations, so a narrow
-   * target has exactly one product. Saying so beats emitting an object whose
-   * code is the wrong width for the header on it. */
   if (!mtlc_target_is_object_capable(mtlc_target()) && !options->flat_output) {
     fprintf(stderr,
             "Error: the %s target emits a flat image only; add --emit-flat "
@@ -4418,18 +4191,12 @@ static int mettle_check_target_options(CompilerOptions *options,
     return 1;
   }
 
-  /* No --gpu-arch given: target the GPU that is actually in this machine when
-   * one is visible. Detection failure (no driver, headless build host) keeps
-   * the GB10 default so cross-compiles for DGX Spark are unchanged. */
   if (options->emit_ptx && !flags->gpu_arch_explicit &&
       detect_host_gpu_ptx_target(flags->detected_ptx_target,
                                  sizeof(flags->detected_ptx_target))) {
     options->ptx_target = flags->detected_ptx_target;
   }
 
-  /* A `.version` above what the local driver understands fails inside
-   * cuModuleLoadData at run time, where the only evidence is a status code.
-   * When the target came from this machine, take the ISA from it too. */
   if (options->emit_ptx && !flags->ptx_version_explicit) {
     int driver_major = 0, driver_minor = 0;
     if (gpu_detect_ptx_isa(&driver_major, &driver_minor) &&
@@ -4521,8 +4288,6 @@ int main(int argc, char *argv[]) {
       return mettle_explain_error_code(argc >= 3 ? argv[2] : NULL);
     }
     if (strcmp(argv[1], "expand") == 0) {
-      /* `mettle expand <file> [flags...]`: shift the subcommand out and let
-         the normal flag loop see the rest, the same way `test` does. */
       options.expand_mode = 1;
       for (int i = 1; i + 1 < argc; i++) {
         argv[i] = argv[i + 1];
@@ -4613,8 +4378,6 @@ int main(int argc, char *argv[]) {
       return 0;
     }
     if (strcmp(argv[1], "test") == 0) {
-      /* `mettle test <file> [--filter=S] [flags...]`: shift the subcommand
-       * out and let the normal flag loop see the rest. */
       options.test_mode = 1;
       for (int i = 1; i + 1 < argc; i++) {
         argv[i] = argv[i + 1];
@@ -4625,7 +4388,6 @@ int main(int argc, char *argv[]) {
         return 1;
       }
     } else if (strcmp(argv[1], "trace") == 0) {
-      /* `mettle trace <file> <fn> [args...]` */
       if (argc < 4) {
         fprintf(stderr,
                 "usage: mettle trace <file.mettle> <function> [args...]\n"
@@ -4636,7 +4398,7 @@ int main(int argc, char *argv[]) {
       options.trace_function = argv[3];
       options.trace_args = (const char *const *)&argv[4];
       options.trace_arg_count = (size_t)(argc - 4);
-      argv[1] = argv[2]; /* the input file */
+      argv[1] = argv[2];
       argc = 2;
     }
     if (strcmp(argv[1], "docs") == 0) {
@@ -4707,9 +4469,6 @@ int main(int argc, char *argv[]) {
     ml_opt_set_default_paths(argv[0]);
   }
 
-  /* The native ELF backend supports --build on Linux via an ld-based link of
-   * the emitted ELF object plus a self-contained _start. On Linux --build
-   * always uses the direct-object backend (no asm/NASM path). */
   BinaryTargetFormat host_format = mtlc_target()->format;
   int elf_build = host_format == BINARY_TARGET_FORMAT_ELF_X64 ||
                   host_format == BINARY_TARGET_FORMAT_ELF_ARM64;
@@ -4778,7 +4537,6 @@ int main(int argc, char *argv[]) {
       free(auto_runtime_directory);
       return 1;
     }
-    /* Linux: force direct-object emission; there is no NASM/asm link path. */
     options.emit_object = 1;
 #else
     if (!auto_runtime_directory) {
@@ -4800,8 +4558,6 @@ int main(int argc, char *argv[]) {
       build_output_filename = default_executable_filename(options.input_filename);
     }
     if (!build_output_filename) {
-      /* On an ELF host the product takes the source's stem, so a source with
-       * no extension leaves nowhere to put it that is not the source. */
       fprintf(stderr,
               "Error: Could not choose an output name for '%s'. Pass -o "
               "<name>\n",
@@ -4813,7 +4569,6 @@ int main(int argc, char *argv[]) {
       return 1;
     }
 
-    /* ELF objects conventionally use .o; COFF uses .obj. */
     object_output_filename = replace_extension(
         build_output_filename, elf_build ? ".o" : ".obj");
     if (!object_output_filename) {
@@ -4838,8 +4593,6 @@ int main(int argc, char *argv[]) {
     double build_profile_start =
         options.profile ? compiler_profile_now_ms() : 0.0;
 #ifndef _WIN32
-    /* Linux: emit the ELF object (done by compile_file above) then link it
-     * with our self-contained _start via ld. */
     result = mettle_link_elf_executable(options.output_filename,
                                         build_output_filename, &options,
                                         auto_runtime_directory);
@@ -4977,16 +4730,10 @@ static int compile_monomorphize(ASTNode *program,
   return 1;
 }
 
-/* `mettle expand`'s bridge to the expansion table: the printer asks what
- * generated a block, and this answers with the same note a diagnostic raised
- * inside that block would carry, so the two always agree. */
 static const char *expand_annotate(void *context, const ASTNode *block) {
   return type_checker_expansion_note((TypeChecker *)context, block, NULL);
 }
 
-/* `mettle explain R1001 house.mettle`: a rule may carry its own code and its
- * own explanation, and the code is meaningless without the file that declares
- * it. Parsing is enough: the text is on the declaration. */
 static int explain_rule_walk(const ASTNode *node, const char *code,
                              int *found) {
   if (!node) {
@@ -5070,16 +4817,6 @@ static int compile_type_check(TypeChecker *type_checker, ASTNode *program,
   return 1;
 }
 
-/* `mettle swap-check <file> --old F --new G`
- *
- * A hot swap asks whether the new function is compatible with the old one at
- * this boundary. Translation validation already answers a question of exactly
- * that shape, so this points the same machinery at two functions instead of
- * at one function before and after a pass: it runs both on generated inputs
- * and compares every observable, reporting a counterexample on divergence.
- *
- * It runs on lowered IR before optimization, so the verdict is about what the
- * two functions mean, not about what any pass did to them. */
 static IRFunction *swap_find_function(IRProgram *program, const char *name) {
   if (!program || !name) {
     return NULL;
@@ -5093,10 +4830,6 @@ static IRFunction *swap_find_function(IRProgram *program, const char *name) {
   return NULL;
 }
 
-/* A swap replaces a function at a call boundary, so the boundary has to be the
- * same one. The gate runs the old body under the new function's signature, so
- * a mismatch here would not merely be an unswappable change, it would make the
- * comparison meaningless. */
 static int swap_signatures_match(const IRFunction *old_fn,
                                  const IRFunction *new_fn, char *why,
                                  size_t why_capacity) {
@@ -5178,9 +4911,6 @@ static int compile_run_swap_check(IRProgram *ir_program,
 
   switch (verdict) {
   case IR_VERIFY_REWRITE_VALIDATED:
-    /* Say what was actually checked. The harness runs a fixed set of generated
-     * inputs, so agreement across them is evidence and not equivalence, and a
-     * verdict that reads as a proof would be the decoration III.2.6 refuses. */
     printf("swap-check: OK - '%s' matched '%s' on %d generated input sets\n",
            new_name, old_name, ir_verify_last_input_run_count());
     printf("  Inputs cover a fixed shape table plus the constants these two "
@@ -5198,15 +4928,12 @@ static int compile_run_swap_check(IRProgram *ir_program,
     return 1;
   case IR_VERIFY_REWRITE_UNVERIFIABLE:
   default:
-    /* Not a pass: the gate could not run these functions, which is a
-     * different answer from "they differ" and must not read as approval. */
     fprintf(stderr,
             "swap-check: UNVERIFIABLE - the gate could not run '%s': %s\n",
             new_name, skip_reason[0] ? skip_reason : "unknown");
     return 2;
   }
 }
-
 
 IRFunction *ir_program_find_function(IRProgram *program, const char *name);
 
@@ -5216,9 +4943,6 @@ IRFunction *ir_program_find_function(IRProgram *program, const char *name);
 #define MACHINE_STEP_MAX 1000000
 #define MACHINE_LINE_MAX 256
 
-/* The program a described machine runs: `const PROGRAM: string[N]`, one
- * assembly line per row. It is read straight out of the AST, the same way the
- * machine itself is, because both are answered before anything runs. */
 static size_t machine_program_lines(ASTNode *program_node, const char **out,
                                     size_t capacity) {
   Program *program = program_node ? (Program *)program_node->data : NULL;
@@ -5253,10 +4977,6 @@ static size_t machine_program_lines(ASTNode *program_node, const char **out,
   return 0;
 }
 
-/* What the emulated machine wrote. The interpreter models the write family
- * by recording the call and the bytes the pointer argument addressed, so an
- * instruction whose semantics prints is observable from here without the
- * interpreter having to be given a console. */
 static size_t machine_drain_output(IRInterpMachine *interp, size_t from) {
   size_t count = ir_interp_extern_trace_count(interp);
   int wrote = 0;
@@ -5333,10 +5053,6 @@ static int machine_emulate(const MachineDesc *desc, ASTNode *program_node,
     length += written;
   }
 
-  /* Assembling and decoding are separate walks over the same description, so
-   * re-assembling what the decoder read back is what says the two agree. A
-   * description that cannot round-trip is a machine that disagrees with
-   * itself, and nothing after this point would notice. */
   {
     size_t cursor = 0;
     size_t out = 0;
@@ -5475,8 +5191,6 @@ static int compile_lower_to_ir(ASTNode *program, TypeChecker *type_checker,
       ir_lower_program(program, type_checker, symbol_table, out_ir_error,
                        emit_runtime_checks, emit_safety_checks);
   if (!*out_ir_program) {
-    /* A comptime-only Type/Field that slipped into lowering is a user
-     * diagnostic, already on the reporter. Do not wrap it as an ICE. */
     if (type_checker && type_checker->error_reporter &&
         error_reporter_has_errors(type_checker->error_reporter)) {
       error_reporter_print_errors(type_checker->error_reporter);
@@ -5491,9 +5205,6 @@ static int compile_lower_to_ir(ASTNode *program, TypeChecker *type_checker,
 
 #include "ir/ml_opt.h"
 
-/* Collect non-extern, non-exported global integer `var`s whose initializer is
- * an integer literal (optionally negated). The optimizer proves each is never
- * written before folding its reads - this only supplies the candidates. */
 static IRGlobalIntConst *collect_global_int_consts(ASTNode *program,
                                                    size_t *out_count) {
   *out_count = 0;
@@ -5559,9 +5270,6 @@ static IRGlobalIntConst *collect_global_int_consts(ASTNode *program,
   return consts;
 }
 
-/* Whether this compile's object output is an AArch64 relocatable object: on an
- * ARM host that is every object; elsewhere it is what --emit-arm64-obj asks
- * for, which is how an x86-64 host reaches (and tests) that backend. */
 static int compile_targets_arm64_object(const CompilerOptions *options) {
 #if defined(__aarch64__) || defined(_M_ARM64)
   (void)options;
@@ -5593,23 +5301,15 @@ static int compile_optimize_ir(IRProgram *ir_program, ASTNode *ast_program,
   ir_optimize_options.explain = options->explain;
   ir_optimize_options.explain_focus_file =
       options->explain_all ? NULL : options->input_filename;
-  /* Large --explain reports divert to `<output-stem>.explain.txt`. */
   ir_explain_set_output_path(options->output_filename);
   ir_explain_set_json(options->explain_json ? 1 : 0);
   ir_explain_set_filter(options->explain_filter);
-  /* --annotate-asm: arm the codegen annotator before codegen runs, and keep the
-   * optimization remarks alive so it can join them onto the emitted asm. */
-  /* --explain-json wants the codegen cost model (cycles per iteration, port
-   * bottleneck, spills) joined onto the optimizer's decisions, so arm the
-   * annotator for its numbers alone: no listing, no .annot.json sidecar. */
   if (options->explain_json && !options->annotate_asm) {
     mir_annotate_set_enabled(1);
     mir_annotate_set_cost_only(1);
     mir_annotate_set_output_path(options->output_filename);
     mir_annotate_set_source_file(options->input_filename);
   }
-  /* The call graph and the ranking are assembled after codegen, from the same
-   * remark table -- so it has to outlive the optimization-stage flush. */
   if (options->explain_json) {
     ir_explain_set_retain_remarks(1);
   }
@@ -5640,17 +5340,12 @@ static int compile_optimize_ir(IRProgram *ir_program, ASTNode *ast_program,
   if (opt_ok) {
     ir_program_drop_rewrite_rules(ir_program);
   }
-  /* --safe describes a stack local at function entry, which outlives the block
-   * the declaration sits in. The optimizer is free to fold that block away, so
-   * retire the notes it left addressing locals that are no longer declared. */
   if (opt_ok && options->safe && !options->emit_ptx && !options->emit_spirv &&
       !ir_safety_retire_dangling_notes(ir_program)) {
     mettle_compiler_ice_report("Failed to retire --safe stack notes", NULL);
     return 0;
   }
   if (!opt_ok) {
-    /* A violated `@simd!` contract is a user error already printed with a
-     * source location; don't bury it under a generic internal-error report. */
     if (!ir_optimize_had_user_error()) {
       mettle_compiler_ice_report("IR optimization failed", NULL);
     }
@@ -5674,7 +5369,6 @@ static int compile_optimize_ir(IRProgram *ir_program, ASTNode *ast_program,
     }
     fprintf(stderr, "; hoisted %d large constants\n", hoisted);
     if (options->explain) {
-      /* ml_gnn wrote _mlopt.explain (TSV). Render it styled like the main report. */
       ir_explain_ml_opt("_mlopt.explain");
     }
   }
@@ -5686,9 +5380,6 @@ static int compile_generate_code(CodeGenerator *code_generator) {
     const char *message = (code_generator && code_generator->error_message)
                               ? code_generator->error_message
                               : "Unknown error";
-    /* A GPU-only construct compiled for a CPU target is the programmer's
-     * mistake, phrased for them at the point it was found; don't bury it
-     * under a generic internal-error report. */
     if (code_generator && code_generator->has_user_error) {
       fprintf(stderr, "error: %s\n", message);
       return 0;
@@ -5751,12 +5442,6 @@ static void compile_dump_ast(ASTNode *program, const char *output_filename) {
   free(ast_output);
 }
 
-/* `mettle test` / `mettle trace`: execute in the compile-time interpreter and
- * stop - no optimization (unless requested), no codegen, no linking. */
-/* Every trace rule, run over the events one test produced. Returns 0 when a
- * rule failed, which fails that test: a rule about what a program does while it
- * runs belongs to the run that produced it, and a verdict that names a later
- * test would name the wrong one. */
 typedef struct {
   IRProgram *program;
   TypeChecker *type_checker;
@@ -5766,11 +5451,6 @@ typedef struct {
   long long budget;
 } TraceRuleContext;
 
-
-/* One line of a recorded trace: kind|name|file|line|column|value. The fields
- * go straight into the collector the compile-time interpreter fills, so a
- * rule cannot tell a recorded run from an interpreted one, which is the whole
- * point of recording. */
 static int trace_line_load(char *line) {
   char *field[6];
   size_t count = 0;
@@ -5940,9 +5620,6 @@ static int compile_write_kernel_declarations(ASTNode *program,
   return write_kernel_declarations(program, decls_path, input_filename);
 }
 
-/* --emit-ptx: lower every declared kernel to a PTX `.visible .entry` and write
- * the PTX text to the output file. No object or link is produced -- the CUDA
- * driver JIT-compiles this text at runtime. */
 static int compile_emit_ptx(IRProgram *ir_program, ASTNode *program,
                             CodeGenerator *code_generator,
                             const CompilerOptions *options,
@@ -5999,9 +5676,6 @@ static int compile_emit_ptx(IRProgram *ir_program, ASTNode *program,
   return 0;
 }
 
-/* --emit-spirv: lower every declared kernel to a SPIR-V `Kernel` entry point
- * and write the binary module. Offload-only: no host object or link. An OpenCL
- * runtime JITs the module at load time. */
 static int compile_emit_spirv(IRProgram *ir_program, ASTNode *program,
                               CodeGenerator *code_generator,
                               const CompilerOptions *options,
@@ -6038,17 +5712,6 @@ static int compile_emit_spirv(IRProgram *ir_program, ASTNode *program,
   return 0;
 }
 
-/* --emit-arm64: lower the scalar subset of every function directly to a
- * self-contained AArch64 ELF executable (from-scratch backend, no external
- * assembler and no linker). A `_start` calls main() and exits with its return
- * value; module globals and the freestanding allocator live in a second,
- * writable segment. No x86 object.
- *
- * -O/--release runs the target-neutral half of the optimizer: scalar and
- * control-flow transforms that keep the shared IR instruction set. The x86
- * SIMD idiom recognizers stay off -- they form ops this backend has no
- * encoding for -- so what reaches the lowering is the same shape it already
- * consumes, just less of it. */
 static int compile_emit_arm64(IRProgram *ir_program, ASTNode *program,
                               const CompilerOptions *options,
                               const char *output_filename) {
@@ -6089,7 +5752,6 @@ static int compile_emit_arm64(IRProgram *ir_program, ASTNode *program,
   return 0;
 }
 
-
 static int compile_wants_debug_info(const CompilerOptions *options) {
   return options->debug_mode || options->generate_debug_symbols ||
          options->generate_line_mapping ||
@@ -6120,7 +5782,6 @@ static void compile_prepend_auto_imports(const CompilerOptions *options,
     ASTNode *auto_import = ast_create_import_declaration(
         auto_imports[ai], NULL, NULL, 0, auto_loc);
     if (auto_import) {
-      // Prepend the import before all user declarations.
       ASTNode **grown =
           realloc(prog_data->declarations,
                   (prog_data->declaration_count + 1) * sizeof(ASTNode *));
@@ -6143,9 +5804,6 @@ int target_argument_is_description(const char *argument) {
   return length > 7 && strcmp(argument + length - 7, ".mettle") == 0;
 }
 
-/* `--target desc.mettle`: the target is a Mettle module declaring a
- * `const NAME: TargetDesc`. It is read the way any module is read, checked,
- * and then handed to the backend as data. */
 int load_target_description(CompilerOptions *options) {
   const char *path = options ? options->target_desc_path : NULL;
   char *source = NULL;
@@ -6185,11 +5843,6 @@ int load_target_description(CompilerOptions *options) {
     fprintf(stderr, "Error: target description '%s': %s\n", path, error);
     goto done;
   }
-  /* A described aarch64 target reaches the emitter as an object by default,
-   * which is what it could do before a description could choose anything
-   * about the convention. `--emit-arm64` asks for the self-contained
-   * executable instead, and that is now a choice worth honouring: it is what
-   * lets a described argument order be run rather than only inspected. */
   if (mtlc_target()->arch == MTLC_TARGET_ARCH_AARCH64 &&
       !options->emit_arm64) {
     options->emit_arm64_obj = 1;
@@ -6254,18 +5907,10 @@ int compile_file(const char *input_filename, const char *output_filename,
     return 1;
   }
 
-  /* Lexical errors are reported inline by the parser (parser_advance calls
-   * parser_report_lexer_token_error on any TOKEN_ERROR, into this same
-   * error_reporter, and the post-parse check below aborts before codegen).
-   * A separate pre-pass that re-tokenized the whole source just to find those
-   * same errors was pure duplicate work -- a full extra lexer pass over the
-   * input -- so it has been removed. The phase slot is kept (recorded as 0 ms)
-   * to preserve the --profile output layout. */
   compiler_set_phase(PROFILE_PHASE_LEXICAL_VALIDATION);
   phase_start = compiler_profile_begin(&profile);
   compiler_profile_add(&profile, PROFILE_PHASE_LEXICAL_VALIDATION, phase_start);
 
-  // Initialize compiler components
   compiler_set_phase(PROFILE_PHASE_INIT);
   phase_start = compiler_profile_begin(&profile);
   Lexer *lexer = lexer_create(source);
@@ -6275,7 +5920,6 @@ int compile_file(const char *input_filename, const char *output_filename,
   RegisterAllocator *register_allocator = register_allocator_create();
   ASTNode *program = NULL;
 
-  // Initialize debug info if debug mode is enabled
   DebugInfo *debug_info = NULL;
   CodeGenerator *code_generator = NULL;
   IRProgram *ir_program = NULL;
@@ -6301,14 +5945,11 @@ int compile_file(const char *input_filename, const char *output_filename,
 
   parser = parser_create_with_error_reporter(lexer, error_reporter);
   if (parser) {
-    /* Enable kernel index built-ins (thread.x etc.) for GPU compiles. */
     parser->gpu_mode = options->emit_ptx || options->emit_spirv;
   }
   type_checker =
       type_checker_create_with_error_reporter(symbol_table, error_reporter);
   type_checker_set_launch_report(options->report_launches);
-  /* What a kernel's types said about its memory, and what the proofs over them
-     cost. `--explain` prints it beside the optimizer's own report. */
   type_checker_set_gpu_type_report(options->report_gpu_types ||
                                    options->explain || options->explain_all);
   if (!parser || !type_checker) {
@@ -6379,11 +6020,6 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
   code_generator_set_stack_trace_support(
       code_generator, options->generate_stack_trace_support ? 1 : 0);
-  /* Crash reporting is on by default, but only where this driver produces the
-   * executable and there is a runtime to report through: it adds references to
-   * mettle_crash_*, and only the link this driver builds is guaranteed to
-   * carry crash_handler.o. A bare object handed to someone else's linker, and
-   * a freestanding image with no runtime at all, stay as they were. */
   code_generator_set_crash_report(
       code_generator,
       (options->generate_crash_report && options->building_executable &&
@@ -6415,7 +6051,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     compile_dump_ast(program, output_filename);
   }
 
-  // Resolve imports (flatten imported module ASTs into the main program)
   ImportResolverOptions import_options = {0};
   if (options) {
     import_options.import_directories = options->import_directories;
@@ -6427,16 +6062,10 @@ int compile_file(const char *input_filename, const char *output_filename,
   } else {
     import_options.stdlib_directory = "stdlib";
   }
-  /* Select standard library OS variants from the output target, not the host
-   * that runs the compiler. Both AArch64 modes emit Linux ELF even when a
-   * Windows compiler produces them. */
   import_options.target_is_elf =
       (options && (options->emit_arm64 || options->emit_arm64_obj)) ||
       host_target_is_elf();
 
-  // Auto-inject the standard prelude only when --prelude was specified, and
-  // std/alloc when --native-heap was specified (it provides the mettle_heap_*
-  // shims the backend rewrites new/malloc/calloc/realloc/free to call).
   compiler_set_phase(PROFILE_PHASE_PRELUDE);
   phase_start = compiler_profile_begin(&profile);
   compile_prepend_auto_imports(options, program);
@@ -6461,10 +6090,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  /* --explain: collect the memory analyzer's diagnostics so the optimization
-   * report can surface them in a "memory" section. Enabled before type-check
-   * (where they fire) and only when the optimizer will run -- the only path
-   * that produces a report. */
   ir_explain_ledger_set_collect(options->explain);
   ir_explain_memory_set_collect(options->explain && options->optimize,
                                 options->explain_all ? NULL
@@ -6479,9 +6104,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  /* Expansion has run by now, so the ledger is complete and the AST is the
-     expanded one. A budget is a contract: check it before anything downstream
-     benefits from work the author did not authorize. */
   if (options->expansion_budget_set &&
       !type_checker_check_expansion_budget(type_checker,
                                            options->expansion_budget)) {
@@ -6540,10 +6162,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  /* @test functions are type-checked in every build (so they can't rot) but
-   * compiled only under `mettle test`: drop them before lowering. The node
-   * lives in BOTH program->children and Program->declarations; remove it
-   * from both before destroying it. */
   if (!options->test_mode) {
     Program *prog_data = (Program *)program->data;
     if (prog_data) {
@@ -6572,9 +6190,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     }
   }
 
-  /* --explain reports optimizer decisions, so it only means something when the
-   * optimizer runs; lowering then brackets every loop with report-only markers
-   * for the verifier to report on. */
   if (options->explain && !options->optimize) {
     fprintf(stderr,
             "note: --explain without -O/--release reports only what does not "
@@ -6582,10 +6197,6 @@ int compile_file(const char *input_filename, const char *output_filename,
             "rules run, the checks a declared type deleted, and the beliefs "
             "the build rested on\n");
   }
-  /* A rule over the machine reads what the passes decided, so the collection
-   * has to be armed before any of them run. It reuses the report the optimizer
-   * already writes for --explain, silenced: a rule sees exactly what a reader
-   * would, and there is no second set of call sites to drift from the first. */
   if (program_declares_machine_rule(program)) {
     machine_rules_pending = 1;
     ir_machine_set_collect(1);
@@ -6605,16 +6216,11 @@ int compile_file(const char *input_filename, const char *output_filename,
   ir_explain_safety_set_collect(options->explain && options->optimize,
                                 input_filename);
 
-  /* --emit-arm64 keeps the checks: its traps print the message and exit(1)
-   * like the x86 backend's, so debug semantics match across targets. (The
-   * exclusion dated from bring-up, when the trap calls could not lower.) */
   int emit_runtime_checks =
       (options->release || options->emit_ptx || options->emit_spirv ||
        mtlc_target()->freestanding)
           ? 0
           : 1;
-  /* The device backends have their own bounds story (--gpu-checks) and their
-   * pointers are not host addresses the shadow map could describe. */
   int emit_safety_checks =
       options->safe && !options->emit_ptx && !options->emit_spirv;
   compiler_set_phase(PROFILE_PHASE_IR_LOWERING);
@@ -6739,10 +6345,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     }
   }
 
-  /* A rule over the machine reads what the passes decided, so the collection
-   * has to be armed before they run. It reuses the report the optimizer already
-   * writes for --explain, silenced: a rule sees exactly what a reader would,
-   * and there is no second set of call sites to drift from the first. */
   if (ir_program_has_rules(ir_program) || options->report_rules) {
     IRRuleImage rule_image;
     char *rule_error = NULL;
@@ -6788,8 +6390,6 @@ int compile_file(const char *input_filename, const char *output_filename,
   mettle_compiler_ctx_set_ir_program(ir_program);
   options->main_wants_argc_argv = ir_program->main_wants_argc_argv;
 
-  /* --pgo: interpret main() now, before optimization, so the optimizer can
-   * consume measured call frequencies instead of static guesses. */
   if (options->pgo) {
     ir_pgo_profile_program(ir_program);
     ir_pgo_print_summary();
@@ -6829,8 +6429,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-
-
   if (options->check_trace_path) {
     size_t events = 0;
     size_t dropped = 0;
@@ -6869,8 +6467,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  /* Record object lifetimes and pointer origins before scalar rewrites can
-   * merge copies or inline stack storage into a longer lived frame. */
   if (options->native_heap && !ir_program_route_to_native_heap(ir_program)) {
     fprintf(stderr, "Error: Failed to route allocation to the native heap\n");
     result = 1;
@@ -6890,12 +6486,7 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  /* Resolve the access marks after scalar analysis: prove away
-   * what cannot fail and lower the rest to comparisons and safety intrinsics.
-   * Vector recognition runs after this resolution. */
   if (emit_safety_checks) {
-    /* Collection has to be armed before the pass, which runs well before the
-     * optimizer's own --explain state comes up. */
     ir_explain_safety_set_collect(options->explain && options->optimize,
                                   input_filename);
     IRSafetyStats safety_stats = {0};
@@ -6910,15 +6501,6 @@ int compile_file(const char *input_filename, const char *output_filename,
                              safety_stats.region_calls);
   }
 
-  /* A deadline is a claim about the code that ships. `mettle test` ships none:
-   * it interprets an image carrying every belief re-check the mode adds, and
-   * costing that image would report a miss against a binary nobody built. The
-   * Machine rules sit out the same mode for the same reason.
-   *
-   * Costed after the checks are in, because they are on the paths being
-   * costed. A checked build read before its checks exist reports a figure for
-   * a binary nobody built, and reports it as lower than the same program
-   * without them, which is the one answer that cannot be right. */
   if (!options->test_mode) {
     IRDeadlineStats deadline_stats;
     IRDeadlineCosts deadline_costs;
@@ -6963,9 +6545,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  /* Device-module emitters consume semantic kernel IR directly. Host targets
-   * now lower semantic launch operations to the stable runtime-provider ABI;
-   * parsing and frontend type checking never mention CUDA argument arrays. */
   if (!ir_program_lower_gpu_launches(ir_program)) {
     fprintf(stderr, "Error: Failed to lower GPU launches for the host runtime\n");
     result = 1;
@@ -6985,10 +6564,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     }
   }
 
-  /* --debug-hooks: interactive debugger instrumentation (enter/exit/line
-   * hooks + live-pointer variable registrations). Mutually exclusive with
-   * the profiler (both own the fn-id registry) and intended for -O0: the
-   * optimizer would move or delete the hooks. */
   if (options->debug_hooks) {
     if (compiler_options_use_profile_runtime(options)) {
       fprintf(stderr,
@@ -7011,25 +6586,12 @@ int compile_file(const char *input_filename, const char *output_filename,
     }
   }
 
-  /* Executable builds sweep functions unreachable from main. Importing a
-   * stdlib module emits the whole module, so without this every binary carries
-   * the unused siblings of each function it actually calls. Skipped for
-   * profile/tracy/debug-hook builds, whose instrumentation tables enumerate
-   * every function. */
   int sweep_dead_functions = options->building_executable && !options->tracy &&
                              !compiler_options_use_profile_runtime(options) &&
                              !options->debug_hooks;
-  /* A foreign object on the link line (`--link-arg caller.o`) may call any
-   * `export fn` without a single Mettle instruction naming it, so the exports
-   * have to stay rooted whenever one is present. A shared object, and a program
-   * that publishes its symbols for one to bind, are the same situation: the
-   * caller is on the other side of the link. */
   int keep_exports = options->link_argument_count > 0 ||
                      options->shared_output || options->export_dynamic;
 
-  /* Sweep once before the optimizer: a body that will not ship should not cost
-   * a full pipeline first. The optimizer never synthesizes a call to a Mettle
-   * function, so nothing dropped here can come back. */
   if (sweep_dead_functions &&
       !ir_program_eliminate_dead_functions(ir_program, keep_exports)) {
     fprintf(stderr, "Error: Failed to eliminate dead functions\n");
@@ -7047,16 +6609,9 @@ int compile_file(const char *input_filename, const char *output_filename,
       goto cleanup;
     }
   } else {
-    /* Vectorization (and thus `@simd` contract verification) only runs under
-     * -O/--release. Tell the user their `@simd` loops went unchecked and strip
-     * the markers so they never reach codegen. */
     ir_note_simd_contracts_unverified(ir_program);
   }
 
-  /* A twin agreed with its reference on the program as written. Under
-   * --verify, ask again after the optimizer, against the reference as it was
-   * before any pass touched it, so a pass that broke the fast one is caught by
-   * the reference the program already supplied. */
   if (twin_snapshots) {
     IRTwinStats twin_stats;
     int twins_ok = ir_twins_recheck(ir_program, twin_snapshots, error_reporter,
@@ -7072,8 +6627,6 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
   ir_program_drop_rewrite_rules(ir_program);
 
-  /* And again after the optimizer, so a helper the inliner absorbed into its
-   * only caller is swept as well. */
   if (sweep_dead_functions &&
       !ir_program_eliminate_dead_functions(ir_program, keep_exports)) {
     fprintf(stderr, "Error: Failed to eliminate dead functions\n");
@@ -7081,10 +6634,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  /* Retiring an instruction leaves a NOP behind, and after a release pipeline
-   * close to half the body is holes. The optimizer keeps them because several
-   * passes rewrite into the slack they provide; nothing downstream needs it,
-   * and codegen walks every function several times. */
   for (size_t i = 0; i < ir_program->function_count; i++) {
     ir_function_drop_dead_nops(ir_program->functions[i]);
   }
@@ -7140,10 +6689,6 @@ int compile_file(const char *input_filename, const char *output_filename,
 
   compiler_set_phase(PROFILE_PHASE_CODEGEN);
   phase_start = compiler_profile_begin(&profile);
-  /* The native Arm path is a first-class IR backend. It deliberately bypasses
-   * the x86 MIR/encoder while sharing the frontend-neutral IR and linker flow.
-   * An ARM host takes it for every object; --emit-arm64-obj asks for it from
-   * any host, which is what lets an x86-64 box exercise and test it. */
   int codegen_ok = arm64_object_output ? 1
                                        : compile_generate_code(code_generator);
   compiler_profile_add(&profile, PROFILE_PHASE_CODEGEN, phase_start);
@@ -7152,26 +6697,14 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  /* The annotator goes first: it publishes the cost model (cycles per
-   * iteration, port bottlenecks, spills) into the --explain report, which the
-   * backend flush below then writes out. It also emits its own listing and
-   * .annot.json sidecar when --annotate-asm asked for them. */
   if (options->annotate_asm || (options->explain_json && mir_annotate_enabled())) {
     mir_annotate_flush();
   }
 
-  /* --explain: the MIR eligibility gate recorded, per function, whether it got
-   * the register-allocating backend; print that section now that codegen ran.
-   * (No-op unless --explain is on.) */
   if (options->explain && options->optimize) {
     ir_explain_backend_flush();
   }
 
-  /* The second rule phase. The program is code by now, so what a rule reads is
-   * what the machine got: a frame size, a spill count, an instruction count,
-   * whether each loop vectorized, whether each call inlined, and the effects
-   * the function holds. A failing verdict stops the build before anything is
-   * written, the same as the first phase. */
   if (machine_rules_pending) {
     IRRuleImage machine_image;
     char *machine_error = NULL;
@@ -7234,10 +6767,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     const unsigned char *trailer = NULL;
     size_t pad_to = 0;
     size_t trailer_size = 0;
-    /* A flat image loaded at 0x7C00 is a boot sector by definition: the
-     * firmware reads exactly 512 bytes and refuses them without the signature
-     * in the last two, so the compiler writes both rather than making every
-     * caller remember. */
     if (mtlc_target()->image_base == 0x7C00ull) {
       pad_to = 512;
       trailer = boot_signature;
@@ -7273,7 +6802,6 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
   compiler_profile_add(&profile, PROFILE_PHASE_WRITE_OUTPUT, phase_start);
 
-  // Generate debug information files if requested
   compiler_set_phase(PROFILE_PHASE_DEBUG_INFO);
   phase_start = compiler_profile_begin(&profile);
   if (debug_info) {
@@ -7332,8 +6860,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     printf("Successfully compiled '%s' to '%s'\n", input_filename,
            output_filename);
   } else if (error_reporter->count > 0) {
-    // Surface non-fatal diagnostics (e.g. circular/duplicate import warnings)
-    // even on successful compilation.
     error_reporter_print_errors(error_reporter);
   }
 
@@ -7346,14 +6872,8 @@ cleanup:
   }
   ir_twins_snapshots_free(twin_snapshots);
   twin_snapshots = NULL;
-  // Clean up resources
   compiler_set_phase(PROFILE_PHASE_CLEANUP);
   phase_start = compiler_profile_begin(&profile);
-  /* compile_file runs once per process and the caller exits right after
-   * linking, so the recursive AST/IR/type/symbol teardown (hundreds of ms on
-   * large inputs) buys nothing: leave those to process exit by default.
-   * METTLE_FULL_CLEANUP=1 restores the deep teardown for leak-hunting under
-   * sanitizers or heap tooling. */
   if (getenv("METTLE_FULL_CLEANUP")) {
     if (program)
       ast_destroy_node(program);
@@ -7638,7 +7158,6 @@ char *read_file(const char *filename) {
     return NULL;
   }
 
-  // Get file size
   if (fseek(file, 0, SEEK_END) != 0) {
     fclose(file);
     return NULL;
@@ -7653,7 +7172,6 @@ char *read_file(const char *filename) {
     return NULL;
   }
 
-  // Allocate buffer and read file
   char *buffer = malloc(size + 1);
   if (!buffer) {
     fclose(file);

@@ -1,17 +1,5 @@
 #include "ir_optimize_internal.h"
 
-/* Target-neutral automatic GPU staging.
- *
- * This pass deliberately recognizes semantics, not source spellings: an
- * ordinary typed global LOAD immediately consumed by a workgroup STORE, one
- * or more times, followed in the same straight-line region by an acquire+
- * release workgroup barrier. It proves address-space provenance, natural
- * transaction alignment, single use of every loaded value, and the absence of
- * intervening memory/control effects before replacing the pairs with a
- * balanced ASYNC_COPY/COMMIT ... WAIT/BARRIER region. Backends remain free to
- * implement the neutral operations natively or synchronously.
- */
-
 typedef struct {
   MtlcAddressSpace space;
   int aligned;
@@ -104,8 +92,6 @@ static int gpu_offset_divisible(const IRFunction *function, size_t before,
     return gpu_offset_divisible(function, producer_index, variable, remaining,
                                 depth + 1);
   }
-  /* Transactions are powers of two. Let two non-constant factors contribute
-   * complementary powers when the IR proves both. */
   for (unsigned left = 2; left <= divisor; left <<= 1) {
     unsigned right = divisor / left;
     if (gpu_offset_divisible(function, producer_index, &producer->lhs, left,
@@ -374,7 +360,7 @@ int ir_promote_gpu_async_staging_pass(IRFunction *function, int *changed) {
     if (function->instructions[i].op == IR_OP_ASYNC_COPY ||
         function->instructions[i].op == IR_OP_ASYNC_COMMIT ||
         function->instructions[i].op == IR_OP_ASYNC_WAIT)
-      return 1; /* Do not splice into an explicit user-managed group state. */
+      return 1;
 
   for (size_t i = 0; i < function->instruction_count;) {
     if (function->instructions[i].op != IR_OP_LOAD) {
@@ -494,7 +480,7 @@ int ir_promote_gpu_async_staging_pass(IRFunction *function, int *changed) {
             NULL,
             "neutral ASYNC_COPY/COMMIT/WAIT IR preserves synchronous fallback semantics");
       }
-      i = barrier_index + 3; /* inserted commit + wait + original barrier */
+      i = barrier_index + 3;
     } else {
       i++;
     }

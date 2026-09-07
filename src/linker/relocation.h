@@ -13,4 +13,4 @@ int link_apply_relocations(LinkResolution *resolution,
                            const LinkRelocationOptions *options,
                            char **error_message_out);
 
-#endif // RELOCATION_H
+#endif

@@ -73,10 +73,6 @@ static int ir_try_lower_memcpy_call(IRFunction *function, size_t index,
     return 1;
   }
 
-  /* Only specialize when the byte count is provably constant at this call
-   * site. Do not consult loop-local symbol values (@chunk, etc.): the
-   * symbol-int map can report a stale constant from an earlier assignment on
-   * a different control-flow path. */
   if (!ir_try_resolve_memcpy_size_const(function, index, &call->arguments[2],
                                       &byte_count) ||
       byte_count <= 0 || byte_count > 8192) {

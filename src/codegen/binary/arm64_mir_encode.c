@@ -4,32 +4,27 @@
 
 Arm64Cond arm64_cond_from_x86_cc(unsigned char x86_cc) {
   switch (x86_cc & 0x0F) {
-  case 0x0: return ARM64_VS; /* O  */
-  case 0x1: return ARM64_VC; /* NO */
-  case 0x2: return ARM64_CC; /* B/C   unsigned <  */
-  case 0x3: return ARM64_CS; /* AE/NC unsigned >= */
-  case 0x4: return ARM64_EQ; /* E/Z  */
-  case 0x5: return ARM64_NE; /* NE   */
-  case 0x6: return ARM64_LS; /* BE   unsigned <= */
-  case 0x7: return ARM64_HI; /* A    unsigned >  */
-  case 0x8: return ARM64_MI; /* S    */
-  case 0x9: return ARM64_PL; /* NS   */
-  case 0xC: return ARM64_LT; /* L    signed <  */
-  case 0xD: return ARM64_GE; /* GE   signed >= */
-  case 0xE: return ARM64_LE; /* LE   signed <= */
-  case 0xF: return ARM64_GT; /* G    signed >  */
-  default: return ARM64_AL;  /* P/NP have no AArch64 equivalent */
+  case 0x0: return ARM64_VS;
+  case 0x1: return ARM64_VC;
+  case 0x2: return ARM64_CC;
+  case 0x3: return ARM64_CS;
+  case 0x4: return ARM64_EQ;
+  case 0x5: return ARM64_NE;
+  case 0x6: return ARM64_LS;
+  case 0x7: return ARM64_HI;
+  case 0x8: return ARM64_MI;
+  case 0x9: return ARM64_PL;
+  case 0xC: return ARM64_LT;
+  case 0xD: return ARM64_GE;
+  case 0xE: return ARM64_LE;
+  case 0xF: return ARM64_GT;
+  default: return ARM64_AL;
   }
 }
 
-/* The two IP scratch registers (x16/x17) are reserved for materializing
- * immediates that do not fit an instruction's inline field. */
 #define SCRATCH0 ARM64_X16
 #define SCRATCH1 ARM64_X17
 
-/* Forward-referenceable label map: MIR labels are strings; the emit layer uses
- * integer ids, so intern each name to an id (creating on first sight so a
- * forward branch can reference a not-yet-defined label). */
 typedef struct {
   const char *names[256];
   int ids[256];
@@ -66,7 +61,6 @@ static void emit_mov_imm(Arm64Emit *e, Arm64Reg rd, uint64_t v) {
   }
 }
 
-/* Resolve an operand to a register, materializing an immediate into `scratch`. */
 static Arm64Reg op_reg(Arm64Emit *e, const MirOperand *op, Arm64Reg scratch) {
   if (op->kind == MIR_OPK_PHYS || op->kind == MIR_OPK_VREG) {
     return (Arm64Reg)(op->kind == MIR_OPK_PHYS ? op->phys : op->vreg);
@@ -84,8 +78,6 @@ static int imm_fits_u12(const MirOperand *op) {
   return op->kind == MIR_OPK_IMM && op->imm >= 0 && op->imm <= 4095;
 }
 
-/* dst = a OP b for the add/sub family, using the immediate form when b is a
- * small unsigned immediate, otherwise the register form. */
 static void alu_addsub(Arm64Emit *e, int is_sub, Arm64Reg dst, Arm64Reg a,
                        const MirOperand *b) {
   if (imm_fits_u12(b)) {
@@ -180,13 +172,13 @@ int arm64_mir_encode_seq(Arm64Emit *e, const MirInst *insns, size_t count) {
       arm64_emit_b(e, label_id(e, &m, in->dst.sym));
       break;
 
-    case MIR_JCC: /* test a; cc -> label  ==  cmp a,#0 ; b.cond label */
+    case MIR_JCC:
       arm64_emit_word(e, arm64_cmp_imm(1, a, 0, 0));
       arm64_emit_bcond(e, arm64_cond_from_x86_cc(in->cc),
                        label_id(e, &m, in->dst.sym));
       break;
 
-    case MIR_CMPBR: /* cmp a,b ; cc -> label */
+    case MIR_CMPBR:
       if (imm_fits_u12(&in->b)) {
         arm64_emit_word(e, arm64_cmp_imm(1, a, (uint32_t)in->b.imm, 0));
       } else {
@@ -200,7 +192,7 @@ int arm64_mir_encode_seq(Arm64Emit *e, const MirInst *insns, size_t count) {
       arm64_emit_word(e, arm64_tst(1, a, op_reg(e, &in->b, SCRATCH0)));
       break;
 
-    case MIR_CMOVCC: /* dst <- a if cc, else dst keeps its value */
+    case MIR_CMOVCC:
       arm64_emit_word(e, arm64_csel(1, dst, op_reg(e, &in->a, SCRATCH0), dst,
                                     arm64_cond_from_x86_cc(in->cc)));
       break;
@@ -222,7 +214,6 @@ int arm64_mir_encode_seq(Arm64Emit *e, const MirInst *insns, size_t count) {
 
     case MIR_IDIV:
     case MIR_DIV: {
-      /* dst = a / b, or a % b when in->cc is set (the x86 RDX-result flag). */
       int uns = (in->op == MIR_DIV) || in->is_unsigned;
       Arm64Reg ar = op_reg(e, &in->a, SCRATCH0);
       Arm64Reg br = op_reg(e, &in->b, SCRATCH1);
@@ -248,8 +239,6 @@ int arm64_mir_encode_seq(Arm64Emit *e, const MirInst *insns, size_t count) {
       break;
 
     default:
-      /* Numeric, not mir_opcode_name(): this file is linked on its own by
-       * tests/arm64_emit_test.c, and naming opcodes would drag in mir.c. */
       arm64_fail(e, "MIR opcode %d has no AArch64 lowering", (int)in->op);
       break;
     }
@@ -258,16 +247,10 @@ int arm64_mir_encode_seq(Arm64Emit *e, const MirInst *insns, size_t count) {
   return e->error ? 0 : arm64_emit_finalize(e);
 }
 
-/* ---- vreg path: stack-home every value, consume mir_lower output --------- */
-
-/* Scratch registers for the load-op-store model (volatile temps, distinct from
- * the x16/x17 immediate-materialization scratch). */
 #define VREG_A ARM64_X9
 #define VREG_B ARM64_X10
 #define VREG_D ARM64_X11
 
-/* Load an operand into `scratch`: a vreg from its frame slot, an immediate via
- * movz/movk, or a physical register passed through. */
 static Arm64Reg vload(Arm64Emit *e, const MirOperand *op, Arm64Reg scratch) {
   if (op->kind == MIR_OPK_VREG) {
     arm64_emit_word(e, arm64_ldr_imm(1, scratch, ARM64_SP, 8 * op->vreg));
@@ -301,7 +284,6 @@ int arm64_mir_encode_vregs(Arm64Emit *e, const MirInst *insns, size_t count,
   if (!arm64_emit_prologue(e, frame, NULL, 0)) {
     return 0;
   }
-  /* Home incoming parameters x0.. into their vreg slots (vregs 0..nparams-1). */
   for (int i = 0; i < nparams && i < 8; i++) {
     arm64_emit_word(e, arm64_str_imm(1, (Arm64Reg)(ARM64_X0 + i), ARM64_SP,
                                      8 * i));
@@ -399,8 +381,6 @@ int arm64_mir_encode_vregs(Arm64Emit *e, const MirInst *insns, size_t count,
       break;
 
     default:
-      /* Numeric, not mir_opcode_name(): this file is linked on its own by
-       * tests/arm64_emit_test.c, and naming opcodes would drag in mir.c. */
       arm64_fail(e, "MIR opcode %d has no AArch64 lowering", (int)in->op);
       break;
     }

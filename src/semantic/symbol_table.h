@@ -17,10 +17,6 @@ typedef enum {
   TYPE_UINT32,
   TYPE_UINT64,
   TYPE_BOOL,
-  /* A one-byte character. Byte-identical to uint8 and it widens into every
-   * wider integer the same way, so character arithmetic needs no ceremony.
-   * The distinction is what interpolation reads: "{c}" writes the character,
-   * where a uint8 would write its number. */
   TYPE_CHAR,
   TYPE_FLOAT32,
   TYPE_FLOAT64,
@@ -30,23 +26,16 @@ typedef enum {
   TYPE_FUNCTION_POINTER,
   TYPE_POINTER,
   TYPE_ARRAY,
-  TYPE_SLICE, /* fat pointer {ptr, len}; element is base_type, length is runtime */
+  TYPE_SLICE,
   TYPE_STRUCT,
   TYPE_ENUM,
   TYPE_TAGGED_ENUM,
   TYPE_VOID,
-  /* Compile-time only. A TypeRef / FieldRef value has this type. There is no
-   * matching MtlcTypeKind: these never reach the backend. */
   TYPE_TYPE,
   TYPE_FIELD,
-  /* A `.fields`-style comptime sequence. Answers `len` and `[i]`; a program
-   * can observe one but never hold one. */
   TYPE_SEQUENCE
 } TypeKind;
 
-/* Where a pointer's data lives on a device. A frontend type carries it so the
- * spelling `T global*` survives into the backend descriptor, where the GPU
- * emitters read it. DEVICE_SPACE_NONE is an ordinary host pointer. */
 typedef enum {
   DEVICE_SPACE_NONE = 0,
   DEVICE_SPACE_GENERIC,
@@ -56,8 +45,6 @@ typedef enum {
   DEVICE_SPACE_LOCAL
 } DeviceSpace;
 
-/* How a static device view stores its elements. `float16[128, 64] layout row`
- * and its siblings; the names live in std/gpu as data and resolve to these. */
 typedef enum {
   VIEW_LAYOUT_NONE = 0,
   VIEW_LAYOUT_ROW,
@@ -74,34 +61,20 @@ typedef enum {
 typedef struct Type {
   TypeKind kind;
   char *name;
-  /* `volatile T`: reading or writing a value of this type is observable in
-   * itself. No access may be removed, merged with another, reordered against
-   * another volatile access, or served from a register. */
   int is_volatile;
   size_t size;
   size_t alignment;
-  struct Type *base_type; // For pointers and arrays
-  size_t array_size;      // For arrays
+  struct Type *base_type;
+  size_t array_size;
   size_t view_rank;
-  /* `T global*`, `T shared*`, `T constant*`, `T local*`: the space the data
-   * this pointer, slice or view names lives in. A slice and a view carry the
-   * space of their data pointer. */
   unsigned char device_space;
-  /* `align(N)`: the byte alignment the pointed-to address is proven to have.
-   * 0 means only the element type's own alignment is known. */
   size_t declared_align;
-  /* The layout a static view's elements are stored in. */
   unsigned char view_layout;
-  /* interleave(k) and the fragment forms carry one parameter. */
   unsigned short view_layout_param;
-  /* Static extents for `T[128, 64]`. A zero extent is a runtime one. */
   size_t view_extents[4];
-  struct Type **fn_param_types; // For function pointers
-  size_t fn_param_count;        // For function pointers
-  struct Type *fn_return_type;  // For function pointers
-  // For a capturing closure: the synthesized environment struct type. NULL for
-  // a thin function pointer. The closure VALUE is an 8-byte pointer to a heap
-  // record whose field 0 is the code pointer and remaining fields are captures.
+  struct Type **fn_param_types;
+  size_t fn_param_count;
+  struct Type *fn_return_type;
   struct Type *closure_env;
   const char **fn_effects;
   size_t fn_effect_count;
@@ -110,43 +83,28 @@ typedef struct Type {
   size_t fn_require_count;
   const char *fn_effect_signature;
 
-  // Struct-specific fields. Names are interned and live for the compile;
-  // do not strdup them. Layout (byte/bit offsets) is computed in the frontend
-  // by type_compute_layout so const eval can read it.
   char **field_names;
   struct Type **field_types;
   size_t *field_offsets;
-  uint32_t *field_bit_offsets; /* bit position within the storage unit */
-  uint32_t *field_bit_widths;  /* 0 = whole field, not a bitfield */
+  uint32_t *field_bit_offsets;
+  uint32_t *field_bit_widths;
   size_t field_count;
 
-  // Tagged enum variant info (TYPE_TAGGED_ENUM only)
   char **tagged_variant_names;
-  int *tagged_variant_tags;              // discriminant value per variant
-  struct Type **tagged_variant_payloads; // payload type per variant (NULL = none)
+  int *tagged_variant_tags;
+  struct Type **tagged_variant_payloads;
   size_t tagged_variant_count;
 
-  // Plain TYPE_ENUM members (interned names + integer values). Tagged enums
-  // keep their own arrays above; type_enum_variant_at reads the right one.
   char **enum_member_names;
   long long *enum_member_values;
   size_t enum_member_count;
-  size_t tagged_data_offset;   // byte offset of the data union inside the struct
-  size_t tagged_data_size;     // size of the data union
+  size_t tagged_data_offset;
+  size_t tagged_data_size;
 
-  // Template info: for un-instantiated generic enum templates
-  char *generic_template_name; // base name e.g. "Option" (NULL if not generic)
+  char *generic_template_name;
 
-  /* Index in the type checker's type table once interned. UINT32_MAX means
-   * the type has not been interned yet. TypeRef stores this index. */
   uint32_t type_table_index;
 
-  /* Module-qualified spelling for a user-declared type, e.g. "std/net.Point",
-   * interned. This is what reflection's `.name` reports, because a bare name
-   * cannot distinguish two modules that both declare `Point` and there are no
-   * compile-time string operations to recover the module from. NULL for
-   * builtins and for structural types (pointers, arrays), whose `name` is
-   * already unambiguous. */
   char *qualified_name;
   struct Type *refined_base;
   struct ASTNode *refinement;
@@ -154,23 +112,9 @@ typedef struct Type {
   int refine_has_range;
   long long refine_min;
   long long refine_max;
-  /* The predicate names a binding that is not in scope where the type is
-     declared, so it speaks about a relation between this value and something
-     the use site supplies: `type Index = uint32 where value < buf.length;`.
-     A relational type has no static interval; every fact it carries is read at
-     the site, in that scope, and refused there when the name is not in it. */
   int refine_relational;
   const char *refine_relation_name;
-  /* The predicate is `uniform(value)`: the value is the same in every work
-     item of the group. It is not an interval, so it has its own flag and its
-     own prover; what discharges it is the dependence analysis in
-     type_checker_uniform.c. */
   int refine_uniform;
-  /* A float predicate carries an interval and the rounding it admits. The
-     error term is what makes the interval usable by a pass that reassociates:
-     a rewrite is allowed only where the bound still holds once the term is
-     added, so a declared bound is a licence the compiler earns instead of one
-     it takes. */
   int refine_has_frange;
   double refine_fmin;
   double refine_fmax;
@@ -186,10 +130,6 @@ typedef struct Scope {
   struct Symbol **symbols;
   size_t symbol_count;
   size_t symbol_capacity;
-  /* Open-addressing hash index over `symbols`, keyed by name. Stores
-   * (symbol_index + 1); 0 marks an empty bucket. Lets symbol_table_lookup and
-   * the declare-time duplicate check avoid a linear strcmp scan per query.
-   * Built lazily once a scope grows past a small threshold. */
   size_t *name_index;
   size_t name_index_bucket_count;
 } Scope;
@@ -212,74 +152,43 @@ typedef struct Symbol {
   Type *type;
   Scope *scope;
   int is_initialized;
-  int is_forward_declaration; // For functions that are declared but not defined
-  int is_extern;              // For extern declarations (C interop)
-  int is_immutable;           // For local `const`: reassignment is rejected
-  int is_address_space_binding; // Fixed GPU storage binding; elements stay mutable
-  MtlcAddressSpace address_space; // Neutral GPU storage provenance when known
-  int is_builtin;             // Compiler-provided (assert/assert_eq test builtins)
+  int is_forward_declaration;
+  int is_extern;
+  int is_immutable;
+  int is_address_space_binding;
+  MtlcAddressSpace address_space;
+  int is_builtin;
   int is_rule;
-  /* SYMBOL_FUNCTION declared with `kernel`: a GPU entry point rather than an
-   * ordinary function. On the host side an `extern kernel` declaration carries
-   * the device signature, so `dispatch` can type-check its arguments and size
-   * its own grid; kernel_block mirrors `kernel(block = ...)`, all zero when
-   * the declaration omits it. */
   int is_kernel;
   int kernel_block[3];
   int kernel_threads_per_item;
-  char *link_name;            // Link-time symbol name for extern declarations
-  /* Declaration site, for "previous declaration here" / "defined here"
-     diagnostic notes. Zero line when unknown. */
+  char *link_name;
   size_t decl_line;
   size_t decl_column;
   const char *decl_file;
-  /* Set on every scope-chain lookup; drives unused-variable warnings. */
   int is_used;
-  /* A numeric const keeps its folded value here even when it needs normal
-   * storage, such as a local float const. */
   int has_constant_value;
   int constant_is_float;
   long long constant_integer_value;
   double constant_float_value;
-  /* What this function's body proved about the value it returns, gathered at
-     every `return` under the guards in force there. `post_state` is 0 for a
-     function whose returns have not been seen, 1 while its body is being
-     checked, 2 when the union below is final, and 3 when a return defeated
-     the union and nothing can be said. Read at call sites by the
-     declared-type prover; never written by an annotation. */
   int post_state;
   int post_has_min;
   int post_has_max;
   long long post_min;
   long long post_max;
-  /* How this binding moves, worked out once. The scan behind it walks the
-     whole function body, and the prover asks about the same binding many
-     times, so the answer is kept here and not recomputed. 0 = not yet asked,
-     1 = answered. */
   int move_computed;
   int move_direction;
   long long move_step;
   struct ASTNode *move_declaration;
   struct ASTNode *move_addend;
-  /* Folded compile-time value, including TypeRef / FieldRef. Numeric consts
-   * also keep the fields above so existing integer/float folders stay simple. */
   ComptimeValue comptime_value;
-  /* The aggregate literal a `const` table was written as, borrowed from the
-   * program. `comptime for` reads the rows out of it; nothing else does. */
   struct ASTNode *constant_initializer;
-  /* This symbol is a `comptime for` binding, which exists only while the body
-   * it binds is being checked. A scalar one is baked into the nodes that read
-   * it, because there is nothing left to read afterwards. */
   int is_comptime_binding;
   union {
     struct {
       int register_id;
       int memory_offset;
       int is_in_register;
-      /* Set on SYMBOL_PARAMETER when the parameter is passed indirectly
-       * per the Microsoft x64 ABI (struct >8 bytes or non-power-of-2 <=8).
-       * memory_offset then names a home slot holding a POINTER to the
-       * struct, not the struct itself. See docs/struct-abi-design.md. */
       int is_indirect_param;
     } variable;
     struct {
@@ -287,17 +196,15 @@ typedef struct Symbol {
       Type **parameter_types;
       size_t parameter_count;
       Type *return_type;
-      /* The last parameter gathers: a call may pass any number of its element
-       * type there, or one slice of them. */
       int is_variadic;
     } function;
     struct {
       long long value;
     } constant;
     struct {
-      Type *enum_type;    // The concrete tagged enum type this constructs
-      int tag_value;      // Discriminant value for this variant
-      Type *payload_type; // NULL if variant carries no payload
+      Type *enum_type;
+      int tag_value;
+      Type *payload_type;
     } constructor;
   } data;
 } Symbol;
@@ -308,7 +215,6 @@ typedef struct SymbolTable {
   size_t next_scope_id;
 } SymbolTable;
 
-// Function declarations
 SymbolTable *symbol_table_create(void);
 void symbol_table_destroy(SymbolTable *table);
 int symbol_table_enter_scope(SymbolTable *table, ScopeType type);
@@ -323,11 +229,6 @@ int symbol_table_resolve_forward_declaration(SymbolTable *table,
 int symbol_table_validate_declaration(SymbolTable *table, Symbol *symbol);
 Scope *symbol_table_get_current_scope(SymbolTable *table);
 
-// Returns a heap-allocated name of the in-scope symbol most similar to
-// `name` (typo suggestion for "did you mean?"), or NULL if nothing is close
-// enough. Walks the full scope chain (current -> ... -> global). When
-// `kinds`/`kind_count` are provided, only symbols of those kinds are
-// considered; pass NULL/0 to consider every kind. Caller frees the result.
 char *symbol_table_suggest_similar(SymbolTable *table, const char *name,
                                    const SymbolKind *kinds, size_t kind_count);
 
@@ -338,7 +239,6 @@ Type *type_create_function_pointer(Type **param_types, size_t param_count,
                                    Type *return_type);
 void type_destroy(Type *type);
 
-// Struct type creation and manipulation functions
 Type *type_create_struct(const char *name, char **field_names,
                          Type **field_types, size_t field_count);
 Type *type_get_field_type(Type *struct_type, const char *field_name);
@@ -346,19 +246,18 @@ size_t type_get_field_offset(Type *struct_type, const char *field_name);
 size_t type_view_rank(const Type *type);
 int type_get_field_index(const Type *struct_type, const char *field_name);
 
-/* One ordered struct (or string) field, as the type table answers it. */
 typedef struct TypeField {
-  const char *name; /* interned */
+  const char *name;
   struct Type *type;
   size_t byte_offset;
   uint32_t bit_offset;
-  uint32_t bit_width; /* 0 = not a bitfield */
+  uint32_t bit_width;
 } TypeField;
 
 typedef struct TypeEnumVariant {
-  const char *name; /* interned */
+  const char *name;
   long long value;
-  struct Type *payload; /* NULL if the variant carries no payload */
+  struct Type *payload;
 } TypeEnumVariant;
 
 int type_alloc_fields(Type *type, size_t field_count);
@@ -377,16 +276,11 @@ size_t type_enum_variant_count(const Type *type);
 int type_enum_variant_at(const Type *type, size_t index,
                          TypeEnumVariant *out);
 
-/* Pointer -> pointee. Array/slice -> element. */
 Type *type_pointee(const Type *type);
 Type *type_element(const Type *type);
-/* Array: static length. Slice: 0 (length is runtime). Others: 0. */
 size_t type_len(const Type *type);
 int type_has_static_len(const Type *type);
 
-/* 1 if `type` is Type or Field: a comptime-only reflection type with no
- * machine layout. Pointers, arrays, and other wrappers are not themselves
- * comptime-only; use type_contains_comptime_only in the type checker. */
 int type_is_comptime_only(const Type *type);
 
-#endif // SYMBOL_TABLE_H
+#endif

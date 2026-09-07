@@ -8,4 +8,4 @@ const char *string_intern_n(const char *value, size_t length);
 int string_is_interned(const char *value);
 void string_intern_clear(void);
 
-#endif // STRING_INTERN_H
+#endif

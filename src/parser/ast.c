@@ -71,18 +71,6 @@ ASTNode *ast_create_node(ASTNodeType type, SourceLocation location) {
   return node;
 }
 
-/* Cloning, one function per node kind.
- *
- * These were a single switch with a case per kind, 950 lines of it, past
- * what a reader can hold and past what the complexity gate allows. A handler
- * fills `clone` from `node` and hands back the node to use: normally `clone`
- * itself, but a kind whose constructor builds the node outright returns that
- * instead, having released `clone`. NULL means the clone failed, and the
- * handler has released `clone` by then - it owns it either way.
- *
- * A kind with no payload to copy has no handler: the table holds NULL there
- * and the bare node stands, which is what the switch's default did. */
-
 static ASTNode *ast_clone_program(ASTNode *clone, const ASTNode *node) {
   Program *src = (Program *)node->data;
   Program *dst = malloc(sizeof(Program));
@@ -122,18 +110,12 @@ static ASTNode *ast_clone_var_declaration(ASTNode *clone, const ASTNode *node) {
       src->initializer ? ast_clone_node(src->initializer) : NULL;
   if (dst->initializer)
     ast_add_child(clone, dst->initializer);
-  /* Not a child: a composed name is compile-time material that the expander
-   * consumes, and every pass that walks children runs after it is gone. */
   dst->composed_name =
       src->composed_name ? ast_clone_node(src->composed_name) : NULL;
   clone->data = dst;
   return clone;
 }
 
-/* A method carries a FunctionDeclaration like the other two. It used to fall
-* to the default case and clone to a node with NULL data, which every later
-* pass then skipped as malformed -- that is how a monomorphized generic
-* struct lost its methods. */
 static ASTNode *ast_clone_method_declaration(ASTNode *clone, const ASTNode *node) {
   FunctionDeclaration *src = (FunctionDeclaration *)node->data;
   FunctionDeclaration *dst = malloc(sizeof(FunctionDeclaration));
@@ -159,10 +141,6 @@ static ASTNode *ast_clone_method_declaration(ASTNode *clone, const ASTNode *node
   dst->type_params = ast_copy_string_array(src->type_params, src->type_param_count);
   dst->type_param_traits =
       ast_copy_string_array(src->type_param_traits, src->type_param_count);
-  /* Decorator flags. These were never copied (the struct is malloc'd, so
-   * clones -- notably monomorphized generics -- carried UNINITIALIZED
-   * decorator flags). Mostly latent until `@inline!`/`@noalloc` made a
-   * garbage flag a hard compile error. */
   dst->is_inline = src->is_inline;
   dst->is_inline_contract = src->is_inline_contract;
   dst->is_noinline = src->is_noinline;
@@ -717,11 +695,6 @@ static ASTNode *ast_clone_aggregate_literal(ASTNode *clone, const ASTNode *node)
   if (dst->repeat_count) {
     ast_add_child(clone, dst->repeat_count);
   }
-  /* The folded image is re-derived when the clone is checked; a clone made
-   * before checking (monomorphization) has nothing to copy anyway. The runtime
-   * elements go with it: they name nodes in the tree that was cloned from, so
-   * carrying them over would point the clone's stores at another tree's
-   * expressions. */
   dst->image = NULL;
   dst->image_size = 0;
   dst->relocs = NULL;
@@ -1243,13 +1216,11 @@ void ast_destroy_node(ASTNode *node) {
   if (!node)
     return;
 
-  // Free children
   for (size_t i = 0; i < node->child_count; i++) {
     ast_destroy_node(node->children[i]);
   }
   free(node->children);
 
-  // Free node-specific data
   switch (node->type) {
   case AST_PROGRAM: {
     Program *program = (Program *)node->data;
@@ -1374,7 +1345,6 @@ void ast_destroy_node(ASTNode *node) {
         for (size_t i = 0; i < enum_decl->variant_count; i++) {
           ast_free_string(enum_decl->variants[i].name);
           ast_free_string(enum_decl->variants[i].payload_type);
-          // the 'value' node is a child of the enum decl node, freed auto
         }
         free(enum_decl->variants);
       }
@@ -1389,12 +1359,10 @@ void ast_destroy_node(ASTNode *node) {
   case AST_MATCH_STATEMENT: {
     MatchStatement *match = (MatchStatement *)node->data;
     if (match) {
-      // expression and arm bodies are children, freed automatically
       if (match->arms) {
         for (size_t i = 0; i < match->arm_count; i++) {
           ast_free_string(match->arms[i].variant_name);
           ast_free_string(match->arms[i].binding_name);
-          // body node is a child, freed automatically
         }
         free(match->arms);
       }
@@ -1560,8 +1528,6 @@ void ast_destroy_node(ASTNode *node) {
   case AST_AGGREGATE_LITERAL: {
     AggregateLiteral *literal = (AggregateLiteral *)node->data;
     if (literal) {
-      /* The element nodes are children and were already freed above; only the
-       * arrays and the field-name strings belong to this struct. */
       for (size_t i = 0; i < literal->element_count; i++) {
         ast_free_string(literal->field_names ? literal->field_names[i] : NULL);
       }
@@ -1634,7 +1600,6 @@ void ast_destroy_node(ASTNode *node) {
   case AST_COMPTIME_FOR: {
     ComptimeForStatement *comptime_for = (ComptimeForStatement *)node->data;
     if (comptime_for) {
-      /* `sequence` and `body` are children; the child walk frees them. */
       ast_free_string(comptime_for->binding_name);
       free(comptime_for);
     }
@@ -1696,7 +1661,6 @@ void ast_destroy_node(ASTNode *node) {
     break;
   }
   default:
-    // For other node types, assume data is managed by children or is NULL
     break;
   }
 
@@ -1716,7 +1680,6 @@ void ast_add_child(ASTNode *parent, ASTNode *child) {
   parent->child_count++;
 }
 
-// Specific node creation functions
 ASTNode *ast_create_program() {
   SourceLocation location = {0, 0, NULL};
   ASTNode *node = ast_create_node(AST_PROGRAM, location);
@@ -2750,7 +2713,6 @@ ASTNode *ast_create_method_call(ASTNode *object, const char *method_name,
     call_expr->arguments = NULL;
   }
 
-  // The object is also a child for proper memory management
   if (object) {
     ast_add_child(node, object);
   }
@@ -2797,9 +2759,6 @@ int ast_new_expression_add_extent(ASTNode *node, ASTNode *extent) {
   return 1;
 }
 
-/* Drop a node's claim on its children without freeing them. The compiler uses
- * it where a synthesized node borrows expressions another node already owns:
- * a walk still reaches them through the owner, and only one destructor does. */
 void ast_release_children(ASTNode *node) {
   if (!node) {
     return;
@@ -2835,7 +2794,7 @@ ASTNode *ast_create_field_assignment(ASTNode *target, ASTNode *value,
     return NULL;
   }
 
-  assignment->variable_name = NULL; // Not a simple variable assignment
+  assignment->variable_name = NULL;
   assignment->value = value;
   assignment->target = target;
   assignment->targets = NULL;
@@ -2887,11 +2846,6 @@ ASTNode *ast_create_for_statement(ASTNode *initializer, ASTNode *condition,
   return node;
 }
 
-/* Collapse a member access in place into an integer literal, keeping the
- * node's address and location. Const eval uses this to bake a compile-time
- * answer into the tree at the point it is known: a `comptime for` binding is
- * only in scope while its expansion is checked, so no later pass could work
- * the value out again. The node pointer is kept because parents hold it. */
 int ast_fold_member_access_to_int(ASTNode *node, long long value) {
   if (!node || (node->type != AST_MEMBER_ACCESS &&
                 node->type != AST_INDEX_EXPRESSION &&
@@ -2928,8 +2882,6 @@ int ast_fold_member_access_to_int(ASTNode *node, long long value) {
   return 1;
 }
 
-/* Same shape as the integer fold, for a float a compile-time query answered
- * with. */
 int ast_fold_member_access_to_float(ASTNode *node, double value) {
   NumberLiteral *literal = NULL;
   size_t i;
@@ -2968,9 +2920,6 @@ int ast_fold_member_access_to_float(ASTNode *node, double value) {
   return 1;
 }
 
-/* `ident("read_", f.name)` where a value goes, folded to the name it composed.
- * Same shape as the folds above: the node becomes what it stood for, so nothing
- * downstream has to know an `ident(...)` was ever there. */
 int ast_fold_call_to_identifier(ASTNode *node, const char *name) {
   if (!node || !name || node->type != AST_FUNCTION_CALL) {
     return 0;
@@ -3013,8 +2962,6 @@ int ast_fold_call_to_identifier(ASTNode *node, const char *name) {
   return 1;
 }
 
-/* Same shape as the integer fold above, for `.name`. The string is interned by
- * the caller, so the literal borrows it and the node owns nothing new. */
 int ast_fold_member_access_to_string(ASTNode *node, const char *value) {
   if (!node || !value || (node->type != AST_MEMBER_ACCESS &&
                           node->type != AST_INDEX_EXPRESSION &&

@@ -1,28 +1,5 @@
 #include "ir_optimize_internal.h"
 
-/* ---- congruent induction-variable elimination ----------------------------
- *
- * Several hand-unrolled kernels carry a fan of induction variables that are all
- * constant offsets of one another and step in lockstep, e.g. matmul's inner
- * loop:
- *
- *     b1_idx = b0_idx + 1; b2_idx = b0_idx + 2; b3_idx = b0_idx + 3;  // pre-loop
- *     while (k < N) { ... use b{0..3}_idx ...; b0_idx += N; b1_idx += N; ... }
- *
- * Throughout the loop b1_idx == b0_idx + 1 etc., so the b1..b3 variables are
- * redundant: each costs a load/add/store every iteration plus a live stack slot
- * (which, under the 7-register promotion budget, is what forces the hot
- * accumulators to spill). This pass replaces every in-loop read of a derived IV
- * with a fresh `base + C` recompute and deletes the derived IV's init and
- * increment. The recompute lands as `(base + C) << k; ptr + ...; load/store`,
- * which the backend's offset-scaled-address fold collapses into a single
- * displacement memory op, so the net effect is: 3 induction variables and
- * their per-iteration maintenance vanish, addresses gain a constant disp, and
- * register pressure drops by the eliminated IVs.
- *
- * Only runs under -O/--release (the whole optimizer is gated there), so the
- * differential fuzzer's unoptimized debug build is an independent oracle. */
-
 #define IR_CIV_MAX_GROUP 32
 
 static int ir_civ_operand_is_sym(const IROperand *op, const char *name) {
@@ -61,8 +38,6 @@ static int ir_civ_steps_match(const IROperand *a, const IROperand *b) {
   return 0;
 }
 
-/* Recognize `v = v + S` (or `v = S + v`): the canonical induction step. Returns
- * the stepped symbol name and a pointer to the step operand S. */
 static int ir_civ_is_self_add(const IRInstruction *in, const char **name_out,
                               const IROperand **step_out) {
   if (!in || in->op != IR_OP_BINARY || in->is_float || !in->text ||
@@ -85,8 +60,6 @@ static int ir_civ_is_self_add(const IRInstruction *in, const char **name_out,
   return 0;
 }
 
-/* Find a pre-loop init `v = base + C` (base a symbol, C an int constant) in
- * [0, label_idx). Fills base/offset and the init's index. */
 static int ir_civ_find_offset_init(const IRFunction *function, size_t label_idx,
                                    const char *v, const char **base_out,
                                    long long *offset_out, size_t *init_idx_out) {
@@ -115,8 +88,6 @@ static int ir_civ_find_offset_init(const IRFunction *function, size_t label_idx,
   return 0;
 }
 
-/* Count writes (BINARY/ASSIGN with dest == name) to a symbol across the whole
- * function; used to confirm a derived IV is written only by its init+step. */
 static size_t ir_civ_symbol_write_count(const IRFunction *function,
                                         const char *name) {
   size_t count = 0;
@@ -148,7 +119,6 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       continue;
     }
 
-    /* Locate the loop header label preceding this back-edge. */
     size_t label_idx = jump_idx;
     int have_label = 0;
     for (size_t li = 0; li < jump_idx; li++) {
@@ -164,7 +134,6 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       continue;
     }
 
-    /* Collect induction steps (v = v + S) in the loop body. */
     const char *iv_name[IR_CIV_MAX_GROUP];
     const IROperand *iv_step[IR_CIV_MAX_GROUP];
     size_t iv_count = 0;
@@ -183,9 +152,6 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       continue;
     }
 
-    /* For each IV, classify as derived (pre-loop init `v = base + C`, base a
-     * same-step IV, written only by init+step, dead outside the loop, used
-     * inside only as a plain lhs/rhs operand). */
     for (size_t d = 0; d < iv_count; d++) {
       const char *v = iv_name[d];
       const char *base = NULL;
@@ -199,9 +165,6 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
                                    &init_idx)) {
         continue;
       }
-      /* base must be a DIFFERENT, same-step IV in this loop and itself NOT
-       * derived from another (avoid chained rewrites referencing a base we are
-       * about to delete). */
       int base_is_group_member = 0;
       int base_is_derived = 0;
       for (size_t g = 0; g < iv_count; g++) {
@@ -213,7 +176,6 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       if (!base_is_group_member || strcmp(base, v) == 0) {
         continue;
       }
-      /* base must not itself have a `base = other + C` pre-loop init. */
       {
         const char *bb = NULL;
         long long bo = 0;
@@ -225,12 +187,9 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       if (base_is_derived) {
         continue;
       }
-      /* v written only by its init + its loop step. */
       if (ir_civ_symbol_write_count(function, v) != 2) {
         continue;
       }
-      /* No mention of v outside [label_idx, jump_idx] except its DECLARE_LOCAL
-       * and the init we will delete. */
       int ok = 1;
       for (size_t i = 0; i < function->instruction_count && ok; i++) {
         if (i >= label_idx && i <= jump_idx) {
@@ -250,14 +209,12 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       if (!ok) {
         continue;
       }
-      /* Inside the loop, every mention of v outside its own step must be a
-       * plain lhs/rhs read (no dest write, no argument use). */
       for (size_t i = label_idx + 1; i < jump_idx && ok; i++) {
         const IRInstruction *in = &function->instructions[i];
         const char *snm = NULL;
         const IROperand *sstep = NULL;
         if (ir_civ_is_self_add(in, &snm, &sstep) && strcmp(snm, v) == 0) {
-          continue; /* the step itself */
+          continue;
         }
         if (ir_civ_operand_is_sym(&in->dest, v)) {
           ok = 0;
@@ -274,7 +231,6 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
         continue;
       }
 
-      /* Accept this derived IV. */
       if (strlen(v) >= sizeof(derived_names[0]) ||
           strlen(base) >= sizeof(derived_base[0])) {
         continue;
@@ -290,16 +246,11 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
     return 1;
   }
 
-  /* Mutation pass: NOP every write to a derived IV (init + step), and replace
-   * each read with a freshly recomputed `base + C` temp. Names are matched
-   * (not indices), so the in-place insertions below can shift the array
-   * without invalidating the plan. */
   static unsigned long long civ_tmp_serial = 0;
   size_t i = 0;
   while (i < function->instruction_count) {
     IRInstruction *insn = &function->instructions[i];
 
-    /* Delete writes to derived IVs (their init and increment). */
     if ((insn->op == IR_OP_BINARY) && insn->dest.kind == IR_OPERAND_SYMBOL &&
         insn->dest.name) {
       int is_derived_dest = 0;
@@ -319,7 +270,6 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       }
     }
 
-    /* Replace a read of a derived IV (lhs/rhs) with a recomputed base+C. */
     int hit = -1;
     if (insn->lhs.kind == IR_OPERAND_SYMBOL && insn->lhs.name) {
       for (size_t d = 0; d < derived_count; d++) {
@@ -359,8 +309,6 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       if (!ir_function_insert_instruction(function, i, &recompute)) {
         return 0;
       }
-      /* insn shifted to i+1; repoint the operand(s) that named the derived IV
-       * to the new temp. */
       IRInstruction *moved = &function->instructions[i + 1];
       if (ir_civ_operand_is_sym(&moved->lhs, derived_names[d])) {
         ir_operand_destroy(&moved->lhs);
@@ -375,8 +323,6 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       if (changed) {
         *changed = 1;
       }
-      /* Re-examine the moved instruction (it may still read another derived
-       * IV); the inserted recompute reads only `base`, never a derived IV. */
       i++;
       continue;
     }

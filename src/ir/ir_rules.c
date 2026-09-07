@@ -16,11 +16,6 @@ void ir_rule_image_free(IRRuleImage *image) {
   memset(image, 0, sizeof(*image));
 }
 
-/* Which image a rule asks for. A rule takes exactly one argument and its type
- * is the question: `Program` is the checked program, `Machine` is what became
- * of it once it was code, `Trace` is what happened when it ran. The parameter
- * type is the whole dispatch; there is no second keyword and no decorator to
- * write. */
 IRRuleKind ir_rule_kind(const IRFunction *rule) {
   const char *type;
   if (!rule || !rule->is_rule || rule->parameter_count != 1 ||
@@ -228,9 +223,6 @@ static const IRRuleSite *match_site(const IRRuleImage *image,
   return NULL;
 }
 
-/* What a proposing rule asked for, kept until the build is done. Applying it
- * while the compiler is still reading the file would rewrite the ground under
- * the diagnostic that is printing. Nothing is written unless --fix asked. */
 typedef struct {
   char file[512];
   size_t line;
@@ -277,9 +269,6 @@ static int ir_rules_propose(const char *file, size_t line,
   return 1;
 }
 
-/* Apply what the rules proposed, one line each, and say what changed. A
- * proposal is ordinary Mettle the program wrote: the compiler puts it where the
- * rule said and compiles the result from scratch, with nothing exempted. */
 int ir_rules_apply_fixes(FILE *out) {
   int applied = 0;
   if (!g_apply_proposals || g_proposal_count == 0) {
@@ -608,10 +597,6 @@ static int run_one_rule(IRProgram *program, IRFunction *rule,
   return 1;
 }
 
-/* A rule is code the compiler does not trust, and a rule that answers
- * differently on two runs over the same program decided by accident. Under
- * `mettle test` every rule is run a second time in a fresh machine over a
- * freshly placed image, and a verdict that moved is reported. */
 static int rule_verdict_again(IRProgram *program, IRFunction *rule,
                               const IRRuleImage *image, long long fuel,
                               RuleVerdict *out, IRInterpStatus *out_status) {

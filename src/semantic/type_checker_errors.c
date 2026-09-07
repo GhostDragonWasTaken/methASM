@@ -1,14 +1,11 @@
-// Type checker: diagnostic emission helpers.
 #include "type_checker_internal.h"
 
 void type_checker_set_error(TypeChecker *checker, const char *format, ...) {
   if (!checker || !format)
     return;
 
-  // Free previous error message
   free(checker->error_message);
 
-  // Calculate required buffer size
   va_list args1, args2;
   va_start(args1, format);
   va_copy(args2, args1);
@@ -23,7 +20,6 @@ void type_checker_set_error(TypeChecker *checker, const char *format, ...) {
     return;
   }
 
-  // Allocate and format the message
   checker->error_message = malloc(size + 1);
   if (checker->error_message) {
     vsnprintf(checker->error_message, size + 1, format, args2);
@@ -32,8 +28,6 @@ void type_checker_set_error(TypeChecker *checker, const char *format, ...) {
   va_end(args2);
   checker->has_error = 1;
 }
-
-// Enhanced error reporting functions
 
 void type_checker_set_error_at_location(TypeChecker *checker,
                                         SourceLocation location,
@@ -47,7 +41,6 @@ void type_checker_set_error_at_location(TypeChecker *checker,
   va_list args;
   va_start(args, format);
 
-  // Calculate required buffer size
   va_list args_copy;
   va_copy(args_copy, args);
   int size = vsnprintf(NULL, 0, format, args_copy);
@@ -60,7 +53,6 @@ void type_checker_set_error_at_location(TypeChecker *checker,
     }
   }
 
-  // If we have an error reporter, add the error to it
   if (checker->error_reporter) {
     char *message = checker->error_message;
     SourceSpan span = source_span_from_location(location, 1);
@@ -71,8 +63,6 @@ void type_checker_set_error_at_location(TypeChecker *checker,
   va_end(args);
 }
 
-/* Width of the source text a node occupies, for full-token caret underlines.
-   Conservative: falls back to 1 when the width isn't recoverable. */
 size_t type_checker_node_span_length(const ASTNode *node) {
   if (!node || !node->data)
     return 1;
@@ -83,7 +73,7 @@ size_t type_checker_node_span_length(const ASTNode *node) {
   }
   case AST_STRING_LITERAL: {
     const StringLiteral *lit = (const StringLiteral *)node->data;
-    return lit->value ? strlen(lit->value) + 2 : 1; /* include quotes */
+    return lit->value ? strlen(lit->value) + 2 : 1;
   }
   case AST_NUMBER_LITERAL: {
     const NumberLiteral *num = (const NumberLiteral *)node->data;
@@ -187,8 +177,6 @@ int type_checker_reject_rawptr_element_use(TypeChecker *checker,
   return 1;
 }
 
-/* Print an integer bound the way the source would spell it: unsigned maxima
-   above INT64_MAX do not fit the signed formatter. */
 static void type_checker_format_bounds(const Type *type, char *out,
                                        size_t out_size) {
   long long min = 0;
@@ -270,8 +258,6 @@ void type_checker_report_assign_mismatch(TypeChecker *checker,
   type_checker_format_bounds(dest_type, bounds, sizeof(bounds));
 
   if (folds) {
-    /* The value is known and does not fit: naming it, and the range it missed,
-     * is the whole diagnostic. Nothing here is a guess. */
     int src_unsigned = src_type->kind == TYPE_UINT8 ||
                        src_type->kind == TYPE_UINT16 ||
                        src_type->kind == TYPE_UINT32 ||
@@ -322,9 +308,6 @@ void type_checker_report_assign_mismatch(TypeChecker *checker,
   }
 }
 
-/* Warn about locals declared in the current (about-to-close) scope that were
-   never read. `_`-prefixed names opt out; only the main compile unit is
-   checked so imported/stdlib code stays quiet. */
 void type_checker_mark_captures_used(TypeChecker *checker,
                                     const FunctionDeclaration *lam) {
   if (!checker || !lam || !lam->captured_names) {

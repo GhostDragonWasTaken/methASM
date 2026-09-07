@@ -1,16 +1,9 @@
-/* `--safe`: resolving the access marks lowering left behind.
- *
- * Every IR_OP_SAFETY_CHECK is either deleted, because the access provably
- * cannot leave its object, or rewritten into comparisons and safety intrinsics.
- * This follows scalar analysis and precedes vector recognition. */
 
 #include "ir_optimize_internal.h"
 #include "../ir_explain_safety.h"
 #include "../ir_safety.h"
 #include <time.h>
 
-/* Distinct from lowering's ".t%d" temps and from every label prefix the
- * recognizers match on, so a resolved check can never be mistaken for one. */
 #define SAFETY_TEMP_PREFIX ".safe"
 #define SAFETY_LABEL_PREFIX "ir_safe_ok_"
 
@@ -62,18 +55,11 @@ static int safety_env_flag(const char *name, int *cache) {
   return *cache;
 }
 
-/* METTLE_SAFETY_TRACE=1 prints why a proof gave up. A check that survives is
- * either a real limit of the analysis or a shape it should have recognized,
- * and from the outside those look identical: both are just a check that is
- * still there. Same purpose as the backend's mir_call_trace. */
 static int safety_trace_enabled(void) {
   static int state = -1;
   return safety_env_flag("METTLE_SAFETY_TRACE", &state);
 }
 
-/* METTLE_SAFETY_TIME=1 reports how long resolving took. Separate from the
- * trace because that prints a line per unproven access, which on a large input
- * costs far more than the work being measured. */
 static int safety_time_enabled(void) {
   static int state = -1;
   return safety_env_flag("METTLE_SAFETY_TIME", &state);
@@ -91,15 +77,12 @@ typedef struct {
   const IROperand *identity;
   long long diagnostic_size;
   long long size;
-  long long extent; /* IR_SAFETY_EXTENT_UNKNOWN when only the runtime knows */
+  long long extent;
   long long access_kind;
   const char *what;
   SourceLocation location;
 } SafetyAccess;
 
-/* Read a check's operands. Returns zero if the instruction is not shaped the
- * way lowering builds one, which leaves it to be copied through untouched
- * rather than silently mishandled. */
 static int safety_read(const IRInstruction *instruction, SafetyAccess *access) {
   if ((instruction->argument_count != IR_SAFETY_ARG_COUNT &&
        instruction->argument_count != IR_SAFETY_TRACKED_ARG_COUNT &&
@@ -128,8 +111,6 @@ static int safety_read(const IRInstruction *instruction, SafetyAccess *access) {
   access->location = instruction->location;
   return 1;
 }
-
-/* ---- emission helpers ------------------------------------------------------ */
 
 static int safety_emit_binary(IRInstructionVector *out, SourceLocation location,
                               const char *op_text, const char *dest_temp,
@@ -180,8 +161,6 @@ static int safety_emit_label(IRInstructionVector *out, SourceLocation location,
   return 1;
 }
 
-/* A call whose arguments are handed over by value. Each entry of `arguments`
- * is cloned, so the caller keeps ownership of what it passed in. */
 static int safety_emit_call(IRInstructionVector *out, SourceLocation location,
                             const char *callee, const IROperand *arguments,
                             size_t count) {
@@ -214,71 +193,29 @@ static int safety_emit_call(IRInstructionVector *out, SourceLocation location,
   return 1;
 }
 
-/* A loop, and what it does to its index when that can be read off the header.
- *
- * The two halves are separate because they answer different questions. Where a
- * loop starts and ends is enough to resolve a pointer once and compare against
- * it, and every loop has that. What its index does is needed to argue about
- * which elements it reaches, and plenty of loops do not say: `while (child <=
- * end)` in a sift-down steps nothing this can read. Refusing to record such a
- * loop at all, which is what the first version did, denied the cheap
- * transformation to exactly the code that needed it most. */
 typedef struct {
   size_t header_index;
   IRWhileLoopBounds bounds;
-  int has_index;        /* the fields below mean anything */
+  int has_index;
   const char *iv;
-  long long step;       /* constant, greater than zero */
-  long long adjust;     /* highest index reached is `bound + adjust` */
+  long long step;
+  long long adjust;
   const IROperand *bound;
   size_t step_first;
   size_t step_last;
 } SafetyLoopForm;
 
-/* Every loop in the function, in source order, so scanning it backwards finds
- * the innermost one containing a given instruction first.
- *
- * Built once per function because it used to be rebuilt per check: each one
- * scanned backwards over every preceding instruction hunting for a header, and
- * parsed each candidate forwards. On one function holding eight thousand
- * accesses that cost several seconds on its own, and grew faster than the
- * input did. */
 typedef struct {
   SafetyLoopForm *items;
   size_t count;
   size_t capacity;
 } SafetyLoopList;
 
-/* Innermost loop whose body holds `index`, or NULL. */
 static const SafetyLoopForm *safety_enclosing_loop(const SafetyLoopList *loops,
                                                   size_t index);
 
-/* ---- proving a check cannot fail ------------------------------------------- */
-/*
- * Deleting a check is a claim that the access can never leave its object, and
- * a wrong claim is a miscompile that reads as a safe program. So each proof
- * below establishes the whole range of offsets the access can take and
- * compares it against the extent; anything it cannot pin down exactly returns
- * zero and the check survives. Being wrong in that direction only costs
- * speed.
- */
-
-/* Fold an operand to a constant by walking back through what produced it.
- *
- * Needed because lowering scales every subscript through a multiply into a
- * fresh temp, so even `a[3]` reaches the check as a temp rather than as the
- * twelve it obviously is. The walk is deliberately shallow: this runs before
- * the optimizer's constant folding, and its job is to see through lowering's
- * own scaffolding, not to re-implement that pass. */
-/* Globals the program never writes, with the value they were given.
- *
- * A global `var` nothing ever assigns is a constant in all but spelling, and
- * that is how a dimension is usually written: `var N: int32 = 32;`. Read as
- * what it is, a stride of N is a known stride, which is the difference between
- * a loop's checks folding into one and staying where they are. Gathered once
- * per program, since the answer is a property of the whole of it. */
 typedef struct {
-  char **names;      /* owned, sorted */
+  char **names;
   long long *values;
   size_t count;
 } SafetyConstGlobals;
@@ -326,10 +263,6 @@ static int safety_constant_value(const IRFunction *function, size_t before,
     return safety_constant_value(function, before, &producer->lhs, depth + 1,
                                  out);
   }
-  /* A cast to a 64-bit integer cannot change what the value is, and the source
-   * writes them: this pass runs before the optimizer, so `idx + (int64)N` still
-   * carries the cast and a step of N would otherwise read as no step at all.
-   * The narrower targets are not read through, since those can change it. */
   if (producer->op == IR_OP_CAST) {
     if (!producer->text) {
       return 0;
@@ -358,8 +291,6 @@ static int safety_constant_value(const IRFunction *function, size_t before,
                              &rhs)) {
     return 0;
   }
-  /* Only the operators lowering uses to build an offset, and only where the
-   * result cannot overflow into a different answer than the machine gives. */
   if (strcmp(producer->text, "*") == 0) {
     if (lhs != 0 && (lhs > INT32_MAX || lhs < INT32_MIN || rhs > INT32_MAX ||
                      rhs < INT32_MIN)) {
@@ -379,7 +310,6 @@ static int safety_constant_value(const IRFunction *function, size_t before,
   return 0;
 }
 
-/* The offset is a constant the compiler already holds. */
 static int safety_prove_constant(const IRFunction *function, size_t check_index,
                                  const SafetyAccess *access) {
   if (access->extent == IR_SAFETY_EXTENT_UNKNOWN) {
@@ -396,11 +326,6 @@ static int safety_prove_constant(const IRFunction *function, size_t check_index,
   return offset <= access->extent - access->size;
 }
 
-/* Read an index as `variable + constant`, which is how `a[i]` and `a[i + 2]`
- * both arrive. A bare variable is the same thing with a zero constant. The
- * decomposition itself is the shared affine one; the elision proofs here
- * reason about the variable's own bounds, so only the coeff == 1 slice of
- * the general `coeff * name + addend` form is wanted. */
 static int safety_index_is_affine(const IRFunction *function, size_t before,
                                   const IROperand *index, const char **name_out,
                                   long long *addend_out) {
@@ -417,13 +342,6 @@ static int safety_index_is_affine(const IRFunction *function, size_t before,
   return 1;
 }
 
-/* The largest value an index can take, when that follows from the arithmetic
- * alone rather than from any loop.
- *
- * Masking is the case worth reading: `alpha[(bits >> 2) & 63]` cannot leave
- * [0, 63] whatever `bits` holds, because a non-negative mask clears every
- * higher bit including the sign. That is the shape of every table lookup, and
- * it bounds the access without knowing anything about the surrounding code. */
 static int safety_index_upper_bound(const IRFunction *function, size_t before,
                                     const IROperand *index, int depth,
                                     long long *upper_out) {
@@ -461,8 +379,6 @@ static int safety_index_upper_bound(const IRFunction *function, size_t before,
   return 0;
 }
 
-/* Read the index out of the multiply lowering emits for a subscript, and
- * report the largest value it can take. */
 static int safety_offset_scaling(const IRFunction *function, size_t check_index,
                                  const IROperand *offset,
                                  const IROperand **index_out,
@@ -478,12 +394,6 @@ static int safety_offset_upper_bound(const IRFunction *function,
       safety_index_upper_bound(function, check_index, index, 0, upper_out);
 }
 
-/* Read `(iv + addend) * stride` out of the instruction that produced the
- * offset. This is the shape lowering emits for every subscript: the index,
- * then a multiply by the element width. */
-/* Split `offset` into the index and the element width it is scaled by. The
- * index itself is left alone: what it is made of depends on which loop is
- * asking, so it is read separately, once per candidate. */
 static int safety_offset_scaling(const IRFunction *function, size_t check_index,
                                  const IROperand *offset,
                                  const IROperand **index_out,
@@ -504,8 +414,6 @@ static int safety_offset_scaling(const IRFunction *function, size_t check_index,
     *stride_out = producer->rhs.int_value;
     return 1;
   }
-  /* Lowering scales a power-of-two element width with a shift as often as a
-   * multiply, and the two mean the same thing here. */
   if (strcmp(producer->text, "<<") == 0 &&
       producer->rhs.kind == IR_OPERAND_INT && producer->rhs.int_value >= 0 &&
       producer->rhs.int_value < 32) {
@@ -513,10 +421,6 @@ static int safety_offset_scaling(const IRFunction *function, size_t check_index,
     *stride_out = 1LL << producer->rhs.int_value;
     return 1;
   }
-  /* A byte array scales by one, so lowering emits no scaling at all and the
-   * offset IS the index. Reading it that way costs nothing on the wider
-   * elements either: the coefficient the form comes back with is then in bytes
-   * rather than elements, and every use of it below is in bytes anyway. */
   *index_out = offset;
   *stride_out = 1;
   return 1;
@@ -533,9 +437,6 @@ static int safety_offset_is_scaled_symbol(const IRFunction *function,
          safety_index_is_affine(function, check_index, index, iv_out, addend_out);
 }
 
-/* Whether `symbol` is written anywhere in [start, end) outside the step's own
- * instructions. Used to confirm the only thing moving an induction variable
- * inside its loop is the step itself. */
 static int safety_symbol_written_between(const IRFunction *function,
                                          size_t start, size_t end,
                                          const char *symbol, size_t step_first,
@@ -554,11 +455,6 @@ static int safety_symbol_written_between(const IRFunction *function,
   return 0;
 }
 
-/* `<anything> = iv + <positive constant>`, the arithmetic half of a step.
- *
- * The constant is read through any widening the source wrote: this pass runs
- * before the optimizer, so `idx = idx + (int64)N` still has the cast in it and
- * a step of N reads as no step at all without looking past it. */
 static int safety_read_step_add(const IRFunction *function, size_t before,
                                 const IRInstruction *instruction,
                                 const char *iv, long long *step_out) {
@@ -577,18 +473,6 @@ static int safety_read_step_add(const IRFunction *function, size_t before,
   return 1;
 }
 
-/* Read how far the loop advances its index each iteration, and report which
- * instructions do it.
- *
- * The body is searched rather than just its last instruction, because a loop
- * often advances more than one counter and only one of them is the index this
- * access uses. Exactly one write to it is required, which is also what proves
- * nothing else in the body moves it.
- *
- * Two shapes, because this pass runs before the optimizer: lowering emits the
- * step as a pair, `t = i + 3` followed by `i = t`, and copy propagation folds
- * that into the single `i = i + 3` every recognizer downstream expects. Both
- * mean the same thing and both have to be read here. */
 static int safety_loop_step(const IRFunction *function,
                             const IRWhileLoopBounds *loop, const char *iv,
                             long long *step_out, size_t *step_first,
@@ -630,22 +514,13 @@ static int safety_loop_step(const IRFunction *function,
     return 0;
   }
   if (add_index <= loop->branch_index || add_index >= loop->jump_index) {
-    return 0; /* the arithmetic is not in this body, so it is not the step */
+    return 0;
   }
   *step_first = add_index;
   *step_last = write_index;
   return 1;
 }
 
-/* The check sits in a counted loop whose trip count and the object's extent
- * are both compile time constants, so the largest offset the loop can reach is
- * one too.
- *
- * Every condition here is load bearing. The variable has to start at zero and
- * only ever step by one, or the offsets it visits are not the range this
- * assumes; nothing else in the body may move it, or the increment is not the
- * whole story; and the bound has to be a constant, or there is no largest
- * offset to compare against. */
 static int safety_prove_loop_bound(IRFunction *function,
                                    const SafetyLoopList *loops,
                                    size_t check_index,
@@ -664,23 +539,20 @@ static int safety_prove_loop_bound(IRFunction *function,
     return 0;
   }
   if (addend < 0) {
-    return 0; /* the loop's lower bound says nothing about a negative offset */
+    return 0;
   }
 
-  /* Innermost enclosing loop stepping this variable. Working outward matters:
-   * a check in a nested loop is indexed by the inner variable, and the outer
-   * loop's bound says nothing about it. */
   for (size_t i = loops->count; i-- > 0;) {
     const SafetyLoopForm *loop = &loops->items[i];
     if (check_index <= loop->bounds.branch_index ||
         check_index >= loop->bounds.jump_index) {
-      continue; /* the check is not in this loop's body */
+      continue;
     }
     if (!loop->has_index) {
-      continue; /* this loop's test says nothing about any index */
+      continue;
     }
     if (strcmp(loop->iv, iv) != 0) {
-      continue; /* this loop steps a different variable; keep looking outward */
+      continue;
     }
 
     long long bound = 0;
@@ -689,11 +561,9 @@ static int safety_prove_loop_bound(IRFunction *function,
       safety_trace("the loop bound is not a constant", access->location.line);
       return 0;
     }
-    /* `iv <op> bound` becomes `iv <= bound + adjust`, whichever way the test
-     * was spelled. */
     long long highest_index = bound + loop->adjust;
     if (highest_index < 0) {
-      return 1; /* the body never runs, so the access never happens */
+      return 1;
     }
 
     if (!ir_iv_zero_at_header(function, loop->header_index, iv)) {
@@ -736,7 +606,6 @@ static int safety_prove_loop_bound(IRFunction *function,
   return 0;
 }
 
-/* The index is masked into a range the object already covers. */
 static int safety_prove_masked_index(const IRFunction *function,
                                      size_t check_index,
                                      const SafetyAccess *access) {
@@ -763,72 +632,33 @@ static int safety_prove(IRFunction *function, const SafetyLoopList *loops,
          safety_prove_masked_index(function, check_index, access);
 }
 
-/* ---- hoisting a loop's checks into one ------------------------------------- */
-/*
- * When the object's size is not known, a check per access means a call per
- * access, and in a tight loop that is the whole cost of the mode. But a
- * counted loop walking `base[i]` for i in [0, bound) touches one contiguous
- * range, and one check covers the lot. So the check moves out of the loop and
- * becomes a statement about the range, and the body is left with nothing in
- * it, which is also what lets the vectorizers claim it again.
- *
- * Correctness rests on the range being exactly what the loop touches, no more
- * and no less. More would trap on a correct program; less would miss a real
- * overrun. That is why the body has to be straight line (a conditional access
- * touches a subset, so checking the whole range could accuse a program that
- * never reads the far end) and why it must contain no calls (one of them could
- * free the block partway through, which a check taken beforehand would miss).
- */
-
 typedef struct {
-  size_t header_index; /* the loop label the check moves in front of */
-  /* When the reach of the access follows from the arithmetic alone, as a
-   * masked index does, the range is this many bytes and none of the loop
-   * fields below are read. */
+  size_t header_index;
   long long constant_length;
   long long diagnostic_size;
-  long long stride;        /* bytes per element */
-  long long primary_step;  /* how far the tested variable moves each iteration */
-  long long index_step;    /* how far the indexing variable moves */
-  long long primary_start; /* the tested variable's first value */
-  long long index_start;   /* the indexing variable's first value */
-  long long adjust;        /* the tested variable tops out at bound + adjust */
-  long long coeff;         /* index = coeff * counter + invariant + constant */
+  long long stride;
+  long long primary_step;
+  long long index_step;
+  long long primary_start;
+  long long index_start;
+  long long adjust;
+  long long coeff;
   long long constant;
-  long long size; /* bytes the access touches */
+  long long size;
   long long access_kind;
-  IROperand base;  /* owned */
-  IROperand bound; /* owned */
-  const IROperand *identity; /* borrowed from the retained check */
-  /* The runtime term the index is displaced by, as it was written in the loop.
-   * Re-read rather than referenced, because the expression that computed it
-   * often lives inside the body and has to be worked out again in front of the
-   * header; `function` and `bounds` are what that re-reading needs. */
-  IROperand invariant; /* owned; kind NONE when absent */
+  IROperand base;
+  IROperand bound;
+  const IROperand *identity;
+  IROperand invariant;
   int has_invariant;
-  /* Where the indexing counter began, when that is not a constant: the row
-   * offset a blocked matrix multiply starts each inner loop from. Added to
-   * index_start rather than replacing it. */
-  IROperand index_start_value; /* owned; kind NONE when absent */
+  IROperand index_start_value;
   int has_index_start;
-  /* Where to start looking for what computed the displacement. It is the
-   * access's own position, not the header's: the expression usually lives
-   * inside the body, and searching back from the header would find some
-   * earlier definition of the same temp, or none. */
   size_t invariant_at;
-  const IRFunction *function; /* borrowed */
+  const IRFunction *function;
   IRWhileLoopBounds bounds;
   SourceLocation location;
 } SafetyHoist;
 
-
-/* Read the loop's test and step.
- *
- * The test is `index <op> bound` for `<` or `<=`, where the index may carry a
- * constant of its own: `while (i + 3 <= len)` is how a loop consuming three
- * bytes at a time says where it stops. Each spelling gives a different highest
- * index, and getting that wrong by one is the difference between checking what
- * the loop touches and checking a byte past it. */
 static int safety_parse_loop_form(const IRFunction *function,
                                   size_t header_index, SafetyLoopForm *form) {
   if (header_index + 4 >= function->instruction_count) {
@@ -839,10 +669,6 @@ static int safety_parse_loop_form(const IRFunction *function,
     return 0;
   }
 
-  /* Find the exit test, then work back to what computed it. A test that needs
-   * arithmetic of its own, as `i + 3 <= len` does, puts that arithmetic
-   * between the header and the compare, so counting instructions forward from
-   * the header finds the wrong one. */
   size_t branch_index = 0;
   int found_branch = 0;
   for (size_t i = header_index + 1; i < function->instruction_count; i++) {
@@ -899,9 +725,6 @@ static int safety_parse_loop_form(const IRFunction *function,
     return 0;
   }
 
-  /* Where the loop runs is settled. Whether its test also says what the index
-   * does is a separate question, and a loop that does not say is still a loop
-   * worth knowing about. */
   form->has_index = 0;
   long long index_addend = 0;
   if (safety_index_is_affine(function, compare_index, &compare->lhs, &form->iv,
@@ -918,7 +741,6 @@ static int safety_parse_loop_form(const IRFunction *function,
   return 1;
 }
 
-/* An operand whose value cannot change across [start, end). */
 static int safety_operand_invariant_in(const IRFunction *function, size_t start,
                                        size_t end, const IROperand *operand) {
   if (operand->kind == IR_OPERAND_INT) {
@@ -938,37 +760,10 @@ static int safety_operand_invariant_in(const IRFunction *function, size_t start,
   return 1;
 }
 
-/* ---- what a call in the body can do to the memory ------------------------- *
- *
- * A hoisted check speaks for a range of bytes before the loop runs, and a span
- * resolved once speaks for an allocation's extent across the whole loop.
- * Neither survives something freeing the block partway through, and a call is
- * the only thing in a body that can do that.
- *
- * Refusing every body with a call in it was the easy reading of that, and it
- * gives up far too much: a loop around a helper is one of the commonest shapes
- * there is, and a helper that computes cannot take memory away from anyone. So
- * the question asked is whether this callee, or anything it reaches, can
- * release memory -- not whether the body has a call in it.
- *
- * The whole program is here, so this is answered rather than assumed. What is
- * refused is what cannot be answered: a callee with no body in this program, a
- * call through a pointer, a launch, and inline assembly. A write to anything
- * that is not the callee's own local is refused too, since the pointer the
- * loop walks, its bound and its counter may all be reachable that way. */
-
-/* The program being resolved, for reading what a callee does. Set for the
- * duration of one resolve; the pass is not reentrant. */
 static const IRProgram *g_safety_program;
 
 static int safety_callee_can_release(const char *name, int depth);
 
-/* C library entry points that cannot release the caller's memory.
- *
- * Reading, writing, comparing and computing are all any of these do. The list
- * is deliberately short and deliberately only standard names: a function this
- * program declares extern for itself stays refused, because its contract is
- * not something the compiler knows. */
 static int safety_extern_cannot_release(const char *name) {
   static const char *const known[] = {
       "memcmp",  "memchr", "memcpy", "memmove", "memset",  "strlen",
@@ -989,8 +784,6 @@ static int safety_extern_cannot_release(const char *name) {
   return 0;
 }
 
-/* Entry points that take memory away. Both spellings, since --native-heap
- * rewrites one set to the other and this runs on whichever survived. */
 static int safety_name_releases_memory(const char *callee) {
   return strcmp(callee, "free") == 0 || strcmp(callee, "realloc") == 0 ||
          strcmp(callee, "mettle_heap_free") == 0 ||
@@ -1010,9 +803,6 @@ static const IRFunction *safety_find_function(const char *name) {
   return NULL;
 }
 
-/* Is this name one of the function's own parameters or locals? A write to
- * anything else outlives the call, and could be the very pointer the check was
- * taken against. */
 static int safety_name_is_functions_own(const IRFunction *function,
                                         const char *name) {
   for (size_t i = 0; i < function->parameter_count; i++) {
@@ -1031,11 +821,9 @@ static int safety_name_is_functions_own(const IRFunction *function,
   return 0;
 }
 
-/* Verdicts, so a helper called from several loops is read once. Cleared with
- * the rest of the per-program state. */
 enum { SAFETY_CALLEE_CACHE_MAX = 512 };
 typedef struct {
-  const char *name; /* borrowed from the IR */
+  const char *name;
   int verdict;
   int visiting;
 } SafetyCalleeVerdict;
@@ -1075,8 +863,6 @@ static int safety_function_can_release(const IRFunction *function, int depth) {
     default:
       break;
     }
-    /* Allocation is not release: taking a new block leaves every live one
-     * where it was. Reallocation is, and it is a call, so it is caught above. */
     if (ir_instruction_writes_destination(in) &&
         in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
         !safety_name_is_functions_own(function, in->dest.name)) {
@@ -1090,11 +876,6 @@ static int safety_callee_can_release(const char *name, int depth) {
   if (!name || depth > 16) {
     return 1;
   }
-  /* Only known checking and shadow operations preserve allocation lifetime.
-   * Region end and unregister calls must invalidate a lifted check. The table
-   * is keyed by arity as well as name, so the probe covers every arity any
-   * entry uses; anything else under the prefix is call metadata, which moves
-   * no allocation and must not cost a loop its hoisted check. */
   IRInstruction probe = {0};
   probe.op = IR_OP_CALL;
   probe.text = (char *)name;
@@ -1112,12 +893,6 @@ static int safety_callee_can_release(const char *name, int depth) {
   }
   const IRFunction *callee = safety_find_function(name);
   if (!callee) {
-    /* No body here to read. That is the end of it for a function this program
-     * declares, but not for the handful the C library defines: their contracts
-     * say what they do, and none of them can take memory away from the caller.
-     * A loop around memcmp or sqrt is common enough that refusing it was most
-     * of what the call restriction still cost. Looked up only after the
-     * program's own functions, so a definition here always wins. */
     return !safety_extern_cannot_release(name);
   }
   SafetyCalleeVerdict *slot = safety_callee_slot(name);
@@ -1128,9 +903,6 @@ static int safety_callee_can_release(const char *name, int depth) {
     return slot->verdict;
   }
   if (slot->visiting) {
-    /* A cycle. Assuming the back edge releases nothing is safe: releasing is
-     * found by reaching a free, and every function in the cycle is still read
-     * in full by the walk that is already in progress. */
     return 0;
   }
   slot->visiting = 1;
@@ -1140,14 +912,6 @@ static int safety_callee_can_release(const char *name, int depth) {
   return verdict;
 }
 
-/* Whether the address of this symbol is taken anywhere in the function.
- *
- * A callee cannot reach one of the caller's locals otherwise, which is what
- * lets a call in the body be judged on what it frees alone. If the loop handed
- * out the address of its own bound or counter, a callee could move it, and the
- * range worked out before the loop would stop describing what the loop walks.
- * The callee analysis refuses writes to anything that is not the callee's own,
- * so a global cannot be moved that way either; this covers the rest. */
 static int safety_symbol_escapes(const IRFunction *function, const char *name) {
   if (!name) {
     return 0;
@@ -1168,9 +932,6 @@ static int safety_operand_escapes(const IRFunction *function,
          safety_symbol_escapes(function, operand->name);
 }
 
-/* Does the body call out at all? Asked only to decide whether the escape
- * question above has to be asked; a body with no call in it cannot hand
- * anything to anyone. */
 static int safety_body_calls_out(const IRFunction *function,
                                  const IRWhileLoopBounds *loop) {
   for (size_t i = loop->branch_index + 1;
@@ -1185,8 +946,6 @@ static int safety_body_calls_out(const IRFunction *function,
   return 0;
 }
 
-/* Whether this instruction, sitting in a loop body, can take away the memory
- * the loop walks. */
 static int safety_body_instruction_can_release(const IRInstruction *in) {
   switch (in->op) {
   case IR_OP_CALL_INDIRECT:
@@ -1200,11 +959,6 @@ static int safety_body_instruction_can_release(const IRInstruction *in) {
   }
 }
 
-/* Nothing in the body can release the memory the loop is walking. Weaker than
- * requiring a straight line, deliberately: to reuse one resolved allocation
- * across many accesses it only matters that the allocation outlives them, not
- * that every access happens. Branches are fine, because each access still
- * carries its own comparison. */
 static int safety_body_has_no_calls(const IRFunction *function,
                                     const IRWhileLoopBounds *loop) {
   for (size_t i = loop->branch_index + 1;
@@ -1216,13 +970,6 @@ static int safety_body_has_no_calls(const IRFunction *function,
   return 1;
 }
 
-/* Whether `label` is defined inside the loop's body.
- *
- * A branch that lands inside the body is internal shape; one that lands
- * anywhere else leaves the loop, and the trip count then stops being the thing
- * the header test says it is. The header and exit labels are deliberately not
- * body labels: a jump to either is a `continue` or a `break`, and a `break`
- * is exactly what makes a whole-range check claim iterations that never ran. */
 static int safety_label_is_in_body(const IRFunction *function,
                                    const IRWhileLoopBounds *loop,
                                    const char *label) {
@@ -1239,21 +986,6 @@ static int safety_label_is_in_body(const IRFunction *function,
   return 0;
 }
 
-/* Every iteration the loop begins runs the access being hoisted, and nothing
- * in the body can release the memory it walks.
- *
- * The body may branch, as long as every branch stays inside it. An `if/else`
- * that rejoins does not change how many times the loop runs, so a check
- * covering the range the header test describes still describes exactly what
- * the loop will touch. What must be refused is anything that cuts the loop
- * short -- a `break`, a `return`, a jump to the exit label -- because then the
- * later elements are never reached and a whole-range check would accuse a
- * program that did nothing wrong.
- *
- * `access_index` must therefore dominate the body: it has to sit ahead of the
- * first branch, so that reaching the top of an iteration means performing it.
- * An access buried inside an `if` runs on some iterations and not others, and
- * one check for the whole range would over-claim in the same way. */
 static int safety_body_runs_access_every_iteration(
     const IRFunction *function, const IRWhileLoopBounds *loop,
     size_t access_index) {
@@ -1278,9 +1010,6 @@ static int safety_body_runs_access_every_iteration(
     case IR_OP_CALL_INDIRECT:
     case IR_OP_GPU_LAUNCH:
     case IR_OP_INLINE_ASM:
-      /* A call is fine where nothing it reaches can take the memory away. A
-       * loop around a helper that computes is one of the commonest shapes
-       * there is, and refusing it left the mode's worst cases exactly there. */
       if (safety_body_instruction_can_release(instruction)) {
         return 0;
       }
@@ -1289,9 +1018,6 @@ static int safety_body_runs_access_every_iteration(
       continue;
     }
   }
-  /* The access has to be reached before the body's control flow can skip it.
-   * Scanning for the first branch and comparing indices says the same thing
-   * more cheaply than a dominance computation, and errs the safe way. */
   if (seen_branch) {
     for (size_t i = loop->branch_index + 1; i < loop->jump_index; i++) {
       IROpcode op = function->instructions[i].op;
@@ -1304,20 +1030,6 @@ static int safety_body_runs_access_every_iteration(
   return 1;
 }
 
-/* ---- reading an index as a line ------------------------------------------- *
- *
- * Most indices that are not a bare counter are still a straight line in one:
- * `mat[base + j]`, `b[j * N + i]`, `src[n - 1 - i]`. Each moves by a fixed
- * amount per iteration, so each touches one contiguous range, and one check
- * covers the range exactly as it does for `a[i]`.
- *
- * The form is `coeff * varying + invariant + constant`. Splitting it needs a
- * loop to be relative to, since the same expression is a counter in one loop
- * and a fixed value in the one outside it, so the reading happens once per
- * candidate loop rather than once per access. */
-
-/* Does the body write this symbol? The induction variable does, by its step,
- * which is what makes it the varying one. */
 static int safety_symbol_written_in_body(const IRFunction *function,
                                          const IRWhileLoopBounds *loop,
                                          const char *symbol) {
@@ -1333,10 +1045,6 @@ static int safety_symbol_written_in_body(const IRFunction *function,
   return 0;
 }
 
-/* Whether the value this operand names differs from one iteration to the next.
- * A temp settled before the loop cannot; one computed inside it varies exactly
- * when what it was computed from does. Anything this cannot read is treated as
- * varying, which only costs a hoist. */
 static int safety_value_varies(const IRFunction *function, size_t before,
                                const IRWhileLoopBounds *loop,
                                const IROperand *operand, int depth) {
@@ -1359,7 +1067,7 @@ static int safety_value_varies(const IRFunction *function, size_t before,
   }
   size_t at = (size_t)(producer - function->instructions);
   if (at <= loop->branch_index) {
-    return 0; /* computed before the loop began */
+    return 0;
   }
   if (producer->op != IR_OP_BINARY && producer->op != IR_OP_ASSIGN &&
       producer->op != IR_OP_CAST) {
@@ -1370,11 +1078,6 @@ static int safety_value_varies(const IRFunction *function, size_t before,
           safety_value_varies(function, at, loop, &producer->rhs, depth + 1));
 }
 
-/* Whether a loop-invariant value can be named in front of the header: either it
- * already is one, or it is a small expression over values that are, which the
- * check can simply compute again there. `mat[i * dim + j]` needs the second
- * form, since `i * dim` is worked out inside the inner loop and the temp
- * holding it does not exist before the header. */
 static int safety_invariant_available(const IRFunction *function, size_t before,
                                       size_t header,
                                       const IRWhileLoopBounds *loop,
@@ -1399,7 +1102,7 @@ static int safety_invariant_available(const IRFunction *function, size_t before,
   }
   size_t at = (size_t)(producer - function->instructions);
   if (at < header) {
-    return 1; /* already settled where the check will go */
+    return 1;
   }
   if (producer->op == IR_OP_ASSIGN || producer->op == IR_OP_CAST) {
     return safety_invariant_available(function, at, header, loop,
@@ -1418,13 +1121,10 @@ static int safety_invariant_available(const IRFunction *function, size_t before,
                                     depth + 1);
 }
 
-/* `index = coeff * varying + invariant + constant`, read relative to one loop.
- * `varying` is NULL when the whole index holds still, which is worth hoisting
- * too: the same element checked once instead of once per iteration. */
 typedef struct {
   long long coeff;
-  const char *varying;        /* borrowed from the IR */
-  const IROperand *invariant; /* borrowed from the IR; NULL when absent */
+  const char *varying;
+  const IROperand *invariant;
   long long constant;
 } SafetyIndexForm;
 
@@ -1433,7 +1133,7 @@ static int safety_index_form_merge(SafetyIndexForm *into,
   if (add->varying) {
     if (into->varying) {
       if (strcmp(into->varying, add->varying) != 0) {
-        return 0; /* two moving parts is not a line in one of them */
+        return 0;
       }
       into->coeff += sign * add->coeff;
     } else {
@@ -1443,10 +1143,10 @@ static int safety_index_form_merge(SafetyIndexForm *into,
   }
   if (add->invariant) {
     if (into->invariant) {
-      return 0; /* only one runtime term is carried into the check */
+      return 0;
     }
     if (sign < 0) {
-      return 0; /* a subtracted runtime term would need its own negation */
+      return 0;
     }
     into->invariant = add->invariant;
   }
@@ -1467,8 +1167,6 @@ static int safety_read_index_form(const IRFunction *function, size_t before,
     out->constant = index->int_value;
     return 1;
   }
-  /* A subtree that holds still is one term, whatever its shape. That is what
-   * keeps `i * dim` together instead of trying to make a line out of it. */
   if (!safety_value_varies(function, before, loop, index, 0)) {
     if (!safety_invariant_available(function, before, header, loop, index, 0)) {
       return 0;
@@ -1515,9 +1213,6 @@ static int safety_read_index_form(const IRFunction *function, size_t before,
     *out = lhs;
     return safety_index_form_merge(out, &rhs, -1);
   }
-  /* Scaling, but only by something the compiler knows: a runtime factor on the
-   * moving part would make the distance between iterations a runtime value the
-   * length below cannot be written in terms of. */
   const SafetyIndexForm *scaled = NULL;
   long long factor = 0;
   if (strcmp(producer->text, "*") == 0) {
@@ -1534,7 +1229,7 @@ static int safety_read_index_form(const IRFunction *function, size_t before,
     factor = 1LL << rhs.constant;
   }
   if (!scaled || (scaled->invariant && factor != 1)) {
-    return 0; /* a scaled runtime term has no place to go in the form */
+    return 0;
   }
   out->varying = scaled->varying;
   out->coeff = scaled->coeff * factor;
@@ -1543,11 +1238,6 @@ static int safety_read_index_form(const IRFunction *function, size_t before,
   return 1;
 }
 
-/* The value a counter holds when the loop is entered. Like
- * ir_iv_zero_at_header, but reports the constant rather than insisting it is
- * zero: a scan starting at one covers `[1, n)`, which is as describable a range
- * as `[0, n)` and was being turned down only because the code asked the
- * narrower question. */
 static int safety_iv_start_at_header(const IRFunction *function,
                                      size_t header_index,
                                      const IRWhileLoopBounds *loop,
@@ -1562,15 +1252,12 @@ static int safety_iv_start_at_header(const IRFunction *function,
     }
     if (ins->op == IR_OP_LABEL || ins->op == IR_OP_JUMP ||
         ins->op == IR_OP_BRANCH_ZERO || ins->op == IR_OP_BRANCH_EQ) {
-      return 0; /* another path reaches the loop; the value is not settled */
+      return 0;
     }
     if (!ir_instruction_writes_destination(ins) ||
         !ir_operand_is_symbol_named(&ins->dest, iv)) {
       continue;
     }
-    /* `idx = (int64)col` widens straight into the counter, so the initializer
-     * is as often a cast as an assignment. Only the 64-bit targets are read
-     * through: a narrower one can change the value being started from. */
     if (ins->op == IR_OP_CAST) {
       if (ins->is_float || !ins->text ||
           (strcmp(ins->text, "int64") != 0 &&
@@ -1584,10 +1271,6 @@ static int safety_iv_start_at_header(const IRFunction *function,
       *start_out = ins->lhs.int_value;
       return 1;
     }
-    /* A counter can start somewhere the compiler does not know, as the row
-     * offsets of a blocked matrix multiply do, and the range is still exactly
-     * describable: it just begins at a value the check works out rather than
-     * one written into it. */
     const IROperand *source = &ins->lhs;
     if (source->kind == IR_OPERAND_TEMP && source->name) {
       const IRInstruction *p =
@@ -1663,17 +1346,11 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
   out->identity = access->identity;
   out->diagnostic_size = access->diagnostic_size;
 
-  /* An index the arithmetic already bounds, such as a masked table lookup,
-   * reaches the same range on every iteration. One check for that range stands
-   * in for all of them, and its length is a constant. */
   long long masked_stride = 0;
   long long masked_upper = 0;
   int masked = safety_offset_upper_bound(function, check_index, access->offset,
                                          &masked_stride, &masked_upper);
 
-  /* The offset is the index scaled by the element width. Only the scaling has
-   * to be read here; what the index itself is made of is read once per
-   * candidate loop below, since the answer depends on which loop is asking. */
   const IROperand *index = NULL;
   long long stride = 0;
   if (!masked && !safety_offset_scaling(function, check_index, access->offset,
@@ -1698,7 +1375,6 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
     }
     saw_loop = 1;
 
-    /* What the index is made of, as this loop sees it. */
     SafetyIndexForm shape;
     if (!safety_read_index_form(function, check_index, header, &form.bounds,
                                 index, 0, &shape)) {
@@ -1708,18 +1384,10 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
       return 0;
     }
     if (!shape.varying || shape.coeff == 0) {
-      continue; /* nothing this loop does moves it; ask the loop outside */
+      continue;
     }
-    /* Keep the original access when a newly exposed descending range cannot
-     * describe its first failing element with the ascending range intrinsic. */
     if (access->diagnostic_size && shape.coeff < 0) return 0;
 
-    /* The variable the loop tests, and the one this access indexes by, need
-     * not be the same. A loop reading three bytes and writing four advances
-     * two counters; the test bounds one of them, and the other is pinned to it
-     * by both starting where it starts and stepping by a constant, so after
-     * the same number of iterations each has travelled its own step times the
-     * count. */
     size_t primary_first = 0;
     size_t primary_last = 0;
     long long primary_start = 0;
@@ -1764,9 +1432,6 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
                    access->location.line);
       return 0;
     }
-    /* A body that calls out may have handed the loop's own pointer, bound or
-     * counter to the callee, and a check worked out before the loop cannot
-     * survive any of the three being moved. */
     if (safety_body_calls_out(function, &form.bounds) &&
         (safety_operand_escapes(function, access->base) ||
          safety_operand_escapes(function, form.bound) ||
@@ -1777,12 +1442,6 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
                    access->location.line);
       return 0;
     }
-    /* The hoisted check is emitted in front of the header, so both the pointer
-     * and the bound have to be settled by then. Scanning from the header
-     * rather than from the body is what makes that true of the bound: a test
-     * like `while (i < rows * cols)` computes it between the header and the
-     * compare, and a check placed in front of the header would name a value
-     * that does not exist yet. */
     if (!safety_operand_invariant_in(function, header, form.bounds.jump_index,
                                      access->base) ||
         (access->identity && !safety_operand_invariant_in(function, header,
@@ -1796,8 +1455,6 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
     }
 
     out->header_index = header;
-    /* The runtime span calculation receives positive, representable steps.
-     * Reject an unrepresentable affine coefficient before host arithmetic. */
     if (shape.coeff == LLONG_MIN || stride <= 0 || index_step <= 0 ||
         (form.adjust < 0 && primary_start > LLONG_MAX + form.adjust) ||
         (form.adjust > 0 && primary_start < LLONG_MIN + form.adjust)) return 0;
@@ -1856,14 +1513,6 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
   return 0;
 }
 
-/* ---- building the check's arithmetic -------------------------------------- *
- *
- * A small scratchpad, because the range now takes a dozen instructions in the
- * worst case and threading the failure and the ownership of each temp through
- * by hand was the bulk of the previous version. Every temp handed out is kept
- * and released together; a failure anywhere is remembered and makes every
- * later call a no-op, so the sequence reads as arithmetic rather than as error
- * handling. */
 enum { SAFETY_BUILD_MAX = 32 };
 
 typedef struct {
@@ -1874,8 +1523,6 @@ typedef struct {
   int failed;
   IROperand owned[SAFETY_BUILD_MAX];
   int owned_count;
-  /* Handed back once something has gone wrong, so the arithmetic below can go
-   * on being written as arithmetic without a null check per step. */
   IROperand nowhere;
 } SafetyBuild;
 
@@ -1894,9 +1541,6 @@ static void safety_build_release(SafetyBuild *b) {
   b->owned_count = 0;
 }
 
-/* A named operand needs its name; a literal has none and needs none. Asking
- * for a name unconditionally rejected every constant leaf, which is most of
- * them: the `256` in `i * 256`. */
 static int safety_operand_is_usable(const IROperand *operand) {
   if (operand->kind == IR_OPERAND_INT || operand->kind == IR_OPERAND_FLOAT) {
     return 1;
@@ -1906,7 +1550,6 @@ static int safety_operand_is_usable(const IROperand *operand) {
          operand->name != NULL;
 }
 
-/* Park an operand this builder owns, and hand back a stable pointer to it. */
 static const IROperand *safety_build_keep(SafetyBuild *b, IROperand *value) {
   if (b->failed || b->owned_count >= SAFETY_BUILD_MAX ||
       !safety_operand_is_usable(value)) {
@@ -1918,7 +1561,6 @@ static const IROperand *safety_build_keep(SafetyBuild *b, IROperand *value) {
   return &b->owned[b->owned_count++];
 }
 
-/* `fresh = lhs <op> rhs`. Returns a pointer that stays valid until release. */
 static const IROperand *safety_build(SafetyBuild *b, const char *op,
                                      const IROperand *lhs,
                                      const IROperand *rhs) {
@@ -1935,9 +1577,6 @@ static const IROperand *safety_build(SafetyBuild *b, const char *op,
   return safety_build_keep(b, &fresh);
 }
 
-/* Name a loop-invariant value in front of the header, working it out again
- * there when the expression that produced it lives inside the body. Mirrors
- * safety_invariant_available, which already decided this would succeed. */
 static const IROperand *safety_build_invariant(SafetyBuild *b,
                                                const IRFunction *function,
                                                size_t before, size_t header,
@@ -1978,37 +1617,8 @@ static const IROperand *safety_build_invariant(SafetyBuild *b,
   return safety_build_keep(b, &copy);
 }
 
-/* Emit the one check that stands in for all of the loop's:
- *
- *   top     = bound + adjust            highest value the test allows
- *   span    = top - start               how far the counter travels
- *   travel  = (span / step) * index_step   how far the index travels with it
- *   length  = travel * |coeff| * stride + size    the bytes it covers
- *   runs    = span >= 0                 zero when the loop never runs at all
- *   check(base, low * stride, length * runs)
- *
- * Rounding down to a multiple of the step matters once the step is more than
- * one: a loop counting by three stops at the largest multiple of three below
- * its bound, and using the bound itself would check up to two bytes the loop
- * never reads. On an exactly sized buffer those two bytes are the difference
- * between silence and accusing a correct program. The division is skipped
- * where the step is one, which is most loops.
- *
- * Rounding down to a multiple of the step matters once the step is more than
- * one: a loop counting by three stops at the largest multiple of three below
- * its bound, and using the bound itself would check up to two bytes the loop
- * never reads. On an exactly sized buffer those two bytes are the difference
- * between silence and accusing a correct program. The division is skipped
- * where the step is one, which is most loops.
- *
- * Multiplying by `runs` rather than branching around the check is what keeps
- * this free: a label immediately before a loop header stops the recognizers'
- * backward scan for the induction variable's initial value, so a guard branch
- * here would cost the loop its vectorization, which is most of what hoisting
- * was for. */
 static int safety_emit_hoisted(IRInstructionVector *out,
                                const SafetyHoist *hoist) {
-  /* A range the arithmetic already settled needs no arithmetic of its own. */
   if (hoist->constant_length > 0) {
     SafetyBuild build;
     safety_build_init(&build, out, hoist->location);
@@ -2043,8 +1653,6 @@ static int safety_emit_hoisted(IRInstructionVector *out,
   IROperand index_step = ir_operand_int(hoist->index_step);
   IROperand stride = ir_operand_int(hoist->stride);
   IROperand size = ir_operand_int(hoist->size);
-  /* The highest value the test allows, and how far that is from where the
-   * counter began. */
   const IROperand *top =
       safety_build(&build, "+", &hoist->bound, &adjust);
   const IROperand *span = top;
@@ -2052,9 +1660,6 @@ static int safety_emit_hoisted(IRInstructionVector *out,
     span = safety_build(&build, "-", top, &primary_start);
   }
 
-  /* Iterations less one, and from that how far the indexing counter travels.
-   * Dividing is what pins two counters together; where the tested variable
-   * steps by one it is already the count. */
   const IROperand *rounds = span;
   if (hoist->primary_step > 1) {
     rounds = safety_build(&build, "/", span, &primary_step);
@@ -2064,9 +1669,6 @@ static int safety_emit_hoisted(IRInstructionVector *out,
     travel = safety_build(&build, "*", rounds, &index_step);
   }
 
-  /* Bytes from the first element the loop touches to one past the last. The
-   * displacement drops out of it, since both ends carry the same one, and so
-   * does where the counter started. */
   long long reach = hoist->coeff < 0 ? -hoist->coeff : hoist->coeff;
   IROperand per_step = ir_operand_int(reach * hoist->stride);
   IROperand length_args[5] = {
@@ -2087,9 +1689,6 @@ static int safety_emit_hoisted(IRInstructionVector *out,
   IROperand guarded_length = ir_operand_temp(length_name);
   const IROperand *guarded = safety_build_keep(&build, &guarded_length);
 
-  /* Where the counter stands at the low end of the range. A positive
-   * coefficient puts that at the first iteration; a negative one puts it at
-   * the last, so the travel has to be walked back to reach it. */
   IROperand index_start = ir_operand_int(hoist->index_start);
   const IROperand *counter = &index_start;
   if (hoist->has_index_start) {
@@ -2104,8 +1703,6 @@ static int safety_emit_hoisted(IRInstructionVector *out,
     counter = safety_build(&build, "+", counter, travel);
   }
 
-  /* And the index there: the counter scaled, displaced, and shifted by
-   * whatever constant the expression carried. */
   const IROperand *low = counter;
   if (hoist->coeff != 1) {
     IROperand coeff = ir_operand_int(hoist->coeff);
@@ -2152,19 +1749,6 @@ static int safety_emit_hoisted(IRInstructionVector *out,
   return ok;
 }
 
-/* ---- the two survivor shapes ----------------------------------------------- */
-
-/* The object's size is a compile time constant, so the whole check is one
- * unsigned comparison.
- *
- * Comparing without sign is what lets a single test cover both ends: a
- * negative offset reads as an enormous unsigned value and fails the same
- * comparison an oversized one does. The alternative, a signed `offset <
- * extent`, waves every negative index straight through.
- *
- * The trap arm converts the byte offset back into an element index so the
- * message speaks in the units the programmer wrote. It sits after the branch,
- * so that division costs nothing on the path that stays in bounds. */
 static int safety_expand_extent(IRInstructionVector *out,
                                 const SafetyAccess *access) {
   char ok_label[64];
@@ -2179,9 +1763,6 @@ static int safety_expand_extent(IRInstructionVector *out,
   snprintf(message, sizeof(message), "Fatal error: `%s` is outside its bounds",
            access->what);
 
-  /* An access wider than the whole object can never fit. Emitting the
-   * comparison would underflow the limit into a huge unsigned bound and let it
-   * pass, so trap outright. */
   if (access->size > access->extent) {
     IROperand arguments[4];
     arguments[0] = ir_operand_int(2);
@@ -2215,7 +1796,7 @@ static int safety_expand_extent(IRInstructionVector *out,
   }
 
   IROperand arguments[4];
-  arguments[0] = ir_operand_int(2); /* METTLE_CRASH_TRAP_ARRAY_BOUNDS */
+  arguments[0] = ir_operand_int(2);
   arguments[1] = ir_operand_string(message);
   arguments[2] = ir_operand_temp(index_temp);
   arguments[3] = ir_operand_int(access->extent / access->size);
@@ -2232,11 +1813,6 @@ static int safety_expand_extent(IRInstructionVector *out,
   return safety_emit_label(out, access->location, ok_label);
 }
 
-/* Only the runtime knows how large the allocation behind this pointer is, so
- * hand it the base, the displacement and the width and let the shadow map
- * answer. The base rather than the final address is what carries provenance:
- * it is the allocation the pointer came from that bounds the access, not
- * whichever one the computed address happens to land in. */
 static int safety_expand_region(IRInstructionVector *out,
                                 const SafetyAccess *access) {
   IROperand arguments[6];
@@ -2268,48 +1844,17 @@ done:
   return ok;
 }
 
-/* ---- resolving a pointer once, comparing per access ------------------------- */
-/*
- * Where nothing about an index can be settled, the access still has to be
- * checked, and a check that walks the shadow map is a call and four dependent
- * loads. But a loop that indexes one pointer asks about the same allocation
- * every time, and how far that allocation runs is loop-invariant even when the
- * indices are not.
- *
- * So the allocation is resolved once in front of the loop, and each access
- * becomes `(unsigned)offset > span - size`, which is a subtract, a compare and
- * a branch that is never taken. Failing it is not a verdict: it calls the full
- * check, which is what keeps this exact for interior pointers reading
- * backwards, for dead allocations, and for anything else the comparison alone
- * cannot judge.
- *
- * This is what makes a checked heapsort possible. Its indices come out of
- * comparisons so nothing bounds them, and every access was paying for a walk
- * to be told the same thing about the same array.
- */
-
 static int safety_expand_region(IRInstructionVector *out,
                                 const SafetyAccess *access);
 
 typedef struct {
   size_t header_index;
-  IROperand base; /* owned */
-  /* Borrowed from an instruction inside the loop, which the straight-line
-   * search guarantees sits after the header: the resolution is written out at
-   * the header, so the instruction it points into has not been moved yet. */
+  IROperand base;
   const IROperand *identity;
-  char temp[64];  /* the span this loop resolves once */
+  char temp[64];
   SourceLocation location;
 } SafetySpan;
 
-/* Follow a base pointer back to the name it was copied from.
- *
- * Lowering reads a pointer into a fresh temporary at each use, so the operand
- * a check carries is defined inside the loop even when the pointer itself
- * never moves. Taken at face value that says the pointer changes every
- * iteration, and it was enough to decline the cheap form for every access in
- * base64_encode. Copies and pointer casts pass the same address along, so the
- * name behind them is what the span should be keyed on. */
 static const IROperand *safety_base_root(const IRFunction *function,
                                          size_t before, const IROperand *base,
                                          const IROperand **delta_out,
@@ -2333,12 +1878,6 @@ static const IROperand *safety_base_root(const IRFunction *function,
                             delta_out, delta_from, depth + 1);
   }
 
-  /* `root + something`, where the something moves each iteration. The pointer
-   * really does move, so it cannot be resolved once; but what it moves within
-   * does not, so the comparison is made against the root's span with the
-   * displacement folded into the offset. Only the fast comparison is rebased.
-   * A failure still calls the check with the pointer the program actually
-   * used, so nothing about what counts as a violation changes. */
   if (producer->op == IR_OP_BINARY && producer->text &&
       strcmp(producer->text, "+") == 0 && !*delta_out &&
       (producer->lhs.kind == IR_OPERAND_SYMBOL ||
@@ -2361,7 +1900,6 @@ static int safety_operand_same(const IROperand *a, const IROperand *b) {
   return a->name && b->name && strcmp(a->name, b->name) == 0;
 }
 
-/* `span = mettle_safety_span(base)`, emitted in front of the loop. */
 static int safety_emit_span_resolve(IRInstructionVector *out,
                                     const SafetySpan *span) {
   IRInstruction call = {0};
@@ -2388,8 +1926,6 @@ static int safety_emit_span_resolve(IRInstructionVector *out,
   return 1;
 }
 
-/* The access itself: compare against the resolved span, and only ask properly
- * when that comparison says something might be wrong. */
 static int safety_emit_span_check(IRInstructionVector *out,
                                   const SafetyAccess *access,
                                   const char *span_temp,
@@ -2422,19 +1958,12 @@ static int safety_emit_span_check(IRInstructionVector *out,
     goto done;
   }
 
-  /* An access with no offset operand starts at the span's own base, which is
-   * offset zero. Saying so explicitly keeps every instruction below with a
-   * real source: an absent operand reached codegen as an add and a compare
-   * with nothing on one side, which the register allocator refuses (and
-   * `--release` copy-propagates into an assignment from nothing). */
   IROperand zero_offset = ir_operand_int(0);
   const IROperand *offset =
       (access->offset && access->offset->kind != IR_OPERAND_NONE)
           ? access->offset
           : &zero_offset;
 
-  /* Where the pointer was reached through arithmetic, the displacement joins
-   * the offset so both are measured from the same root. */
   const IROperand *measured = offset;
   if (delta && delta->kind != IR_OPERAND_NONE) {
     if (!safety_emit_binary(out, access->location, "+", total, offset, delta,
@@ -2444,19 +1973,11 @@ static int safety_emit_span_check(IRInstructionVector *out,
     measured = &total_operand;
   }
 
-  /* Comparing without sign is what covers both ends at once: a negative offset
-   * reads as an enormous unsigned value and fails, which sends it to the full
-   * check rather than rejecting it. */
   if (!safety_emit_binary(out, access->location, ">", bad, measured,
                           &limit_operand, 1)) {
     goto done;
   }
 
-  /* A resolution that came back empty means the origin named no live
-   * allocation covering the pointer. The subtraction above turns that into a
-   * limit larger than any offset, so without this the whole loop would pass
-   * unexamined. Only tracked accesses take this branch: an untracked pointer
-   * has always been allowed to run, and that is what an absent origin means. */
   const char *condition = bad;
   if (access->identity) {
     IROperand bad_operand = ir_operand_temp(bad);
@@ -2487,10 +2008,6 @@ done:
   return ok;
 }
 
-/* Where the straight-line run of instructions ending at `index` begins. A
- * write inside that run is the one the instruction at `index` reads, whatever
- * else in the function writes the same name, because control reached it here
- * with no branch in between. */
 static size_t safety_block_start(const IRFunction *function, size_t index) {
   for (size_t i = index; i-- > 0;) {
     IROpcode op = function->instructions[i].op;
@@ -2502,19 +2019,6 @@ static size_t safety_block_start(const IRFunction *function, size_t index) {
   return 0;
 }
 
-/* The origin operand at a check is usually a copy made inside the loop:
- * pointer arithmetic gives its result an origin of its own, merged from the
- * pointer's and the index's, and an ordinary counter carries none. Those links
- * name the allocation the pointer named on entry, so following them back finds
- * the value that settled outside. Without this a loop that could resolve its
- * allocation once falls back to asking the runtime at every access, purely
- * because the origin passed through an instruction in the body.
- *
- * Only a write in the same straight-line run is followed, so the write is the
- * one this operand actually reads, and only a merge whose other side is a
- * literal nothing, which the runtime defines as the first side unchanged. A
- * name with no write in that run is returned as it stands, leaving the caller
- * to decide whether the loop holds it still. */
 static const IROperand *safety_identity_root(const IRFunction *function,
                                              const IROperand *identity,
                                              size_t before, int depth) {
@@ -2555,8 +2059,6 @@ static const IROperand *safety_identity_root(const IRFunction *function,
   return identity;
 }
 
-/* ---- the loops, gathered once ----------------------------------------------- */
-
 static const SafetyLoopForm *safety_enclosing_loop(const SafetyLoopList *loops,
                                                    size_t index) {
   for (size_t i = loops->count; i-- > 0;) {
@@ -2575,8 +2077,6 @@ static void safety_loop_list_destroy(SafetyLoopList *loops) {
   loops->capacity = 0;
 }
 
-/* Source order, so a backward scan meets the innermost enclosing loop first:
- * an inner loop's header comes after its outer loop's. */
 static int safety_loop_list_build(IRFunction *function, SafetyLoopList *loops) {
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
@@ -2604,19 +2104,6 @@ static int safety_loop_list_build(IRFunction *function, SafetyLoopList *loops) {
   return 1;
 }
 
-/* ---- the one exempt module ------------------------------------------------- */
-
-/* An allocator is the one piece of code whose job is to touch memory that is
- * not inside any live allocation. It writes a block header below the pointer
- * it hands out, and it threads its free list through the bodies of blocks the
- * program has already released. Checked against the model those accesses read
- * as a header overrun and a use-after-free, and they are neither: the model is
- * describing the allocator's own bookkeeping as if it were program memory.
- *
- * So the allocator is exempt, identified by role rather than by path: it is
- * whichever source file defines the heap entry points. Nothing else is exempt,
- * and the exemption costs no coverage of the program itself, because the
- * program only reaches this memory through pointers the allocator returned. */
 static const char *safety_allocator_source(const IRProgram *program) {
   for (size_t i = 0; i < program->function_count; i++) {
     const IRFunction *function = program->functions[i];
@@ -2640,9 +2127,6 @@ static int safety_function_is_allocator(const IRFunction *function,
          strcmp(function->location.filename, allocator_source) == 0;
 }
 
-/* ---- driver ---------------------------------------------------------------- */
-
-/* Drop every check in a function without expanding any of them. */
 static int safety_strip_function(IRFunction *function, IRSafetyStats *stats) {
   IRInstructionVector out = {0};
   if (!ir_instruction_vector_reserve(&out, function->instruction_count)) {
@@ -2680,10 +2164,6 @@ static int safety_resolve_function(IRFunction *function, IRSafetyStats *stats) {
     return 1;
   }
 
-  /* Decide first, rewrite second. The proofs read the instructions that
-   * produced a check's operands, and rewriting moves instructions out of the
-   * array as it goes, so a proof running mid-rewrite would look back at
-   * emptied slots and conclude it knows nothing. */
   enum {
     SAFETY_KEEP = 0,
     SAFETY_PROVED = 1,
@@ -2735,10 +2215,6 @@ static int safety_resolve_function(IRFunction *function, IRSafetyStats *stats) {
       continue;
     }
 
-    /* Nothing settles the index, so the access keeps a check. But if it is in
-     * a loop that cannot release what it is walking, and the pointer holds
-     * still, resolving the allocation once turns the check from a call into a
-     * comparison. */
     const SafetyLoopForm *loop = safety_enclosing_loop(&loops, i);
     if (!loop) {
       safety_trace("not in any loop, so there is nothing to resolve against",
@@ -2759,9 +2235,6 @@ static int safety_resolve_function(IRFunction *function, IRSafetyStats *stats) {
                    access.location.line);
       continue;
     }
-    /* The span is the extent of the allocation the pointer named when the loop
-     * began. If the body handed that pointer's address out, a callee could
-     * point it somewhere else and the span would describe the wrong block. */
     if (safety_body_calls_out(function, &loop->bounds) &&
         safety_operand_escapes(function, access.base)) {
       safety_trace("the loop hands out the address of the pointer it walks, so "
@@ -2780,8 +2253,6 @@ static int safety_resolve_function(IRFunction *function, IRSafetyStats *stats) {
                    access.location.line);
       continue;
     }
-    /* The displacement is read again where the check sits, so it has to still
-     * hold what it held where the pointer was formed. */
     if (delta && !safety_operand_invariant_in(function, delta_from + 1, i,
                                               delta)) {
       safety_trace("the displacement changes between forming the pointer and "
@@ -2827,8 +2298,6 @@ static int safety_resolve_function(IRFunction *function, IRSafetyStats *stats) {
   for (size_t i = 0; i < function->instruction_count; i++) {
     IRInstruction *instruction = &function->instructions[i];
 
-    /* A loop's hoisted checks and resolved pointers go in front of its
-     * header. */
     for (size_t h = 0; h < hoist_count; h++) {
       if (hoists[h].header_index == i &&
           !safety_emit_hoisted(&out, &hoists[h])) {
@@ -2911,9 +2380,6 @@ static int safety_resolve_function(IRFunction *function, IRSafetyStats *stats) {
       ir_instruction_vector_destroy(&out);
       goto fail;
     }
-    /* The check is not moved into `out`: its operands were cloned into the
-     * replacement, and ir_function_replace_instructions frees what is left of
-     * the old array below. */
   }
 
   for (size_t h = 0; h < hoist_count; h++) {
@@ -2963,23 +2429,14 @@ fail:
   return 0;
 }
 
-/* Declare the runtime entry points this pass calls.
- *
- * Without these the calls name functions the program never declared, and the
- * register-allocating backend defers any function containing a call it cannot
- * find a signature for. That turned `--safe` into "compile the whole program
- * with the spill-everything backend": every function holding a single check
- * lost register allocation, which cost far more than the checks did. */
 static int safety_declare_runtime(IRProgram *program) {
-  /* Metadata APIs consume addresses, including string record addresses. A
-   * byte pointer signature would ask codegen to convert records to cstrings. */
   const MtlcType *pointer = mtlc_type_pointer(mtlc_type_scalar(MTLC_TYPE_UINT64));
   const MtlcType *i64 = mtlc_type_scalar(MTLC_TYPE_INT64);
   const MtlcType *u32 = mtlc_type_scalar(MTLC_TYPE_UINT32);
   const MtlcType *u64 = mtlc_type_scalar(MTLC_TYPE_UINT64);
   const MtlcType *nothing = mtlc_type_scalar(MTLC_TYPE_VOID);
   if (!pointer || !i64 || !u32 || !u64 || !nothing) {
-    return 1; /* no signatures available: the calls still work, unallocated */
+    return 1;
   }
 
   const MtlcType *check_params[5] = {pointer, i64, i64, u32, u32};
@@ -3064,8 +2521,6 @@ static int safety_declare_runtime(IRProgram *program) {
   return 1;
 }
 
-/* Is this name written, or its address taken, anywhere in the program? Either
- * makes it something other than the constant its initializer suggests. */
 static int safety_global_is_settled(const IRProgram *program,
                                     const char *name) {
   for (size_t f = 0; f < program->function_count; f++) {
@@ -3084,8 +2539,6 @@ static int safety_global_is_settled(const IRProgram *program,
           strcmp(in->dest.name, name) == 0) {
         return 0;
       }
-      /* An asm block is opaque: a global it binds may be stored to inside it,
-       * and no instruction records that. */
       if (in->op == IR_OP_INLINE_ASM &&
           ir_inline_asm_binds_symbol(in->text, name)) {
         return 0;
@@ -3131,8 +2584,6 @@ static void safety_const_globals_build(const IRProgram *program) {
         symbol->init_string || symbol->init_bytes || !symbol->name) {
       continue;
     }
-    /* Exported: something outside this compilation can write it, so scanning
-     * this program says nothing about its value. */
     if (symbol->is_exported) {
       continue;
     }
@@ -3149,8 +2600,6 @@ static void safety_const_globals_build(const IRProgram *program) {
         symbol->init_bits;
     g_safety_const_globals.count++;
   }
-  /* Sorted so the lookup, which every constant fold reaches, is a search
-   * rather than a scan of every global in the program. */
   size_t count = g_safety_const_globals.count;
   if (count < 2) {
     return;
@@ -3177,7 +2626,7 @@ static void safety_const_globals_build(const IRProgram *program) {
   } else {
     free(names);
     free(values);
-    g_safety_const_globals.count = 0; /* unsorted is unsearchable */
+    g_safety_const_globals.count = 0;
   }
   free(order);
 }
@@ -3186,9 +2635,6 @@ static void safety_const_globals_build(const IRProgram *program) {
 
 int ir_safety_analyze_origins(IRProgram *program) {
   if (!program) return 1;
-  /* Preserve the diagnostic footprint of the input IR. A range already
-   * recognized here keeps its range message. A check widened only after
-   * scalar analysis still reports the first failing source access. */
   g_safety_program = program;
   g_safety_callee_cache_count = 0;
   safety_const_globals_build(program);
@@ -3240,10 +2686,6 @@ int ir_safety_resolve_program(IRProgram *program, IRSafetyStats *stats) {
     if (!function) {
       continue;
     }
-    /* A rule is not part of the program: it runs in the compile-time
-     * interpreter and never reaches a binary, so there is nothing for a
-     * checked access to protect. Instrumenting one only hands the interpreter
-     * code it cannot run. */
     if (function->is_rule) {
       continue;
     }
@@ -3261,39 +2703,25 @@ int ir_safety_resolve_program(IRProgram *program, IRSafetyStats *stats) {
   g_safety_program = NULL;
   if (!safety_simplify_plain_storage(program)) return 0;
   if (safety_time_enabled()) {
-    /* Ticks rather than a converted figure: clock()'s units do not reliably
-     * match CLOCKS_PER_SEC across the toolchains this builds with, and a
-     * number in the wrong units is worse than none. Runs are comparable, which
-     * is what this is for. */
     fprintf(stderr, "safety: resolving took %lld ticks\n",
             (long long)(clock() - started));
   }
   return 1;
 }
 
-/* ---- telling the runtime where the heap is --------------------------------- */
-
 typedef enum {
   SAFETY_ALLOC_NONE = 0,
-  SAFETY_ALLOC_SIZE,    /* arguments[0] is the byte count */
-  SAFETY_ALLOC_PRODUCT, /* arguments[0] * arguments[1] is the byte count */
-  SAFETY_ALLOC_REALLOC, /* arguments[0] the old block, arguments[1] the size */
-  SAFETY_ALLOC_FREE     /* arguments[0] is the block being retired */
+  SAFETY_ALLOC_SIZE,
+  SAFETY_ALLOC_PRODUCT,
+  SAFETY_ALLOC_REALLOC,
+  SAFETY_ALLOC_FREE
 } SafetyAllocKind;
 
-/* Whether the callee is the Mettle-implemented allocator rather than the libc
- * one. Only the former needs bracketing: its body is Mettle code that lowering
- * has checked, and it reaches for the same helpers ordinary code does. The
- * libc allocator is C, never carries a check, and needs no bracket. */
 static int safety_callee_is_mettle_allocator(const IRInstruction *instruction) {
   return instruction->op == IR_OP_CALL && instruction->text &&
          strncmp(instruction->text, "mettle_heap_", 12) == 0;
 }
 
-/* Both spellings of every entry point: the libc names a program calls by
- * default, and the std/alloc names --native-heap rewrites them to. This runs
- * after that rewrite, so only one set is ever present, but matching both keeps
- * the two flags independent. */
 static SafetyAllocKind safety_classify_call(const IRInstruction *instruction) {
   if (instruction->op != IR_OP_CALL || !instruction->text) {
     return SAFETY_ALLOC_NONE;
@@ -3385,8 +2813,6 @@ done:
   return ok;
 }
 
-/* The size `new T` asks for. Mirrors what --native-heap's rewrite does with
- * the same operand, including its eight byte fallback for a missing one. */
 static IROperand safety_new_size(const IRInstruction *instruction) {
   if (instruction->rhs.kind == IR_OPERAND_NONE ||
       (instruction->rhs.kind == IR_OPERAND_INT &&
@@ -3426,9 +2852,6 @@ static int safety_register_function(IRFunction *function) {
       continue;
     }
 
-    /* Retire the block before the call that releases it, not after. Between
-     * the two the allocator has not handed the memory out yet, so no other
-     * thread can register something else over it. */
     if (kind == SAFETY_ALLOC_FREE) {
       if (!safety_emit_one_pointer_call(&out, location,
                                         "mettle_safety_unregister",
@@ -3438,9 +2861,6 @@ static int safety_register_function(IRFunction *function) {
       }
     }
 
-    /* How many bytes the call is about to hand back. calloc states it as a
-     * product, which is multiplied out here, before the call, so only the one
-     * result has its live range stretched across it instead of both factors. */
     IROperand size = ir_operand_none();
     IROperand product_operand = ir_operand_none();
     if (is_new) {
@@ -3465,8 +2885,6 @@ static int safety_register_function(IRFunction *function) {
       size = product_operand;
     }
 
-    /* These alias the instruction's own storage, which the vector takes over
-     * below and keeps alive for the rest of this function. */
     IROperand result = instruction->dest;
     IROperand old_pointer = kind == SAFETY_ALLOC_REALLOC
                                 ? instruction->arguments[0]
@@ -3495,8 +2913,6 @@ static int safety_register_function(IRFunction *function) {
       return 0;
     }
 
-    /* A result nobody keeps cannot be reached through, so there is nothing to
-     * describe. Freeing has already been handled above. */
     int ok = 1;
     if (result.kind != IR_OPERAND_NONE && kind != SAFETY_ALLOC_FREE) {
       ok = kind == SAFETY_ALLOC_REALLOC
@@ -3518,19 +2934,6 @@ static int safety_register_function(IRFunction *function) {
   ir_function_clear_cfg(function);
   return 1;
 }
-
-/* ---- describing the stack ---------------------------------------------------- */
-/*
- * Indexing a local never needs the runtime: its size is in the program, so the
- * check is a comparison against a constant or is proved away. What needs the
- * runtime is a pointer taken into a local and carried somewhere the size no
- * longer travels with it, and until now that pointer resolved to nothing and
- * the access went unexamined.
- *
- * Only locals whose address genuinely leaves are described. Every indexed
- * array has its address taken in the IR, so registering on that alone would
- * charge two calls per invocation to functions that never needed it.
- */
 
 #define SAFETY_MAX_ESCAPE_TEMPS 64
 
@@ -3563,17 +2966,6 @@ static void safety_temp_set_add(SafetyTempSet *set, const IROperand *op) {
   set->names[set->count++] = op->name;
 }
 
-/* Whether a pointer to `local` reaches anywhere its size does not.
- *
- * Reading or writing through the address here is not that: those accesses
- * carry the local's extent already. Handing the address to a call, storing it
- * into memory, returning it, or parking it in a variable all are, because from
- * that point the program can reach the object without anything saying how
- * large it is.
- *
- * Conservative in the direction that costs speed rather than coverage: an
- * address chain too long to follow, or a shape not recognized, counts as
- * escaping. */
 static int safety_local_address_escapes(const IRFunction *function,
                                         const char *local) {
   SafetyTempSet addresses = {{0}, 0, 0};
@@ -3594,8 +2986,6 @@ static int safety_local_address_escapes(const IRFunction *function,
     case IR_OP_BINARY:
     case IR_OP_ASSIGN:
     case IR_OP_CAST:
-      /* Address arithmetic and copies carry the pointer along. Landing in a
-       * variable rather than a temporary is already out of reach. */
       if (safety_temp_set_has(&addresses, &instruction->lhs) ||
           safety_temp_set_has(&addresses, &instruction->rhs)) {
         if (instruction->dest.kind == IR_OPERAND_SYMBOL) {
@@ -3605,17 +2995,14 @@ static int safety_local_address_escapes(const IRFunction *function,
       }
       break;
     case IR_OP_LOAD:
-      /* lhs is the address being read through, which is not an escape. */
       break;
     case IR_OP_STORE:
-      /* dest is the address, lhs the value: storing the pointer is an escape,
-       * storing through it is not. */
       if (safety_temp_set_has(&addresses, &instruction->lhs)) {
         return 1;
       }
       break;
     case IR_OP_SAFETY_CHECK:
-      break; /* the checks themselves are not a use of the program's */
+      break;
     case IR_OP_RETURN:
       if (safety_temp_set_has(&addresses, &instruction->lhs)) {
         return 1;
@@ -3638,7 +3025,6 @@ static int safety_local_address_escapes(const IRFunction *function,
   return addresses.overflowed && addresses.count > 0;
 }
 
-/* `t = &local; call mettle_safety_<what>(t, ...)`. */
 static int safety_emit_local_note(IRInstructionVector *out, const char *callee,
                                   const char *local, long long size,
                                   SourceLocation location) {
@@ -3676,11 +3062,6 @@ typedef struct {
   SourceLocation location;
 } SafetyStackLocal;
 
-/* Register every escaping local at function entry and retire it at every exit.
- *
- * At entry rather than where the declaration appears, because the slot exists
- * for the whole frame either way, and a declaration inside a loop would
- * otherwise re-register once per iteration. */
 static int safety_describe_local(IRProgram *program, IRFunction *function,
                                  size_t i, SafetyStackLocal *locals,
                                  size_t *count) {
@@ -3718,19 +3099,11 @@ static int safety_describe_stack(IRProgram *program, IRFunction *function) {
       declared++;
     }
   }
-  /* A parameter has a stack slot too, and no DECLARE_LOCAL to find it by.
-   * Left undescribed, its slot keeps whatever dead descriptor the previous
-   * frame retired over the same bytes, so reading through `&parameter`
-   * reported a use-after-free in a program that had freed nothing. */
   declared += function->parameter_count;
   if (declared == 0) {
     return 1;
   }
 
-  /* Sized to what the function actually declares rather than to a fixed cap.
-   * A cap would silently stop describing locals past it, and a coverage hole
-   * that depends on how many variables a function happens to have is not one
-   * anybody would think to look for. */
   SafetyStackLocal *locals = calloc(declared, sizeof(SafetyStackLocal));
   if (!locals) {
     return 0;
@@ -3751,8 +3124,6 @@ static int safety_describe_stack(IRProgram *program, IRFunction *function) {
     if (!name || !type || type->size == 0) {
       continue;
     }
-    /* A name the body redeclares is a local shadowing the parameter, and the
-     * loop above already described it at the right size. */
     if (ir_function_find_declaration(function, name, 1)) {
       continue;
     }
@@ -3808,10 +3179,6 @@ static int safety_describe_stack(IRProgram *program, IRFunction *function) {
     }
   }
 
-  /* A function that runs off the end has no return to hang the retirement on,
-   * so it goes last. Retiring a slot twice is harmless; leaving one live after
-   * the frame is gone is not, because the next frame reusing that memory would
-   * be described as the old local. */
   const IRInstruction *last =
       out.count > 0 ? &out.items[out.count - 1] : NULL;
   if (!last || last->op != IR_OP_RETURN) {
@@ -3834,15 +3201,6 @@ static int safety_describe_stack(IRProgram *program, IRFunction *function) {
   return 1;
 }
 
-/* ---- describing the globals ------------------------------------------------ */
-
-/* Module variables sit at fixed addresses for the whole run, so one sweep at
- * the top of `main` describes them all and nothing ever retires them.
- *
- * This only matters for a pointer taken into a global and carried somewhere
- * else. Indexing one directly never reaches the map at all: the size is right
- * there in the program, so the check is a comparison against a constant, or is
- * proved away outright. */
 static int safety_seed_global_pointer(IRInstructionVector *out, SourceLocation location,
                                        const char *name, size_t offset, int mode, size_t size) {
   char base_name[64], slot_name[64];
@@ -3874,10 +3232,6 @@ static int safety_seed_global_pointer(IRInstructionVector *out, SourceLocation l
   return ok;
 }
 
-/* main's parameters arrive from the process rather than from a compiled
- * caller, so the frame that normally carries a parameter's origin was never
- * pushed and the argument vector reads as an unknown pointer. Describe it at
- * entry instead, which is the only such parameter a program indexes. */
 static int safety_describe_entry_arguments(IRProgram *program, IRFunction *entry) {
   if (entry->parameter_count < 2 || !entry->parameter_names ||
       !entry->parameter_names[1] || !entry->parameter_types) {
@@ -3939,8 +3293,6 @@ static int safety_describe_globals(IRProgram *program, IRFunction *entry) {
              g_safety_next_id++);
     IROperand size_operand = ir_operand_int((long long)symbol->type->size);
 
-    /* The instruction gets its own copies: appending moves it into the vector,
-     * which then owns whatever names it holds. */
     IRInstruction take = {0};
     take.op = IR_OP_ADDRESS_OF;
     take.location = entry->location;
@@ -3969,8 +3321,6 @@ static int safety_describe_globals(IRProgram *program, IRFunction *entry) {
     }
   }
 
-  /* All target regions must exist before seeding relocations, including a
-   * pointer whose target appears later in the module's symbol table. */
   for (size_t i = 0; i < program->module_symbol_count; i++) {
     const IRModuleSymbol *symbol = &program->module_symbols[i];
     if (symbol->kind != IR_MODSYM_VARIABLE || symbol->is_extern || !symbol->type) continue;
@@ -4006,15 +3356,6 @@ static int safety_describe_globals(IRProgram *program, IRFunction *entry) {
   return 1;
 }
 
-/* A stack local is described at function entry, so the note outlives the block
- * the declaration sits in. When the optimizer folds that block away - a
- * constructor built under `if (1 == 2)`, say - the declaration goes and the
- * note is left taking the address of a local that no longer exists, which the
- * backend refuses. Nothing can reach an undeclared slot, so the note has
- * nothing left to describe: retire it and the address it took.
- *
- * Only stack notes. A global has no declaration in any function by
- * construction, and its note is exactly as good as it ever was. */
 static int safety_retire_stack_notes(const IRProgram *program,
                                      IRFunction *function) {
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -4033,7 +3374,6 @@ static int safety_retire_stack_notes(const IRProgram *program,
       continue;
     }
 
-    /* The address is taken immediately before the call it feeds. */
     IRInstruction *take = NULL;
     for (size_t back = i; back-- > 0;) {
       IRInstruction *candidate = &function->instructions[back];
@@ -4055,10 +3395,6 @@ static int safety_retire_stack_notes(const IRProgram *program,
     }
 
     int declared = 0;
-    /* A parameter has a slot and no declaration to prove it by. Retiring its
-     * note left the slot undescribed, so it kept whatever dead descriptor the
-     * previous frame retired over the same bytes and reading through
-     * `&parameter` reported a use-after-free in a program that freed nothing. */
     for (size_t d = 0; d < function->parameter_count && !declared; d++) {
       if (function->parameter_names && function->parameter_names[d] &&
           strcmp(function->parameter_names[d], take->lhs.name) == 0) {
@@ -4119,9 +3455,6 @@ int ir_safety_register_allocations(IRProgram *program) {
     if (function->name && strcmp(function->name, "main") == 0) {
       entry = function;
     }
-    /* Exempt for the same reason its accesses are: the calls it makes to
-     * itself are the allocator working, not the program allocating, and
-     * describing them would register a block once per layer. */
     if (safety_function_is_allocator(function, allocator_source)) {
       continue;
     }

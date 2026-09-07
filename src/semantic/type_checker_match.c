@@ -1,9 +1,5 @@
-// Type checker: match statement and match expression checking.
 #include "type_checker_internal.h"
 
-// ---------------------------------------------------------------------------
-// Type-check a match statement.
-// ---------------------------------------------------------------------------
 int type_checker_check_match_statement(TypeChecker *checker,
                                                ASTNode *statement) {
   MatchStatement *match = (MatchStatement *)statement->data;
@@ -30,7 +26,6 @@ int type_checker_check_match_statement(TypeChecker *checker,
   }
 
   int seen_default = 0;
-  // Track which variant tags have been covered
   int *covered = calloc(subject_type->tagged_variant_count, sizeof(int));
   if (!covered) {
     type_checker_set_error_at_location(checker, statement->location,
@@ -44,7 +39,6 @@ int type_checker_check_match_statement(TypeChecker *checker,
     if (arm->is_default) {
       seen_default = 1;
     } else {
-      // Find the variant index
       int variant_idx = -1;
       for (size_t v = 0; v < subject_type->tagged_variant_count; v++) {
         if (subject_type->tagged_variant_names[v] &&
@@ -71,7 +65,6 @@ int type_checker_check_match_statement(TypeChecker *checker,
       }
       covered[variant_idx] = 1;
 
-      // If the arm has a binding, introduce it as a local variable
       if (arm->binding_name) {
         Type *payload =
             subject_type->tagged_variant_payloads[variant_idx];
@@ -107,14 +100,12 @@ int type_checker_check_match_statement(TypeChecker *checker,
       }
     }
 
-    // No binding: just check the body
     if (arm->body && !type_checker_check_statement(checker, arm->body)) {
       free(covered);
       return 0;
     }
   }
 
-  // Exhaustiveness check
   if (!seen_default) {
     for (size_t v = 0; v < subject_type->tagged_variant_count; v++) {
       if (!covered[v]) {
@@ -139,10 +130,7 @@ int type_checker_check_match_statement(TypeChecker *checker,
   return 1;
 }
 
-// Type-check a match used in expression position. Every arm body is a
-// value-yielding expression; all arm types must unify, and the match must be
 // exhaustive (no implicit fallthrough is allowed when a value is required).
-// Returns the unified result Type*, or NULL on error.
 Type *type_checker_check_match_expression(TypeChecker *checker,
                                                  ASTNode *expression) {
   MatchStatement *match = (MatchStatement *)expression->data;

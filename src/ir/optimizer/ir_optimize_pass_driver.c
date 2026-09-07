@@ -18,9 +18,6 @@ const char *ir_opt_pass_name(IROptPassId pass_id) {
   return g_ir_pass_names[pass_id];
 }
 
-/* METTLE_TIME_IR_PASSES=1: accumulate wall time per pass across the whole
- * compile and dump a sorted table at the end of optimization. The cheap way
- * to answer "which pass is eating the build" without a sampling profiler. */
 static int ir_pass_time_enabled(void) {
   static int cached = -1;
   if (cached < 0) {
@@ -41,7 +38,6 @@ static int ir_pass_time_covers(const IRFunction *function) {
 
 static double g_ir_pass_ms[IR_OPT_PASS_COUNT];
 static unsigned long long g_ir_pass_runs[IR_OPT_PASS_COUNT];
-/* Named-sequence passes (vectorizers etc.) keyed by name, small fixed table. */
 #define IR_PASS_TIME_NAMED_MAX 96
 static struct {
   const char *name;
@@ -71,8 +67,6 @@ static void ir_pass_time_add_named(const char *name, double ms) {
   }
 }
 
-/* Timing hooks for program-level passes (the inliner, pure-call LICM) that
- * don't go through the per-function drivers. begin returns 0 when disabled. */
 double ir_pass_time_begin(void) {
   return ir_pass_time_enabled() ? ir_pass_now_ticks() : 0.0;
 }
@@ -90,7 +84,7 @@ void ir_pass_time_report(void) {
   }
   fprintf(stderr, "-- IR pass times (cumulative ms) --\n");
   for (int dumped = 0; dumped < 40; dumped++) {
-    double best = 0.5; /* drop sub-tick noise */
+    double best = 0.5;
     int best_fix = -1;
     size_t best_named = (size_t)-1;
     for (int i = 0; i < IR_OPT_PASS_COUNT; i++) {
@@ -134,8 +128,6 @@ static int ir_skip_token_equals(const char *token, size_t token_len,
 }
 
 static int ir_pass_trace_enabled(void) {
-  /* Cached: this is consulted per pass EVENT (hundreds of thousands of times
-   * on big programs) and getenv is not cheap on Windows. */
   static int cached = -1;
   if (cached < 0) {
     const char *spec = getenv("METTLE_TRACE_IR_PASSES");
@@ -165,22 +157,13 @@ static void ir_trace_pass_event(const char *pass_name, const char *event,
     fprintf(stderr, " changed=%d", changed);
   }
   fputc('\n', stderr);
-  fflush(stderr); /* the trace exists to locate hangs; keep it ordered */
+  fflush(stderr);
 }
 
-/* Diagnostic: METTLE_SKIP_PASS="sroa,16" disables the listed pass names or
- * numeric pass IDs so a miscompile can be bisected to a single pass. Names
- * cover both fixpoint passes and named-sequence passes (the pre-inline and
- * post-fixpoint stages: vectorizers, SLP, induction-pointer, ...). */
 static int ir_skip_spec_matches(const char *id_text, const char *pass_name) {
-  /* Snapshot once: consulted per pass run, and getenv per call was real
-   * compile time on big programs. The env cannot change mid-process for a
-   * diagnostic knob. */
   static const char *spec = NULL;
   static int fetched = 0;
   if (!fetched) {
-    /* Own the string: POSIX lets a later getenv overwrite the buffer, and the
-     * freestanding runtime's used to. */
     const char *raw = getenv("METTLE_SKIP_PASS");
     spec = raw ? mettle_strdup(raw) : NULL;
     fetched = 1;
@@ -228,12 +211,6 @@ int ir_pass_is_skipped(IROptPassId pass_id) {
   return ir_skip_spec_matches(id_text, ir_opt_pass_name(pass_id));
 }
 
-/* METTLE_NO_SIMD: build a baseline (SSE2-only) binary by skipping every
- * vectorizer / SLP / SIMD named pass. Those are the only passes that emit
- * AVX/AVX2/FMA instructions, so a binary built with this set runs on any
- * x86-64 CPU (SSE2 is mandatory in the x86-64 baseline). Scalar float codegen
- * already uses legacy SSE2 encodings, so nothing else needs AVX. Use for
- * distributable builds that must run on older machines. */
 static int ir_no_simd_enabled(void) {
   static int v = -1;
   if (v < 0) {
@@ -243,31 +220,12 @@ static int ir_no_simd_enabled(void) {
   return v;
 }
 
-/* The passes METTLE_NO_SIMD turns off: the ones that emit a vector kernel, all
- * of which are named for what they are. It used to skip EVERY pass, which is
- * not what it says and not what the docs promise. Skipping the whole pipeline
- * also left the loop canonical form unestablished while the checker that
- * enforces it still ran, so `while (...) { var t: int64 = b; ... }` -- a local
- * declared inside a loop, which hoist_body_locals exists to lift out -- turned
- * -O and --release into an internal compiler error. */
 static int ir_pass_is_vectorizer(const char *name) {
   return name && (strncmp(name, "simd_", 5) == 0 ||
                   strncmp(name, "auto_vectorize", 14) == 0 ||
                   strncmp(name, "outer_vectorize", 15) == 0);
 }
 
-/* NO_SLP: the pair vectorizer only.
- *
- * This lived inside the two passes as an early `return 0`, which is the
- * failure code, so asking to disable the pass reported an internal compiler
- * error instead. METTLE_NO_SIMD had the same bug before it. A pass function
- * has one return value carrying two meanings -- did it work, and did it do
- * anything -- and there is no third value for "I declined", so declining had
- * to borrow one of the two and borrowed the wrong one, twice.
- *
- * The driver already has a place to say "not this one" and already says it for
- * METTLE_NO_SIMD, a skip list and a quarantine list. A knob belongs there,
- * where declining is expressible, rather than inside a pass where it is not. */
 static int ir_no_slp_enabled(void) {
   static int v = -1;
   if (v < 0) {
@@ -281,12 +239,6 @@ static int ir_pass_is_slp(const char *name) {
   return name && strncmp(name, "simd_slp_", 9) == 0;
 }
 
-/* A signature over the function's volatile accesses: how many there are, in
- * what order, and at what width. A pass that drops one, invents one, or swaps
- * two of them has broken the one guarantee `volatile` makes, and the program
- * would be silently wrong. Comparing the signature across a pass turns that
- * into a compiler error naming the pass. Only functions that hold a volatile
- * access pay for this. */
 static unsigned long long ir_volatile_signature(const IRFunction *function) {
   unsigned long long signature = 1469598103934665603ULL;
   size_t i;
@@ -326,7 +278,7 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
 
   if (ir_no_simd_enabled() && ir_pass_is_vectorizer(pass->name)) {
     ir_trace_pass_event(pass->name, "skipped", NULL, -1);
-    return 1;                 /* baseline build: no vectorization, no AVX */
+    return 1;
   }
 
   if (ir_no_slp_enabled() && ir_pass_is_slp(pass->name)) {
@@ -392,11 +344,6 @@ int ir_run_named_pass_sequence(IRFunction *function,
   return 1;
 }
 
-/* Worklist driver for named-pass stages (see the header comment). Cleanliness
- * is tracked per unique pass function at the stage's IR version, exactly as
- * ir_run_fixpoint_pass tracks the fixpoint passes: a pass whose clean version
- * is still current is looking at the same instruction array it already
- * declined, so it is skipped without running its matcher. */
 #define IR_NAMED_STAGE_MAX_PASSES 64
 
 int ir_run_named_stage_fixpoint(IRFunction *function,
@@ -410,8 +357,6 @@ int ir_run_named_stage_fixpoint(IRFunction *function,
     return 0;
   }
 
-  /* Duplicate entries (same run pointer) share one cleanliness slot, so an
-   * array that still lists a pass twice behaves as one pass offered twice. */
   size_t slot[IR_NAMED_STAGE_MAX_PASSES];
   unsigned long long clean_version[IR_NAMED_STAGE_MAX_PASSES];
   for (size_t i = 0; i < pass_count; i++) {
@@ -460,12 +405,6 @@ int ir_run_named_stage_fixpoint(IRFunction *function,
       if (changed) {
         version++;
         iteration_changed = 1;
-        /* A structural change can remove features (a claimed loop loses its
-         * labels); refresh so later gates read the truth. A saturated mask
-         * needs no refresh: re-scanning could only clear bits, and a stale
-         * set bit costs one matcher call that declines, where a stale clear
-         * bit would skip a pass that had work. Erring toward running is both
-         * cheaper here and the safe direction. */
         if (feature_flags != IR_OPT_FEATURE_ALL) {
           ir_collect_function_features(function, &features);
           feature_flags = ir_opt_feature_flags(&features);
@@ -483,10 +422,6 @@ int ir_run_named_stage_fixpoint(IRFunction *function,
   mettle_compiler_ctx_set_fixpoint_iteration(0);
 
   if (require_convergence && !converged) {
-    /* The stage's output is a normal form the passes behind it rely on.
-     * Still changing at the cap means the form does not hold: some pass is
-     * oscillating or feeding another, and every recognizer downstream would
-     * be matching against shapes it cannot trust. Stop loudly. */
     fprintf(stderr,
             "mettle: internal error: stage '%s' did not converge on function "
             "'%s' after %d iterations\n",
@@ -498,13 +433,6 @@ int ir_run_named_stage_fixpoint(IRFunction *function,
   return 1;
 }
 
-/* Fixpoint pass driver with redundant-run skipping.
- *
- * The IR has a monotonically increasing version that bumps whenever any pass
- * changes it. Each pass records the version at which it last reported no
- * change. If that version is still current, the instruction array is identical
- * to what the pass already inspected, so the pass cannot change anything.
- */
 int ir_run_fixpoint_pass(IRFunction *function, IROptPassId pass_id,
                          IROptFunctionPass pass, int enabled,
                          unsigned long long *version,
@@ -559,8 +487,6 @@ int ir_run_fixpoint_pass(IRFunction *function, IROptPassId pass_id,
     ir_verify_maybe_sabotage(function, pass_name, &pass_changed);
     if (!ir_verify_check_pass(function, verify_snapshot, pass_name,
                               &pass_changed)) {
-      /* Divergence: IR restored; the pass is quarantined for this function,
-       * so mark it clean at this version rather than re-running it. */
       clean_version[pass_id] = *version;
     }
     ir_verify_snapshot_free(verify_snapshot);

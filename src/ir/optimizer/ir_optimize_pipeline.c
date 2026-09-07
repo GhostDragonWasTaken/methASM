@@ -29,25 +29,7 @@ typedef struct {
 #define IR_OPT_PASS_WHEN_ALL_ANY(id, fn, all_features, any_features)           \
   { IR_OPT_PASS_##id, fn, {all_features, any_features} }
 
-/* Loop canonical form. The recognizers behind these read loop bodies, and
- * each of these rewrites a shape that would otherwise hide the body from all
- * of them: a declaration sitting inside the body, a global array's base
- * computed where no recognizer reads it as a base, a conditional accumulator,
- * a scan seeded from its first element. They run to a checked fixpoint; the
- * driver stops the build if the form fails to converge, so a recognizer never
- * matches against a shape the compiler has not finished normalizing. */
 #define IR_OPT_CANONICAL_MAX_ITERATIONS 6
-/* Two, because a third sweep was measured to change nothing.
- *
- * The worklist re-offers a recognizer whenever the IR moved after it last
- * came back clean, so the bound is only reached when the previous sweep
- * actually changed something. Two sweeps give every pass the second chance
- * the old array hand-coded by listing seven of them twice. A third produced
- * byte-identical object code across all 78 examples and test inputs, while
- * costing up to 36% on a function holding hundreds of loops, where one claim
- * un-cleans every other recognizer and forces a full re-scan. Raising this
- * again is fine, but measure the output, not just the runtime: if the bytes
- * do not move, the sweep is pure cost. */
 #define IR_OPT_RECOGNIZER_MAX_ITERATIONS 2
 
 #define IR_GATE_LOOP {IR_OPT_LABEL_JUMP, IR_OPT_REQUIRE_NONE}
@@ -66,12 +48,6 @@ static const IROptNamedPass g_ir_pre_inline_canonical[] = {
     {"scan_from_first", ir_normalize_scan_from_first_pass, IR_GATE_LOOP_LOAD},
 };
 
-/* Recognizers, each listed once in dependency order. The worklist driver
- * re-offers a pass whenever a later one changes the IR, which is what the
- * old duplicated entries did by hand. simd_minmax_i32 runs before
- * induction_pointer because the latter rewrites an int32 scan's counter into
- * a walking pointer, after which the extremum diamond indexes off something
- * no longer recognizable as the loop counter. */
 static const IROptNamedPass g_ir_pre_inline_recognizers[] = {
     {"user_rewrite", ir_user_rewrite_pass,
      {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
@@ -85,9 +61,6 @@ static const IROptNamedPass g_ir_pre_inline_recognizers[] = {
     {"lower_bound_i32", ir_lower_bound_i32_pass, IR_GATE_LOOP_LOAD},
 };
 
-/* Post-inline loop canonical form. hoist_body_locals joins here because
- * inlining plants a fresh declaration per parameter of every call it folded
- * into a body. */
 static const IROptNamedPass g_ir_loop_canonical_passes[] = {
     {"drop_dead_narrowing", ir_drop_dead_narrowing_pass,
      {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
@@ -107,12 +80,6 @@ static const IROptNamedPass g_ir_loop_canonical_passes[] = {
     {"scan_from_first", ir_normalize_scan_from_first_pass, IR_GATE_LOOP_LOAD},
 };
 
-/* Recognizers, each listed once in dependency order; the worklist driver
- * re-offers earlier passes when later ones change the IR. The two orderings
- * that matter: simd_minmax_reduce before induction_pointer (a rewritten
- * counter is no longer recognizable to the extremum diamond), and simd_fill
- * after induction_pointer (so range-for fills, already in pointer-walk form,
- * and while-loop fills, still indexed, both match). */
 static const IROptNamedPass g_ir_recognizer_passes[] = {
     {"simd_minmax_reduce", ir_simd_minmax_reduce_pass, IR_GATE_LOOP_LOAD},
     {"induction_pointer", ir_pointer_induction_pass, IR_GATE_LOOP},
@@ -135,20 +102,12 @@ static const IROptNamedPass g_ir_recognizer_passes[] = {
     {"detect_shift_loops", ir_detect_shift_loops_pass, IR_GATE_LOOP},
     {"eliminate_congruent_ivs", ir_eliminate_congruent_ivs_pass,
      IR_GATE_LOOP},
-    /* After congruent-IV merge so parallel lane indices appear as base+J.
-     * SLP matches straight-line chains, so no loop gate. */
     {"simd_slp_mac_i32", ir_simd_slp_mac_i32_pass,
      {IR_OPT_FEATURE_LOAD, IR_OPT_REQUIRE_NONE}},
     {"simd_slp_mac_i8", ir_simd_slp_mac_i8_pass,
      {IR_OPT_FEATURE_LOAD, IR_OPT_REQUIRE_NONE}},
 };
 
-/* Run once, in order, after the recognizer worklist has converged. Both
- * mutate loop bodies in ways that would defeat every recognizer above:
- * if_convert collapses register-only diamonds to branchless selects, and
- * prefetch_indirect inserts control flow into loops with load-fed accesses
- * -- shapes no vectorizer can claim. Keeping them out of the worklist is
- * what keeps the recognizers from ever seeing their output. */
 static const IROptNamedPass g_ir_post_recognizer_tail[] = {
     {"if_convert", ir_if_convert_pass,
      {IR_OPT_FEATURE_LABEL,
@@ -156,18 +115,7 @@ static const IROptNamedPass g_ir_post_recognizer_tail[] = {
     {"prefetch_indirect", ir_prefetch_indirect_pass, IR_GATE_LOOP_LOAD},
 };
 
-/* Lowering cleanups. Each erases a shape a recognizer reads -- a load becomes
- * a copy, two arms become one, a widening cast disappears -- so they run after
- * every recognizer has had its chance AND outside the stage --explain re-runs
- * to test a hypothesis, which would otherwise measure the cleaned-up body
- * instead of the one the programmer wrote. The two general passes behind them
- * retire the copies they leave; nothing later in the pipeline would. */
 static const IROptNamedPass g_ir_lowering_cleanup[] = {
-    /* This one matches the shape the programmer wrote: two arms that differ
-     * only in a field offset. The hoists below rewrite exactly those arms, and
-     * an arm reading a base the hoist lifted out no longer looks like its
-     * partner, so the branch survives as a data-dependent branch the hardware
-     * cannot predict. It goes first, where the shape is still intact. */
     {"select_field_load", ir_select_adjacent_field_pass,
      {IR_OPT_FEATURE_LOAD | IR_OPT_FEATURE_BRANCH_ZERO, IR_OPT_REQUIRE_NONE}},
     {"promote_loop_memory", ir_promote_loop_memory_pass,
@@ -182,8 +130,6 @@ static const IROptNamedPass g_ir_lowering_cleanup[] = {
      {IR_OPT_FEATURE_LOAD, IR_OPT_REQUIRE_NONE}},
     {"ascii_casefold_range", ir_ascii_casefold_range_pass,
      {IR_OPT_FEATURE_BRANCH_ZERO, IR_OPT_REQUIRE_NONE}},
-    /* After the casefold pass, which claims the two-range letter test and
-     * produces something better than a single subtract-and-compare. */
     {"fold_range_test", ir_fold_range_test_pass,
      {IR_OPT_FEATURE_BRANCH_ZERO, IR_OPT_REQUIRE_NONE}},
     {"or_chain_bitset", ir_or_chain_to_bitset_pass,
@@ -201,9 +147,6 @@ static const IROptNamedPass g_ir_lowering_cleanup[] = {
       IR_OPT_FEATURE_BRANCH_ZERO}},
 };
 
-
-/* SROA runs after copy/coalesce fold inlined struct copies into clean
- * symbol-to-symbol form, and before CSE/dead-temp cleanup. */
 static const IROptScheduledPass g_ir_fixpoint_passes[] = {
     IR_OPT_PASS_WHEN_ALL(REDUCTION_UNROLL, ir_reduction_unroll_pass,
                          IR_OPT_LABEL_JUMP),
@@ -247,8 +190,6 @@ static const IROptScheduledPass g_ir_fixpoint_passes[] = {
                        ir_constant_and_branch_simplify_pass),
     IR_OPT_PASS_WHEN_ALL(REASSOCIATE_CONSTANTS, ir_reassociate_constants_pass,
                          IR_OPT_FEATURE_BINARY),
-    /* E-class pilot (METTLE_EGRAPH=1): inert by default; when enabled it
-     * rides this driver's verify snapshot like any other pass. */
     IR_OPT_PASS_WHEN_ALL(EGRAPH_SIMPLIFY, ir_egraph_simplify_pass,
                          IR_OPT_FEATURE_BINARY),
     IR_OPT_PASS_WHEN_ALL(COUNT_WORD_STARTS, ir_count_word_starts_pass,
@@ -310,10 +251,6 @@ static const IROptFixpointStage g_ir_fixpoint_stage = {
     IR_OPT_FIXPOINT_MAX_ITERATIONS,
 };
 
-/* Portable targets consume the same scalar/control-flow IR but cannot accept
- * the x86-only SIMD idioms produced by the full pipeline. Keep this schedule
- * intentionally target-neutral: no vector opcodes, rotate fusion, host memory
- * intrinsics, prefetch, or target-specific cost model. */
 static const IROptScheduledPass g_ir_portable_fixpoint_passes[] = {
     IR_OPT_PASS_ALWAYS(DROP_DEAD_NARROWING, ir_drop_dead_narrowing_pass),
     IR_OPT_PASS_WHEN_ALL(UNROLL_ANNOTATED_LOOPS,
@@ -392,15 +329,10 @@ int ir_optimize_pre_inline_function(IRFunction *function) {
       "IR optimization pre-inline pass failed", 0);
 }
 
-/* METTLE_LOOP_FINGERPRINT=1: pair every counted loop's dataflow fingerprint
- * with whether a recognizer claimed it (its header label is gone after the
- * stages). CI diffs these lines across compiler versions; a fingerprint that
- * held still while its claim flipped is recognizer rot. */
 #define IR_FP_MAX_LOOPS 64
 
 typedef struct {
-  char *label; /* owned copy: a recognizer that claims the loop frees the
-                  label instruction's text before the report runs */
+  char *label;
   unsigned long long fp;
 } IRLoopFpEntry;
 
@@ -427,7 +359,7 @@ static int ir_loop_fp_snapshot(IRFunction *function, IRLoopFpEntry *entries) {
     }
     total++;
     if (count >= IR_FP_MAX_LOOPS) {
-      continue; /* keep counting so the cap can be reported honestly */
+      continue;
     }
     entries[count].label = mettle_strdup(ins->text);
     if (!entries[count].label) {
@@ -436,8 +368,6 @@ static int ir_loop_fp_snapshot(IRFunction *function, IRLoopFpEntry *entries) {
     entries[count].fp = ir_affine_loop_fingerprint(function, &loop);
     count++;
   }
-  /* A gate that quietly covered a prefix of the loops would read as a clean
-   * run. Say what was left out instead. */
   if (total > count) {
     fprintf(stderr,
             "[loop-fp] NOTE function=%s has %d modelled loops but the cap is "
@@ -472,7 +402,6 @@ static void ir_loop_fp_destroy(IRLoopFpEntry *entries, int count) {
   }
 }
 
-/* Canonical form (checked fixpoint) -> recognizer worklist -> tail. */
 static int ir_run_post_fixpoint_stages(IRFunction *function) {
   mettle_compiler_ctx_set_pass_name("loop canonical form");
   if (!ir_run_named_stage_fixpoint(
@@ -482,17 +411,6 @@ static int ir_run_post_fixpoint_stages(IRFunction *function) {
           "IR optimization pass failed", 1)) {
     return 0;
   }
-  /* The recognizers start here, and every one of them assumes the form the
-   * stage above was supposed to establish. Check it structurally before they
-   * run: a canonicalizer whose matcher stopped firing converges just as
-   * quietly as one with nothing to do, and this is the difference.
-   *
-   * --verify is the one caller allowed to break the form on purpose: a
-   * divergence quarantines the offending pass and restores the pre-pass IR,
-   * so a canonicalizer that was supposed to run did not. That is a reported
-   * loss of optimization, not rot, and ir_verify.h promises it "costs only
-   * optimization, never correctness" -- aborting here charged a false
-   * positive in the input generator as a compiler crash. */
   {
     char detail[192];
     detail[0] = '\0';
@@ -542,8 +460,6 @@ static int ir_scheduled_pass_is_enabled(const IROptScheduledPass *pass,
          (features & pass->gate.any) != 0;
 }
 
-/* Cached: getenv takes a lock and walks the whole environment on Windows, and
- * this is asked once per function. */
 static int ir_time_functions_enabled(void) {
   static int cached = -1;
 
@@ -570,9 +486,6 @@ static int ir_run_fixpoint_stage(IRFunction *function,
     int changed = 0;
     IROptFunctionFeatures features;
 
-    /* Retiring an instruction leaves a NOP behind, and by the third iteration
-     * of a big body most of it is holes that every pass below still walks.
-     * Positions move, so every pass has to be offered the body again. */
     if (ir_function_drop_dead_nops(function) > 0) {
       version++;
     }
@@ -609,8 +522,6 @@ int ir_optimize_function_pipeline(IRFunction *function) {
     return 0;
   }
 
-  /* Weigh the function on the way in and out: the difference is what the whole
-   * pipeline achieved, which is the one number the per-pass ledger cannot show. */
   ir_explain_function_before(function);
 
   {
@@ -620,11 +531,6 @@ int ir_optimize_function_pipeline(IRFunction *function) {
     }
   }
 
-  /* Snapshot ahead of the main fixpoint, not just ahead of the post-fixpoint
-   * worklist: the sum, dot, byte-map and SLP recognizers run as fixpoint
-   * passes, so a loop one of them claims has already lost its header by the
-   * time the worklist starts. Sampling here is what makes the gate cover
-   * every recognizer instead of most of them. */
   IRLoopFpEntry fp_entries[IR_FP_MAX_LOOPS];
   int fp_count = 0;
   if (ir_loop_fp_enabled()) {
@@ -646,17 +552,12 @@ int ir_optimize_function_pipeline(IRFunction *function) {
   }
   ir_loop_fp_destroy(fp_entries, fp_count);
 
-  /* Enforce `@simd` contracts now that every vectorizer has had its chance,
-   * then strip the markers before CFG rebuild / codegen. */
   double t0 = ir_pass_time_begin();
   if (!ir_verify_simd_contracts(function)) {
     return 0;
   }
   ir_pass_time_end("verify_simd_contracts [stage]", t0);
 
-  /* Weigh the body --explain reports on before the lowering cleanups touch it:
-   * its fix simulations re-run the recognizers on a clone, and a cleanup has
-   * already erased the shapes they read. */
   ir_explain_function_after(function);
 
   mettle_compiler_ctx_set_pass_name("lowering cleanup");
@@ -673,10 +574,6 @@ int ir_optimize_function_pipeline(IRFunction *function) {
   return ok;
 }
 
-/* --explain hypothesis testing: re-run the optimization stages (including
- * every vectorizer) on a scratch clone that carries a simulated fix. No
- * contract verification, no CFG rebuild -- the caller inspects the clone's
- * marker regions itself and then throws it away. */
 int ir_optimize_function_revectorize(IRFunction *function) {
   if (!function) {
     return 0;
@@ -755,10 +652,6 @@ static int ir_optimize_portable_program_pipeline(
     fprintf(stderr, "GPU optimization eligibility failed: %s\n",
             graph_error ? graph_error : "invalid device module");
     free(graph_error);
-    /* That message is the user diagnostic (uniformity violation, recursive
-     * device call graph, ...). Marking it a user error keeps the driver from
-     * escalating to an internal-compiler-error report attributed to whatever
-     * function happened to hold the compiler context last. */
     ir_optimize_note_user_error();
     ir_verify_end_program();
     ir_function_index_reset();
@@ -767,16 +660,6 @@ static int ir_optimize_portable_program_pipeline(
 
   ir_explain_set_program(program);
 
-  /* Inlining, for device modules only. It matters more here than on the host:
-   * a helper left out of line is a PTX `.func` reached by `call.uni`, which
-   * means the call ABI's parameter space plus a register allocation that stops
-   * at the call boundary -- a cost every work item pays. The GPU call-graph
-   * verifier above has already rejected recursion and indirect calls, so what
-   * reaches this point is a DAG of direct calls.
-   *
-   * Restricted to `gpu_only` rather than every target-neutral compile: the
-   * AArch64 path shares this pipeline, and its inlining policy is its own
-   * question. */
   if (gpu_only && (!options || !options->preserve_function_boundaries) &&
       !ir_pass_name_is_skipped("inline_small_functions")) {
     int inlining_changed = 0;
@@ -789,11 +672,6 @@ static int ir_optimize_portable_program_pipeline(
     ir_pass_time_end("inline_small_functions [program]", t0);
 
     if (inlining_changed) {
-      /* Inlining rewrites bodies, so every derived structure is stale. The
-       * per-function stage below reads the CFG, and the reachability filter
-       * reads the call graph: a helper every caller absorbed has no callers
-       * left and is no longer device code. Rebuild both before either is
-       * consulted again. */
       for (size_t i = 0; i < program->function_count; i++) {
         if (program->functions[i] &&
             !ir_function_rebuild_cfg(program->functions[i])) {
@@ -814,8 +692,6 @@ static int ir_optimize_portable_program_pipeline(
     }
   }
 
-  /* `@pure` loop-invariant call hoisting, after inlining so a body the caller
-   * absorbed is hoisted as ordinary loop-invariant code instead. */
   if (ok && gpu_only && !ir_pass_name_is_skipped("hoist_pure_calls")) {
     int pure_licm_changed = 0;
     mettle_compiler_ctx_set_pass_name("hoist_pure_calls");
@@ -838,8 +714,6 @@ static int ir_optimize_portable_program_pipeline(
     }
   }
 
-  /* `@inline!` is a contract: a surviving call site fails the build. It cannot
-   * mean that on one target and nothing on another. */
   if (ok && gpu_only && (!options || !options->preserve_function_boundaries) &&
       !ir_inline_enforce_contracts(program)) {
     ir_optimize_note_user_error();
@@ -903,8 +777,6 @@ int ir_optimize_program_pipeline(IRProgram *program,
                           options ? options->explain_focus_file : NULL);
   ir_function_index_reset();
   ir_verify_begin_program(program);
-  /* hoist_global_bases declares a pointer local, which the backend resolves by
-   * name; a program whose source never spelled one would have no such type. */
   ir_program_register_scalar_pointer_types(program);
 
   if (!ir_user_rewrite_begin(program)) {
@@ -913,9 +785,6 @@ int ir_optimize_program_pipeline(IRProgram *program,
     return 0;
   }
 
-  /* Fold never-written global integer vars to their initializer constants
-   * first, so every later pass (strength reduction, vectorizers, TRE) sees
-   * plain constants instead of opaque global reads. */
   if (options && options->global_int_consts &&
       !ir_pass_name_is_skipped("fold_readonly_globals")) {
     int fold_changed = 0;
@@ -940,14 +809,6 @@ int ir_optimize_program_pipeline(IRProgram *program,
     ir_pass_time_end("pre_inline [stage]", t0);
   }
 
-  /* Loop-invariant call hoisting, first run: BEFORE inlining. Inlining a
-   * read-only callee into a loop body dissolves the single invariant-arg call
-   * into residual calls whose arguments vary per iteration (a recursive
-   * callee's self-calls, say), which no later pass can lift. Hoisting first
-   * sees the call while its arguments are still the caller's loop-invariant
-   * locals; the inliner then treats the hoisted preheader site like any other
-   * call. The post-inline run below still catches calls a round of inlining
-   * exposes. */
   if (!ir_pass_name_is_skipped("hoist_pure_calls")) {
     int pure_licm_changed = 0;
     mettle_compiler_ctx_set_pass_name("hoist_pure_calls");
@@ -959,10 +820,6 @@ int ir_optimize_program_pipeline(IRProgram *program,
     ir_pass_time_end("hoist_pure_calls_pre_inline [program]", t0);
   }
 
-  /* Tail-recursion elimination before any inlining: converting the tail
-   * self call into a loop first means the regular inliner sees a loop-shaped
-   * callee and the bounded self-recursion expander only has the remaining
-   * non-tail calls to amortize. */
   if ((!options || !options->preserve_function_boundaries) &&
       !ir_pass_name_is_skipped("tail_recursion_elim")) {
     int tre_changed = 0;
@@ -987,12 +844,6 @@ int ir_optimize_program_pipeline(IRProgram *program,
     ir_pass_time_end("inline_small_functions [program]", t0);
   }
 
-  /* Bounded recursive inlining: expand a recursive function's direct
-   * self-call sites into copies of its own body (depth- and size-capped), so
-   * each remaining real call amortizes prologue/epilogue and argument-passing
-   * overhead across a subtree of the recursion. Runs after the regular
-   * inliner so a self-recursive helper is first inlined into callers where
-   * possible, then expanded in place. */
   if ((!options || !options->preserve_function_boundaries) &&
       !ir_pass_name_is_skipped("inline_self_recursion")) {
     int self_inline_changed = 0;
@@ -1005,9 +856,6 @@ int ir_optimize_program_pipeline(IRProgram *program,
     ir_pass_time_end("inline_self_recursion [program]", t0);
   }
 
-  /* `@pure` loop-invariant call hoisting. Program-level (resolves callees by
-   * name) and run after inlining so an inlined pure body is hoisted as ordinary
-   * loop-invariant code; the per-function fixpoint below then cleans up. */
   if (!ir_pass_name_is_skipped("hoist_pure_calls")) {
     int pure_licm_changed = 0;
     mettle_compiler_ctx_set_pass_name("hoist_pure_calls");
@@ -1019,17 +867,6 @@ int ir_optimize_program_pipeline(IRProgram *program,
     ir_pass_time_end("hoist_pure_calls [program]", t0);
   }
 
-  /* Allocation-site layout factorization: re-map provably-private malloc
-   * pools (compact padded strides / factor into per-field SoA arrays).
-   * Whole-program only: rewriting a callee body to a new pool layout is
-   * sound only when every call site is visible. Runs after inlining so
-   * field-accessor helpers are already folded into their callers, and
-   * before the per-function stage so the vectorizers see the rewritten
-   * unit-stride form. NOT under per-function --verify: the transform
-   * preserves program behavior but changes the buffer's byte image, which
-   * the per-function validator counts as an observation (and a coordinated
-   * multi-function rewrite must never be quarantined one function at a
-   * time). METTLE_SKIP_PASS=layout_factor disables it. */
   if (options && options->whole_program &&
       !options->preserve_function_boundaries &&
       !ir_pass_name_is_skipped("layout_factor")) {
@@ -1043,27 +880,17 @@ int ir_optimize_program_pipeline(IRProgram *program,
     ir_pass_time_end("layout_factor [program]", t0);
   }
 
-  /* Whole-program alias facts, built once the call graph has settled: the
-   * memory passes in the per-function stage ask which parameters can reach
-   * the same allocation, and the answer comes from every call site at once.
-   * After inlining, because an inlined body's arguments are the caller's own
-   * values and no longer a question about parameters. */
   if (!ir_pass_name_is_skipped("alias_facts")) {
     double t0 = ir_pass_time_begin();
     ir_alias_facts_build(program);
     ir_pass_time_end("alias_facts [program]", t0);
   }
 
-  /* Give the per-function contract verifier program access for the duration
-   * of the stage: the call-in-body fix simulation re-runs the inliner on a
-   * caller clone, which needs callee lookup. */
   ir_explain_set_program(program);
   if (!ir_run_program_stage_for_each_function(
           program, ir_optimize_function_pipeline)) {
     ir_explain_set_program(NULL);
     ir_alias_facts_reset();
-    /* A violated `@simd!` contract already printed a user diagnostic; don't
-     * dress it up as an internal compiler error. */
     if (!ir_optimize_had_user_error()) {
       mettle_compiler_ice_report("IR optimization failed", NULL);
     }
@@ -1071,15 +898,8 @@ int ir_optimize_program_pipeline(IRProgram *program,
     return 0;
   }
   ir_explain_set_program(NULL);
-  /* The facts index functions by pointer; nothing may consult them once the
-   * program can be rewritten or freed. */
   ir_alias_facts_reset();
 
-  /* Function-level contracts, now that every optimization that could satisfy
-   * them has run. `@inline!` is skipped when function boundaries are pinned
-   * (--profile-runtime disables inlining entirely; failing every contract
-   * there would be noise, not information). Check both before deciding the
-   * outcome so a build with several violations reports them all. */
   int contracts_ok = 1;
   if (!options || !options->preserve_function_boundaries) {
     contracts_ok &= ir_inline_enforce_contracts(program);
@@ -1087,14 +907,9 @@ int ir_optimize_program_pipeline(IRProgram *program,
   contracts_ok &= ir_enforce_noalloc_contracts(program);
   contracts_ok &= ir_user_rewrite_end(program);
 
-  /* --explain: every inline that happened was recorded as it happened; record
-   * each surviving call with the reason it was refused, then print the whole
-   * sorted report. (No-ops unless explain is enabled.) */
   ir_inline_explain_report_remaining(program);
   ir_explain_flush();
   if (!contracts_ok) {
-    /* Compilation stops before codegen, so the backend flush (the normal
-     * report-routing point) never runs: print the buffered report now. */
     ir_explain_finalize(1);
   }
   ir_pass_time_report();

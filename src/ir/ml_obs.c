@@ -1,26 +1,3 @@
-/* Observational-equivalence node features (OBS) -- the C side of the contract
- * defined by tools/mlopt/obs.py.
- *
- * Each pure instruction is evaluated on NPROBE deterministic pseudo-random
- * assignments to the function's leaves; the resulting NPROBE*64 bits are the
- * node's fingerprint. Nodes computing the same value get bit-identical
- * fingerprints however they are written, so `x*2`, `x+x`, and `x<<1` become one
- * node as far as the model is concerned. A frozen +-1 projection reduces the 512
- * bits to NPROJ bounded floats; four derived scalars follow.
- *
- * THIS FILE MUST AGREE WITH obs.py BIT FOR BIT. The model is trained on features
- * produced there and runs on features produced here; a divergence does not fail
- * loudly, it just means the model reads different inputs at compile time than it
- * trained on. That is why the PRNG, the name hash, the projection matrix, the
- * arithmetic, and the opaque-value rules are all pinned, and why
- * tools/mlopt/obs_golden.txt exists: ml_obs_selftest() replays it and reports
- * the first disagreement rather than leaving it to be discovered as a quiet
- * accuracy loss.
- *
- * This is a FEATURE, not a proof. Fingerprint agreement is evidence of value
- * equality; the interpreter differential in ml_opt.c remains the only authority
- * on whether a rewrite is sound.
- */
 #include "ml_obs.h"
 
 #include <ctype.h>
@@ -30,14 +7,12 @@
 #include <string.h>
 
 #define SMALL_MOD 4u
-#define NSMALL 5 /* probes 0..NSMALL-1 are structured; the rest full width */
+#define NSMALL 5
 
 static const uint64_t PROJ_SEED = 0x9E3779B97F4A7C15ULL;
 static const uint64_t PROBE_SEED = 0xD1B54A32D192ED03ULL;
 static const uint64_t OPAQUE_SEED = 0xA24BAED4963EE407ULL;
 static const uint64_t GOLDEN = 0x9E3779B97F4A7C15ULL;
-
-/* ---------------- primitives (pinned; see obs.py) ---------------- */
 
 uint64_t ml_obs_splitmix64(uint64_t x) {
   x += GOLDEN;
@@ -59,10 +34,6 @@ static uint64_t probe_salt(int k) {
   return ml_obs_splitmix64(PROBE_SEED ^ ((uint64_t)(k + 1) * GOLDEN));
 }
 
-/* Probe k for a leaf with name-hash h. Probes 0 and 1 are degenerate on purpose:
- * with only full-width random leaves, two random 64-bit values are never equal
- * and never ordered close, so every comparison evaluates to 0 on every probe and
- * `x == y`, `x < y`, and the literal 0 collapse to one fingerprint. */
 static uint64_t mix(uint64_t h, int k) {
   if (k == 0) return 0;
   if (k == 1) return 1;
@@ -75,20 +46,14 @@ static void leaf_values(const char *name, uint64_t out[ML_OBS_NPROBE]) {
   for (int k = 0; k < ML_OBS_NPROBE; k++) out[k] = mix(h, k);
 }
 
-/* Keyed by name AND index: two calls to the same function must not be assumed
- * to return the same value, since either may have side effects. */
 static void opaque_values(const char *name, int idx, uint64_t out[ML_OBS_NPROBE]) {
   uint64_t h = ml_obs_fnv1a64(name) ^ ml_obs_splitmix64(OPAQUE_SEED ^ (uint64_t)idx);
   for (int k = 0; k < ML_OBS_NPROBE; k++) out[k] = mix(h, k);
 }
 
-/* ---------------- projection ---------------- */
-
 static uint64_t g_proj[ML_OBS_NPROJ][ML_OBS_NPROBE];
 static int g_proj_ready = 0;
 
-/* Generated from a fixed seed rather than shipped in the weight blob: both sides
- * regenerate the identical matrix from the same splitmix64 stream. */
 static void proj_init(void) {
   if (g_proj_ready) return;
   uint64_t state = PROJ_SEED;
@@ -117,24 +82,15 @@ static int popcount64(uint64_t x) {
 #endif
 }
 
-/* Row and fingerprint read as +-1 vectors: their dot product is
- * 512 - 2*popcount(row XOR fp). Scale by 1/sqrt(512), bound with tanh. */
 static void project(const uint64_t fp[ML_OBS_NPROBE], float *out) {
   proj_init();
   for (int r = 0; r < ML_OBS_NPROJ; r++) {
     int pc = 0;
     for (int w = 0; w < ML_OBS_NPROBE; w++) pc += popcount64(g_proj[r][w] ^ fp[w]);
     int dot = ML_OBS_NBITS - 2 * pc;
-    /* Double precision then narrow, matching Python's math.tanh followed by the
-     * float32 store. tanhf() on the already-narrowed quotient differs in the
-     * last ulp, which is invisible against the golden vectors' 2e-6 tolerance
-     * but is enough to flip a near-tied argmax: it cost exactly one node out of
-     * 17043 in the trained-model cross-check. */
     out[r] = (float)tanh((double)dot / 22.627416997969522);
   }
 }
-
-/* ---------------- lexing ---------------- */
 
 static char *dupstr(const char *s) {
   size_t n = strlen(s) + 1;
@@ -162,9 +118,6 @@ static int is_lit(const char *s) {
   return 1;
 }
 
-/* ^[%@][A-Za-z0-9_.$]*$ -- a bare IR name. Deliberately NOT "any token without
- * whitespace": `__acrt_iob_func(2)` contains no space, and accepting it as a
- * copy source makes two distinct calls alias to one leaf value. */
 static int is_name(const char *s) {
   if (s[0] != '%' && s[0] != '@') return 0;
   for (const char *p = s + 1; *p; p++) {
@@ -174,7 +127,6 @@ static int is_name(const char *s) {
   return 1;
 }
 
-/* ^(\S+)\s*(=|<-|\+=)\s*(.*)$ over a non-control line. */
 static int split_def(const char *s, char *dest, size_t dcap, char *eq,
                      size_t ecap, char *rhs, size_t rcap) {
   if (is_control(s)) return 0;
@@ -190,7 +142,6 @@ static int split_def(const char *s, char *dest, size_t dcap, char *eq,
   else if (starts(q, "+=")) { op = "+="; oplen = 2; }
   else if (q[0] == '=' && q[1] != '=') { op = "="; oplen = 1; }
   if (!op) {
-    /* no space before the operator: `@x=1` */
     const char *e = memchr(s, '=', dlen);
     if (!e || e == s || e[1] == '=') return 0;
     size_t nd = (size_t)(e - s);
@@ -217,7 +168,6 @@ static const char *const OPS[] = {"<<", ">>", "+",  "-",  "*",  "/",
                                   "<=", ">=", "<",  ">"};
 #define NOPS ((int)(sizeof(OPS) / sizeof(OPS[0])))
 
-/* ^(\S+) (op) (\S+)$ -- exactly three whitespace-separated tokens. */
 static int three_token(const char *rhs, char *a, size_t acap, char *op,
                        size_t ocap, char *b, size_t bcap) {
   const char *p = rhs;
@@ -236,7 +186,7 @@ static int three_token(const char *rhs, char *a, size_t acap, char *op,
   size_t blen = (size_t)(p - b0);
   if (!blen || blen >= bcap) return 0;
   while (*p && isspace((unsigned char)*p)) p++;
-  if (*p) return 0; /* a fourth token: not a binary form */
+  if (*p) return 0;
   memcpy(a, a0, alen); a[alen] = 0;
   memcpy(op, o0, olen); op[olen] = 0;
   memcpy(b, b0, blen); b[blen] = 0;
@@ -247,9 +197,6 @@ static int three_token(const char *rhs, char *a, size_t acap, char *op,
 
 static int64_t to_signed(uint64_t v) { return (int64_t)v; }
 
-/* uint64 semantics matching sopt.evalop, plus signed comparisons. Division and
- * modulo by zero yield 0 (the interpreter's convention), so no fingerprint
- * depends on trap behaviour. */
 static int apply_op(const char *op, uint64_t a, uint64_t b, uint64_t *out) {
   if (!strcmp(op, "+")) { *out = a + b; return 1; }
   if (!strcmp(op, "-")) { *out = a - b; return 1; }
@@ -270,20 +217,12 @@ static int apply_op(const char *op, uint64_t a, uint64_t b, uint64_t *out) {
   return 0;
 }
 
-/* ---------------- environment ---------------- */
-
-/* Open-addressing index over the environment. A linear scan is the obvious
- * implementation and it is quadratic: every operand of every instruction walks
- * every name defined so far, which on an 800-node function is over a million
- * string comparisons. Measured before this index, featurization cost grew from
- * 0.7 to 4.6 microseconds per node between n=50 and n=800. Compile speed is a
- * headline number for this compiler, so the index is not optional. */
 typedef struct {
   char **name;
   uint64_t (*val)[ML_OBS_NPROBE];
   unsigned char *is_leaf;
   int n, cap;
-  int *slot;          /* hash -> index+1, 0 = empty */
+  int *slot;
   int nslot;
 } Env;
 
@@ -355,10 +294,6 @@ static int env_put(Env *e, const char *name, const uint64_t v[ML_OBS_NPROBE],
   return i;
 }
 
-/* ---------------- mutable-name analysis ---------------- */
-
-/* Same story as Env: hashed, because the mutable-name pass tests every `@` token
- * of every call and store against the whole set. */
 typedef struct { char **a; int n, cap; int *slot; int nslot; } StrSet;
 
 static void ss_rehash(StrSet *s, int nslot) {
@@ -428,12 +363,6 @@ static int has_call(const char *s) {
   return 0;
 }
 
-/* Names whose value straight-line evaluation cannot be trusted to know:
- * defined more than once (a scan cannot model a loop back edge), or passed to a
- * call / touched by a store (a callee writing through a pointer is invisible to
- * a def-only scan, so `@counter <- 0` followed by such a call would leave the
- * evaluator believing @counter is still 0 and collapse everything downstream of
- * it to zero). */
 static void mutable_names(char **texts, int n, StrSet *mut) {
   StrSet seen = {0};
   for (int i = 0; i < n; i++) {
@@ -464,8 +393,6 @@ static void mutable_names(char **texts, int n, StrSet *mut) {
   }
   ss_free(&seen);
 }
-
-/* ---------------- fingerprints ---------------- */
 
 static int operand(Env *env, const char *tok, uint64_t out[ML_OBS_NPROBE]) {
   if (is_lit(tok)) {
@@ -499,7 +426,7 @@ int ml_obs_fingerprints(char **texts, int n, MlObsFp *fps, MlObsFp **leaves,
       continue;
     if (dest[0] != '%' && dest[0] != '@') continue;
 
-    if (ss_has(&mut, dest)) { /* loop-carried or aliased: one stable leaf value */
+    if (ss_has(&mut, dest)) {
       if (env_find(&env, dest) < 0) {
         uint64_t lv[ML_OBS_NPROBE];
         leaf_values(dest, lv);
@@ -528,7 +455,7 @@ int ml_obs_fingerprints(char **texts, int n, MlObsFp *fps, MlObsFp **leaves,
       have = operand(&env, rhs, vals);
     }
 
-    if (!have) { /* call, load, or a form we cannot read */
+    if (!have) {
       uint64_t ov[ML_OBS_NPROBE];
       opaque_values(dest, i, ov);
       env_put(&env, dest, ov, 1);
@@ -539,7 +466,6 @@ int ml_obs_fingerprints(char **texts, int n, MlObsFp *fps, MlObsFp **leaves,
     fps[i].valid = 1;
   }
 
-  /* leaf fingerprints, for the eq_leaf scalar */
   if (leaves && nleaves) {
     int nleaf = 0;
     for (int i = 0; i < env.n; i++) nleaf += env.is_leaf[i] ? 1 : 0;
@@ -575,10 +501,10 @@ int ml_obs_edge_eligible(const MlObsFp *f) {
   int allsame = 1;
   for (int k = 1; k < ML_OBS_NPROBE; k++)
     if (f->v[k] != f->v[0]) { allsame = 0; break; }
-  if (allsame) return 0;            /* constant: would form a clique */
+  if (allsame) return 0;
   for (int k = 0; k < ML_OBS_NPROBE; k++)
     if (f->v[k] > 1) return 1;
-  return 0;                         /* boolean: one bit, collides constantly */
+  return 0;
 }
 
 void ml_obs_features(char **texts, int n, float *out) {
@@ -589,9 +515,6 @@ void ml_obs_features(char **texts, int n, float *out) {
   int nleaves = 0;
   ml_obs_fingerprints(texts, n, fps, &leaves, &nleaves);
 
-  /* `eq_leaf` and `dup_earlier` are both set-membership questions over 512-bit
-   * fingerprints. Done directly they are O(n * leaves) and O(n^2); hashing the
-   * fingerprint makes both linear. */
   uint64_t *lh = nleaves ? malloc((size_t)nleaves * sizeof(uint64_t)) : NULL;
   for (int l = 0; l < nleaves; l++) lh[l] = fp_hash(&leaves[l]);
   uint64_t *sh = malloc((size_t)(n ? n : 1) * sizeof(uint64_t));
@@ -626,12 +549,6 @@ void ml_obs_features(char **texts, int n, float *out) {
   free(fps);
 }
 
-/* ---------------- golden-vector self-test ---------------- */
-
-/* Replays tools/mlopt/obs_golden.txt, which obs_golden.py generates from the
- * Python featurizer. A mismatch here means the model is about to read different
- * inputs at compile time than it trained on, which is otherwise invisible: it
- * shows up as unexplained accuracy loss, not as a crash. */
 static int gold_fail(int *bad, const char *what, const char *detail) {
   if (*bad < 5) fprintf(stderr, "ml_obs: GOLDEN MISMATCH %s: %s\n", what, detail);
   (*bad)++;
@@ -659,7 +576,6 @@ int ml_obs_selftest(const char *golden_path) {
     if (!line[0] || line[0] == '#') continue;
 
     if (line[0] == '[') {
-      /* finishing a body section: run the featurizer and compare below */
       if (sec == S_BODY && nbody) {
         for (int i = 0; i < nbody; i++) free(body[i]);
         nbody = 0;
@@ -691,7 +607,6 @@ int ml_obs_selftest(const char *golden_path) {
         }
       }
     } else if (sec == S_FNV) {
-      /* `'@x' 090c5007b5a4b485` -- the name is a Python repr */
       char name[256];
       uint64_t want = 0;
       char *open = strchr(line, '\'');
@@ -713,7 +628,6 @@ int ml_obs_selftest(const char *golden_path) {
         }
       }
     } else if (sec == S_LEAF || sec == S_OPAQUE) {
-      /* `@x v0 v1 ...` or `%q 0 v0 v1 ...` */
       char name[256];
       int idx = 0;
       int got = sec == S_OPAQUE
@@ -807,9 +721,6 @@ int ml_obs_selftest(const char *golden_path) {
           }
         }
       } else if (starts(line, "sedge") && nbody) {
-        /* Value-equality edges. Features agreeing does not imply edges agreeing,
-         * and the edges are what message passing actually moves information
-         * along, so they need their own check. */
         int *es = malloc((size_t)nbody * sizeof(int));
         int *ed = malloc((size_t)nbody * sizeof(int));
         int ne = (es && ed) ? ml_obs_semantic_edges(body, nbody, es, ed) : 0;
@@ -877,7 +788,7 @@ int ml_obs_semantic_edges(char **texts, int n, int *src, int *dst) {
   int ne = 0;
   for (int i = 0; i < n; i++) {
     if (!ml_obs_edge_eligible(&fps[i])) continue;
-    for (int p = i - 1; p >= 0; p--) {      /* nearest earlier identical value */
+    for (int p = i - 1; p >= 0; p--) {
       if (!ml_obs_edge_eligible(&fps[p])) continue;
       if (fp_eq(&fps[i], &fps[p])) {
         src[ne] = p; dst[ne] = i; ne++;

@@ -1,18 +1,12 @@
-/* mtlc_lower_module.c - fill the backend IR's type registry + module symbol
- * table from the frontend, so codegen needs neither the AST nor the frontend
- * type/symbol tables. FRONTEND-side adapter (driver, not libmtlc). */
 #include "frontend/mtlc_lower_module.h"
 #include "ir/ir_interp.h"
-#include "frontend/mtlc_frontend.h" // mtlc_type_from_frontend
-#include "common.h"                 // mettle_fnv1a_hash
+#include "frontend/mtlc_frontend.h"
+#include "common.h"
 
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Register `name` -> its MtlcType in the program type registry, resolving it via
- * the frontend type checker (which parses primitives, structs/enums, and the
- * composite fn(...)->R / T[] / T* forms). No-op for names that are not types. */
 static void register_named_type(IRProgram *program, TypeChecker *tc,
                                 const char *name) {
   if (!name || !name[0] || ir_program_lookup_type(program, name)) {
@@ -24,19 +18,12 @@ static void register_named_type(IRProgram *program, TypeChecker *tc,
   }
 }
 
-/* Set of type-name strings already probed against the frontend, so each
- * distinct spelling is resolved once. Probing used to run for EVERY
- * instruction's text (labels, temps, call targets included), which put
- * millions of type_checker_get_type_by_name calls on the compile path of
- * large modules. */
 typedef struct {
-  const char **names; /* NULL = empty slot */
-  size_t slot_count;  /* power of two; 0 = allocation failed, probe anyway */
+  const char **names;
+  size_t slot_count;
   size_t count;
 } ProbedNameSet;
 
-/* Returns 1 when `name` was already present, 0 when newly added (or when the
- * set is unavailable, so the caller still probes). */
 static int probed_set_check_and_add(ProbedNameSet *set, const char *name) {
   if (set->slot_count && set->count * 2 >= set->slot_count) {
     size_t next = set->slot_count * 2;
@@ -73,12 +60,6 @@ static int probed_set_check_and_add(ProbedNameSet *set, const char *name) {
   return 0;
 }
 
-/* Register every type name the code generators may resolve: the primitives (for
- * get_resolved_type's defaults) plus every type name that appears in the IR as a
- * function parameter type, return type, or a type-carrying instruction's text
- * (IR_OP_CAST target, IR_OP_DECLARE_LOCAL local type, IR_OP_NEW allocation
- * type). Other opcodes put labels, operators, and call targets in text - never
- * type names - so they are not probed. */
 static void populate_type_registry(IRProgram *program, TypeChecker *tc) {
   static const char *const builtins[] = {
       "bool",   "int8",    "int16",   "int32",   "int64",
@@ -121,13 +102,6 @@ static void populate_type_registry(IRProgram *program, TypeChecker *tc) {
   free((void *)probed.names);
 }
 
-/* ------------------------------------------------------------------ */
-/* Module symbol table + global initializer evaluation.                */
-/* ------------------------------------------------------------------ */
-
-/* A folded numeric constant, mirroring code_generator's BinaryNumericConstant.
- * A float value is stored as its double; callers reinterpret to bits for a
- * 32/64-bit float global. */
 typedef struct {
   int is_float;
   long long int_value;
@@ -145,7 +119,6 @@ static void num_from_double(NumConst *c, double v) {
   c->float_value = v;
 }
 
-/* IEEE-754 width of a frontend type: 32/64 for float32/float64, else 0. */
 static int frontend_type_float_bits(const Type *t) {
   if (!t) {
     return 0;
@@ -170,8 +143,6 @@ static int num_is_float(const NumConst *v, ASTNode *expression) {
          frontend_type_float_bits(expression->resolved_type) != 0;
 }
 
-/* Reinterpret a stored module-symbol initializer back into a NumConst for
- * identifier references inside another initializer. */
 static int module_symbol_numeric(const IRProgram *program, const char *name,
                                   NumConst *out) {
   const IRModuleSymbol *s = ir_program_lookup_symbol(program, name);
@@ -192,10 +163,6 @@ static int module_symbol_numeric(const IRProgram *program, const char *name,
     }
     return 1;
   }
-  /* A global we own with no initializer is .bss, so its compile-time value is
-   * zero -- `var a: int32; var b: int32 = a + 1;` lays out b as 1, the value it
-   * would hold at load. An extern's storage belongs to another object and an
-   * unfoldable initializer has already failed, so neither folds. */
   if (s->kind == IR_MODSYM_VARIABLE && !s->is_extern && !s->has_initializer &&
       !s->has_unfoldable_initializer && !s->init_symbol_ref && !s->init_bytes) {
     num_from_int(out, 0);
@@ -204,13 +171,6 @@ static int module_symbol_numeric(const IRProgram *program, const char *name,
   return 0;
 }
 
-/* Evaluate a constant global initializer expression to a NumConst. Ported from
- * code_generator_binary_eval_numeric_global_initializer (globals.c), with
- * identifier references resolved against the module symbols added so far. */
-/* Recognises `&identifier` as a global initializer. The address of another
- * module symbol -- a function for a dispatch table, or a global for an alias --
- * is only known at link time, so it cannot be folded to a constant. Returns the
- * referenced name (borrowed from the AST) or NULL. */
 static const char *lower_module_address_of_symbol_name(ASTNode *expression) {
   UnaryExpression *unary = NULL;
   Identifier *identifier = NULL;
@@ -240,11 +200,6 @@ static int eval_numeric(const IRProgram *program, TypeChecker *tc,
   }
   switch (expression->type) {
   case AST_FUNCTION_CALL: {
-    /* `sizeof(T)` is a compile-time integer, so it can initialize a global just
-     * as it can a const. It reaches here as a call node rather than a literal
-     * (see ir_lower_expr.c), and without this case it would be reported
-     * unfoldable and fail in codegen with no source location. No other call is
-     * foldable: there is no module initializer to run one in. */
     CallExpression *call = (CallExpression *)expression->data;
     Identifier *type_id = NULL;
     Type *sized = NULL;
@@ -287,9 +242,6 @@ static int eval_numeric(const IRProgram *program, TypeChecker *tc,
     if (module_symbol_numeric(program, identifier->name, out)) {
       return 1;
     }
-    /* An enum member is a frontend constant, not a module symbol, so it never
-     * reaches the module table -- resolve it here so `var s: Status = Ok;`
-     * lays out its discriminant. */
     symbol = st ? symbol_table_lookup(st, identifier->name) : NULL;
     if (symbol && symbol->kind == SYMBOL_CONSTANT) {
       num_from_int(out, symbol->data.constant.value);
@@ -437,9 +389,6 @@ static int eval_numeric(const IRProgram *program, TypeChecker *tc,
   }
 }
 
-/* Build a borrowed-MtlcType parameter array for a function symbol. Returns a
- * malloc'd array (the caller frees it after ir_program_add_symbol copies it) and
- * sets *count; NULL when the function has no parameters. */
 static MtlcType **build_param_types(const Symbol *s, size_t *count) {
   *count = 0;
   if (!s || s->kind != SYMBOL_FUNCTION ||
@@ -459,13 +408,9 @@ static MtlcType **build_param_types(const Symbol *s, size_t *count) {
   return arr;
 }
 
-/* Open-addressing set of the program's lowered function names, built once per
- * populate_module_symbols call. The previous per-declaration linear scan over
- * program->functions made module population quadratic in function count
- * (13k-function fixtures spent seconds in strcmp here). */
 typedef struct {
-  const char **names; /* NULL = empty slot */
-  size_t slot_count;  /* power of two, 0 when allocation failed */
+  const char **names;
+  size_t slot_count;
 } FnBodySet;
 
 static void fn_body_set_build(FnBodySet *set, const IRProgram *program) {
@@ -477,7 +422,7 @@ static void fn_body_set_build(FnBodySet *set, const IRProgram *program) {
   }
   const char **names = (const char **)calloc(slot_count, sizeof(*names));
   if (!names) {
-    return; /* lookups fall back to the linear scan */
+    return;
   }
   for (size_t i = 0; i < program->function_count; i++) {
     if (!program->functions[i] || !program->functions[i]->name) {
@@ -535,11 +480,6 @@ static void populate_function_symbol(IRProgram *program,
   entry.kind = IR_MODSYM_FUNCTION;
   entry.is_extern = fd->is_extern;
   entry.is_kernel = fd->is_kernel;
-  /* Whether the MODULE defines this function, not whether this particular
-   * declaration carries the body: a forward declaration and its later
-   * definition each add a symbol entry, and lookups find the first. Asking
-   * fd->body made the forward declaration's entry claim there was no body, so
-   * a backend that skips body-less symbols skipped the definition. */
   entry.has_body = program_has_function_body(program, body_set, fd->name);
   entry.link_name = s ? s->link_name : NULL;
   entry.type = s ? mtlc_type_from_frontend(s->type) : NULL;
@@ -564,14 +504,10 @@ static void populate_function_symbol(IRProgram *program,
     }
     entry.effect_clause = clause;
   }
-  ir_program_add_symbol(program, &entry); /* copies param_types */
+  ir_program_add_symbol(program, &entry);
   free(params);
 }
 
-/* An aggregate literal was already folded to its laid-out bytes when the type
- * checker validated it against the declared type, so the image just moves
- * across. Codegen blits it and emits the relocations; nothing re-walks the
- * AST. */
 static IRInitReloc *populate_aggregate_initializer(IRModuleSymbol *entry,
                                                    ASTNode *initializer) {
   AggregateLiteral *literal = (AggregateLiteral *)initializer->data;
@@ -602,16 +538,6 @@ static IRInitReloc *populate_aggregate_initializer(IRModuleSymbol *entry,
   return relocs;
 }
 
-/* A `const` whose initializer is a call to a function the program wrote. The
- * interpreter runs it here, where the function's IR exists and nothing has run
- * yet, and the answer becomes the bytes in the object file. The budget is the
- * interpreter's fuel: a table that does not finish computing is a build that
- * says so rather than one that hangs.
- *
- * This is the same interpreter that runs `@test`, holds the optimizer to
- * `--verify` and runs the rules. There is no second evaluator with a smaller
- * language in it, which is the point: any function the interpreter can run can
- * compute a constant. */
 #define MTLC_CONST_CALL_FUEL 20000000LL
 
 static long long g_const_call_steps;
@@ -669,8 +595,6 @@ static int const_call_arguments(TypeChecker *tc, SymbolTable *st,
   return 1;
 }
 
-/* Run the call and answer what it returned. `out_bytes` is filled for an
-   aggregate result the caller asked to lay out. */
 static int const_call_run(IRProgram *program, TypeChecker *tc, SymbolTable *st,
                           const ASTNode *initializer, IRInterpValue *out_value,
                           IRInterpMachine **out_machine) {
@@ -741,8 +665,6 @@ static void populate_scalar_initializer(IRProgram *program, TypeChecker *tc,
       entry->init_bits = c.int_value;
     }
   } else if (addressed) {
-    /* `&other_symbol`: the address is a link-time value, so record the name
-     * and let the backend emit a relocation. */
     entry->init_symbol_ref = (char *)addressed;
   } else {
     IRInterpValue answered;
@@ -761,8 +683,6 @@ static void populate_scalar_initializer(IRProgram *program, TypeChecker *tc,
   }
 }
 
-/* An array `const` computed by a function: the interpreter runs it, and the
-   buffer it returns becomes the object file's bytes. */
 static int populate_computed_array(IRProgram *program, TypeChecker *tc,
                                    SymbolTable *st, IRModuleSymbol *entry,
                                    ASTNode *initializer, const Type *vtype) {
@@ -808,8 +728,6 @@ static void populate_variable_symbol(IRProgram *program, TypeChecker *tc,
   entry.is_extern = vd->is_extern;
   entry.link_name = s ? s->link_name : NULL;
   if (s && s->kind == SYMBOL_CONSTANT) {
-    /* Type/Field reflection consts have no runtime representation and must not
-     * become module symbols. */
     if (type_is_comptime_only(s->type)) {
       return;
     }
@@ -841,11 +759,10 @@ static void populate_variable_symbol(IRProgram *program, TypeChecker *tc,
       }
     }
   }
-  ir_program_add_symbol(program, &entry); /* deep-copies the image */
+  ir_program_add_symbol(program, &entry);
   free(aggregate_relocs);
 }
 
-/* Register user-defined named types so codegen can resolve them. */
 static void populate_named_type_symbol(IRProgram *program, TypeChecker *tc,
                                        SymbolTable *st, ASTNode *decl) {
   Symbol *s = NULL;
@@ -881,11 +798,6 @@ static void populate_module_symbols(IRProgram *program, ASTNode *ast_program,
     }
     if (decl->type == AST_FUNCTION_DECLARATION) {
       FunctionDeclaration *fd = (FunctionDeclaration *)decl->data;
-      /* `extern kernel` names a device entry point, not a host symbol. It
-       * exists so `dispatch` can check its arguments; the handle is resolved
-       * from the loaded GPU module at run time. Emitting a module symbol for
-       * it would make the host linker look for a definition that is, by
-       * construction, on the other side of the PTX boundary. */
       if (fd && fd->name && !(fd->is_extern && fd->is_kernel)) {
         populate_function_symbol(program, &body_set, st, fd);
       }
@@ -902,7 +814,6 @@ static void populate_module_symbols(IRProgram *program, ASTNode *ast_program,
   fn_body_set_free(&body_set);
 }
 
-/* main() takes (argc, argv) when its lowered signature has two parameters. */
 static void populate_main_flag(IRProgram *program) {
   for (size_t i = 0; i < program->function_count; i++) {
     IRFunction *fn = program->functions[i];

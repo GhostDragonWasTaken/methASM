@@ -42,4 +42,4 @@ void import_library_destroy(ImportLibrary *library);
 const ImportLibrarySymbol *import_library_find_symbol(const ImportLibrary *library,
                                                       const char *symbol_name);
 
-#endif // IMPORT_LIB_H
+#endif

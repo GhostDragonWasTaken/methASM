@@ -10,25 +10,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- microarchitectural model ------------------------------------------- *
- *
- * The annotator carries a small static cost model so a decision can be backed
- * by a number, not just a name. It is a steady-state port-pressure model of a
- * Skylake-class core: six issue resources, each able to retire one micro-op per
- * cycle. Per instruction we record its latency, its reciprocal throughput, and
- * how its micro-ops spread across the resources. Summed over a recovered loop
- * body this yields the throughput floor (cycles/iteration) and the bottleneck
- * port -- the same reasoning a developer does by hand reading -O2 output, made
- * explicit. The numbers are approximate and labelled as such; their value is in
- * relative hot-spotting and showing which resource a hot loop is bound on. */
-
 enum {
-  RES_P0 = 0, /* ALU, integer/vector mul, divide, fp */
-  RES_P1,     /* ALU, integer mul, fp */
-  RES_P5,     /* ALU, vector shuffle, lea */
-  RES_P6,     /* ALU, branch */
-  RES_LD,     /* load AGU + data (two units, modelled as 0.5c each) */
-  RES_ST,     /* store AGU + data */
+  RES_P0 = 0,
+  RES_P1,
+  RES_P5,
+  RES_P6,
+  RES_LD,
+  RES_ST,
   RES_COUNT
 };
 
@@ -43,8 +31,6 @@ static const char *res_name[RES_COUNT] = {"p0", "p1", "p5", "p6", "load", "store
 #define M_P15 (M_P1 | M_P5)
 #define M_P01 (M_P0 | M_P1)
 
-/* Instruction-mix buckets (also the per-insn `kind` tag). Static strings; never
- * freed, compared by value where needed. */
 static const char *const KINDS[] = {
     "mov",  "alu",   "mul",  "div",   "shift", "lea",
     "cmp",  "setcc", "cmov", "branch", "call",  "float",
@@ -55,7 +41,7 @@ static int kind_index(const char *k) {
   if (k)
     for (int i = 0; i < KIND_COUNT; i++)
       if (strcmp(KINDS[i], k) == 0) return i;
-  return KIND_COUNT - 1; /* "other" */
+  return KIND_COUNT - 1;
 }
 
 static int popcnt(unsigned x) {
@@ -67,64 +53,56 @@ static int popcnt(unsigned x) {
   return n;
 }
 
-/* ---- state -------------------------------------------------------------- */
-
 typedef struct {
-  int mir_index;        /* index into the MIR function, -1 for synthetic spans */
+  int mir_index;
   size_t off;
   size_t len;
-  char *bytes;          /* hex string "55 48 89 e5" */
+  char *bytes;
   char *intel;
   char *att;
-  char *mir;            /* MIR opcode mnemonic, e.g. "MOV" */
-  size_t line;          /* source line, 0 if synthetic/unknown */
-  char *tag;            /* short decision tag */
-  char *note;           /* decision detail (may be NULL) */
-  /* analysis */
-  int lat;              /* latency in cycles (approx) */
-  int rthru;            /* reciprocal throughput in centicycles (0.01c units) */
-  int press[RES_COUNT]; /* FIXED port-pressure contribution (narrow uops) */
-  int flex_alu;         /* centicycles of ALU uops eligible on p0/p1/p5/p6,
-                           distributed per-loop by water-filling, not pinned */
-  const char *kind;     /* mix bucket; one of KINDS (static) */
-  const char *ports;    /* human port string for display (static) */
+  char *mir;
+  size_t line;
+  char *tag;
+  char *note;
+  int lat;
+  int rthru;
+  int press[RES_COUNT];
+  int flex_alu;
+  const char *kind;
+  const char *ports;
   unsigned char is_kernel;
-  unsigned char is_branch; /* control transfer that can close a loop */
+  unsigned char is_branch;
   unsigned char is_label;
-  char *target;         /* branch target label name, or NULL */
-  char *label;          /* this label's name, or NULL */
-  int loop_depth;       /* nesting depth, set at end_function */
-  unsigned char cost_estimated; /* 1 = bytes didn't decode; opcode estimate used */
-  int block;            /* program-wide basic-block id (--profile-blocks), or -1.
-                           Joins the measured .mprof execution counts to this
-                           instruction's static cost in the VTune-style view. */
+  char *target;
+  char *label;
+  int loop_depth;
+  unsigned char cost_estimated;
+  int block;
 } AnnotInsn;
 
-/* One physical-register live interval, snapshotted from the allocator. */
 typedef struct {
   int phys;
-  int rclass;       /* MirRegClass */
+  int rclass;
   int width;
   int vreg;
-  int start;        /* MIR index of first def */
-  int end;          /* MIR index of last use */
+  int start;
+  int end;
   int crosses_call;
   int loop_carried;
 } RegInterval;
 
-/* A recovered natural loop, expressed over AnnotInsn positions. */
 typedef struct {
-  int start_rec;            /* header position (inclusive) */
-  int end_rec;              /* back-edge position (inclusive) */
+  int start_rec;
+  int end_rec;
   size_t head_line;
   size_t tail_line;
-  int depth;                /* number of loops enclosing this one */
-  int press[RES_COUNT];     /* summed body pressure, centicycles */
-  int bottleneck;           /* resource index of the busiest port */
-  int cycles_per_iter;      /* press[bottleneck], centicycles */
+  int depth;
+  int press[RES_COUNT];
+  int bottleneck;
+  int cycles_per_iter;
   int has_kernel;
-  int has_estimated;        /* a body span fell back to an opcode estimate */
-  char *header;             /* header label name, or NULL */
+  int has_estimated;
+  char *header;
 } Loop;
 
 typedef struct {
@@ -132,44 +110,39 @@ typedef struct {
   char *file;
   size_t line;
   size_t byte_size;
-  char *backend;        /* "register-allocated" or "baseline (fallback)" */
-  char *backend_reason; /* MIR-gate bail code for the fallback, or NULL */
+  char *backend;
+  char *backend_reason;
   AnnotInsn *insns;
   size_t insn_count;
   size_t insn_cap;
-  /* register-allocation snapshot (MIR backend only) */
   RegInterval *regs;
   size_t reg_count;
   size_t reg_cap;
-  int spill_count;      /* vregs that the allocator spilled */
-  int axis;             /* MIR instruction count = timeline x-axis extent */
-  int snapped;          /* regmap captured for this function */
-  /* loops */
+  int spill_count;
+  int axis;
+  int snapped;
   Loop *loops;
   size_t loop_count;
   size_t loop_cap;
-  /* summary */
   int mix[KIND_COUNT];
-  int total_rthru;      /* sum of reciprocal throughput, centicycles */
-  long hot_cost;        /* loop-depth-weighted throughput */
-  int vec_ops;          /* count of vectorized/kernel ops */
-  int cost_estimated;   /* number of spans that fell back to an opcode estimate */
+  int total_rthru;
+  long hot_cost;
+  int vec_ops;
+  int cost_estimated;
 } AnnotFunc;
 
 static MTLC_THREAD_LOCAL struct {
   int enabled;
-  int cost_only; /* measure for --explain-json; emit no listing or sidecar */
+  int cost_only;
   MirAnnotSyntax syntax;
   char *output_path;
   char *source_file;
   AnnotFunc *funcs;
   size_t func_count;
   size_t func_cap;
-  /* The function currently being encoded. */
   AnnotFunc *cur;
   const IRFunction *cur_ir;
-  int cur_block; /* id of the basic block currently being emitted, or -1 */
-  /* LLM-facing focused queries (see header). */
+  int cur_block;
   int q_lo, q_hi;
   char *q_fn;
   int q_hot;
@@ -211,8 +184,6 @@ void mir_annotate_set_line_query(int lo, int hi, const char *fn) {
 
 void mir_annotate_set_hot_query(int n) { g.q_hot = n; }
 
-/* ---- register naming ---------------------------------------------------- */
-
 static const char *gp_name(int phys, int width) {
   static const char *n64[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp",
                                 "rsi", "rdi", "r8",  "r9",  "r10", "r11",
@@ -248,14 +219,11 @@ static const char *vec_name(int phys, MirRegClass rclass) {
   return rclass == MIR_RC_VEC ? ymm[phys] : xmm[phys];
 }
 
-/* x86 condition tttn -> mnemonic suffix (jCC/setCC/cmovCC). */
 static const char *cc_suffix(unsigned char cc) {
   static const char *s[16] = {"o",  "no", "b",  "ae", "e",  "ne", "be", "a",
                               "s",  "ns", "p",  "np", "l",  "ge", "le", "g"};
   return s[cc & 0xF];
 }
-
-/* ---- small string buffer ------------------------------------------------ */
 
 typedef struct {
   char *data;
@@ -289,11 +257,6 @@ static void sb_putf(Sb *b, const char *fmt, ...) {
   sb_puts(b, tmp);
 }
 
-/* ---- operand rendering -------------------------------------------------- */
-
-/* Resolve a vreg to a register name (allocated) or its spill memory. width is
- * the operation width; for XMM/VEC the vreg's own class governs. att controls
- * sigils and memory syntax. Returns a static-ish rendering into `out`. */
 static void render_vreg(const MirFunction *fn, MirVregId v, int width, int att,
                         Sb *out) {
   if (!fn || v < 0 || (size_t)v >= fn->vreg_count) {
@@ -307,7 +270,6 @@ static void render_vreg(const MirFunction *fn, MirVregId v, int width, int att,
                          : vec_name(vr->phys, vr->rclass);
     sb_putf(out, "%s%s", att ? "%" : "", nm);
   } else {
-    /* Spilled or address-taken: lives at [rbp - spill_offset]. */
     int off = vr->spill_offset;
     if (att)
       sb_putf(out, "-%d(%%rbp)", off);
@@ -386,8 +348,6 @@ static void render_operand(const MirFunction *fn, const MirOperand *op, int widt
   }
 }
 
-/* ---- instruction rendering ---------------------------------------------- */
-
 static const char *const MIR_SCALAR_MNEMONICS[MIR_OPCODE_COUNT] = {
     [MIR_MOV] = "mov",
     [MIR_ADD] = "add",
@@ -445,9 +405,6 @@ static char att_suffix(int width) {
   }
 }
 
-/* Do two operands name the same physical register? Used to collapse the MIR
- * three-address form (dst = a op b) to the faithful x86 two-address form
- * (dst op= b) when dst and a coalesced to one register. */
 static int same_reg(const MirFunction *fn, const MirOperand *x,
                     const MirOperand *y) {
   int xp = -2, yp = -2;
@@ -462,13 +419,11 @@ static int same_reg(const MirFunction *fn, const MirOperand *x,
   return xp >= 0 && xp == yp;
 }
 
-/* Render one MIR instruction into Intel and AT&T text. */
 static void render_inst(const MirFunction *fn, const MirInst *in, char **intel,
                         char **att) {
   Sb bi = {0}, ba = {0};
   const char *mn = scalar_mnemonic(in);
 
-  /* Branches and labels read better than the generic dst,a,b form. */
   if (in->op == MIR_LABEL) {
     const char *l = in->dst.sym ? in->dst.sym : "?";
     sb_putf(&bi, "%s:", l);
@@ -516,22 +471,14 @@ static void render_inst(const MirFunction *fn, const MirInst *in, char **intel,
   }
 
   if (!mn) {
-    /* SIMD kernel or other multi-instruction op: show it as a pseudo-op. The
-     * decision note carries the semantic meaning, and the raw bytes are kept. */
     const char *nm = mir_opcode_name(in->op);
     sb_putf(&bi, "<%s>", nm);
     sb_putf(&ba, "<%s>", nm);
     goto done;
   }
 
-  /* Generic dst, a, b. x86 is two-address; when dst==a we collapse to the
-   * faithful two-operand form, otherwise we keep three operands (dst = a op b)
-   * which mirrors the mov+op the encoder actually emits (see raw bytes). */
-  /* Collapse the two-address form: when dst and a are the same register and
-   * there is a b source, x86 really computes `dst op= b`. */
   int collapse = in->dst.kind != MIR_OPK_NONE && in->a.kind != MIR_OPK_NONE &&
                  in->b.kind != MIR_OPK_NONE && same_reg(fn, &in->dst, &in->a);
-  /* Intel */
   sb_puts(&bi, mn);
   sb_putc(&bi, ' ');
   if (collapse) {
@@ -549,7 +496,6 @@ static void render_inst(const MirFunction *fn, const MirInst *in, char **intel,
       render_operand(fn, &in->b, in->width, 0, &bi);
     }
   }
-  /* AT&T: append size suffix on plain integer ops; reverse operand order. */
   int wants_suffix = 0;
   switch (in->op) {
   case MIR_MOV:
@@ -598,15 +544,12 @@ done:
   *att = ba.data ? ba.data : dupstr("");
 }
 
-/* ---- cost model --------------------------------------------------------- */
-
-/* Does this operand resolve to memory (a real [mem]/home, or a spilled vreg)? */
 static int op_is_mem(const MirFunction *fn, const MirOperand *op) {
   if (op->kind == MIR_OPK_MEM || op->kind == MIR_OPK_STACKHOME) return 1;
   if (op->kind == MIR_OPK_VREG && fn && op->vreg >= 0 &&
       (size_t)op->vreg < fn->vreg_count) {
     const MirVreg *vr = &fn->vregs[op->vreg];
-    if (vr->assigned && !vr->in_register) return 1; /* spilled / address-taken */
+    if (vr->assigned && !vr->in_register) return 1;
   }
   return 0;
 }
@@ -824,40 +767,22 @@ static void cost_model(const MirFunction *fn, const MirInst *in, int *lat,
   }
 }
 
-/* ---- byte-accurate micro-op model --------------------------------------- *
- *
- * The opcode models above estimate cost from the MIR/IR opcode. That is coarse
- * for the baseline backend, where one IR op becomes many machine instructions.
- * This decoder instead reads the ACTUAL emitted bytes of a span and accounts
- * the real micro-ops -- the genuinely accurate basis. The backend emits a known,
- * limited instruction set, so a targeted x86-64 length decoder covers it; it is
- * self-validating: classify_span_bytes only succeeds if it walks the span and
- * consumes EXACTLY its length on instruction boundaries with every opcode
- * recognized. On any mismatch the caller keeps the opcode estimate, so a decode
- * error can never corrupt the numbers -- worst case it is no worse than before.
- *
- * Modeled effects a static analyzer can know: macro-fusion (cmp/test/add/sub/and
- * + jcc -> one branch uop), reg-reg mov elimination (0 execution uops), memory
- * loads/stores, and the per-uop port assignment. Not modeled (data-dependent):
- * branch prediction and cache behaviour. */
-
 enum {
   PC_NONE = 0, PC_ALU, PC_SHIFT, PC_MUL, PC_DIV, PC_LEA, PC_LEA3, PC_SETCC,
   PC_CMOV, PC_BRANCH, PC_RET, PC_CALL, PC_FPADDMUL, PC_FPDIV, PC_FPMISC
 };
 
 typedef struct {
-  int ilen;             /* total instruction length in bytes */
-  int pc;               /* port class */
+  int ilen;
+  int pc;
   int mem_load;
   int mem_store;
-  int is_mov_rr;        /* reg-reg integer mov: eliminated at rename */
-  int is_cmp_fusible;   /* cmp/test/add/sub/and -- fuses with a following jcc */
-  int is_cond_branch;   /* jcc */
-  int wide;             /* REX.W (for divide sizing) */
+  int is_mov_rr;
+  int is_cmp_fusible;
+  int is_cond_branch;
+  int wide;
 } Insn;
 
-/* ModRM(+SIB+displacement) length. Sets *is_mem and, for SIB, *has_index. */
 static int modrm_len(const unsigned char *p, size_t avail, int *is_mem,
                      int *reg, int *has_index) {
   if (avail < 1) return -1;
@@ -868,29 +793,27 @@ static int modrm_len(const unsigned char *p, size_t avail, int *is_mem,
   *has_index = 0;
   int len = 1;
   int sib_base5 = 0;
-  if (mod != 3 && rm == 4) { /* SIB */
+  if (mod != 3 && rm == 4) {
     if (avail < 2) return -1;
     unsigned char sib = p[1];
     len++;
-    if (((sib >> 3) & 7) != 4) *has_index = 1; /* index != none */
+    if (((sib >> 3) & 7) != 4) *has_index = 1;
     if ((sib & 7) == 5) sib_base5 = 1;
   }
   if (mod == 1) len += 1;
   else if (mod == 2) len += 4;
   else if (mod == 0) {
-    if (rm == 5) len += 4;            /* RIP-relative disp32 */
-    else if (sib_base5) len += 4;     /* SIB no-base disp32 */
+    if (rm == 5) len += 4;
+    else if (sib_base5) len += 4;
   }
   return len;
 }
 
-/* Decode one instruction. Returns 1 and fills `o` on success; 0 to bail (unknown
- * opcode, VEX/kernel, or overrun). */
 static int decode_one(const unsigned char *p, size_t len, Insn *o) {
   memset(o, 0, sizeof *o);
   o->pc = PC_ALU;
   size_t i = 0;
-  int opsize16 = 0, mand = 0; /* mandatory SSE prefix: 0x66/0xF2/0xF3 */
+  int opsize16 = 0, mand = 0;
   for (;;) {
     if (i >= len) return 0;
     unsigned char b = p[i];
@@ -906,20 +829,19 @@ static int decode_one(const unsigned char *p, size_t len, Insn *o) {
 
   int is_mem = 0, reg = 0, has_index = 0, imm = 0;
   int two = 0;
-  if (op == 0xC4 || op == 0xC5) return 0; /* VEX: kernel territory, bail */
+  if (op == 0xC4 || op == 0xC5) return 0;
 
   if (op == 0x0F) {
     two = 1;
     if (i >= len) return 0;
     unsigned char o2 = p[i++];
-    if (o2 == 0x38 || o2 == 0x3A) return 0; /* 3-byte map: bail */
-    if (o2 >= 0x80 && o2 <= 0x8F) { /* jcc rel32 */
+    if (o2 == 0x38 || o2 == 0x3A) return 0;
+    if (o2 >= 0x80 && o2 <= 0x8F) {
       o->pc = PC_BRANCH; o->is_cond_branch = 1;
       imm = opsize16 ? 2 : 4;
       o->ilen = (int)i + imm;
       return o->ilen <= (int)len;
     }
-    /* the rest have ModRM, no immediate */
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml;
@@ -930,45 +852,42 @@ static int decode_one(const unsigned char *p, size_t len, Insn *o) {
     if (o2 == 0xAF) { o->pc = PC_MUL; if (is_mem) o->mem_load = 1; return 1; }
     if (o2 == 0xB6 || o2 == 0xB7 || o2 == 0xBE || o2 == 0xBF) {
       o->pc = PC_ALU; if (is_mem) o->mem_load = 1; return 1; }
-    if (o2 == 0x1F) { o->pc = PC_NONE; return 1; } /* multi-byte nop */
-    /* SSE/scalar-float */
+    if (o2 == 0x1F) { o->pc = PC_NONE; return 1; }
     switch (o2) {
-    case 0x58: case 0x59: case 0x5C: case 0x5D: case 0x5F: /* add/mul/sub/min/max */
+    case 0x58: case 0x59: case 0x5C: case 0x5D: case 0x5F:
       o->pc = PC_FPADDMUL; if (is_mem) o->mem_load = 1; return 1;
-    case 0x5E: o->pc = PC_FPDIV; if (is_mem) o->mem_load = 1; return 1; /* div */
-    case 0x51: o->pc = PC_FPDIV; if (is_mem) o->mem_load = 1; return 1; /* sqrt */
-    case 0x54: case 0x55: case 0x56: case 0x57: /* and/andn/or/xor ps */
+    case 0x5E: o->pc = PC_FPDIV; if (is_mem) o->mem_load = 1; return 1;
+    case 0x51: o->pc = PC_FPDIV; if (is_mem) o->mem_load = 1; return 1;
+    case 0x54: case 0x55: case 0x56: case 0x57:
       o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
-    case 0x2E: case 0x2F: /* ucomis/comis */
+    case 0x2E: case 0x2F:
       o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
-    case 0x2A: case 0x2C: case 0x2D: case 0x5A: case 0x5B: /* cvt* */
+    case 0x2A: case 0x2C: case 0x2D: case 0x5A: case 0x5B:
       o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
-    case 0x10: case 0x28: /* movups/movaps load */
+    case 0x10: case 0x28:
       o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
-    case 0x11: case 0x29: /* movups/movaps store */
+    case 0x11: case 0x29:
       o->pc = PC_FPMISC; if (is_mem) o->mem_store = 1; return 1;
-    case 0x6E: /* movd/q to xmm */
+    case 0x6E:
       o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
-    case 0x7E: /* movq (F3=load) / movd (66=store) */
+    case 0x7E:
       o->pc = PC_FPMISC;
       if (is_mem) { if (mand == 0xF3) o->mem_load = 1; else o->mem_store = 1; }
       return 1;
-    case 0xD6: /* movq store */
+    case 0xD6:
       o->pc = PC_FPMISC; if (is_mem) o->mem_store = 1; return 1;
     case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x17:
       o->pc = PC_FPMISC; if (is_mem) { if (o2 & 1) o->mem_store = 1; else o->mem_load = 1; } return 1;
     default:
-      return 0; /* unknown 2-byte op: bail */
+      return 0;
     }
   }
 
-  /* one-byte opcode map */
-  /* integer ALU group: 0x00..0x3D, in 8-opcode blocks (ADD,OR,ADC,SBB,AND,SUB,XOR,CMP). */
   if (op <= 0x3D && (op & 7) <= 5 && op != 0x0F) {
-    int blk = op >> 3;          /* 0..7 -> which arith op */
-    int form = op & 7;          /* 0,1=Eb/Ev,Gb/Gv ; 2,3=Gb/Gv,Eb/Ev ; 4,5=AL/eAX,imm */
-    int is_cmp = (blk == 7);    /* CMP */
-    int is_fusible = (blk == 0 || blk == 4 || blk == 5 || blk == 7); /* ADD/AND/SUB/CMP */
+    int blk = op >> 3;
+    int form = op & 7;
+    int is_cmp = (blk == 7);
+    int is_fusible = (blk == 0 || blk == 4 || blk == 5 || blk == 7);
     if (form <= 3) {
       int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
       if (ml < 0) return 0;
@@ -978,13 +897,11 @@ static int decode_one(const unsigned char *p, size_t len, Insn *o) {
       o->pc = PC_ALU;
       o->is_cmp_fusible = is_fusible;
       if (is_mem) {
-        if (form <= 1) { o->mem_load = 1; if (!is_cmp) o->mem_store = 1; } /* rm dest: RMW (cmp is read-only) */
-        else o->mem_load = 1;                                              /* rm source */
+        if (form <= 1) { o->mem_load = 1; if (!is_cmp) o->mem_store = 1; }
+        else o->mem_load = 1;
       }
-      /* reg-reg mov is handled at 0x88-0x8B; here arith reg-reg is a normal alu */
       return 1;
     }
-    /* AL/eAX, immediate */
     imm = (form == 4) ? 1 : (opsize16 ? 2 : 4);
     o->ilen = (int)i + imm;
     o->pc = PC_ALU; o->is_cmp_fusible = is_fusible;
@@ -993,127 +910,126 @@ static int decode_one(const unsigned char *p, size_t len, Insn *o) {
 
   switch (op) {
   case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56:
-  case 0x57: /* push r */
+  case 0x57:
     o->pc = PC_NONE; o->mem_store = 1; o->ilen = (int)i; return 1;
   case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E:
-  case 0x5F: /* pop r */
+  case 0x5F:
     o->pc = PC_NONE; o->mem_load = 1; o->ilen = (int)i; return 1;
-  case 0x63: { /* movsxd */
+  case 0x63: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; o->pc = PC_ALU; if (is_mem) o->mem_load = 1;
     o->ilen = (int)i; return o->ilen <= (int)len; }
   case 0x68: imm = opsize16 ? 2 : 4; o->pc = PC_NONE; o->mem_store = 1;
-    o->ilen = (int)i + imm; return o->ilen <= (int)len; /* push imm */
+    o->ilen = (int)i + imm; return o->ilen <= (int)len;
   case 0x6A: o->pc = PC_NONE; o->mem_store = 1; o->ilen = (int)i + 1;
     return o->ilen <= (int)len;
-  case 0x69: case 0x6B: { /* imul r, r/m, imm */
+  case 0x69: case 0x6B: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; imm = (op == 0x6B) ? 1 : (opsize16 ? 2 : 4);
     o->pc = PC_MUL; if (is_mem) o->mem_load = 1;
     o->ilen = (int)i + imm; return o->ilen <= (int)len; }
-  case 0x84: case 0x85: { /* test */
+  case 0x84: case 0x85: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; o->pc = PC_ALU; o->is_cmp_fusible = 1; if (is_mem) o->mem_load = 1;
     o->ilen = (int)i; return o->ilen <= (int)len; }
-  case 0x88: case 0x89: case 0x8A: case 0x8B: { /* mov */
+  case 0x88: case 0x89: case 0x8A: case 0x8B: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; o->ilen = (int)i; if (o->ilen > (int)len) return 0;
     if (is_mem) { o->pc = PC_NONE; if (op == 0x88 || op == 0x89) o->mem_store = 1; else o->mem_load = 1; }
-    else { o->pc = PC_NONE; o->is_mov_rr = 1; } /* reg-reg mov: eliminated */
+    else { o->pc = PC_NONE; o->is_mov_rr = 1; }
     return 1; }
-  case 0x8D: { /* lea */
+  case 0x8D: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
-    i += ml; o->pc = has_index ? PC_LEA3 : PC_LEA; /* no memory access */
+    i += ml; o->pc = has_index ? PC_LEA3 : PC_LEA;
     o->ilen = (int)i; return o->ilen <= (int)len; }
-  case 0x80: case 0x81: case 0x83: { /* grp1 Ev, imm */
+  case 0x80: case 0x81: case 0x83: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; imm = (op == 0x81) ? (opsize16 ? 2 : 4) : 1;
     o->pc = PC_ALU; o->is_cmp_fusible = (reg == 0 || reg == 4 || reg == 5 || reg == 7);
-    if (is_mem) { o->mem_load = 1; if (reg != 7) o->mem_store = 1; } /* /7=CMP read-only */
+    if (is_mem) { o->mem_load = 1; if (reg != 7) o->mem_store = 1; }
     o->ilen = (int)i + imm; return o->ilen <= (int)len; }
-  case 0x90: o->pc = PC_NONE; o->ilen = (int)i; return 1; /* nop */
-  case 0x98: case 0x99: o->pc = PC_ALU; o->ilen = (int)i; return 1; /* cwde/cqo */
+  case 0x90: o->pc = PC_NONE; o->ilen = (int)i; return 1;
+  case 0x98: case 0x99: o->pc = PC_ALU; o->ilen = (int)i; return 1;
   case 0xA8: o->pc = PC_ALU; o->is_cmp_fusible = 1; o->ilen = (int)i + 1; return o->ilen <= (int)len;
   case 0xA9: imm = opsize16 ? 2 : 4; o->pc = PC_ALU; o->is_cmp_fusible = 1;
     o->ilen = (int)i + imm; return o->ilen <= (int)len;
   case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6:
-  case 0xB7: o->pc = PC_NONE; o->ilen = (int)i + 1; return o->ilen <= (int)len; /* mov r8,imm8 */
+  case 0xB7: o->pc = PC_NONE; o->ilen = (int)i + 1; return o->ilen <= (int)len;
   case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE:
-  case 0xBF: imm = o->wide ? 8 : (opsize16 ? 2 : 4); o->pc = PC_NONE; /* mov r,imm (movabs) */
+  case 0xBF: imm = o->wide ? 8 : (opsize16 ? 2 : 4); o->pc = PC_NONE;
     o->ilen = (int)i + imm; return o->ilen <= (int)len;
-  case 0xC0: case 0xC1: { /* grp2 shift Ev, imm8 */
+  case 0xC0: case 0xC1: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; o->pc = PC_SHIFT; if (is_mem) { o->mem_load = 1; o->mem_store = 1; }
     o->ilen = (int)i + 1; return o->ilen <= (int)len; }
-  case 0xD0: case 0xD1: case 0xD2: case 0xD3: { /* grp2 shift by 1/CL */
+  case 0xD0: case 0xD1: case 0xD2: case 0xD3: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; o->pc = PC_SHIFT; if (is_mem) { o->mem_load = 1; o->mem_store = 1; }
     o->ilen = (int)i; return o->ilen <= (int)len; }
-  case 0xC2: o->pc = PC_RET; o->ilen = (int)i + 2; return o->ilen <= (int)len; /* ret imm16 */
-  case 0xC3: o->pc = PC_RET; o->ilen = (int)i; return 1; /* ret */
-  case 0xC6: { /* mov Eb, Ib */
+  case 0xC2: o->pc = PC_RET; o->ilen = (int)i + 2; return o->ilen <= (int)len;
+  case 0xC3: o->pc = PC_RET; o->ilen = (int)i; return 1;
+  case 0xC6: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; o->pc = PC_NONE; if (is_mem) o->mem_store = 1;
     o->ilen = (int)i + 1; return o->ilen <= (int)len; }
-  case 0xC7: { /* mov Ev, Iz */
+  case 0xC7: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; imm = opsize16 ? 2 : 4; o->pc = PC_NONE; if (is_mem) o->mem_store = 1;
     o->ilen = (int)i + imm; return o->ilen <= (int)len; }
-  case 0xCC: o->pc = PC_NONE; o->ilen = (int)i; return 1; /* int3 (trap pad) */
+  case 0xCC: o->pc = PC_NONE; o->ilen = (int)i; return 1;
   case 0xE8: o->pc = PC_CALL; o->ilen = (int)i + 4; return o->ilen <= (int)len;
-  case 0xE9: o->pc = PC_BRANCH; o->ilen = (int)i + 4; return o->ilen <= (int)len; /* jmp rel32 */
-  case 0xEB: o->pc = PC_BRANCH; o->ilen = (int)i + 1; return o->ilen <= (int)len; /* jmp rel8 */
+  case 0xE9: o->pc = PC_BRANCH; o->ilen = (int)i + 4; return o->ilen <= (int)len;
+  case 0xEB: o->pc = PC_BRANCH; o->ilen = (int)i + 1; return o->ilen <= (int)len;
   case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76:
   case 0x77: case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D:
-  case 0x7E: case 0x7F: /* jcc rel8 */
+  case 0x7E: case 0x7F:
     o->pc = PC_BRANCH; o->is_cond_branch = 1; o->ilen = (int)i + 1;
     return o->ilen <= (int)len;
-  case 0xF6: case 0xF7: { /* grp3 Ev */
+  case 0xF6: case 0xF7: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml;
-    if (reg == 0 || reg == 1) { /* TEST Ev, imm */
+    if (reg == 0 || reg == 1) {
       imm = (op == 0xF7) ? (opsize16 ? 2 : 4) : 1;
       o->pc = PC_ALU; if (is_mem) o->mem_load = 1;
       o->ilen = (int)i + imm; return o->ilen <= (int)len;
     }
-    if (reg == 2 || reg == 3) o->pc = PC_ALU;         /* NOT/NEG */
-    else if (reg == 4 || reg == 5) o->pc = PC_MUL;    /* MUL/IMUL */
-    else o->pc = PC_DIV;                              /* DIV/IDIV */
+    if (reg == 2 || reg == 3) o->pc = PC_ALU;
+    else if (reg == 4 || reg == 5) o->pc = PC_MUL;
+    else o->pc = PC_DIV;
     if (is_mem) { o->mem_load = 1; if (reg == 2 || reg == 3) o->mem_store = 1; }
     o->ilen = (int)i; return o->ilen <= (int)len; }
-  case 0xFE: { /* grp4 inc/dec Eb */
+  case 0xFE: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; o->pc = PC_ALU; if (is_mem) { o->mem_load = 1; o->mem_store = 1; }
     o->ilen = (int)i; return o->ilen <= (int)len; }
-  case 0xFF: { /* grp5 */
+  case 0xFF: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml; o->ilen = (int)i; if (o->ilen > (int)len) return 0;
-    if (reg == 0 || reg == 1) { o->pc = PC_ALU; if (is_mem) { o->mem_load = 1; o->mem_store = 1; } } /* inc/dec */
-    else if (reg == 2 || reg == 3) { o->pc = PC_CALL; if (is_mem) o->mem_load = 1; } /* call */
-    else if (reg == 4 || reg == 5) { o->pc = PC_BRANCH; if (is_mem) o->mem_load = 1; } /* jmp */
-    else if (reg == 6) { o->pc = PC_NONE; o->mem_store = 1; if (is_mem) o->mem_load = 1; } /* push */
+    if (reg == 0 || reg == 1) { o->pc = PC_ALU; if (is_mem) { o->mem_load = 1; o->mem_store = 1; } }
+    else if (reg == 2 || reg == 3) { o->pc = PC_CALL; if (is_mem) o->mem_load = 1; }
+    else if (reg == 4 || reg == 5) { o->pc = PC_BRANCH; if (is_mem) o->mem_load = 1; }
+    else if (reg == 6) { o->pc = PC_NONE; o->mem_store = 1; if (is_mem) o->mem_load = 1; }
     else return 0;
     return 1; }
   default:
     (void)two;
-    return 0; /* unknown: bail to the opcode estimate */
+    return 0;
   }
 }
 
-/* Account one decoded instruction into the resource model. */
 static void account_insn(const Insn *in, int press[RES_COUNT], int *flex,
                          int *lat) {
   int l = 1;
@@ -1139,9 +1055,6 @@ static void account_insn(const Insn *in, int press[RES_COUNT], int *flex,
   if (l > *lat) *lat = l;
 }
 
-/* Walk a span's bytes, accounting real micro-ops with macro-fusion and mov
- * elimination. Returns 1 (and fills press/flex/lat + a dominant `kind`) only if
- * the whole span decodes cleanly on instruction boundaries; 0 to bail. */
 #define UOP_CAP 512
 static int classify_span_bytes(const unsigned char *p, size_t len,
                                int press[RES_COUNT], int *flex, int *lat,
@@ -1157,29 +1070,24 @@ static int classify_span_bytes(const unsigned char *p, size_t len,
     i += (size_t)o->ilen;
     n++;
   }
-  if (i != len) return 0; /* must land exactly on the span boundary */
+  if (i != len) return 0;
 
   for (int r = 0; r < RES_COUNT; r++) press[r] = 0;
   *flex = 0;
   *lat = 0;
-  int kc[16] = {0}; /* per port-class instruction tally for the dominant kind */
+  int kc[16] = {0};
   for (int k = 0; k < n; k++) {
     Insn *o = &insns[k];
-    /* Macro-fusion: a fusible cmp/test/add/sub/and immediately followed by a
-     * conditional branch issues as ONE branch uop -- drop the ALU uop. */
     if (o->is_cmp_fusible && k + 1 < n && insns[k + 1].is_cond_branch) {
-      /* account only the branch (next iteration handles it); the compare's mem
-       * load, if any, still happens. */
       if (o->mem_load) press[RES_LD] += 50;
       kc[PC_BRANCH]++;
       continue;
     }
-    if (o->is_mov_rr) { kc[PC_NONE]++; continue; } /* eliminated */
+    if (o->is_mov_rr) { kc[PC_NONE]++; continue; }
     account_insn(o, press, flex, lat);
     kc[o->pc]++;
   }
 
-  /* Dominant kind for the instruction-mix label. */
   static const char *pc_kind[16] = {
       "other", "alu", "shift", "mul", "div", "lea", "lea", "setcc",
       "cmov", "branch", "branch", "call", "float", "float", "float"};
@@ -1195,7 +1103,6 @@ static int classify_span_bytes(const unsigned char *p, size_t len,
   return 1;
 }
 
-/* Port string for a refined (byte-derived) kind, for display. */
 static const char *kind_ports(const char *k) {
   if (!k) return "";
   if (!strcmp(k, "alu")) return "p0156";
@@ -1211,11 +1118,6 @@ static const char *kind_ports(const char *k) {
   return "";
 }
 
-/* Replace a recorded span's opcode-estimated cost with the byte-accurate one
- * when the emitted machine bytes decode cleanly. Kernels keep their estimate
- * (they contain VEX the decoder bails on, and are excluded from loop costs
- * anyway). On a decode bail, the opcode estimate stands and the span is flagged
- * so the UI can disclose that one span was estimated. */
 static void refine_cost_from_bytes(AnnotInsn *r, const unsigned char *bytes,
                                    size_t byte_len) {
   if (r->is_kernel || !bytes || byte_len == 0) return;
@@ -1237,16 +1139,10 @@ static void refine_cost_from_bytes(AnnotInsn *r, const unsigned char *bytes,
   }
 }
 
-/* ---- decision classification -------------------------------------------- */
-
-/* Derive a structural decision tag/note from the MIR op and allocation state,
- * before the richer --explain join. note is malloc'd or NULL. */
 static void classify(const MirFunction *fn, const MirInst *in, char **tag,
                      char **note) {
   *tag = NULL;
   *note = NULL;
-  /* Auto-vectorizer kernels and packed-SIMD ops (the contiguous vector range
-   * of the opcode enum, from MIR_VADD onward). */
   if (in->op == MIR_SIMD_SILU_F32) {
     *tag = dupstr("vectorized");
     *note = dupstr("AVX2 SiLU/SwiGLU kernel (exp-poly, 8-wide f32)");
@@ -1277,7 +1173,6 @@ static void classify(const MirFunction *fn, const MirInst *in, char **tag,
     *tag = dupstr("call");
     return;
   }
-  /* A def into a spilled vreg: register pressure forced a stack slot. */
   if (in->dst.kind == MIR_OPK_VREG && fn && in->dst.vreg >= 0 &&
       (size_t)in->dst.vreg < fn->vreg_count) {
     const MirVreg *vr = &fn->vregs[in->dst.vreg];
@@ -1290,8 +1185,6 @@ static void classify(const MirFunction *fn, const MirInst *in, char **tag,
     }
   }
 }
-
-/* ---- recording ---------------------------------------------------------- */
 
 static AnnotFunc *push_func(void) {
   if (g.func_count >= g.func_cap) {
@@ -1319,12 +1212,6 @@ void mir_annotate_begin_function(const char *name, const IRFunction *ir_fn,
   g.cur_block = -1;
 }
 
-/* Classify an originating IR instruction as profiling instrumentation:
- *   0 = normal user instruction (record it),
- *   1 = mettle_profile_block(id) marker -- updates g.cur_block, do NOT record,
- *   2 = other mettle_profile_* shim (enter/exit/op) -- do NOT record.
- * Markers/shims are kept out of the listing and the cost model; only the real
- * code they bracket is costed, and the measured block id flows onto it. */
 static int annot_instrument_kind(const IRInstruction *in) {
   uint32_t id = 0;
   if (!in || in->op != IR_OP_CALL || !in->text) return 0;
@@ -1344,9 +1231,6 @@ void mir_annotate_note_backend(const char *backend, const char *reason) {
   g.cur->backend_reason = dupstr(reason);
 }
 
-/* Snapshot the allocator's result for the open MIR function: each physical
- * register's live interval, and the spill count. Called lazily on the first
- * recorded instruction, when the MirFunction is still in scope. */
 static void snapshot_regmap(AnnotFunc *f, const MirFunction *fn) {
   if (!f || !fn || f->snapped) return;
   f->snapped = 1;
@@ -1385,8 +1269,6 @@ void mir_annotate_end_function(void) {
     AnnotInsn *last = &g.cur->insns[g.cur->insn_count - 1];
     g.cur->byte_size = last->off + last->len;
   }
-  /* If the declaration line was unavailable, fall back to the first instruction
-   * that carries a source line. */
   if (g.cur->line == 0) {
     for (size_t i = 0; i < g.cur->insn_count; i++) {
       if (g.cur->insns[i].line) {
@@ -1426,7 +1308,7 @@ static AnnotInsn *push_insn(AnnotFunc *f) {
   AnnotInsn *r = &f->insns[f->insn_count++];
   memset(r, 0, sizeof(*r));
   r->mir_index = -1;
-  r->block = -1; /* 0 is a valid block id, so an unstamped insn must be -1 */
+  r->block = -1;
   return r;
 }
 
@@ -1435,9 +1317,6 @@ void mir_annotate_record(const MirFunction *fn, const MirInst *in, int mir_index
                          const unsigned char *bytes) {
   if (!g.enabled || !g.cur || byte_len == 0) return;
   snapshot_regmap(g.cur, fn);
-  /* Profiling instrumentation (block markers + enter/exit/op shims) is bracket
-   * code, not user code: skip recording it, but let a block marker advance the
-   * current block id so it flows onto the real instructions that follow. */
   const IRInstruction *src_ir = NULL;
   if (g.cur_ir && in->ir_index >= 0 &&
       (size_t)in->ir_index < g.cur_ir->instruction_count) {
@@ -1459,7 +1338,6 @@ void mir_annotate_record(const MirFunction *fn, const MirInst *in, int mir_index
              &r->ports, &kern);
   r->is_kernel = (unsigned char)kern;
   refine_cost_from_bytes(r, bytes, byte_len);
-  /* Control-flow structure for loop recovery. */
   if (in->op == MIR_LABEL) {
     r->is_label = 1;
     r->label = dupstr(in->dst.sym);
@@ -1470,7 +1348,6 @@ void mir_annotate_record(const MirFunction *fn, const MirInst *in, int mir_index
       r->target = dupstr(in->dst.sym);
     }
   }
-  /* Source line via the IR instruction the MIR op came from. */
   r->line = src_ir ? src_ir->location.line : 0;
 }
 
@@ -1494,8 +1371,6 @@ void mir_annotate_record_synthetic(const char *label, const char *decision,
   r->ports = "";
 }
 
-/* ---- whole-function analysis (loops, depth, summary) -------------------- */
-
 static int find_label_rec(const AnnotFunc *f, const char *name) {
   if (!name) return -1;
   for (size_t i = 0; i < f->insn_count; i++)
@@ -1518,10 +1393,6 @@ static Loop *push_loop(AnnotFunc *f) {
   return l;
 }
 
-/* Distribute `add` centicycles of flexible ALU work across the four ALU ports
- * (whose current fixed loads are in base[]) so as to MINIMIZE the resulting
- * maximum -- the classic water-filling an out-of-order scheduler approximates.
- * Writes the leveled per-port loads into out[]. */
 static const int alu_ports[4] = {RES_P0, RES_P1, RES_P5, RES_P6};
 static void waterfill(const int base[4], int add, int out[4]) {
   for (int i = 0; i < 4; i++) out[i] = base[i];
@@ -1530,7 +1401,7 @@ static void waterfill(const int base[4], int add, int out[4]) {
   for (int i = 1; i < 4; i++)
     if (base[i] < lo) lo = base[i];
   int hi = lo + add;
-  while (lo < hi) { /* largest level L with sum(max(0,L-base)) <= add */
+  while (lo < hi) {
     int mid = lo + (hi - lo + 1) / 2;
     long need = 0;
     for (int i = 0; i < 4; i++)
@@ -1541,7 +1412,7 @@ static void waterfill(const int base[4], int add, int out[4]) {
   long used = 0;
   for (int i = 0; i < 4; i++)
     if (base[i] < lo) { out[i] = lo; used += lo - base[i]; }
-  int leftover = add - (int)used; /* < 4; pour onto the least-loaded ports */
+  int leftover = add - (int)used;
   while (leftover-- > 0) {
     int mi = 0;
     for (int i = 1; i < 4; i++)
@@ -1550,20 +1421,14 @@ static void waterfill(const int base[4], int add, int out[4]) {
   }
 }
 
-/* Recover natural loops (a backward branch to an earlier label), compute each
- * instruction's nesting depth, summarize each loop's port pressure / bottleneck
- * and the function's instruction mix and hot-weighted cost. */
 static void analyze_function(AnnotFunc *f) {
   if (!f) return;
 
-  /* 1. Recover loops from backward branches. */
   for (size_t p = 0; p < f->insn_count; p++) {
     AnnotInsn *br = &f->insns[p];
     if (!br->is_branch || !br->target) continue;
     int q = find_label_rec(f, br->target);
-    if (q < 0 || (size_t)q >= p) continue; /* forward edge: not a loop */
-    /* Merge with an existing loop sharing this header (the natural body is the
-     * widest back-edge to a header). */
+    if (q < 0 || (size_t)q >= p) continue;
     Loop *existing = NULL;
     for (size_t li = 0; li < f->loop_count; li++) {
       if (f->loops[li].start_rec == q) {
@@ -1579,9 +1444,6 @@ static void analyze_function(AnnotFunc *f) {
     if (!l) break;
     l->start_rec = q;
     l->end_rec = (int)p;
-    /* The header label itself often carries no source line (it is a synthetic
-     * marker); use the first body instruction that does, falling back to the
-     * back-edge's line. */
     l->head_line = f->insns[q].line;
     for (int j = q; j <= (int)p && !l->head_line; j++)
       if (f->insns[j].line) l->head_line = f->insns[j].line;
@@ -1590,7 +1452,6 @@ static void analyze_function(AnnotFunc *f) {
     l->header = f->insns[q].label ? dupstr(f->insns[q].label) : NULL;
   }
 
-  /* 2. Per-instruction nesting depth, and per-loop containment depth. */
   for (size_t i = 0; i < f->insn_count; i++) {
     int depth = 0;
     for (size_t li = 0; li < f->loop_count; li++)
@@ -1609,9 +1470,6 @@ static void analyze_function(AnnotFunc *f) {
     l->depth = d;
   }
 
-  /* 3. Per-loop port pressure + bottleneck. Fixed (narrow) uop pressure sums
-   * directly; flexible ALU work is water-filled across p0/p1/p5/p6 around it so
-   * the busiest port reflects what a scheduler would actually produce. */
   for (size_t li = 0; li < f->loop_count; li++) {
     Loop *l = &f->loops[li];
     int flex = 0;
@@ -1636,7 +1494,6 @@ static void analyze_function(AnnotFunc *f) {
     l->cycles_per_iter = l->press[best];
   }
 
-  /* 4. Instruction mix, total throughput, hot-weighted cost, vec coverage. */
   for (size_t i = 0; i < f->insn_count; i++) {
     AnnotInsn *r = &f->insns[i];
     if (!r->kind) r->kind = "other";
@@ -1650,8 +1507,6 @@ static void analyze_function(AnnotFunc *f) {
     f->hot_cost += (long)r->rthru * w;
   }
 }
-
-/* ---- output: JSON sidecar + stdout listing ------------------------------ */
 
 static void json_escape(FILE *o, const char *s) {
   if (!s) {
@@ -1677,8 +1532,6 @@ static void json_escape(FILE *o, const char *s) {
   fputc('"', o);
 }
 
-/* Emit this function's --explain remarks (loops/calls vectorized/inlined) as a
- * JSON array, and return them so the per-line join can reuse the same data. */
 static void emit_remarks_json(FILE *o, const char *fnname) {
   size_t n = ir_explain_remark_count();
   int first = 1;
@@ -1769,7 +1622,6 @@ static char *annot_json_path(void) {
   const char *src = g.output_path ? g.output_path : g.source_file;
   if (!src) return dupstr("a.annot.json");
   size_t n = strlen(src);
-  /* Strip the last extension. */
   size_t dot = n;
   for (size_t i = n; i > 0; i--) {
     char c = src[i - 1];
@@ -1847,9 +1699,6 @@ static void write_json(void) {
               r->lat, r->rthru, r->loop_depth, r->cost_estimated,
               r->kind ? r->kind : "other");
       json_escape(o, r->ports);
-      /* Per-instruction issue-port pressure: the measured-frequency view in the
-       * extension scales these by execution count for a real port-utilization
-       * breakdown. press[] are FIXED ports; falu is flexible ALU centicycles. */
       fprintf(o, ",\"press\":[%d,%d,%d,%d,%d,%d],\"falu\":%d",
               r->press[RES_P0], r->press[RES_P1], r->press[RES_P5],
               r->press[RES_P6], r->press[RES_LD], r->press[RES_ST], r->flex_alu);
@@ -1868,9 +1717,6 @@ static void cycles_str(int centi, char *out, size_t n) {
   snprintf(out, n, "%d.%02d", centi / 100, centi % 100);
 }
 
-/* A compact ASCII register-lifetime map: one lane per physical register, the
- * MIR index axis scaled to a fixed column width, a bar over each live interval.
- * This is the piano-roll that makes spills legible at a glance. */
 static void write_regmap_ascii(const AnnotFunc *f) {
   if (f->reg_count == 0 || f->axis <= 0) return;
   const int COLS = 60;
@@ -1909,14 +1755,10 @@ static void write_summary_ascii(const AnnotFunc *f) {
   if (f->vec_ops) printf(", %d vector op%s", f->vec_ops,
                          f->vec_ops == 1 ? "" : "s");
   printf(" --\n");
-  /* instruction mix */
   printf("     mix:");
   for (int k = 0; k < KIND_COUNT; k++)
     if (f->mix[k]) printf(" %s=%d", KINDS[k], f->mix[k]);
   printf("\n");
-  /* per-loop bottlenecks. Costs are decoded from the emitted instructions; a
-   * loop that contains an inline SIMD kernel or a span the decoder could not
-   * read is marked, since its figure is then partial/estimated. */
   for (size_t li = 0; li < f->loop_count; li++) {
     const Loop *l = &f->loops[li];
     char cy[16];
@@ -1950,7 +1792,6 @@ static void write_stdout(void) {
            f->backend_reason ? " " : "",
            f->backend_reason ? f->backend_reason : "");
     write_summary_ascii(f);
-    /* Function-level remarks first. */
     size_t n = ir_explain_remark_count();
     for (size_t i = 0; i < n; i++) {
       const char *rfn, *entity, *headline, *reason, *fix, *verified;
@@ -1972,7 +1813,6 @@ static void write_stdout(void) {
       char loc[32] = "";
       if (r->line) snprintf(loc, sizeof(loc), ":%zu", r->line);
       const char *asmtext = intel ? r->intel : r->att;
-      /* Brief bytes field: whole bytes up to 21 cols, then '+' if truncated. */
       char brief[24];
       const char *hex = r->bytes ? r->bytes : "";
       size_t cut = strlen(hex);
@@ -1983,7 +1823,6 @@ static void write_stdout(void) {
       }
       snprintf(brief, sizeof(brief), "%.*s%s", (int)cut, hex,
                strlen(hex) > cut ? "+" : "");
-      /* Loop-depth gutter: one '|' per nesting level marks hot instructions. */
       char gutter[8] = "";
       int gd = r->loop_depth > 4 ? 4 : r->loop_depth;
       for (int d = 0; d < gd; d++) gutter[d] = '|';
@@ -2010,13 +1849,6 @@ static void write_stdout(void) {
   }
 }
 
-/* ---- LLM-facing focused queries ----------------------------------------- *
- *
- * These print a compact, structured report instead of the full listing: a
- * developer or an agent asks "what did the compiler do with lines A..B" (or
- * "where is the time") and gets back just the relevant asm, cost, covering
- * loops, live registers, and decisions. The goal is high signal per token. */
-
 static const char *base_name(const char *p) {
   const char *b = p;
   if (p)
@@ -2036,15 +1868,11 @@ static int icase_eq(const char *a, const char *b) {
   return *a == *b;
 }
 
-/* A focused query targets one named function, or (default) every function from
- * the main source file - so a line range is not confused with the same line
- * numbers in an imported stdlib file. */
 static int query_in_focus(const AnnotFunc *f) {
   if (g.q_fn) return f->name && strcmp(f->name, g.q_fn) == 0;
   return icase_eq(base_name(f->file), base_name(g.source_file));
 }
 
-/* Print this function's --explain remark for `line` (if any), compactly. */
 static void query_remark_for_line(const char *fnname, size_t line) {
   size_t n = ir_explain_remark_count();
   for (size_t i = 0; i < n; i++) {
@@ -2073,7 +1901,6 @@ static void write_line_query(void) {
   for (size_t fi = 0; fi < g.func_count; fi++) {
     AnnotFunc *f = &g.funcs[fi];
     if (!query_in_focus(f)) continue;
-    /* in-range instruction span + aggregates */
     int n_in = 0, min_idx = -1, max_idx = -1, rt = 0, kern = 0;
     size_t bytes = 0;
     for (size_t ii = 0; ii < f->insn_count; ii++) {
@@ -2105,7 +1932,6 @@ static void write_line_query(void) {
              " estimate)",
              kern, kern == 1 ? "" : "s");
     printf("\n");
-    /* asm grouped by source line, in emission order */
     size_t cur_line = 0;
     for (size_t ii = 0; ii < f->insn_count; ii++) {
       AnnotInsn *r = &f->insns[ii];
@@ -2127,7 +1953,6 @@ static void write_line_query(void) {
       }
       printf("\n");
     }
-    /* loops covering the range */
     for (size_t li = 0; li < f->loop_count; li++) {
       Loop *l = &f->loops[li];
       size_t lt = l->tail_line ? l->tail_line : l->head_line;
@@ -2139,9 +1964,6 @@ static void write_line_query(void) {
              l->has_kernel ? " (+SIMD kernel)" : "",
              l->has_estimated ? " (partly estimated)" : "");
     }
-    /* registers live across the range (register-allocated functions only),
-     * deduplicated by physical register with merged crosses-call/loop-carried
-     * flags - one physical register may host several vregs across the span. */
     if (f->reg_count && min_idx >= 0) {
       const char *names[32];
       int cc[32], lc[32], rcls[32], nd = 0;
@@ -2178,11 +2000,8 @@ static void write_line_query(void) {
     printf("\n(no register-allocated or emitted code matched the query)\n");
 }
 
-/* Top-N hotspots across the program: hottest loops by cycles/iteration weighted
- * by nesting depth, and a note of spills / fallback functions. */
 static void write_hot_query(void) {
   int n = g.q_hot > 0 ? g.q_hot : 8;
-  /* gather loops */
   typedef struct { const char *fn; size_t line; int depth, cyc, has_kernel; long w; const char *port; } HL;
   size_t cap = 0;
   for (size_t fi = 0; fi < g.func_count; fi++) cap += g.funcs[fi].loop_count;
@@ -2204,7 +2023,6 @@ static void write_hot_query(void) {
       }
     }
   }
-  /* selection sort the top n by weight (small lists) */
   for (size_t i = 0; i < hn && (int)i < n; i++) {
     size_t best = i;
     for (size_t j = i + 1; j < hn; j++) if (hl[j].w > hl[best].w) best = j;
@@ -2221,7 +2039,6 @@ static void write_hot_query(void) {
            hl[i].fn ? hl[i].fn : "?", hl[i].line, cy, hl[i].port, hl[i].depth,
            hl[i].has_kernel ? "  (+SIMD kernel)" : "");
   }
-  /* spills / fallback notes */
   for (size_t fi = 0; fi < g.func_count; fi++) {
     AnnotFunc *f = &g.funcs[fi];
     if (query_in_focus(f) && f->spill_count)
@@ -2265,12 +2082,6 @@ static void free_all(void) {
   g.func_count = g.func_cap = 0;
 }
 
-/* Hand the cost model to the --explain report.
- *
- * The optimizer's report knows which loops it refused to vectorize; only
- * codegen knows what those loops then cost. Publishing here joins the two
- * without the IR layer having to know codegen exists: the same direction the
- * backend gate already reports in. */
 static void publish_costs_to_explain(void) {
   if (!ir_explain_enabled()) return;
   for (size_t fi = 0; fi < g.func_count; fi++) {
@@ -2292,14 +2103,12 @@ void mir_annotate_flush(void) {
   if (!g.enabled) return;
   publish_costs_to_explain();
   if (g.cost_only) {
-    /* Armed purely to measure for --explain-json: no listing, no sidecar. */
     free_all();
     free(g.q_fn);
     g.q_fn = NULL;
     return;
   }
   if (g.q_hot || g.q_lo || g.q_fn) {
-    /* Focused, tool-facing output: no giant listing or sidecar. */
     if (g.q_hot) write_hot_query();
     if (g.q_lo || g.q_fn) write_line_query();
   } else {

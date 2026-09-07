@@ -1,30 +1,17 @@
 #include "ir_optimize_internal.h"
 #include "../ir_optimize.h"
 
-/* Fold reads of never-written global integer vars to their initializer
- * constant. main.c supplies the candidates (globals with literal integer
- * initializers, from the AST); this pass proves each one is never stored to
- * and never has its address taken anywhere in the program, then rewrites
- * every read operand to the constant. Turns `idx * NODE_BYTES` into a
- * strength-reducible constant multiply and removes the per-call global-cache
- * reload the MIR backend would otherwise emit.
- *
- * All candidates are checked and folded together in a fixed number of
- * whole-program sweeps: the per-candidate program scan was
- * O(candidates x instructions) and dominated the phase on real applications
- * with hundreds of constant globals. */
-
 typedef struct {
   const char *name;
   long long value;
   int disqualified;
-  size_t shadow_gen; /* == current function generation when shadowed there */
+  size_t shadow_gen;
 } IRRgCandidate;
 
 typedef struct {
   IRRgCandidate *items;
   size_t count;
-  size_t *buckets; /* slot+1; 0 = empty */
+  size_t *buckets;
   size_t bucket_count;
 } IRRgTable;
 
@@ -43,10 +30,6 @@ static IRRgCandidate *ir_rg_table_find(IRRgTable *table, const char *name) {
   return NULL;
 }
 
-/* Mark every candidate shadowed in `fn` (declared as a local or bound as a
- * parameter there) with the function's generation `gen`. A shadowing name
- * hides the global throughout the function: its writes don't disqualify and
- * its reads are never folded. */
 static void ir_rg_mark_shadows(IRRgTable *table, const IRFunction *fn,
                                size_t gen) {
   for (size_t p = 0; p < fn->parameter_count; p++) {
@@ -113,16 +96,14 @@ int ir_fold_readonly_globals_pass(IRProgram *program,
     IRRgCandidate *cand = &table.items[table.count];
     cand->name = consts[c].name;
     cand->value = consts[c].value;
-    cand->shadow_gen = 0; /* generations start at 1 */
+    cand->shadow_gen = 0;
     size_t b = mettle_fnv1a_hash(cand->name) & (nb - 1);
     while (table.buckets[b]) {
       b = (b + 1) & (nb - 1);
     }
-    table.buckets[b] = ++table.count; /* slot index + 1 */
+    table.buckets[b] = ++table.count;
   }
 
-  /* Disqualify: any address-of or write of a candidate (outside functions
-   * that shadow it) anywhere in the program. */
   size_t gen = 0;
   for (size_t f = 0; f < program->function_count; f++) {
     const IRFunction *fn = program->functions[f];
@@ -147,9 +128,6 @@ int ir_fold_readonly_globals_pass(IRProgram *program,
           cand->disqualified = 1;
         }
       }
-      /* An asm block that binds a candidate reaches it by address and may
-       * store through it; the block is one opaque instruction and no other
-       * instruction records the write. */
       if (ins->op == IR_OP_INLINE_ASM && ins->text) {
         for (size_t c = 0; c < table.count; c++) {
           if (table.items[c].shadow_gen != gen &&
@@ -161,7 +139,6 @@ int ir_fold_readonly_globals_pass(IRProgram *program,
     }
   }
 
-  /* Fold every surviving candidate's reads. */
   for (size_t f = 0; f < program->function_count; f++) {
     IRFunction *fn = program->functions[f];
     if (!fn) {

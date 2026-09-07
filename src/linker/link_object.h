@@ -99,4 +99,4 @@ int link_object_read_file(const char *filename, unsigned char **data_out,
 
 int link_object_range_ok(size_t file_size, uint64_t offset, uint64_t length);
 
-#endif /* METTLE_LINK_OBJECT_H */
+#endif

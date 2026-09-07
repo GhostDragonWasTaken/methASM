@@ -4,12 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The CUDA driver library is loaded by hand rather than linked. A compiler
- * that linked `cuda.lib` would refuse to start on a machine with no NVIDIA
- * driver, and cross-compiling for a GPU the build host does not have is a
- * normal thing to do. Loading it late keeps GPU support a property of the
- * machine running the compile, not of the binary. */
-
 typedef int (*GpuCuInt)(unsigned int);
 typedef int (*GpuCuIntOut)(int *);
 typedef int (*GpuCuDeviceGet)(int *, int);
@@ -17,8 +11,6 @@ typedef int (*GpuCuDeviceGetName)(char *, int, int);
 typedef int (*GpuCuDeviceGetAttribute)(int *, int, int);
 typedef int (*GpuCuDeviceTotalMem)(size_t *, int);
 
-/* CUdevice_attribute values that matter here. These are ABI, fixed since
- * CUDA 2.x, so naming them beats depending on cuda.h being installed. */
 #define GPU_ATTR_MAX_THREADS_PER_BLOCK 1
 #define GPU_ATTR_MAX_SHARED_MEMORY_PER_BLOCK 8
 #define GPU_ATTR_WARP_SIZE 10
@@ -43,11 +35,6 @@ static void *gpu_driver_symbol(void *library, const char *name) {
 }
 
 #else
-/* The Linux compiler links statically and carries no dynamic loader, by
- * design, so it cannot open libcuda however much it would like to. The
- * nvidia-smi path below answers there instead: it settles the `.target` and
- * the ISA ceiling, which are the two things codegen turns on, and leaves the
- * multiprocessor count to `--sms=N`. */
 #endif
 
 static int gpu_driver_attribute(GpuCuDeviceGetAttribute get, int device,
@@ -57,7 +44,6 @@ static int gpu_driver_attribute(GpuCuDeviceGetAttribute get, int device,
   return value;
 }
 
-/* Ask the driver. Returns 1 when at least one device answered. */
 #if defined(GPU_DETECT_CAN_LOAD_DRIVER)
 static int gpu_detect_via_driver(GpuDetectResult *out) {
   void *library = gpu_load_driver();
@@ -145,8 +131,6 @@ static int gpu_detect_via_driver(GpuDetectResult *out) {
 }
 #endif
 
-/* Run `command` and copy its first line into `line`. Returns 1 when the
- * command exited successfully and wrote something. */
 static int gpu_read_command_line(const char *command, char *line,
                                  size_t line_size) {
 #if defined(_WIN32)
@@ -170,7 +154,6 @@ static int gpu_read_command_line(const char *command, char *line,
   return length > 0;
 }
 
-/* Field `index` of a comma-separated line, trimmed, or NULL. */
 static const char *gpu_csv_field(const char *line, int index) {
   const char *cursor = line;
   for (int at = 0; at < index; at++) {
@@ -182,10 +165,6 @@ static const char *gpu_csv_field(const char *line, int index) {
   return cursor;
 }
 
-/* The driver library is out of reach: nvidia-smi reports the capability, the
- * name and the memory, which settles the `.target`. It has no field for the
- * multiprocessor count, so occupancy's whole-card threshold needs `--sms=N`
- * on this path. */
 static int gpu_detect_via_nvidia_smi(GpuDetectResult *out) {
   char line[512];
   if (!gpu_read_command_line(
@@ -216,8 +195,6 @@ static int gpu_detect_via_nvidia_smi(GpuDetectResult *out) {
     slot->total_memory = mebibytes * 1024 * 1024;
   }
 
-  /* `nvidia-smi -q` names the newest CUDA this driver supports, which is what
-   * caps the PTX ISA. Without it the ISA stays at the compiler's default. */
   char report[512];
   if (gpu_read_command_line(
 #if defined(_WIN32)
@@ -286,8 +263,6 @@ const char *gpu_detect_ptxas_version(void) {
   return version[0] ? version : NULL;
 }
 
-/* `ptxas --help` enumerates every `--gpu-name` it accepts, so the installed
- * assembler's capability list is a question it can answer about itself. */
 const char *gpu_detect_ptxas_targets(void) {
   static char targets[4096];
   static int done = 0;
@@ -309,8 +284,6 @@ const char *gpu_detect_ptxas_targets(void) {
       if (*end == 'a' || *end == 'f') end++;
       size_t length = (size_t)(end - cursor);
       if (length > 4 && used + length + 2 < sizeof(targets)) {
-        /* One NUL-separated copy of each name; the list is short enough that
-         * a linear duplicate scan costs less than a set would. */
         int seen = 0;
         for (size_t at = 0; at < used; at += strlen(targets + at) + 1) {
           if (strlen(targets + at) == length &&
@@ -347,13 +320,9 @@ int gpu_detect_ptxas_supports(const char *target) {
   return 0;
 }
 
-/* CUDA release -> newest PTX ISA that release's driver accepts. Every entry is
- * a published pair from the PTX ISA release notes; a driver newer than the
- * last row keeps the last row's answer, which only ever understates what it
- * can load. */
 int gpu_detect_ptx_isa(int *major, int *minor) {
   static const struct {
-    int cuda;    /* 12090 == CUDA 12.9 */
+    int cuda;
     int isa[2];
   } releases[] = {
       {11000, {7, 0}}, {11010, {7, 1}}, {11020, {7, 2}}, {11030, {7, 3}},
@@ -384,11 +353,6 @@ int gpu_detect_ptx_target(int device, char *out, size_t out_size) {
   const GpuDetectDevice *found = &local->devices[device];
   if (found->compute_major <= 0) return 0;
 
-  /* Compute capability 9.0 onward publishes architecture-specific targets --
-   * sm_90a, sm_120a -- whose extra instructions (block-scaled MMA and the
-   * rest) are exactly what an inference kernel wants. Take the `a` form when
-   * the installed assembler confirms it exists, so a toolkit that predates
-   * the card still gets PTX it can read. */
   char candidate[32];
   if (found->compute_major >= 9) {
     snprintf(candidate, sizeof(candidate), "sm_%d%da", found->compute_major,

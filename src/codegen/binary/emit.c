@@ -5,8 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Valid after `push rsi; push rdi`: recover the original string-copy
- * register value when the source address was already in RSI or RDI. */
 static int binary_emit_mov_reg_from_saved_string_source(
     BinaryCodeBuffer *code, BinaryGpRegister destination,
     BinaryGpRegister source) {
@@ -18,15 +16,6 @@ static int binary_emit_mov_reg_from_saved_string_source(
   }
   return binary_emit_mov_reg_reg(code, destination, source);
 }
-
-/* Allocate through the runtime's own allocator.
- *
- * This used to inline HeapAlloc against the Win32 process heap while every
- * other path -- the MIR backend, SysV, and every allocation the standard
- * library makes -- went through the runtime's allocator. A buffer taken from
- * one and released to the other is a crash, and which one a program got
- * depended on whether its function happened to be eligible for the register
- * allocator. There is one allocator, and both backends now call it. */
 
 #define BINARY_HEAP_ZERO_MEMORY 8u
 
@@ -174,10 +163,6 @@ int code_generator_binary_emit_string_literal_value_address(
     goto cleanup;
   }
 
-  /* Each literal gets its own `.rdata$label` section on COFF so the ones only
-   * collected functions named are collected with them; the chars and the
-   * struct share the section, bound by a local relocation. The section-count
-   * guard keeps enormous programs under the COFF uint16 section limit. */
   {
     const char *rdata_name = ".rdata";
     char granular_name[128];
@@ -199,9 +184,6 @@ int code_generator_binary_emit_string_literal_value_address(
     goto cleanup;
   }
 
-  /* The caller's byte count, not strlen: `\\0` is a legal escape, so the
-   * literal's bytes can run past an interior NUL and the record's length field
-   * has to span all of them. */
   length = value_length;
   string_length = (uint64_t)length;
   if (!binary_emitter_append_bytes(emitter, rdata_section, value, length,
@@ -428,8 +410,6 @@ int code_generator_binary_emit_store_to_address(
     return binary_emit_mov_mem_reg(&context->code, address_register, 0,
                                    source_register);
   default: {
-    /* Multi-byte aggregate (e.g. struct memcpy): rep movsb, RSI=src, RDI=dst,
-     * RCX=count. Save non-volatile RSI/RDI on Win64. */
     uint64_t n = (uint64_t)size;
     if (n != (uint64_t)size || n == 0) {
       code_generator_set_error(
@@ -455,10 +435,6 @@ int code_generator_binary_emit_store_to_address(
   }
 }
 
-/* Emit `rep movsb` of `size` bytes from [src_addr_reg] to [dst_addr_reg].
- * Preserves RSI/RDI because the register promoter may keep live values there,
- * and RCX because the allocator hands it out like any other register while
- * the string count has to sit in it. */
 int code_generator_binary_emit_rep_movsb(
     CodeGenerator *generator, BinaryFunctionContext *context,
     BinaryGpRegister src_addr_reg, BinaryGpRegister dst_addr_reg, size_t size) {
@@ -473,9 +449,7 @@ int code_generator_binary_emit_rep_movsb(
           &context->code, BINARY_GP_RDI, dst_addr_reg) ||
       !binary_emit_mov_reg_imm64(&context->code, BINARY_GP_RCX,
                                  (uint64_t)size) ||
-      /* cld (DF=0), ensure forward direction. One byte 0xFC. */
       !binary_code_buffer_append_u8(&context->code, 0xFC) ||
-      /* rep movsb: 0xF3 0xA4. */
       !binary_code_buffer_append_u8(&context->code, 0xF3) ||
       !binary_code_buffer_append_u8(&context->code, 0xA4) ||
       !binary_emit_pop_reg(&context->code, BINARY_GP_RDI) ||
@@ -485,8 +459,6 @@ int code_generator_binary_emit_rep_movsb(
   return 1;
 }
 
-/* rep movsq: RCX = qword count, RSI/RDI = src/dst. Requires 8-byte alignment
- * for correctness on strict platforms; benchmark buffers are int32-aligned. */
 int code_generator_binary_emit_rep_movsq(
     CodeGenerator *generator, BinaryFunctionContext *context,
     BinaryGpRegister src_addr_reg, BinaryGpRegister dst_addr_reg,
@@ -671,11 +643,6 @@ int code_generator_binary_operand_is_known_float64(
   return 0;
 }
 
-/* IEEE-754 width of a value operand: 32, 64, or 0 (not floating). Resolution
- * order: the operand's own IR-carried float_bits (authoritative, set by
- * ir_lowering), then a width recorded for the named symbol/temp, then the
- * declared symbol type. This is the single place backends ask "what float
- * precision is this value" so single vs double is never re-guessed ad hoc. */
 int code_generator_binary_operand_float_bits(
     CodeGenerator *generator, BinaryFunctionContext *context,
     const IROperand *operand) {
@@ -742,12 +709,6 @@ int code_generator_binary_instruction_result_is_float64(
            (strcmp(op, "+") == 0 || strcmp(op, "-") == 0);
 
   case IR_OP_CALL:
-    /* Any floating return (float32 or float64) lands in XMM0 and must mark the
-     * dest temp as float so downstream loads bit-copy via movd/movq instead of
-     * treating the slot as an integer. resolved_type_float_bits returns 32 for
-     * float32, which result_float_bits then narrows correctly. Using the
-     * float64-only predicate here dropped float32 returns to the integer path
-     * and lost the value. */
     symbol = generator && generator->ir_program && instruction->text
                  ? code_generator_lookup_symbol(generator,
                                        instruction->text)
@@ -764,20 +725,10 @@ int code_generator_binary_instruction_result_is_float64(
                              : instruction->value_type) != 0;
 
   case IR_OP_CAST:
-    /* Any floating target marks the dest temp, float32 as well as float64.
-     * The float64-only predicate left a cast to float32 unmarked, so
-     * mir_lower saw dest float bits of 0 and lowered `(float)i` down the
-     * integer path: the raw bit pattern landed in the slot and read back as
-     * a denormal. Same fault the float32 return value hit above. */
     return code_generator_binary_named_type_float_bits(generator,
                                                        instruction->text) != 0;
 
   case IR_OP_LOAD:
-    /* A value dereferenced from a float* / struct member is floating in the
-     * machine sense even though no symbol carries that type. ir_lowering sets
-     * is_float on float32/float64 loads; honor it so the destination temp is
-     * marked and reaches xmm via movd/movq (bit copy) rather than cvtsi2s*
-     * (integer->float conversion of the raw bit pattern). */
     return instruction->is_float;
 
   default:
@@ -785,9 +736,6 @@ int code_generator_binary_instruction_result_is_float64(
   }
 }
 
-/* Float width (0/32/64) of an instruction's destination value. Generalizes
- * code_generator_binary_instruction_result_is_float64 so the symbol-marking
- * pass can record single vs double precision per temp/symbol. */
 int code_generator_binary_instruction_result_float_bits(
     CodeGenerator *generator, BinaryFunctionContext *context,
     const IRInstruction *instruction) {
@@ -887,12 +835,6 @@ int code_generator_binary_emit_string_symbol_load(
   return 0;
 }
 
-/* The staging slot an inline kernel's operand was placed in, or NULL when no
- * kernel is running or this operand is not one of its staged ones (an immediate
- * or a string literal, which the kernel materializes for itself). The list is
- * at most BINARY_MAX_MARSHALED_OPERANDS long and empty outside a kernel, so
- * this is a handful of pointer compares on the kernel path and one count test
- * everywhere else. */
 static const BinaryMarshaledOperand *binary_marshaled_slot(
     const BinaryFunctionContext *context, const IROperand *operand) {
   if (!context || !operand || context->marshaled_operand_count == 0) {
@@ -913,11 +855,6 @@ int code_generator_binary_emit_operand_load(
     return 0;
   }
 
-  /* Inside an inline kernel this operand's value lives in a staging slot rather
-   * than the named stack home the cases below would look up (which does not
-   * exist in a register-allocated frame). Read the slot as a full 8 bytes: the
-   * MIR side wrote the whole value there, and every kernel operand is a
-   * pointer, a count, or an accumulator the kernel narrows itself. */
   {
     const BinaryMarshaledOperand *slot =
         binary_marshaled_slot(context, operand);
@@ -938,9 +875,6 @@ int code_generator_binary_emit_operand_load(
 
   case IR_OPERAND_FLOAT: {
     if (operand->float_bits == 32) {
-      /* Materialize the true 32-bit IEEE-754 single pattern (zero-extended).
-       * Encoding it as the low half of a double would store 0 for most
-       * values. */
       union {
         float value;
         uint32_t bits;
@@ -1087,12 +1021,6 @@ int code_generator_binary_emit_operand_load(
           operand->name ? operand->name : "<unnamed>", context->function_name);
       return 0;
     }
-    /* A local's symbol is usually out of scope in the symbol table by codegen
-     * time (the scope was popped), so symbol_table_lookup returns NULL and the
-     * stack load would default to a signed 8-byte read, sign-extending a
-     * narrow unsigned local (e.g. uint32) and corrupting its value. Resolve the
-     * type from the IR (parameter signature / DECLARE_LOCAL) so the load uses
-     * the correct width and signedness. */
     return code_generator_binary_emit_symbol_stack_load(
         generator, context, load_type, offset, target_register);
   }
@@ -1111,9 +1039,6 @@ int code_generator_binary_emit_memcpy_inline(
     CodeGenerator *generator, BinaryFunctionContext *context,
     const IRInstruction *instruction) {
   long long byte_count = 0;
-  /* The rep-movs helpers save RSI/RDI before moving these volatile operand
-   * registers into them. Loading the operands into RSI/RDI here would clobber
-   * live promoted values before the helpers had a chance to preserve them. */
   BinaryGpRegister dst_reg = BINARY_GP_R10;
   BinaryGpRegister src_reg = BINARY_GP_R11;
 
@@ -1224,11 +1149,6 @@ int code_generator_binary_emit_destination_store(
     return 0;
   }
 
-  /* Inside an inline kernel: write the result back to the staging slot. The MIR
-   * side reads the slot after the kernel returns and moves it into whatever
-   * register or spill home holds that value for the rest of the function. A
-   * kernel with several outputs (simd_minmax_i32 writes both its dest and its
-   * arguments[0]) needs nothing special -- each store finds its own slot. */
   {
     const BinaryMarshaledOperand *slot =
         binary_marshaled_slot(context, destination);
@@ -1260,12 +1180,6 @@ int code_generator_binary_emit_destination_store(
   case IR_OPERAND_SYMBOL: {
     const CgSym *symbol = code_generator_binary_value_symbol(
         generator, context, destination->name);
-    /* The symbol table has popped function scope by codegen time, so the
-     * lookup returns NULL for locals/params; fall back to the IR-derived type
-     * (function signature + DECLARE_LOCAL). Without it a narrow local's store
-     * defaults to 8 bytes, losing the type's truncation semantics (and
-     * over-writing a 4-byte stack slot). A local that shares its name with a
-     * global takes the same fallback -- the global is a different object. */
     const MtlcType *dest_type = symbol && symbol->type
                           ? symbol->type
                           : code_generator_binary_get_operand_type_in_context(
@@ -1314,7 +1228,6 @@ int code_generator_binary_emit_destination_store(
     if (code_generator_binary_symbol_assigned_register(
             generator, context, destination->name, &assigned_register)) {
       if (assigned_register == source_register) {
-        /* Same register: still canonicalize a narrow value in place. */
         return binary_canonicalize_narrow_reg_for_type(context, dest_type,
                                                        assigned_register);
       }
@@ -1709,14 +1622,6 @@ int code_generator_binary_load_needs_sign_extend(
   return 1;
 }
 
-/* destination = (float)(uint64)source. x86-64 has no unsigned integer-to-float
- * instruction below AVX-512, so a source with bit 63 set has to be halved,
- * converted, and doubled. Halving with the low bit ORed back in (round to odd)
- * keeps the one rounding the conversion is allowed, which the plainer
- * "subtract 2^63, convert, add it back" can round twice.
- *
- * `work` and `odd` are scratch registers the caller owns; `source` is left
- * alone unless it is `work`. */
 int code_generator_binary_emit_unsigned_int_to_float(
     BinaryFunctionContext *context, int float_bits,
     BinaryXmmRegister destination, BinaryGpRegister source,
@@ -1730,7 +1635,6 @@ int code_generator_binary_emit_unsigned_int_to_float(
   if (source != work && !binary_emit_mov_reg_reg(&context->code, work, source)) {
     return 0;
   }
-  /* js: bit 63 set means the value does not fit a signed conversion. */
   if (!binary_emit_test_reg_reg(&context->code, work) ||
       !binary_emit_jcc_placeholder(&context->code, 0x88, &to_negative)) {
     return 0;
@@ -1747,7 +1651,6 @@ int code_generator_binary_emit_unsigned_int_to_float(
                                            context->code.size)) {
     return 0;
   }
-  /* odd = work & 1; work = (work >> 1) | odd; convert; double. */
   if (!binary_emit_mov_reg_reg(&context->code, odd, work) ||
       !binary_emit_alu_reg_imm32(&context->code, 4, odd, 1u) ||
       !binary_emit_shift_reg_imm8(&context->code, 5, work, 1) ||
@@ -1768,17 +1671,10 @@ int code_generator_binary_emit_unsigned_int_to_float(
                                              context->code.size);
 }
 
-/* destination = (uint64)truncate(source). cvttsd2si is signed: anything at or
- * above 2^63 comes back as the integer-indefinite sentinel. Above that
- * threshold, subtract 2^63 before converting and put the bit back afterwards.
- *
- * `work` and `scratch` are scratch registers the caller owns; `source` is left
- * alone. `destination` may be `work`. */
 int code_generator_binary_emit_float_to_unsigned_int(
     BinaryFunctionContext *context, int float_bits,
     BinaryGpRegister destination, BinaryXmmRegister source,
     BinaryGpRegister work, BinaryXmmRegister scratch) {
-  /* 2^63 and -2^63 as float32 / float64 bit patterns. */
   uint64_t bias = (float_bits == 32) ? 0x5F000000ull : 0x43E0000000000000ull;
   uint64_t minus_bias = (float_bits == 32) ? 0xDF000000ull
                                            : 0xC3E0000000000000ull;
@@ -1800,8 +1696,6 @@ int code_generator_binary_emit_float_to_unsigned_int(
              !binary_emit_ucomisd_xmm_xmm(&context->code, source, scratch)) {
     return 0;
   }
-  /* jb takes the signed path; an unordered compare sets CF too, so NaN lands
-   * there and keeps the sentinel a signed conversion would have produced. */
   if (!binary_emit_jcc_placeholder(&context->code, 0x82, &to_small)) {
     return 0;
   }
@@ -1820,7 +1714,6 @@ int code_generator_binary_emit_float_to_unsigned_int(
                                             scratch)) {
     return 0;
   }
-  /* The difference is below 2^63, so its top bit is clear and xor sets it. */
   if (!binary_emit_mov_reg_imm64(&context->code, work, 0x8000000000000000ull) ||
       !binary_emit_alu_reg_reg(&context->code, 0x31, destination, work) ||
       !binary_emit_jmp_placeholder(&context->code, &to_done) ||
@@ -1840,10 +1733,6 @@ int code_generator_binary_emit_float_to_unsigned_int(
                                              context->code.size);
 }
 
-/* The function-pointer type of an indirect call's callee: a local declared
- * with a function-pointer descriptor first (the C frontend routes every
- * indirect call through one, so the signature is per call site), then a
- * program-scope symbol. NULL when neither carries a signature. */
 MtlcType *code_generator_binary_indirect_callee_type(
     CodeGenerator *generator, BinaryFunctionContext *context,
     const IRInstruction *instruction) {
@@ -1901,21 +1790,10 @@ static int binary_canonicalize_narrow_reg_for_type(
   return 1;
 }
 
-/* Windows reserves the stack lazily behind a single guard page: touching the
- * guard page commits it and moves the guard down by one page. A prologue that
- * lowers rsp by more than a page in one `sub` can step *over* the guard page
- * without ever touching it, so the first write into the new frame faults --
- * exactly the crash seen on functions with very large frames (e.g. main() with
- * hundreds of call sites). Microsoft's ABI requires a stack probe for frames
- * larger than a page: touch each page as rsp descends so the guard moves down
- * one page at a time. We do an unrolled probe (no helper call): for each 4 KiB
- * step, `sub rsp, 4096` then write to [rsp], then handle the remainder. RAX is
- * scratch here (prologue runs before any value is live in it). */
 static int binary_emit_stack_probe_touch(BinaryCodeBuffer *code) {
   if (!code) {
     return 0;
   }
-  /* test byte ptr [rsp], 0 */
   return binary_code_buffer_append_u8(code, 0xF6) &&
          binary_code_buffer_append_u8(code, 0x04) &&
          binary_code_buffer_append_u8(code, 0x24) &&
@@ -1936,13 +1814,11 @@ int binary_emit_frame_allocation(BinaryCodeBuffer *code, int frame_size) {
     if (!binary_emit_sub_rsp_imm32(code, (uint32_t)BINARY_STACK_PAGE_SIZE)) {
       return 0;
     }
-    /* Touch the freshly-stepped page so the guard page is hit in order. */
     if (!binary_emit_stack_probe_touch(code)) {
       return 0;
     }
     remaining -= BINARY_STACK_PAGE_SIZE;
   }
-  /* Final (sub-page) remainder; touch it too to commit the last page. */
   if (!binary_emit_sub_rsp_imm32(code, (uint32_t)remaining)) {
     return 0;
   }

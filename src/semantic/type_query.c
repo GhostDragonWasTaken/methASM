@@ -1,30 +1,6 @@
-/* Reflection queries: the member-access surface on `Type` and `Field`.
- *
- * `typeof(T)` already yielded a TypeRef; this is what you can ask one. Every
- * query folds during const eval to an ordinary compile-time value -- an int, a
- * string, another TypeRef, or a sequence -- so nothing here has a runtime
- * representation and nothing reaches the backend un-folded.
- *
- * Three decisions are baked in here and are worth stating where they live:
- *
- *  - `.name` is module-qualified ("std/net.Point"). A bare name cannot tell two
- *    modules' `Point` apart, and since compile-time strings compare but do not
- *    concatenate, the module could never be recovered from a bare name.
- *    Builtins and structural types (pointers, arrays) answer their own
- *    unambiguous spelling.
- *
- *  - `.fields` is a real sequence value, not a special form. It is backed by an
- *    arena owned by the TypeChecker and memoized per (type, query), so the
- *    value stays trivially copyable, repeated evaluation of the same query
- *    borrows one allocation, and a constructed sequence stays possible later.
- *
- *  - `.kind` answers with `Kind`, an enum the compiler registers itself. Its
- *    variants are reachable only qualified, so reflection costs no import, no
- *    --prelude, and none of the bare global names a plain enum would claim. */
 #include "type_checker_internal.h"
 #include "import_resolver.h"
 
-/* One memoized run of values, keyed by what produced it. */
 typedef struct {
   uint32_t type_index;
   int query;
@@ -80,9 +56,6 @@ static int sequence_reserve(ComptimeSequenceArena *arena, size_t extra) {
   return 1;
 }
 
-/* Values are addressed by offset, not pointer: the arena reallocs as it grows,
- * so a pointer handed out early would dangle. The ComptimeValue a caller sees
- * is built from the offset at the moment it is asked for. */
 static int sequence_intern(TypeChecker *checker, uint32_t type_index, int query,
                            const ComptimeValue *items, uint32_t count,
                            ComptimeValue *out_value) {
@@ -128,11 +101,6 @@ static int sequence_intern(TypeChecker *checker, uint32_t type_index, int query,
   return 1;
 }
 
-/* The curated `Kind` set. Deliberately not a mirror of TypeKind: TYPE_TYPE and
- * TYPE_FIELD are compile-time only, so no value a program can reflect on ever
- * has one, and exposing them would pin user surface to a compiler-internal
- * enum. Widths stay distinct because telling int32 from int64 is exactly what a
- * wire-format generator needs. */
 typedef struct {
   const char *name;
   TypeKind kind;
@@ -166,9 +134,6 @@ static const KindMember g_kind_members[] = {
 static const size_t g_kind_member_count =
     sizeof(g_kind_members) / sizeof(g_kind_members[0]);
 
-/* Discriminants are the member's position here, not the internal TypeKind
- * value, so reordering TypeKind cannot silently renumber user-visible
- * constants. */
 static long long kind_value_for(TypeKind kind) {
   for (size_t i = 0; i < g_kind_member_count; i++) {
     if (g_kind_members[i].kind == kind) {
@@ -198,9 +163,6 @@ void type_checker_register_kind_enum(TypeChecker *checker) {
   type_checker_intern_type(checker, kind);
   checker->builtin_kind = kind;
 
-  /* Only the enum name enters the namespace. A user enum also inserts each
-   * variant as a bare global; doing that here would claim `Struct`, `Array`,
-   * `Bool` and friends out of every program. */
   Symbol *symbol = symbol_create("Kind", SYMBOL_ENUM, kind);
   if (symbol) {
     symbol->is_initialized = 1;
@@ -208,10 +170,6 @@ void type_checker_register_kind_enum(TypeChecker *checker) {
   }
 }
 
-/* The module-qualified spelling reflection reports. Interned, computed once
- * per type at declaration. A type declared in the root program has no import
- * spelling, so it is qualified by the source file's stem instead -- still
- * unambiguous, and stable as long as the file keeps its name. */
 void type_checker_set_qualified_name(TypeChecker *checker, Type *type,
                                      const char *filename) {
   if (!checker || !type || !type->name || type->qualified_name) {
@@ -254,9 +212,6 @@ void type_checker_set_qualified_name(TypeChecker *checker, Type *type,
   free(buffer);
 }
 
-/* What a type reports as its name. User-declared aggregates answer their
- * qualified spelling; builtins and structural types answer the spelling that
- * already names them uniquely (`int32`, `Point*`, `int32[4]`). */
 static const char *type_reflected_name(const Type *type) {
   if (!type) {
     return NULL;
@@ -400,8 +355,6 @@ int type_checker_eval_field_member(TypeChecker *checker, ComptimeValue field,
     *out_value = comptime_int((long long)resolved.byte_offset);
     return 1;
   }
-  /* A field name is not qualified: it is already unique within its type, and
-   * the owning type's `.name` is where the module belongs. */
   if (strcmp(member, "name") == 0) {
     if (!resolved.name) {
       return 0;
@@ -423,9 +376,6 @@ int type_checker_eval_field_member(TypeChecker *checker, ComptimeValue field,
   return 0;
 }
 
-/* A column of one table row. The row is an aggregate literal and the columns
- * are its struct's fields, so a name resolves the same way a field access
- * would, and the answer is whatever constant the table wrote there. */
 int type_checker_eval_row_member(TypeChecker *checker, ComptimeValue row,
                                  const char *member,
                                  ComptimeValue *out_value) {
@@ -454,8 +404,6 @@ int type_checker_eval_row_member(TypeChecker *checker, ComptimeValue row,
     return type_checker_eval_comptime(checker, literal->elements[i],
                                       out_value);
   }
-  /* A column the row left out keeps the zero the layout gives it, which is
-     what the value would be at run time. */
   for (i = 0; i < row_type->field_count; i++) {
     if (row_type->field_names[i] &&
         strcmp(row_type->field_names[i], member) == 0) {
@@ -476,7 +424,6 @@ int type_checker_eval_row_member(TypeChecker *checker, ComptimeValue row,
   return 0;
 }
 
-/* Does this table row have a column by that name? */
 int type_checker_row_member_exists(TypeChecker *checker, ComptimeValue row,
                                    const char *member) {
   Type *row_type = NULL;
@@ -500,8 +447,6 @@ int type_checker_row_member_exists(TypeChecker *checker, ComptimeValue row,
   return 0;
 }
 
-/* `.len` and `[i]` on a sequence. Sequences answer only these two, which is
- * what makes them observable without being a container the program can hold. */
 int type_checker_eval_sequence_member(TypeChecker *checker,
                                       ComptimeValue sequence,
                                       const char *member,
@@ -517,14 +462,6 @@ int type_checker_eval_sequence_member(TypeChecker *checker,
   return 0;
 }
 
-/* Turn a folded query answer into a type, baking scalars into the AST as they
- * go. Baking has to happen here rather than at lowering: a query's operand may
- * be a `comptime for` binding, which leaves scope with its expansion, so by the
- * time the backend runs there is nothing left to re-derive the answer from.
- *
- * The reflection values (Type, Field, Sequence) are not baked -- they have no
- * runtime representation at all, and the escape checks reject any attempt to
- * let one reach runtime code. */
 Type *type_checker_comptime_result(TypeChecker *checker, ComptimeValue value,
                                    ASTNode *expression) {
   if (!checker || !expression) {
@@ -564,9 +501,6 @@ Type *type_checker_comptime_result(TypeChecker *checker, ComptimeValue value,
   }
 }
 
-/* `.kind` is typed as `Kind` rather than a bare integer so it compares against
- * `Kind.Struct` and switches exhaustively, which is the whole reason it is an
- * enum and not a set of constants. */
 Type *type_checker_kind_result(TypeChecker *checker, ComptimeValue value,
                                ASTNode *expression) {
   Type *folded = type_checker_comptime_result(checker, value, expression);

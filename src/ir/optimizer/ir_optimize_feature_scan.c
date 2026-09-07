@@ -49,11 +49,6 @@ void ir_collect_function_features(const IRFunction *function,
     return;
   }
 
-  /* Saturating scan: every bit this can set is set by some instruction, so
-   * once all of them are set the rest of the walk cannot change the answer.
-   * The drivers call this per fixpoint iteration and, in a named stage, after
-   * every pass that changed the IR, so on the multi-thousand-instruction
-   * functions inlining produces the early exit is most of the cost. */
   unsigned seen = 0;
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
@@ -114,10 +109,6 @@ void ir_collect_function_features(const IRFunction *function,
     }
   }
 }
-
-/* -------------------------------------------------------------------------- */
-/* Constant memcpy call specialization                                        */
-/* -------------------------------------------------------------------------- */
 
 const IRInstruction *ir_find_temp_producer_before(const IRFunction *function,
                                                   size_t before_index,

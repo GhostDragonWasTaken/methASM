@@ -1,12 +1,3 @@
-/* mtlc_build.c - implementation of the public IR builder (include/mtlc/build.h).
- *
- * Part of libmtlc. This is the frontend-agnostic path for CONSTRUCTING IR: it
- * turns the opaque builder calls into a backend IRProgram, then populates the
- * module type registry and symbol table the code generators read -- doing, for
- * an arbitrary frontend, exactly what src/frontend/mtlc_lower_module.c does for
- * the reference Mettle frontend, but from the builder's own declared types
- * instead of a frontend AST. It is frontend-free: it includes only the public
- * mtlc/ headers and the backend IR. */
 #include "mtlc/build.h"
 #include "mtlc/module.h"
 
@@ -18,37 +9,31 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* A function declaration recorded for the module symbol table. Bodies (when not
- * extern) are emitted directly into `ir`. */
 typedef struct {
   char *name;
   const MtlcType *return_type;
-  char **param_names;         /* owned copies */
-  const MtlcType **param_types; /* borrowed (immortal singletons) */
+  char **param_names;
+  const MtlcType **param_types;
   size_t param_count;
   int is_extern;
   int has_body;
   int is_kernel;
 } FnDecl;
 
-
 struct MtlcFn {
-  IRFunction *ir;      /* borrowed; owned by the program */
+  IRFunction *ir;
   MtlcBuilder *builder;
   const MtlcType *return_type;
-  char **param_names;  /* borrowed from the FnDecl */
-  const MtlcType **param_types; /* borrowed from the FnDecl */
+  char **param_names;
+  const MtlcType **param_types;
   size_t param_count;
-  IROperand *values;   /* value-handle table; each owns its operand */
+  IROperand *values;
   size_t value_count, value_capacity;
-  /* Labels allocated by mtlc_label_new, so a double placement is caught here
-   * and an unplaced-but-branched-to label is caught at finish. */
   char **labels;
   unsigned char *label_placed;
   size_t label_count, label_capacity;
 };
 
-/* A module-level global variable declaration. */
 typedef struct {
   char *name;
   const MtlcType *type;
@@ -57,16 +42,13 @@ typedef struct {
 } GlobalDecl;
 
 struct MtlcBuilder {
-  IRProgram *program;  /* owned until finish */
-  MtlcFn **fns;        /* body builders (non-extern), owned */
+  IRProgram *program;
+  MtlcFn **fns;
   size_t fn_count, fn_capacity;
-  FnDecl *decls;       /* every declaration, owned */
+  FnDecl *decls;
   size_t decl_count, decl_capacity;
-  GlobalDecl *globals; /* module globals, owned */
+  GlobalDecl *globals;
   size_t global_count, global_capacity;
-  /* every distinct MtlcType* that passed through the builder API, registered
-   * by name into the module type registry at finish so codegen can resolve
-   * any type NAME the IR carries (parameter types, DECLARE_LOCAL/CAST text) */
   const MtlcType **seen_types;
   size_t seen_count, seen_capacity;
   int temp_counter;
@@ -77,9 +59,6 @@ struct MtlcBuilder {
   void *diag_user_data;
 };
 
-/* Latch the first construction error and report it. Errors are sticky: once
- * one lands every later builder call is a no-op, so a frontend can emit a whole
- * function and test once, and the message still names the call that broke. */
 static void builder_fail_impl(MtlcBuilder *b, const char *api,
                               const char *format, ...) {
   char detail[384];
@@ -105,8 +84,6 @@ static void builder_fail_impl(MtlcBuilder *b, const char *api,
 
 #define BUILDER_FAIL(b, ...) builder_fail_impl((b), __func__, __VA_ARGS__)
 
-/* The parseable NAME of a type: its canonical name when set (scalars carry
- * "int64", interned pointers carry "int64*"), else the kind name. */
 static const char *type_name(const MtlcType *t) {
   if (!t) {
     return "int64";
@@ -135,13 +112,10 @@ static void record_type(MtlcBuilder *b, const MtlcType *t) {
     b->seen_capacity = next;
   }
   b->seen_types[b->seen_count++] = t;
-  /* pointer chains: seeing "int64*" implies "int64" should resolve too */
   if (t->base_type) {
     record_type(b, t->base_type);
   }
 }
-
-/* ------------------------------------------------------------------ builder */
 
 MtlcBuilder *mtlc_builder_create(void) {
   MtlcBuilder *b = (MtlcBuilder *)calloc(1, sizeof(MtlcBuilder));
@@ -225,9 +199,6 @@ int mtlc_fn_ok(const MtlcFn *fn) {
   return fn && fn->builder && !fn->builder->error;
 }
 
-/* Inlining policy, the neutral form of the reference frontend's decorators.
- * `@inline` and `@noinline` are opposites, so each clears the other rather
- * than leaving the optimizer to arbitrate between two contradictory flags. */
 int mtlc_fn_set_inline(MtlcFn *fn) {
   if (!mtlc_fn_ok(fn) || !fn->ir) return 0;
   fn->ir->is_inline = 1;
@@ -316,7 +287,6 @@ static MtlcFn *builder_function_impl(MtlcBuilder *builder, const char *name,
     }
   }
 
-  /* record the declaration (used at finish for the module symbol table) */
   if (builder->decl_count == builder->decl_capacity) {
     size_t next = builder->decl_capacity ? builder->decl_capacity * 2 : 8;
     FnDecl *grown = realloc(builder->decls, next * sizeof(FnDecl));
@@ -347,11 +317,9 @@ static MtlcFn *builder_function_impl(MtlcBuilder *builder, const char *name,
   builder->decl_count++;
 
   if (is_extern) {
-    return NULL; /* body-less: nothing to emit into */
+    return NULL;
   }
 
-  /* create the IR function and set its signature by type NAME (resolved against
-   * the type registry at codegen time) */
   IRFunction *irf = ir_function_create(name);
   if (!irf) {
     BUILDER_FAIL(builder, "invalid argument or allocation failure");
@@ -424,9 +392,7 @@ int mtlc_builder_declare_function(MtlcBuilder *builder, const char *name,
   }
   int was_ok = !builder->error;
   builder_function_impl(builder, name, return_type, param_names, param_types,
-                        param_count, /*is_extern=*/1, /*is_kernel=*/0);
-  /* An extern declaration has no body builder, so NULL is its success value
-   * too; the error latch is what actually distinguishes the two. */
+                        param_count, 1, 0);
   return was_ok && !builder->error;
 }
 
@@ -439,9 +405,6 @@ MtlcFn *mtlc_builder_kernel(MtlcBuilder *builder, const char *name,
       param_count, 0, 1);
 }
 
-/* ------------------------------------------------------------------- values */
-
-/* IEEE width (0/32/64) of a type, 0 when not floating. */
 static int float_bits_of(const MtlcType *t) {
   if (!t || !mtlc_type_is_float(t)) {
     return 0;
@@ -449,10 +412,6 @@ static int float_bits_of(const MtlcType *t) {
   return (t->kind == MTLC_TYPE_FLOAT32) ? 32 : 64;
 }
 
-/* Record a float value's width on its handle, so a later use site (CAST in
- * particular) can tell what it is holding. The operand is copied into every
- * instruction that uses the handle, so codegen's operand_float_bits sees the
- * width too. */
 static void value_set_float_bits(MtlcFn *fn, MtlcValue v, int bits) {
   if (bits && v >= 0 && (size_t)v < fn->value_count) {
     fn->values[v].float_bits = bits;
@@ -471,7 +430,7 @@ static MtlcValue push_value(MtlcFn *fn, IROperand op) {
     fn->values = grown;
     fn->value_capacity = next;
   }
-  fn->values[fn->value_count] = op; /* takes ownership of op's name */
+  fn->values[fn->value_count] = op;
   return (MtlcValue)fn->value_count++;
 }
 
@@ -482,10 +441,6 @@ static const IROperand *value_operand(MtlcFn *fn, MtlcValue v) {
   return &fn->values[v];
 }
 
-/* Append a stack-built instruction. Its dest/lhs/rhs/arguments operands are
- * shallow copies that ALIAS handle-table entries (or borrowed literals); the
- * append clones every operand and strdup's the text, so the stack instruction
- * is discarded without a destroy. */
 static void emit(MtlcFn *fn, const IRInstruction *inst) {
   if (fn->builder->error) {
     return;
@@ -516,7 +471,7 @@ MtlcValue mtlc_fn_param(MtlcFn *fn, size_t index) {
 }
 
 MtlcValue mtlc_const_int(MtlcFn *fn, const MtlcType *type, long long value) {
-  (void)type; /* an int literal carries its width at its use site */
+  (void)type;
   if (!fn) {
     return MTLC_NO_VALUE;
   }
@@ -574,8 +529,6 @@ MtlcValue mtlc_const_float(MtlcFn *fn, const MtlcType *type, double value) {
   return push_value(fn, ir_operand_float_sized(value, bits));
 }
 
-/* --------------------------------------------------------------- instructions */
-
 void mtlc_assign(MtlcFn *fn, MtlcValue dest, MtlcValue value) {
   if (!fn) {
     return;
@@ -626,9 +579,6 @@ const char *mtlc_unary_op_name(MtlcUnaryOp op) {
   return NULL;
 }
 
-/* The instruction text must outlive the call, and ir_function_append_instruction
- * copies it -- but only the canonical spellings below are ever accepted, so the
- * pointer handed to the IR is always a string literal either way. */
 static const char *canonical_binary_op(const char *op) {
   static const char *const ops[] = {"+",  "-",  "*",  "/",  "%",  "==", "!=",
                                     "<",  "<=", ">",  ">=", "&&", "||", "&",
@@ -696,7 +646,6 @@ MtlcValue mtlc_binary(MtlcFn *fn, const char *op, MtlcValue lhs, MtlcValue rhs,
     return MTLC_NO_VALUE;
   }
   record_type(fn->builder, result_type);
-  /* copy operands before push_value may realloc the table out from under them */
   IROperand lc = *l, rc = *r;
   MtlcValue res = fresh_temp(fn);
   const IROperand *dest = value_operand(fn, res);
@@ -713,14 +662,11 @@ MtlcValue mtlc_binary(MtlcFn *fn, const char *op, MtlcValue lhs, MtlcValue rhs,
   if (mtlc_type_is_float(result_type)) {
     inst.is_float = 1;
     inst.float_bits = (int)(result_type->size * 8);
-    /* Only arithmetic yields a float VALUE; a float comparison is flagged
-     * is_float (so codegen picks ucomis) but produces an integer 0/1. */
     if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0 ||
         strcmp(op, "*") == 0 || strcmp(op, "/") == 0) {
       value_set_float_bits(fn, res, inst.float_bits);
     }
   } else if (mtlc_type_is_unsigned(result_type)) {
-    /* unsigned result type selects unsigned / % >> and compares */
     inst.is_unsigned = 1;
   }
   emit(fn, &inst);
@@ -791,7 +737,7 @@ MtlcValue mtlc_call(MtlcFn *fn, const char *callee, const MtlcValue *args,
         BUILDER_FAIL(fn->builder, "invalid argument or allocation failure");
         return MTLC_NO_VALUE;
       }
-      argv[i] = *a; /* shallow alias; append clones */
+      argv[i] = *a;
     }
   }
   record_type(fn->builder, return_type);
@@ -818,7 +764,7 @@ MtlcValue mtlc_call(MtlcFn *fn, const char *callee, const MtlcValue *args,
   inst.value_type = (MtlcType *)return_type;
   value_set_float_bits(fn, res, float_bits_of(return_type));
   emit(fn, &inst);
-  free(argv); /* elements were cloned by append; free the container only */
+  free(argv);
   return res;
 }
 
@@ -1187,8 +1133,6 @@ void mtlc_tensor_transfer_workgroup(
   record_type(fn->builder, view_type);
   record_type(fn->builder, coordinate_type);
   IRInstruction instruction = {0};
-  /* Stack block: emit deep-copies it, and heap_owned == 0 means no destroy path
-   * can try to free stack memory. */
   IRTensorAux tensor;
   ir_instruction_tensor_attach(&instruction, &tensor);
   tensor.transfer = *desc;
@@ -1540,9 +1484,6 @@ void mtlc_gpu_launch(MtlcFn *fn, MtlcValue kernel_handle, MtlcDim3 grid,
   free(types);
 }
 
-/* Real address of a function symbol (defined here or a declared extern):
- * IR_OP_ADDRESS_OF on a function name lowers to a RIP-relative lea with a
- * relocation, so the value is callable by the OS and comparable. */
 MtlcValue mtlc_function_address(MtlcFn *fn, const char *name) {
   if (!fn || !name) {
     if (fn) {
@@ -1568,10 +1509,6 @@ MtlcValue mtlc_function_address(MtlcFn *fn, const char *name) {
   return res;
 }
 
-/* Call through a function-pointer VALUE (e.g. one produced by
- * mtlc_function_address or loaded from memory). Arguments follow the same
- * ABI classification as direct calls; without a typed fn-pointer symbol the
- * backend classifies every argument as integer/pointer. */
 MtlcValue mtlc_call_indirect(MtlcFn *fn, MtlcValue callee,
                              const MtlcValue *args, size_t arg_count,
                              const MtlcType *return_type) {
@@ -1601,7 +1538,7 @@ MtlcValue mtlc_call_indirect(MtlcFn *fn, MtlcValue callee,
         BUILDER_FAIL(fn->builder, "invalid argument or allocation failure");
         return MTLC_NO_VALUE;
       }
-      argv[i] = *a; /* shallow alias; append clones */
+      argv[i] = *a;
     }
   }
   record_type(fn->builder, return_type);
@@ -1650,11 +1587,6 @@ MtlcValue mtlc_cast(MtlcFn *fn, MtlcValue value, const MtlcType *type) {
   inst.lhs = vc;
   inst.text = (char *)type_name(type);
   inst.value_type = (MtlcType *)type;
-  /* is_float/float_bits on a CAST describe the SOURCE operand (ir_lowering's
-   * contract; codegen picks cvttss2si vs cvttsd2si from it). The TARGET is
-   * resolved from inst.text. Setting them from the target here made the
-   * emitter read a float32 source as already-64-bit, or, for a float->int
-   * cast, as an integer, handing back the raw IEEE bit pattern. */
   if (vc.float_bits == 32 || vc.float_bits == 64) {
     inst.is_float = 1;
     inst.float_bits = vc.float_bits;
@@ -1693,10 +1625,6 @@ MtlcValue mtlc_address_of(MtlcFn *fn, MtlcValue storage,
   return res;
 }
 
-/* Apply the load/store scalar flags the code generators key on: the element's
- * byte size travels in `rhs`, floats set is_float+float_bits, and unsigned
- * integer elements set is_unsigned (so a 32-bit load zero-extends). Mirrors
- * ir_lowering's shape exactly. */
 static void apply_mem_flags(IRInstruction *inst, const MtlcType *elem) {
   inst->rhs = ir_operand_int((long long)mtlc_type_size(elem));
   if (mtlc_type_is_float(elem)) {
@@ -1762,9 +1690,6 @@ void mtlc_store(MtlcFn *fn, MtlcValue address, MtlcValue value,
   emit(fn, &inst);
 }
 
-/* -------------------------------------------------------------------- indexing */
-
-/* The pointee of a pointer descriptor, or NULL when `t` is not a pointer. */
 static const MtlcType *pointer_element(const MtlcType *t) {
   if (!t || t->kind != MTLC_TYPE_POINTER || !t->base_type) {
     return NULL;
@@ -1772,8 +1697,6 @@ static const MtlcType *pointer_element(const MtlcType *t) {
   return t->base_type;
 }
 
-/* base + byte_offset, typed as the pointer itself so codegen keeps the address
- * space. A zero offset is folded here rather than left for the optimizer. */
 static MtlcValue offset_pointer(MtlcFn *fn, MtlcValue base,
                                 const MtlcType *pointer_type,
                                 MtlcValue byte_offset) {
@@ -1797,14 +1720,10 @@ MtlcValue mtlc_element_address(MtlcFn *fn, MtlcValue base,
                  type_name(element));
     return MTLC_NO_VALUE;
   }
-  /* Checked here rather than left to the arithmetic below, which a stride of
-   * one would skip entirely. */
   if (index == MTLC_NO_VALUE) {
     BUILDER_FAIL(fn->builder, "the index is not a value");
     return MTLC_NO_VALUE;
   }
-  /* IR pointer arithmetic is in bytes; scaling the element index is exactly
-   * the step a frontend should not have to open-code. */
   const MtlcType *i64 = mtlc_type_scalar(MTLC_TYPE_INT64);
   MtlcValue byte_offset =
       (stride == 1) ? index
@@ -1833,7 +1752,6 @@ void mtlc_store_element(MtlcFn *fn, MtlcValue base,
   mtlc_store(fn, address, value, pointer_element(pointer_type));
 }
 
-/* Resolve a pointer-to-struct plus a field index into (field type, offset). */
 static const MtlcType *field_of(MtlcFn *fn, const MtlcType *struct_pointer_type,
                                 size_t field_index, size_t *out_offset) {
   const MtlcType *record = pointer_element(struct_pointer_type);
@@ -1864,8 +1782,6 @@ MtlcValue mtlc_field_address(MtlcFn *fn, MtlcValue base,
   if (!field) {
     return MTLC_NO_VALUE;
   }
-  /* The result points at the field's own type, in the struct pointer's space,
-   * so the caller can load or store through it directly. */
   const MtlcType *field_pointer =
       mtlc_type_pointer_in(field, struct_pointer_type->address_space);
   if (!field_pointer) {
@@ -1875,7 +1791,6 @@ MtlcValue mtlc_field_address(MtlcFn *fn, MtlcValue base,
   }
   record_type(fn->builder, field_pointer);
   if (offset == 0) {
-    /* Field 0 is at the base address; a cast retypes it without arithmetic. */
     return mtlc_cast(fn, base, field_pointer);
   }
   const MtlcType *i64 = mtlc_type_scalar(MTLC_TYPE_INT64);
@@ -1923,10 +1838,6 @@ void mtlc_store_field(MtlcFn *fn, MtlcValue base,
   mtlc_store(fn, address, value, field);
 }
 
-/* --------------------------------------------------------------- control flow */
-
-/* Allocated labels are named ".L<n>[_hint]". The counter lives on the builder,
- * so the name is unique across the whole module, not just this function. */
 MtlcLabel mtlc_label_new(MtlcFn *fn, const char *hint) {
   if (!fn) {
     return MTLC_NO_LABEL;
@@ -1965,7 +1876,6 @@ MtlcLabel mtlc_label_new(MtlcFn *fn, const char *hint) {
   return (MtlcLabel)fn->label_count++;
 }
 
-/* The name behind a handle, or NULL after reporting an invalid handle. */
 static const char *label_name(MtlcFn *fn, MtlcLabel label, const char *api) {
   if (label < 0 || (size_t)label >= fn->label_count) {
     builder_fail_impl(fn->builder, api,
@@ -2066,11 +1976,6 @@ void mtlc_return(MtlcFn *fn, MtlcValue value) {
   emit(fn, &inst);
 }
 
-/* -------------------------------------------------------------------- finish */
-
-/* Register the canonical scalar type names so codegen can resolve every
- * parameter/return/local type by name (the frontend uses only scalars through
- * mtlc_type_scalar; composite types would be registered by their builder). */
 static void register_scalar_types(IRProgram *program) {
   static const MtlcTypeKind kinds[] = {
       MTLC_TYPE_INT8,    MTLC_TYPE_INT16,   MTLC_TYPE_INT32,  MTLC_TYPE_INT64,
@@ -2086,11 +1991,6 @@ static void register_scalar_types(IRProgram *program) {
   }
 }
 
-/* Every branch must have somewhere to land. A jump to a label that was never
- * defined is the classic IR-builder slip -- a typo in a label string, or a
- * label allocated and then forgotten -- and it produces a module that fails
- * far away in codegen, or silently falls through. Catching it here names the
- * function and the label. */
 static int compare_label_names(const void *a, const void *b) {
   return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
@@ -2110,8 +2010,6 @@ static int verify_branch_targets(MtlcBuilder *builder) {
       const char **grown = (const char **)realloc(
           defined, irf->instruction_count * sizeof(*defined));
       if (!grown) {
-        /* Verification is a courtesy; running out of memory here must not
-         * condemn an otherwise valid module. */
         free(defined);
         return 1;
       }
@@ -2119,8 +2017,6 @@ static int verify_branch_targets(MtlcBuilder *builder) {
       defined_capacity = irf->instruction_count;
     }
 
-    /* Collect the defined labels once, then answer each branch by binary
-     * search: a big generated function should not cost a quadratic scan. */
     size_t defined_count = 0;
     for (size_t i = 0; i < irf->instruction_count; i++) {
       const IRInstruction *insn = &irf->instructions[i];
@@ -2167,15 +2063,11 @@ MtlcModule *mtlc_builder_finish(MtlcBuilder *builder) {
   }
 
   register_scalar_types(builder->program);
-  /* every distinct type the builder saw, resolvable by its NAME (pointer
-   * types like "int64*" included -- codegen resolves DECLARE_LOCAL/parameter
-   * type names against this registry) */
   for (size_t i = 0; i < builder->seen_count; i++) {
     ir_program_register_type(builder->program, type_name(builder->seen_types[i]),
                              (MtlcType *)builder->seen_types[i]);
   }
 
-  /* module symbol table: global variables */
   for (size_t i = 0; i < builder->global_count; i++) {
     GlobalDecl *g = &builder->globals[i];
     IRModuleSymbol entry;
@@ -2192,7 +2084,6 @@ MtlcModule *mtlc_builder_finish(MtlcBuilder *builder) {
     ir_program_add_symbol(builder->program, &entry);
   }
 
-  /* module symbol table: one entry per declared function */
   for (size_t i = 0; i < builder->decl_count; i++) {
     FnDecl *d = &builder->decls[i];
     IRModuleSymbol entry;
@@ -2209,20 +2100,19 @@ MtlcModule *mtlc_builder_finish(MtlcBuilder *builder) {
       for (size_t p = 0; p < d->param_count; p++) {
         params[p] = (MtlcType *)d->param_types[p];
       }
-      entry.param_types = params; /* add_symbol copies the array */
+      entry.param_types = params;
       ir_program_add_symbol(builder->program, &entry);
       free(params);
     } else {
       ir_program_add_symbol(builder->program, &entry);
     }
-    /* main(argc, argv) is signalled by a two-parameter main */
     if (strcmp(d->name, "main") == 0 && !d->is_extern) {
       builder->program->main_wants_argc_argv = (d->param_count == 2) ? 1 : 0;
     }
   }
 
   IRProgram *program = builder->program;
-  builder->program = NULL; /* ownership transfers to the module */
+  builder->program = NULL;
 
   MtlcModule *module = mtlc_module_adopt_ir(program);
   if (!module) {

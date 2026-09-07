@@ -3,10 +3,6 @@
 #include "linker/unresolved_hint.h"
 #include "../common.h"
 
-/* Section merge and symbol resolution for COFF produced by the object backend;
- * pair with relocation.c and see docs/linker-build-pipelines.md for pipeline
- * triage (internal link vs external gcc). */
-
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -28,7 +24,6 @@
 #define IMAGE_SCN_ALIGN_2048BYTES 0x00C00000u
 #define IMAGE_SCN_ALIGN_4096BYTES 0x00D00000u
 #define IMAGE_SCN_ALIGN_8192BYTES 0x00E00000u
-
 
 static size_t link_section_index_from_kind(LinkSectionKind kind) {
   switch (kind) {
@@ -326,14 +321,6 @@ static int link_resolution_load_objects(LinkResolution *resolution,
   return 1;
 }
 
-/* Section garbage collection: the runtime objects are compiled with
- * -ffunction-sections/-fdata-sections, so every function and global lives in
- * its own `.text$name`/`.data$name` section. Only those granular sections are
- * collectable; plain sections (all Mettle-emitted code among them) are roots.
- * Reachability follows relocations, binding locally when the referenced
- * symbol is defined in the same object and by name otherwise, with the same
- * runtime-default-loses precedence the real symbol resolution applies. */
-
 typedef struct {
   const char *name;
   size_t object_index;
@@ -393,9 +380,6 @@ static const GcDefinition *gc_find_definition(const GcDefinition *table,
   return NULL;
 }
 
-/* Mirrors link_resolution_record_global_symbol: a runtime default loses to a
- * program definition, and two same-precedence definitions are an error even
- * when both would be collected, so a duplicate never links silently. */
 static int gc_insert_definition(GcDefinition *table, size_t bucket_count,
                                 const GcDefinition *definition,
                                 char **error_message_out) {
@@ -774,7 +758,7 @@ static int link_resolution_index_insert(LinkResolution *resolution,
                                          (resolution->symbol_count + 1u) * 2u)) {
       return 0;
     }
-    return 1; /* reindex covered the new entry */
+    return 1;
   }
   b = mettle_fnv1a_hash(resolution->symbols[symbol_index].name) &
       (resolution->symbol_bucket_count - 1);
@@ -893,10 +877,6 @@ static int link_resolution_record_global_symbol(
   if (global_symbol->is_defined) {
     const LinkedInputObject *holder =
         &resolution->objects[global_symbol->defining_object_index];
-    /* A runtime default loses to a real definition, whichever order they
-     * arrive in. Relocations inside an object that defines the symbol itself
-     * are bound locally (see relocation.c), so replacing the global definition
-     * redirects other objects without rerouting the runtime's own calls. */
     if (holder->is_runtime_default && !input->is_runtime_default) {
       /* fall through and let the program definition take over */
     } else if (!holder->is_runtime_default && input->is_runtime_default) {
@@ -996,10 +976,6 @@ static int link_resolution_build_symbols(LinkResolution *resolution,
           input->section_gc_dead[(size_t)symbol->section_index]) {
         continue;
       }
-      /* An undefined external nothing retained relocates against is dropped
-       * rather than recorded, so it neither fails resolution nor becomes a
-       * DLL import. Mettle objects declare every extern a module names, used
-       * or not, and the runtime's dead code names libc symbols. */
       if (symbol->section_index == LINK_SECTION_INDEX_UNDEFINED &&
           input->symbol_gc_referenced &&
           !input->symbol_gc_referenced[symbol_index]) {

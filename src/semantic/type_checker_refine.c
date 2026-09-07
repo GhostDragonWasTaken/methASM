@@ -20,15 +20,6 @@ typedef struct {
   long long max;
 } Range;
 
-/* A hard stop on proof work, in steps.
- *
- * The narrowing lock below bounds the shape that used to run away, but a
- * prover that recurses over user-written expressions has no natural bound, and
- * a compiler that appears to hang tells the programmer nothing. Past this the
- * prover answers "unknown" and every proof that needed it refuses in the
- * ordinary way. The whole 900-file test suite peaks near 92 thousand steps, so
- * this is two hundred times the worst real program and a fraction of a second
- * of work. `--proof-budget=N` sets a smaller one. */
 #define TYPE_CHECKER_PROOF_CEILING 20000000LL
 
 static Range range_unknown(void) {
@@ -133,36 +124,8 @@ static double frange_eps(const Type *type) {
   return 2.220446049250313e-16;
 }
 
-static double frange_magnitude(const FRange *r) {
-  double lo = r->has_min ? (r->min < 0 ? -r->min : r->min) : 0.0;
-  double hi = r->has_max ? (r->max < 0 ? -r->max : r->max) : 0.0;
-  return lo > hi ? lo : hi;
-}
-
-/* The rounding term is relative, because IEEE rounding is. A product of two
- * values in 0..1 stays in 0..1: the endpoints move by a fraction of
- * themselves, and zero does not move at all. Adding an absolute epsilon to a
- * bound the arithmetic cannot cross would refuse proofs that hold.
- *
- * Cancellation is where a relative bound stops being one, so a subtraction, or
- * an addition of values that can have opposite signs, sets the term to 1: the
- * value could be anything of that magnitude, and the prover then refuses
- * rather than speaking past what it knows. */
 #define FRANGE_NO_BOUND 1.0
 
-static double frange_slack(double endpoint, double rel) {
-  double magnitude = endpoint < 0 ? -endpoint : endpoint;
-  return magnitude * rel;
-}
-
-/* IEEE rounding is monotone, so a computed result never leaves the interval
- * the exact operation would have produced, once that interval's own endpoints
- * are rounded outward. The endpoints are computed in the widest type the host
- * has and stepped one place outward only where the double they land in is not
- * the value itself. That is why a product of two values in 0..1 stays in 0..1:
- * one is representable, the arithmetic that produced it did not round, and
- * nothing needs widening. Where the host has nothing wider than double, every
- * endpoint is stepped, because there is no way to tell. */
 static double frange_step(double value, int up) {
   unsigned long long bits;
   if (value == 0.0) {
@@ -416,8 +379,6 @@ static void narrow_visit(void *raw, ASTNode *node, int negated) {
   }
 }
 
-/* Take the narrowing lock for `name`, or report that it is already held. See
- * the field comment on TypeChecker::narrowing. */
 static int narrowing_enter(TypeChecker *checker, const char *name) {
   size_t i;
   if (!checker || !name) {
@@ -483,18 +444,12 @@ static void narrow_by_relation(TypeChecker *checker, const Type *declared,
 
 static int range_of_call(TypeChecker *checker, ASTNode *expr, Range *out,
                     int depth) {
-  const char *op = NULL;
-  ASTNode *left = NULL;
-  ASTNode *right = NULL;
-  ASTNode *operand = NULL;
+  (void)depth;
 
   *out = range_unknown();
     CallExpression *call = (CallExpression *)expr->data;
     Symbol *callee = NULL;
     *out = range_of_type(expr->resolved_type);
-    /* A work-item index runs from zero to the block shape the kernel declared,
-       which the module makes the driver enforce. So the launch's own geometry
-       is a fact the prover has, and an index built out of one carries it. */
     if (checker && call && call->is_gpu_index && call->function_name) {
       ASTNode *owner_node = checker->current_function_decl;
       FunctionDeclaration *owner =
@@ -553,10 +508,8 @@ static int range_of_call(TypeChecker *checker, ASTNode *expr, Range *out,
 
 static int range_of_member(TypeChecker *checker, ASTNode *expr, Range *out,
                     int depth) {
-  const char *op = NULL;
-  ASTNode *left = NULL;
-  ASTNode *right = NULL;
-  ASTNode *operand = NULL;
+  (void)checker;
+  (void)depth;
 
   *out = range_unknown();
     MemberAccess *member = (MemberAccess *)expr->data;
@@ -581,10 +534,6 @@ static int range_of_member(TypeChecker *checker, ASTNode *expr, Range *out,
 
 static int range_of_cast(TypeChecker *checker, ASTNode *expr, Range *out,
                     int depth) {
-  const char *op = NULL;
-  ASTNode *left = NULL;
-  ASTNode *right = NULL;
-  ASTNode *operand = NULL;
 
   *out = range_unknown();
     CastExpression *cast = (CastExpression *)expr->data;
@@ -604,8 +553,6 @@ static int range_of_cast(TypeChecker *checker, ASTNode *expr, Range *out,
 static int range_of_unary(TypeChecker *checker, ASTNode *expr, Range *out,
                     int depth) {
   const char *op = NULL;
-  ASTNode *left = NULL;
-  ASTNode *right = NULL;
   ASTNode *operand = NULL;
 
   *out = range_unknown();
@@ -805,10 +752,6 @@ static int range_of_binary(TypeChecker *checker, ASTNode *expr, Range *out,
 
 static int range_of_identifier(TypeChecker *checker, ASTNode *expr, Range *out,
                     int depth) {
-  const char *op = NULL;
-  ASTNode *left = NULL;
-  ASTNode *right = NULL;
-  ASTNode *operand = NULL;
 
   *out = range_unknown();
     Identifier *identifier = (Identifier *)expr->data;
@@ -854,10 +797,6 @@ static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
       return 0;
     }
   }
-  const char *op = NULL;
-  ASTNode *left = NULL;
-  ASTNode *right = NULL;
-  ASTNode *operand = NULL;
   *out = range_unknown();
   if (!expr || depth > 32) {
     return 0;
@@ -895,10 +834,6 @@ static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
   }
 }
 
-/* A relational declared type carries no interval of its own: `value <
- * buf.length` says nothing until there is a `buf`. Where a value of the type is
- * read, the predicate is narrowed in that scope, so the fact the type asserts
- * becomes the fact the prover uses at the site that supplied the other half. */
 static void narrow_by_relation(TypeChecker *checker, const Type *declared,
                                Range *out, int depth) {
   const Type *layer;
@@ -919,11 +854,6 @@ static void narrow_by_relation(TypeChecker *checker, const Type *declared,
   }
 }
 
-/* Every write to `name` anywhere in `node`, classified. Returns 1 while the
- * variable stays monotone in `direction` (+1 rising, -1 falling, 0 undecided),
- * 0 the moment a write is found that moves it either way or by an amount the
- * compiler cannot bound. Taking the address of the variable also ends it: a
- * store through the pointer is a write this walk cannot see. */
 static int monotone_scan(const ASTNode *node, const char *name,
                          int *direction) {
   if (!node) {
@@ -981,8 +911,6 @@ static int monotone_scan(const ASTNode *node, const char *name,
   return 1;
 }
 
-/* The one constant step every write to `name` in `node` moves it by. Returns 0
- * where the writes disagree or there are none. */
 static int monotone_step(const ASTNode *node, const char *name,
                          long long *step) {
   if (!node) {
@@ -1022,9 +950,6 @@ static int monotone_step(const ASTNode *node, const char *name,
   return 1;
 }
 
-/* The declaration of `name` in `node`, with its initialiser. A name declared
- * more than once in the function is two bindings sharing a spelling, and the
- * walk cannot tell which one a use meant, so it answers with nothing. */
 static const ASTNode *monotone_declaration_scan(const ASTNode *node,
                                                 const char *name,
                                                 size_t *seen) {
@@ -1057,14 +982,6 @@ static const ASTNode *monotone_declaration(const ASTNode *node,
   return seen == 1 ? found : NULL;
 }
 
-/* A counter that only ever rises keeps the bound its initialiser gave it, and
- * one that only ever falls keeps its ceiling. That is the fact a loop carries:
- * `while (i < n)` bounds `i` above inside the body, and this bounds it below,
- * so an index built from a counter is provable where the two meet. The walk is
- * over the whole function, which is stronger than it needs to be and easier to
- * believe: a write anywhere that breaks the direction ends it everywhere. */
-/* The addend of the one `name = name + e` in `node`, or NULL when the writes
- * to `name` are not all of that shape. */
 static ASTNode *accumulator_addend(ASTNode *node, const char *name, int *ok) {
   ASTNode *found = NULL;
   if (!node || !*ok) {
@@ -1099,11 +1016,6 @@ static ASTNode *accumulator_addend(ASTNode *node, const char *name, int *ok) {
   return found;
 }
 
-/* A bound that costs nothing to read: a literal, a constant, or a cast of one.
- * The full interval engine narrows by every guard in scope and each guard's
- * atoms re-enter it, which is fine for the handful of questions a declared type
- * asks and ruinous for a question asked of every loop in the program. A trip
- * count needs a constant bound anyway, so this is what it asks for. */
 static int constant_range(TypeChecker *checker, const ASTNode *expr, Range *out,
                           int depth) {
   *out = range_unknown();
@@ -1132,12 +1044,6 @@ static int constant_range(TypeChecker *checker, const ASTNode *expr, Range *out,
       *out = range_exact(symbol->constant_integer_value);
       return 1;
     }
-    /* A declared type bounds a loop the same way a literal does. `for i in
-     * 0..n` where `n: Count` and `Count` is `int32 where value <= 1024` runs
-     * at most 1024 times, and that is a fact the compiler proved rather than
-     * one it was told, so the trip count and everything the trip count bounds
-     * follow from it. Reading the type is a lookup, so this stays the cheap
-     * walk the trip counter needs. */
     if (symbol && symbol->type && symbol->type->refined_base &&
         symbol->type->refine_has_range) {
       *out = range_of_type(symbol->type);
@@ -1167,10 +1073,6 @@ static int constant_range(TypeChecker *checker, const ASTNode *expr, Range *out,
   }
 }
 
-/* The scan behind every question about how a binding moves, run once per
- * binding and kept on its symbol. Without this the prover walks the whole
- * function body for every identifier it looks at, which is quadratic in the
- * body and was measured making the compiler stop finishing. */
 static Symbol *movement_of(TypeChecker *checker, const char *name) {
   Symbol *symbol;
   const ASTNode *body;
@@ -1248,11 +1150,6 @@ static void narrow_by_monotone(TypeChecker *checker, const char *name,
   }
 }
 
-/* A `while (i < K)` whose body moves `i` by a constant step runs at most
- * (K - init + step - 1) / step times. That count is what turns an accumulator
- * into a bounded value, and it is the only thing here that says anything about
- * how many times a loop runs. Where the count cannot be established, nothing is
- * pushed and no accumulator is widened. */
 size_t type_checker_loop_trip_depth(const TypeChecker *checker) {
   return checker ? checker->loop_trip_count : 0;
 }
@@ -1265,11 +1162,11 @@ void type_checker_pop_loop_trip(TypeChecker *checker, size_t depth) {
 
 int type_checker_push_loop_trip(TypeChecker *checker, ASTNode *condition,
                                 ASTNode *body) {
+  const char *counter;
+  const ASTNode *declaration;
   const char *op = NULL;
   ASTNode *left = NULL;
   ASTNode *right = NULL;
-  const char *counter;
-  const ASTNode *declaration;
   Range limit;
   Range initial;
   int direction = 0;
@@ -1336,12 +1233,6 @@ int type_checker_push_loop_trip(TypeChecker *checker, ASTNode *condition,
   return 1;
 }
 
-/* One `return` in the function being checked, seen with the guards that reach
- * it in force. A function that returns 0, 100, or a value a dominating test
- * pinned to 0..100 exports 0..100 as a postcondition, and a call site proves a
- * declared type from it the way it would from a literal. A return the interval
- * engine cannot bound defeats the union: an exported fact has to hold on every
- * path or it is not a fact. */
 void type_checker_note_return_range(TypeChecker *checker, ASTNode *value) {
   Symbol *fn = checker ? checker->current_function : NULL;
   Range r;
@@ -1369,16 +1260,6 @@ void type_checker_note_return_range(TypeChecker *checker, ASTNode *value) {
     fn->post_max = r.max;
   }
 }
-
-/* ---- float intervals ------------------------------------------------------
- *
- * The same shape as the integer engine, with one addition: every arithmetic
- * step accumulates a bound on the rounding it introduced. A declared float type
- * is then two facts, an interval and how far a value inside it may have drifted
- * from the real number it stands for, and a pass that wants to reassociate has
- * something to check itself against.
- *
- * Everything here is conservative in the direction that refuses. */
 
 static FRange frange_of_type(const Type *type) {
   FRange r = frange_unknown();
@@ -1537,9 +1418,6 @@ static int frange_of_binary(TypeChecker *checker, ASTNode *expr, FRange *out,
 
 static int frange_of_identifier(TypeChecker *checker, ASTNode *expr, FRange *out,
                      int depth) {
-  const char *op = NULL;
-  ASTNode *left = NULL;
-  ASTNode *right = NULL;
 
   *out = frange_unknown();
     Identifier *identifier = (Identifier *)expr->data;
@@ -1565,8 +1443,6 @@ static int frange_of_identifier(TypeChecker *checker, ASTNode *expr, FRange *out
 static int frange_of(TypeChecker *checker, ASTNode *expr, FRange *out,
                      int depth) {
   const char *op = NULL;
-  ASTNode *left = NULL;
-  ASTNode *right = NULL;
   ASTNode *operand = NULL;
   if (checker) {
     checker->proof_steps++;
@@ -1628,11 +1504,6 @@ static int frange_of(TypeChecker *checker, ASTNode *expr, FRange *out,
   }
 }
 
-/* A float that starts somewhere and is only ever added to, inside a loop whose
- * trip count the compiler bounded, has a bound of its own: the start plus the
- * count times the addend's own interval. That is the loop-carried fact, and it
- * is what lets a running sum carry a declared type at all. The rounding term
- * grows with the count, because every one of those additions rounds. */
 static void fnarrow_by_accumulator(TypeChecker *checker, const char *name,
                                    FRange *out, int depth) {
   const ASTNode *declaration;
@@ -1672,10 +1543,6 @@ static void fnarrow_by_accumulator(TypeChecker *checker, const char *name,
       initial.err >= FRANGE_NO_BOUND) {
     return;
   }
-  /* Inside the loop the accumulator has taken between zero and `trips` steps,
-   * so the bound is the union over that whole run and not the value it ends
-   * with. Widening to the final value would be a fact that holds only after
-   * the last iteration, which is not where it is read. */
   widened = frange_unknown();
   widened.has_min = 1;
   widened.has_max = 1;
@@ -1694,9 +1561,6 @@ static void fnarrow_by_accumulator(TypeChecker *checker, const char *name,
   frange_meet(out, &widened);
 }
 
-/* Does the predicate carry an atom that rules the value out of being zero?
- * `value != 0` says it outright; an interval that excludes zero says it too.
- * Anything else is unproven, and the check stays. */
 static int predicate_excludes_zero(const ASTNode *node, const char *binding) {
   const char *op = NULL;
   ASTNode *left = NULL;
@@ -2168,10 +2032,6 @@ typedef struct {
   int have_frange;
 } ProveContext;
 
-/* The comparison has to hold for every value the interval admits, once the
- * rounding the expression could have accumulated is taken off the end that
- * matters. A bound that only holds for the exact real value is not a bound the
- * program can rely on. */
 static int fcomparison_holds(const char *op, const FRange *value,
                              const FRange *bound) {
   double lo;
@@ -2251,9 +2111,6 @@ static void prove_visit(void *raw, ASTNode *atom, int negated) {
       }
     }
   }
-  /* `value % K == 0` is a divisibility claim, and the arithmetic that built
-     the value answers it directly: a product of a multiple of K is one. This
-     is the route an alignment predicate over an offset takes. */
   if (!negated && binary_parts(atom, &op, &left, &right) && op &&
       strcmp(op, "==") == 0 && left && right) {
     const char *inner_op = NULL;
@@ -2436,9 +2293,6 @@ int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
   ctx.steps = checker->proof_steps;
   snprintf(ctx.route, sizeof(ctx.route), "the value's own type admits it");
   checker->proofs_attempted++;
-  /* `uniform(value)` is discharged by the dependence analysis, which answers a
-     different question from every interval in this file: not what the value
-     can be, but whether every work item holds the same one. */
   if (refined->refine_uniform) {
     const char *why = NULL;
     if (type_checker_expression_is_uniform(checker, expr, &why)) {
@@ -2593,9 +2447,6 @@ static void holds_visit(void *raw, ASTNode *atom, int negated) {
   ctx->failed_negated = negated;
 }
 
-/* Does this condition hold here, on the guards in force and the intervals the
- * compiler can bound? Used where a predicate has to be re-established rather
- * than carried: a write into a field of a refined struct. */
 static int condition_holds(TypeChecker *checker, ASTNode *condition,
                            ASTNode **failed_atom, int *failed_negated) {
   HoldsContext ctx;
@@ -2613,9 +2464,6 @@ static int condition_holds(TypeChecker *checker, ASTNode *condition,
   return !ctx.failed;
 }
 
-/* Replace `object.field` with a copy of `replacement` throughout `node`. Each
- * occurrence gets its own copy, so the clone owns everything in it and can be
- * destroyed whole. */
 static int predicate_replace_field(ASTNode *node, const char *object,
                                    const char *field,
                                    const ASTNode *replacement) {
@@ -2654,12 +2502,6 @@ static int predicate_replace_field(ASTNode *node, const char *object,
   return replaced;
 }
 
-/* A field write into a value whose declared type speaks about its fields has
- * to leave the predicate true. The predicate is taken as it will read after
- * the write -- the written field standing for the value being assigned, every
- * other field for what it already holds -- and has to hold here. Nothing is
- * carried over from the conversion that made the value: a write is a new
- * obligation, and this is where it is discharged. */
 int type_checker_check_field_write(TypeChecker *checker, ASTNode *object,
                                    const char *field, ASTNode *value,
                                    SourceLocation location) {
@@ -2706,10 +2548,6 @@ int type_checker_check_field_write(TypeChecker *checker, ASTNode *object,
   return 1;
 }
 
-/* A relational type is proven at the site and re-checked at the site: the
- * predicate is cloned, type-checked here with the binding standing for this
- * value, and handed to lowering, which emits it as the run-time test. A type
- * with a static interval keeps the two comparisons it already had. */
 void type_checker_bind_predicate_check(TypeChecker *checker, Type *refined,
                                        ASTNode *expr) {
   Type *layer;
@@ -2720,9 +2558,6 @@ void type_checker_bind_predicate_check(TypeChecker *checker, Type *refined,
        layer = layer->refined_base) {
     ASTNode *clone;
     Symbol *value_symbol;
-    /* A uniform predicate has no expression to evaluate per value: the
-       question is across work items, and the check for it is the cross-lane
-       comparison a device build and the grid runner make. */
     if (!layer->refinement || layer->refine_has_range ||
         layer->refine_uniform) {
       continue;
@@ -2755,10 +2590,6 @@ void type_checker_bind_predicate_check(TypeChecker *checker, Type *refined,
       return;
     }
     symbol_table_exit_scope(checker->symbol_table);
-    /* A value with a name has one at run time too, so the check reads the
-     * binding the program wrote and lowering sees ordinary code. That is the
-     * only shape an aggregate can take: there is no operand to stand for a
-     * struct in the middle of an expression. */
     if (identifier_name(expr)) {
       predicate_rename(clone,
                        layer->refine_binding ? layer->refine_binding : "value",

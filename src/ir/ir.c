@@ -8,13 +8,6 @@
 
 #define IR_OPERAND_FMT_BUFSIZE 128
 
-/* Single seam for allocating an IR operand name / instruction text copy, and
- * the pair of mettle_free_string on every destroy path (which also tolerates
- * interned/static strings). Interning these names was tried and measured
- * SLOWER on 500k-LOC fixtures: temp/label names are unique, so the pool paid
- * a hash, an entry allocation, and periodic whole-table rehashes per name
- * while clones almost never hit. Plain owned copies win; keep the seam so a
- * future allocator change is one line. */
 static char *ir_intern_name(const char *name) {
   return mettle_strdup(name);
 }
@@ -739,9 +732,6 @@ IROperand ir_operand_string(const char *value) {
   return ir_operand_string_n(value, value ? strlen(value) : 0);
 }
 
-/* `value` may hold interior NULs, so the copy is by length and the terminator
- * is added on top: readers that only want a name keep working, and the ones
- * that build a {chars, length} record get every byte. */
 IROperand ir_operand_string_n(const char *value, size_t length) {
   IROperand operand = ir_operand_none();
   operand.kind = IR_OPERAND_STRING;
@@ -826,17 +816,9 @@ static IROperand ir_operand_clone(const IROperand *operand) {
   return ir_operand_copy(operand);
 }
 
-/* ---- tensor descriptor block ---------------------------------------------- */
-
-/* Stand-in for an instruction with no block. Const and never written, so every
- * caller reading a descriptor off a non-tensor instruction sees the zeroes the
- * inline fields used to hold. */
 static const IRTensorAux g_ir_tensor_absent;
 
 #ifdef METTLE_IR_TENSOR_DEBUG
-/* "TNSR". Present on every live block; cleared before the block is freed, so a
- * second free or a later read through a stale alias is caught rather than
- * silently corrupting the free list. */
 #define IR_TENSOR_MAGIC 0x544E5352u
 
 static void ir_tensor_check(const IRTensorAux *block, const char *what) {
@@ -881,7 +863,7 @@ int ir_instruction_tensor_copy(IRInstruction *dst, const IRInstruction *src) {
   }
   ir_instruction_tensor_clear(dst);
   if (!src || !src->tensor) {
-    return 1; /* nothing to carry: absent stays absent */
+    return 1;
   }
   {
     IRTensorAux *block = (IRTensorAux *)malloc(sizeof(IRTensorAux));
@@ -978,11 +960,6 @@ void ir_function_clear_cfg(IRFunction *function) {
   function->cfg_valid = 0;
 }
 
-/* Declared float bounds, keyed by the type name the frontend wrote into a
- * DECLARE_LOCAL. A pass that wants to reassociate float arithmetic asks here
- * whether the value it is about to move carries a bound, and the answer is the
- * program's, established by the prover. The backend never sees the type system;
- * it sees a name and two numbers. */
 typedef struct {
   const char *name;
   double lo;
@@ -1038,9 +1015,6 @@ int ir_lookup_float_bound(const char *type_name, double *lo, double *hi) {
 
 int ir_has_float_bounds(void) { return g_float_bound_count > 0; }
 
-/* Declared types whose predicate rules the value out of being zero, keyed the
- * same way. A divisor of one of these cannot trap, which is what lets a pass
- * move it. */
 static const char **g_nonzero_types;
 static size_t g_nonzero_count;
 static size_t g_nonzero_capacity;
@@ -1080,10 +1054,6 @@ int ir_type_is_nonzero(const char *type_name) {
 }
 
 IRFunction *ir_function_create(const char *name) {
-  /* Zeroed first, then filled in. A field added to IRFunction and not listed
-   * below would otherwise start as whatever was on the heap, and a synthesized
-   * function would carry it: a declared deadline of a few trillion cycles is
-   * what that looks like from the outside. */
   IRFunction *function = calloc(1, sizeof(IRFunction));
   if (!function) {
     return NULL;
@@ -1268,13 +1238,6 @@ int ir_function_append_instruction(IRFunction *function,
   }
 
   if (function->instruction_count >= function->instruction_capacity) {
-    /* The first block holds 128, not 64. An IRInstruction is around 576 bytes,
-     * so the 64 -> 128 step copies ~36KB, and on a 13k-function program almost
-     * every function took it: peak working set is identical either way, which is
-     * the measurement saying the arrays were reaching 128 regardless. Starting
-     * there just skips the copy -- worth ~50ms of the IR lowering phase. Going
-     * further (192, 256, 2048) measured slower: the extra pages have to be
-     * touched, and past 512KB each array becomes an individual OS mapping. */
     size_t new_capacity = function->instruction_capacity == 0
                               ? 128
                               : function->instruction_capacity * 2;
@@ -1293,8 +1256,6 @@ int ir_function_append_instruction(IRFunction *function,
     function->has_volatile_access = 1;
   }
 
-  /* The shallow copy above aliased the source's tensor block; take our own
-   * before anything can free either instruction. */
   slot->tensor = NULL;
   if (!ir_instruction_tensor_copy(slot, instruction)) {
     return 0;
@@ -1412,7 +1373,6 @@ int ir_function_insert_instruction(IRFunction *function, size_t index,
     }
   }
 
-
   if (instruction->argument_types && instruction->argument_count > 0) {
     slot->argument_types =
         malloc(instruction->argument_count * sizeof(*slot->argument_types));
@@ -1428,9 +1388,6 @@ int ir_function_insert_instruction(IRFunction *function, size_t index,
   return 1;
 
 fail_unshift:
-  /* The tail was already shifted up to make room. Destroy the partial clone
-   * and shift the tail back so the caller sees the function unchanged rather
-   * than a stream with a dead slot spliced in. */
   ir_instruction_destroy(slot);
   if (index < function->instruction_count) {
     memmove(&function->instructions[index], &function->instructions[index + 1],
@@ -1492,13 +1449,6 @@ static int ir_cfg_append_edge(IRFunction *function, size_t from, size_t to) {
                                       &target->predecessor_count, from);
 }
 
-/* Label name -> its block, open addressed.
- *
- * Resolving a branch's target by scanning the label list is quadratic in the
- * number of blocks, and the CFG is rebuilt several times per function. On a
- * body built out of if/else, where nearly every block starts with a label, that
- * was the largest remaining cost in optimizing one. Slots hold label_index + 1
- * so zero stays "empty". */
 typedef struct {
   size_t *slots;
   size_t capacity;
@@ -1538,7 +1488,7 @@ static int ir_cfg_label_index_build(IRCfgLabelIndex *index,
     slot = (size_t)mettle_fnv1a_hash(labels[i].label) & mask;
     while (index->slots[slot]) {
       if (strcmp(labels[index->slots[slot] - 1].label, labels[i].label) == 0) {
-        break; /* the first block for a name wins, as the scan did */
+        break;
       }
       slot = (slot + 1) & mask;
     }
@@ -1755,11 +1705,6 @@ const IRBasicBlock *ir_function_blocks(IRFunction *function,
   return function->blocks;
 }
 
-/* True if any function in the module takes the address of the module-level
- * variable `name`. A pointer that arrives as a parameter carries no
- * provenance, so a global another function pointed at may be written through
- * it here, even in a function that never spells `&g`. Built once per program;
- * the array is owned, the names are borrowed interned IR strings. */
 int ir_program_global_address_taken(IRProgram *program, const char *name) {
   if (!program || !name) {
     return 0;
@@ -1869,9 +1814,6 @@ void ir_program_destroy(IRProgram *program) {
   if (!program) {
     return;
   }
-  /* A later program allocated at this address must not inherit the cached
-   * name->index table (the incremental update path trusts entries [0, cached)
-   * to be unchanged, which only holds within one program's lifetime). */
   ir_symbol_index_invalidate(program);
   ir_type_index_invalidate(program);
   free(program->alias_globals);
@@ -1928,8 +1870,6 @@ int ir_program_drop_rules(IRProgram *program) {
   return ir_program_drop_rules_except(program, NULL);
 }
 
-/* Drop the rule bodies, except the ones `keep` answers for. A rule over the
-   machine outlives the first phase because the machine does not exist yet. */
 int ir_program_drop_rules_except(IRProgram *program,
                                  int (*keep)(const IRFunction *)) {
   size_t kept = 0;
@@ -1995,15 +1935,9 @@ int ir_program_drop_rewrite_rules(IRProgram *program) {
   return 1;
 }
 
-/* Name -> type-registry index. Same shape and lifecycle as IRSymbolIndex
- * below: the registry is append-only (update-in-place never changes a name),
- * so the cache tops up incrementally and only rebuilds on load-factor
- * overflow. ir_program_lookup_type runs per codegen instruction
- * (mir_addressof_kind and friends), so the old linear scan was a measurable
- * constant on 500k-LOC modules. */
 typedef struct {
-  size_t *slots; /* index+1 into type_registry; 0 = empty */
-  size_t slot_count; /* power of two */
+  size_t *slots;
+  size_t slot_count;
   const IRProgram *program;
   size_t entry_count;
 } IRTypeIndex;
@@ -2034,15 +1968,13 @@ static void ir_type_index_insert(const IRProgram *program, size_t i) {
   while (g_ir_type_index.slots[h]) {
     if (strcmp(program->type_registry[g_ir_type_index.slots[h] - 1].name,
                name) == 0) {
-      return; /* names are unique; keep the first entry */
+      return;
     }
     h = (h + 1) & mask;
   }
   g_ir_type_index.slots[h] = i + 1;
 }
 
-/* Returns the registry index of `name`, or (size_t)-1 when absent. Falls back
- * to the linear scan if the table cannot be allocated. */
 static size_t ir_type_index_find(const IRProgram *program, const char *name) {
   if (!(g_ir_type_index.program == program && g_ir_type_index.slots &&
         g_ir_type_index.entry_count <= program->type_registry_count &&
@@ -2091,7 +2023,7 @@ int ir_program_register_type(IRProgram *program, const char *name,
   }
   size_t existing = ir_type_index_find(program, name);
   if (existing != (size_t)-1) {
-    program->type_registry[existing].type = type; /* update in place */
+    program->type_registry[existing].type = type;
     return 1;
   }
   if (program->type_registry_count == program->type_registry_capacity) {
@@ -2142,7 +2074,7 @@ IRModuleSymbol *ir_program_add_symbol(IRProgram *program,
     program->module_symbol_capacity = next;
   }
   IRModuleSymbol *dst = &program->module_symbols[program->module_symbol_count];
-  *dst = *proto; /* shallow copy scalars + borrowed MtlcType* */
+  *dst = *proto;
   dst->name = mettle_strdup(proto->name);
   dst->link_name = proto->link_name ? mettle_strdup(proto->link_name) : NULL;
   dst->effect_clause =
@@ -2154,8 +2086,6 @@ IRModuleSymbol *ir_program_add_symbol(IRProgram *program,
   dst->init_string_length = proto->init_string ? proto->init_string_length : 0;
   dst->init_symbol_ref =
       proto->init_symbol_ref ? mettle_strdup(proto->init_symbol_ref) : NULL;
-  /* Deep-copy the aggregate initializer image so the symbol table owns it
-   * independently of the frontend AST it was folded on. */
   dst->init_bytes = NULL;
   dst->init_bytes_size = 0;
   dst->init_relocs = NULL;
@@ -2222,19 +2152,9 @@ IRModuleSymbol *ir_program_add_symbol(IRProgram *program,
   return dst;
 }
 
-/* Name -> module-symbol index for ir_program_lookup_symbol.
- *
- * The linear scan below is called for every symbol reference codegen resolves,
- * and a frontend with many string literals pushes module_symbol_count into the
- * tens of thousands, O(references x symbols) strcmp dominated emission on
- * large programs. Cache an open-addressing table keyed on the program, its
- * symbol count, and the array's base address (module_symbols reallocs as
- * symbols are added, so the table stores indices, never pointers), rebuilding
- * whenever any of those change. Same cure BinaryIRFunctionIndex applies to
- * function lookup in the binary backend. */
 typedef struct {
-  size_t *slots; /* index+1 into module_symbols; 0 = empty */
-  size_t slot_count; /* power of two */
+  size_t *slots;
+  size_t slot_count;
   const IRProgram *program;
   const IRModuleSymbol *symbols_base;
   size_t symbol_count;
@@ -2257,8 +2177,6 @@ static void ir_symbol_index_invalidate(const IRProgram *program) {
   }
 }
 
-/* Insert module_symbols[i] into the table. "First entry with a given name
- * wins", matching the original linear scan's duplicate semantics. */
 static void ir_symbol_index_insert(const IRProgram *program, size_t i) {
   size_t mask = g_ir_symbol_index.slot_count - 1;
   const char *name = program->module_symbols[i].name;
@@ -2269,23 +2187,13 @@ static void ir_symbol_index_insert(const IRProgram *program, size_t i) {
   while (g_ir_symbol_index.slots[h]) {
     if (strcmp(program->module_symbols[g_ir_symbol_index.slots[h] - 1].name,
                name) == 0) {
-      return; /* earlier symbol with this name wins */
+      return;
     }
     h = (h + 1) & mask;
   }
   g_ir_symbol_index.slots[h] = i + 1;
 }
 
-/* Returns 1 with the table ready, 0 on allocation failure (callers fall back
- * to the linear scan rather than miss real symbols).
- *
- * The module symbol array is append-only for a program's lifetime, so when the
- * cached table belongs to this program and only trails by newly appended
- * entries, we top it up instead of rebuilding. Rebuilding from scratch on
- * every count change made interleaved add/lookup sequences (each global
- * initializer resolves the globals before it) quadratic: 200k globals sat in
- * IR lowering for over five minutes. The base address is NOT part of the
- * validity check - slots store indices, and realloc preserves contents. */
 static int ir_symbol_index_ensure(const IRProgram *program) {
   if (g_ir_symbol_index.program == program && g_ir_symbol_index.slots &&
       g_ir_symbol_index.symbol_count <= program->module_symbol_count &&
@@ -2302,8 +2210,6 @@ static int ir_symbol_index_ensure(const IRProgram *program) {
   ir_symbol_index_reset();
 
   size_t slot_count = 16;
-  /* Size for 4x the current count so appends reuse the table for a while
-   * before the load-factor check above forces a rebuild. */
   while (slot_count < program->module_symbol_count * 4) {
     slot_count *= 2;
   }
@@ -2345,7 +2251,6 @@ const IRModuleSymbol *ir_program_lookup_symbol(const IRProgram *program,
     return NULL;
   }
 
-  /* Fallback: index allocation failed; behave as before. */
   for (size_t i = 0; i < program->module_symbol_count; i++) {
     if (strcmp(program->module_symbols[i].name, name) == 0) {
       return &program->module_symbols[i];
@@ -2756,11 +2661,6 @@ static int ir_format_gpu_line(const IRInstruction *instruction,
     break;
   }
   case IR_OP_ASYNC_COPY: {
-    /* Its own buffers. This used to format into `dest` and `lhs`, which are
-     * the caller's read-only strings, and sized the writes with `sizeof` on a
-     * pointer: eight bytes into somebody else's constant. The dump printed the
-     * caller's operands rather than this instruction's arguments, which is why
-     * nothing looked wrong. */
     char copy_dest[128];
     char copy_source[128];
     ir_format_operand(instruction->argument_count > 0
@@ -3280,7 +3180,6 @@ static void ir_dump_block_edges(FILE *output, const char *label,
   }
 }
 
-/* Replace insn->text with a copy of `name`, freeing the old text. */
 static int ir_retarget_call(IRInstruction *insn, const char *name) {
   char *copy = mettle_strdup(name);
   if (!copy) {
@@ -3300,13 +3199,6 @@ int ir_program_route_to_native_heap(IRProgram *program) {
     if (!fn) {
       continue;
     }
-    /* Never rewrite inside the allocator shims themselves. They bottom out on
-     * the OS page layer (never malloc/free/new), so no rewrite is needed
-     * today; the guard makes that invariant robust against a future shim edit
-     * that would otherwise turn a literal free or malloc call into
-     * self-recursion. The "mettle_heap_" prefix is distinctive enough not to
-     * collide with user code, and the allocator core calls no allocation
-     * surface either, so it needs no guard. */
     if (fn->name && strncmp(fn->name, "mettle_heap_", 12) == 0) {
       continue;
     }
@@ -3314,11 +3206,6 @@ int ir_program_route_to_native_heap(IRProgram *program) {
       IRInstruction *insn = &fn->instructions[i];
 
       if (insn->op == IR_OP_NEW) {
-        /* new T  ->  mettle_heap_zeroed(sizeof T). The size is in rhs. An
-         * absent or non-positive constant size means a default object (8
-         * bytes), the same fallback the backend's original new lowering used.
-         * Any other operand (the normal case is an INT constant; TEMP/SYMBOL
-         * are copied faithfully, duplicating an owned name) is forwarded. */
         IROperand size_arg;
         memset(&size_arg, 0, sizeof(size_arg));
         if (insn->rhs.kind == IR_OPERAND_NONE ||
@@ -3348,8 +3235,6 @@ int ir_program_route_to_native_heap(IRProgram *program) {
         insn->arguments = args;
         insn->argument_count = 1;
         insn->op = IR_OP_CALL;
-        /* rhs ownership moved into args[0] (TEMP name re-duplicated above), so
-         * detach it from the instruction to avoid a double free. */
         memset(&insn->rhs, 0, sizeof(insn->rhs));
         insn->rhs.kind = IR_OPERAND_NONE;
         continue;
@@ -3370,9 +3255,6 @@ int ir_program_route_to_native_heap(IRProgram *program) {
         }
       }
     }
-    /* Calls were added/retyped; the cached CFG (if any) is unaffected in shape,
-     * but mark it stale so any later consumer rebuilds rather than trusting
-     * per-op metadata. */
     ir_function_clear_cfg(fn);
   }
   return 1;
@@ -3396,9 +3278,6 @@ static const char *ir_gpu_launch_type_name(const MtlcType *type) {
   if (type->name) {
     return type->name;
   }
-  /* Keep the core IR object self-contained.  Some diagnostic harnesses link
-   * ir.c without the public type factory, and launch lowering needs only the
-   * spelling already carried by scalar descriptors. */
   switch (type->kind) {
   case MTLC_TYPE_VOID: return "void";
   case MTLC_TYPE_INT8: return "int8";
@@ -3475,10 +3354,6 @@ static MtlcType *ir_gpu_launch_params_type(IRProgram *program, size_t count) {
   return type;
 }
 
-/* Register `T*` for each scalar T, so a pass that needs to name a pointer type
- * has one whether or not the source ever spelled it. Optimizer passes see the
- * program only through its functions, and a local they declare must carry a
- * type string the backend can resolve to a stack slot. */
 int ir_program_register_scalar_pointer_types(IRProgram *program) {
   static const char *kElements[] = {"int8",    "uint8",   "int16",  "uint16",
                                     "int32",   "uint32",  "int64",  "uint64",
@@ -3603,9 +3478,6 @@ static int ir_gpu_launch_append_expansion(IRProgram *program, IRFunction *out,
   snprintf(params_base_name, sizeof(params_base_name),
            ".__mtlc_gpu%zu_params_base", launch_id);
 
-  /* Materialize every kernel argument in exact typed storage. The runtime ABI
-   * receives pointers to these cells, so narrow integers and float32 retain
-   * their natural widths on both x86-64 and AArch64. */
   for (size_t i = 0; i < nargs; i++) {
     char arg_name[80];
     snprintf(arg_name, sizeof(arg_name), ".__mtlc_gpu%zu_arg%zu", launch_id,
@@ -3782,7 +3654,7 @@ int ir_program_lower_gpu_launches(IRProgram *program) {
 typedef struct {
   const IRProgram *program;
   IRGpuCallGraph *graph;
-  unsigned char *state; /* 0 unseen, 1 active, 2 complete */
+  unsigned char *state;
   char **error;
 } IRGpuGraphBuilder;
 
@@ -3966,9 +3838,6 @@ static MtlcAddressSpace ir_gpu_operand_address_space_impl(
     if (!producer->dest.name ||
         strcmp(producer->dest.name, operand->name) != 0)
       continue;
-    /* STORE.dest and several fused-op dest fields are address/value uses.
-     * They must not shadow the allocation or pointer expression that actually
-     * defines this operand's provenance. */
     if (!ir_gpu_instruction_defines_dest(producer)) continue;
     if (producer->op == IR_OP_ADDRESS_SPACE_ALLOC)
       return producer->address_space;
@@ -4131,10 +4000,6 @@ static int ir_gpu_tensor_transfer_signature_matches(
   return 1;
 }
 
-/* Validate per-work-item async groups over arbitrary neutral CFGs. A state is
- * (committed pending groups 0..8, has-uncommitted-copy). Union at CFG merges
- * preserves every possible path; an unmatched loop keeps growing until it
- * exceeds the architectural-neutral eight-group bound and is rejected. */
 static int ir_gpu_async_copy_groups_valid(const IRProgram *program,
                                           IRFunction *function) {
   int have_async = 0;
@@ -4159,7 +4024,7 @@ static int ir_gpu_async_copy_groups_valid(const IRProgram *program,
     free(outputs);
     return 0;
   }
-  inputs[function->entry_block] = 1u; /* pending=0, uncommitted=false */
+  inputs[function->entry_block] = 1u;
   int changed = 1;
   while (changed) {
     changed = 0;
@@ -4368,9 +4233,6 @@ static int ir_gpu_tensor_matmul_signature_matches(
       ir_tensor_mma_instruction_count(instruction) != 1u)
     return 0;
 
-  /* The first bundle is deliberately identical to one exact neutral MMA.
-   * Validate it through the same descriptor/type contract, then validate the
-   * five whole-problem controls independently. */
   IRInstruction tile = *instruction;
   tile.op = IR_OP_TENSOR_MMA;
   tile.argument_count = mma_operands;
@@ -4625,8 +4487,6 @@ static int ir_gpu_tensor_residency_groups_valid(IRFunction *function) {
                                                         &commit_block))
       return 0;
     if (start->tensor_residency_scope == IR_TENSOR_RESIDENCY_SCOPE_LOOP) {
-      /* START falls into one loop header, UPDATE is its sole backedge body,
-       * and the other header edge is the unique COMMIT predecessor. */
       if (updates != 1 || start_block == update_block ||
           start_block == commit_block ||
           update_block == commit_block)
@@ -4651,9 +4511,6 @@ static int ir_gpu_tensor_residency_groups_valid(IRFunction *function) {
           commit_cfg->successor_count > 1)
         return 0;
     } else {
-      /* A staged pipeline is one straight-line block. Every adjacent MMA pair
-       * has its own ordered async WAIT -> publication BARRIER handoff; D stays
-       * entirely unobservable until the single final commit. */
       if (start_block != update_block || start_block != commit_block)
         return 0;
       size_t previous_mma_index = i;
@@ -4670,7 +4527,7 @@ static int ir_gpu_tensor_residency_groups_valid(IRFunction *function) {
                 function, update_index, &candidate_block) ||
             candidate_block != start_block)
           return 0;
-        int handoff_state = 0; /* 0 issuing, 1 waited, 2 published */
+        int handoff_state = 0;
         for (size_t j = previous_mma_index + 1; j < update_index; j++) {
           const IRInstruction *middle = &function->instructions[j];
           if (ir_gpu_tensor_residency_mentions_operand(
@@ -4702,7 +4559,6 @@ static int ir_gpu_tensor_residency_groups_valid(IRFunction *function) {
     }
   }
 
-  /* Every update/commit must belong to the unique start checked above. */
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
     if (instruction->tensor_residency_role == IR_TENSOR_RESIDENCY_NONE ||
@@ -4720,17 +4576,6 @@ static int ir_gpu_tensor_residency_groups_valid(IRFunction *function) {
   return 1;
 }
 
-/* GPU collective legality is a shared-IR property. A frontend cannot make a
- * divergent barrier correct, and a backend must not quietly reinterpret one.
- * Track the strongest scope at which a value is known uniform:
- *
- *   WORKGROUP <= SUBGROUP <= VARYING
- *
- * The join is therefore max(). Kernel parameters are workgroup-uniform. Device
- * helper parameter ranks are propagated from every reachable call site in
- * caller-before-callee order, so helpers remain reusable without pretending
- * their arguments are always uniform. Memory loads and unknown call results
- * are conservatively varying. */
 enum {
   IR_GPU_UNIFORM_WORKGROUP = 0,
   IR_GPU_UNIFORM_SUBGROUP = 1,
@@ -4744,15 +4589,9 @@ enum {
 };
 
 typedef struct {
-  const char *name; /* borrowed from IR */
+  const char *name;
   unsigned char rank;
-  /* Lane decomposition: the value is W*s + l where s is subgroup-uniform,
-   * W is the subgroup width, and l is the caller's lane (0 <= l < W), so
-   * dividing it by W yields a subgroup-uniform value. thread.x has that shape
-   * under the documented launch precondition (a one-dimensional block, or a
-   * block x-extent that is a multiple of the subgroup width). */
   unsigned char lane_affine;
-  /* The value is the subgroup width itself (a subgroup_size() result). */
   unsigned char subgroup_width;
 } IRGpuUniformSlot;
 
@@ -4846,11 +4685,6 @@ static const IRGpuUniformSlot *ir_gpu_uniform_operand_slot(
   return ir_gpu_uniform_slot((IRGpuUniformMap *)map, operand->name, 0);
 }
 
-/* A cast keeps a lane decomposition only when it is value-preserving for the
- * small nonnegative id/width magnitudes involved: any 32-bit-or-wider integer
- * target qualifies; a narrowing or float cast does not (a truncated or
- * rounded id no longer floors to its subgroup index). The frontend stamps the
- * target type name in text; builder-created casts carry value_type instead. */
 static int ir_gpu_cast_preserves_lane_shape(const IRInstruction *instruction) {
   if (instruction->op != IR_OP_CAST || instruction->dest.float_bits != 0)
     return 0;
@@ -4872,10 +4706,6 @@ static int ir_gpu_cast_preserves_lane_shape(const IRInstruction *instruction) {
   }
 }
 
-/* Downward fixpoint over the lane-shape flags: assume every defined name has
- * both shapes, then strip the assumption wherever some reachable definition
- * fails to produce it. DECLARE_LOCAL is a binding, not a value definition, and
- * is skipped exactly as the rank fixpoint skips it. */
 static void ir_gpu_uniform_map_mark_lane_shapes(const IRFunction *function,
                                                 IRGpuUniformMap *map) {
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -4927,12 +4757,6 @@ static void ir_gpu_uniform_map_mark_lane_shapes(const IRFunction *function,
   }
 }
 
-/* thread.x / 32, thread.x >> 5, and thread.x / subgroup_size() name the warp
- * (subgroup) a work-item belongs to: every lane of a subgroup computes the
- * same quotient, so the result ranks subgroup-uniform rather than varying.
- * The literal spellings assume the 32-lane PTX subgroup width; the
- * subgroup_size() spelling is the portable form. Integer division only --
- * float division does not floor away the lane term. */
 static int ir_gpu_binary_is_subgroup_quotient(const IRGpuUniformMap *map,
                                               const IRInstruction *instruction) {
   if (instruction->op != IR_OP_BINARY || instruction->is_float ||
@@ -5037,16 +4861,12 @@ static unsigned char ir_gpu_intrinsic_result_uniformity(
   case MTLC_INTRINSIC_GPU_LOAD4_U32:
   case MTLC_INTRINSIC_GPU_STORE4_F32:
   case MTLC_INTRINSIC_GPU_STORE4_U32:
-    /* Memory movers: the values they land are as varying as any load. */
     return IR_GPU_UNIFORM_VARYING;
   case MTLC_INTRINSIC_GPU_PRINT:
   case MTLC_INTRINSIC_GPU_PRINT_I32:
   case MTLC_INTRINSIC_GPU_PRINT_F32:
   case MTLC_INTRINSIC_GPU_PRINT_2I32:
   case MTLC_INTRINSIC_GPU_ASSERT:
-    /* Diagnostics return nothing and constrain nothing: a per-lane print or
-     * trap is deliberately allowed in divergent control flow, which is where
-     * it is most wanted. */
     return IR_GPU_UNIFORM_WORKGROUP;
   case MTLC_INTRINSIC_GPU_WORKGROUP_BARRIER:
     return IR_GPU_UNIFORM_WORKGROUP;
@@ -5132,8 +4952,6 @@ static int ir_gpu_uniform_map_build(const IRFunction *function,
   }
   ir_gpu_uniform_map_mark_lane_shapes(function, map);
 
-  /* Mutable locals and loops need a small monotone fixed point. Each name can
-   * rise at most twice, so instruction_count+1 rounds is a hard upper bound. */
   for (size_t round = 0; round <= function->instruction_count; round++) {
     int changed = 0;
     for (size_t i = 0; i < function->instruction_count; i++) {
@@ -5301,10 +5119,6 @@ static int ir_gpu_validate_function_uniformity(
     goto done;
   }
 
-  /* For a two-way branch, blocks reachable from exactly one successor are
-   * control-dependent on that decision. Blocks reachable from both successors
-   * are reconverged. This also catches varying-trip loops: the header/body is
-   * reachable through the backedge from only the continuing successor. */
   for (size_t b = 0; b < blocks; b++) {
     IRBasicBlock *block = &function->blocks[b];
     size_t last_offset = 0;
@@ -5505,8 +5319,6 @@ static int ir_gpu_validate_collective_uniformity(IRGpuGraphBuilder *builder) {
     }
   }
 
-  /* graph->order is callee-before-caller. Reverse it so every caller has
-   * contributed its argument ranks before a helper is analyzed. */
   for (size_t remaining = graph->count; remaining > 0; remaining--) {
     size_t index = graph->order[remaining - 1];
     IRFunction *function = program->functions[index];
@@ -5737,18 +5549,13 @@ void ir_gpu_call_graph_destroy(IRGpuCallGraph *graph) {
   memset(graph, 0, sizeof(*graph));
 }
 
-/* Open-addressed name -> function-index table for the dead-function sweep.
- * Lookups happen once per operand of every instruction, so a linear name scan
- * would go quadratic on large multi-function programs (the same trap as the
- * historical per-element strcmp compile-speed bugs). */
 typedef struct {
   const char **names;
   size_t *indices;
-  size_t capacity; /* power of two */
+  size_t capacity;
 } IrFnNameTable;
 
 static size_t ir_fn_name_hash(const char *name) {
-  /* FNV-1a. */
   size_t hash = 1469598103934665603ull;
   while (*name) {
     hash ^= (unsigned char)*name++;
@@ -5778,7 +5585,7 @@ static void ir_fn_table_insert(IrFnNameTable *table, const char *name,
   size_t slot = ir_fn_name_hash(name) & (table->capacity - 1);
   while (table->names[slot]) {
     if (strcmp(table->names[slot], name) == 0) {
-      return; /* First definition wins; duplicates would be a sema error. */
+      return;
     }
     slot = (slot + 1) & (table->capacity - 1);
   }
@@ -5786,7 +5593,6 @@ static void ir_fn_table_insert(IrFnNameTable *table, const char *name,
   table->indices[slot] = index;
 }
 
-/* Returns the function index for `name`, or (size_t)-1. */
 static size_t ir_fn_table_lookup(const IrFnNameTable *table, const char *name) {
   size_t slot = ir_fn_name_hash(name) & (table->capacity - 1);
   while (table->names[slot]) {
@@ -5884,9 +5690,6 @@ static struct {
   size_t index;
 } g_ir_declaration_hints[IR_DECLARATION_HINT_SLOTS];
 
-/* Keyed on what the name says, not where it is stored: an operand's name is
- * its own copy, so the same symbol arrives through a different pointer at
- * almost every call and a pointer key never hits. */
 static size_t ir_declaration_hint_slot(const IRFunction *function,
                                        const char *symbol_name,
                                        int symbols_only) {
@@ -5915,18 +5718,12 @@ static int ir_declaration_names(const IRInstruction *instruction,
          strcmp(instruction->dest.name, symbol_name) == 0;
 }
 
-/* One scan of a body indexes every declaration in it, which is what the
- * per-name hint below cannot do: its first lookup for each name still had to
- * walk the function, and on a body that has absorbed a thousand inlined calls
- * that was most of the compile. The index is only ever trusted through
- * ir_declaration_names against the live instruction, so a body that moved
- * under it costs a miss and never a wrong answer. */
 #define IR_DECLARATION_MAP_SLOTS 4
 #define IR_DECLARATION_MAP_MIN_BODY 64
 
 typedef struct {
-  unsigned any;    /* index + 1 of the first declaration of this name */
-  unsigned symbol; /* index + 1 of the first with a SYMBOL destination */
+  unsigned any;
+  unsigned symbol;
 } IRDeclarationBucket;
 
 static struct {
@@ -6058,12 +5855,6 @@ static const IRInstruction *ir_declaration_map_find(const IRFunction *function,
   return NULL;
 }
 
-/* Dead instructions are retired by turning them into NOPs, so a function that
- * has been through the pipeline is close to half empty and every later pass
- * still walks the holes. Drop the ones that carry nothing: a NOP with text is a
- * marker (`@@simd:`, `@@unroll:`) a later pass reads, and one with an origin
- * token still names a source line for debug info. Positions move, so the caller
- * owns invalidating anything that recorded one. */
 size_t ir_function_drop_dead_nops(IRFunction *function) {
   size_t write = 0;
   size_t dropped;
@@ -6175,16 +5966,12 @@ int ir_program_eliminate_dead_functions(IRProgram *program, int keep_exports) {
                  program->functions[i]->rewrite_role ||
                  program->functions[i]->is_rule ||
                  (keep_exports && program->functions[i]->is_exported)) {
-        /* A GPU entry point is launched by the driver against the emitted
-         * module, so no instruction in this program has to name it. `export fn`
-         * roots only when something outside this program is joining the link. */
         live[i] = 1;
         worklist[worklist_count++] = i;
       }
     }
   }
 
-  /* No main means this is not a normal executable image; touch nothing. */
   if (!found_main) {
     free(table.names);
     free(table.indices);
@@ -6193,28 +5980,15 @@ int ir_program_eliminate_dead_functions(IRProgram *program, int keep_exports) {
     return 1;
   }
 
-  /* A global holding a function's address is a root even though no instruction
-   * names it: `var handler: fn(int32) -> int32 = &on_event;` lowers to a
-   * relocation against the function, and sweeping the body away would leave
-   * that relocation pointing at nothing. The traversal below only walks
-   * instructions, so seed these here. */
   for (size_t i = 0; i < program->module_symbol_count; i++) {
     ir_dead_fn_mark(&table, program->module_symbols[i].init_symbol_ref, live,
                     worklist, &worklist_count);
-    /* Same for a dispatch table built as an aggregate constant: every entry is
-     * a relocation against a function nothing else may mention. */
     for (size_t r = 0; r < program->module_symbols[i].init_reloc_count; r++) {
       ir_dead_fn_mark(&table, program->module_symbols[i].init_relocs[r].symbol,
                       live, worklist, &worklist_count);
     }
   }
 
-  /* A function is referenced when any instruction of a live function carries
-   * its name: in `text` (direct calls, defer captures, rewritten intrinsics),
-   * in a SYMBOL operand (function-pointer uses like `run(mix)`), or in a
-   * STRING operand (e.g. `dispatch` kernel-name launches). Local variables
-   * shadowing a function name over-approximate to "live", which only costs
-   * bytes, never correctness. */
   while (worklist_count > 0) {
     IRFunction *fn = program->functions[worklist[--worklist_count]];
     if (!fn) {
@@ -6251,9 +6025,6 @@ int ir_program_eliminate_dead_functions(IRProgram *program, int keep_exports) {
     }
   }
 
-  /* Freeing thousands of dead post-inline bodies instruction-by-instruction
-   * costs real time on large programs and the process reclaims it at exit;
-   * only pay for it when deep teardown is explicitly requested. */
   static int full_cleanup = -1;
   if (full_cleanup < 0) {
     full_cleanup = getenv("METTLE_FULL_CLEANUP") ? 1 : 0;

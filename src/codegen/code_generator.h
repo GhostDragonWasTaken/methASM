@@ -16,21 +16,10 @@ typedef struct {
   char *current_function_name;
   int generate_debug_info;
   int generate_stack_trace_support;
-  /* Function-granularity crash reporting: one debug record per function, the
-   * installed handler, and no per-instruction location markers -- so unlike
-   * generate_stack_trace_support it does not push a function to the baseline
-   * emitter. On by default; a fault names its function instead of being
-   * silent. */
   int generate_crash_report;
   int eliminate_unreachable_functions;
-  /* The whole program is in this object, so a function nothing outside names
-   * can take local linkage. A separately compiled object keeps every symbol
-   * global, because whoever links it may be calling in. */
   int whole_program;
   int has_error;
-  /* The failure in error_message is the programmer's, already phrased for them
-     (today: a GPU-only construct compiled for a CPU target). The driver prints
-     it and skips the generic internal-error report. */
   int has_user_error;
   char *error_message;
   IRProgram *ir_program;
@@ -44,7 +33,6 @@ typedef struct {
   size_t profile_function_capacity;
 } CodeGenerator;
 
-// Function declarations
 CodeGenerator *code_generator_create(void);
 CodeGenerator *code_generator_create_with_debug(DebugInfo *debug_info);
 void code_generator_destroy(CodeGenerator *generator);
@@ -83,4 +71,4 @@ void code_generator_record_runtime_trap_site(
     const char *message_template, const char *static_context);
 int code_generator_is_floating_point_type(const MtlcType *type);
 
-#endif // CODE_GENERATOR_H
+#endif

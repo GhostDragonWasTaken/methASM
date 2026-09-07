@@ -310,8 +310,6 @@ if (ir_pgo_enabled() && function_count > 1) {
                     ? LLONG_MAX
                     : (fn && fn->name ? ir_pgo_callee_calls(fn->name) : 0);
     }
-    /* Stable insertion sort of the function indices by heat, descending:
-     * ties (and cold/-1) keep declaration order. */
     for (size_t i = 1; i < function_count; i++) {
       size_t slot = emit_order[i];
       long long h = heat[i];
@@ -342,8 +340,6 @@ int code_generator_generate_program_binary_object(CodeGenerator *generator) {
                              "IR program not attached to code generator");
     return 0;
   }
-  /* Pin the calling convention to the target object format before emitting any
-   * code: COFF -> MS-x64, ELF -> SysV. */
   code_generator_binary_select_abi(generator->binary_emitter->target_format);
 
   binary_emitter_reset(generator->binary_emitter);
@@ -358,11 +354,6 @@ int code_generator_generate_program_binary_object(CodeGenerator *generator) {
     return 0;
   }
 
-  /* --pgo code layout: emit measured-hot functions first (main leading) so
-   * the hot working set shares I-cache lines and iTLB pages, cold glue sinks
-   * to the tail. Zero-run: the frequencies come from the compile-time
-   * interpretation of main(), no training run. Without a profile the order is
-   * untouched. */
   size_t function_count = generator->ir_program->function_count;
   size_t *emit_order =
       code_generator_binary_pgo_emit_order(generator, function_count);
@@ -380,11 +371,6 @@ int code_generator_generate_program_binary_object(CodeGenerator *generator) {
   free(emit_order);
   cg_time_report();
 
-  /* Global variables: an integer `const` folds to a CG_SYM_CONSTANT at every
-   * use site and carries no storage (IR_MODSYM_CONSTANT, not represented
-   * here); a non-integer `const` (float/string/aggregate) is registered as an
-   * immutable variable instead and DOES need storage, since the IR references
-   * it via a RIP-relative load like any global (IR_MODSYM_VARIABLE). */
   for (size_t i = 0; i < generator->ir_program->module_symbol_count; i++) {
     const IRModuleSymbol *sym = &generator->ir_program->module_symbols[i];
     if (sym->kind != IR_MODSYM_VARIABLE || sym->is_extern) {

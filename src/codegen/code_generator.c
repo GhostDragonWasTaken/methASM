@@ -1,7 +1,3 @@
-/* The code generators are frontend-free: they consume only the backend IR
- * (ir.h) and its module type registry + symbol table. Type facts are read from
- * IRInstruction.value_type and the module tables, never re-derived from a
- * frontend AST/TypeChecker/SymbolTable. */
 #include "code_generator_internal.h"
 #include "compiler/compiler_context.h"
 #include "codegen/target.h"
@@ -109,8 +105,6 @@ const CgSym *code_generator_lookup_symbol(CodeGenerator *generator,
     v->type = m->type;
     v->is_extern = m->is_extern;
     v->link_name = m->link_name;
-    /* Module symbols are global-scope; point at a shared CG_SCOPE_GLOBAL
-     * sentinel so codegen's `scope->type == CG_SCOPE_GLOBAL` guards read true. */
     static const CgScope module_scope = {CG_SCOPE_GLOBAL};
     v->scope = &module_scope;
     if (m->kind == IR_MODSYM_FUNCTION) {
@@ -120,7 +114,6 @@ const CgSym *code_generator_lookup_symbol(CodeGenerator *generator,
     } else if (m->kind == IR_MODSYM_CONSTANT) {
       v->data.constant.value = m->const_value;
     }
-    /* Cache on the (logically const) IR symbol for reuse; one-shot lifetime. */
     ((IRModuleSymbol *)m)->codegen_view = v;
   }
   return (const CgSym *)m->codegen_view;
@@ -316,23 +309,10 @@ char *code_generator_generate_label(CodeGenerator *generator,
   return label;
 }
 
-/* code_generator_infer_expression_type was removed in Phase 2: the result type
- * of each expression instruction is now baked onto the IR (IRInstruction.value_type)
- * at lowering, so codegen never re-derives it from the frontend AST/TypeChecker. */
-
 int code_generator_type_is_aggregate(const MtlcType *type) {
   if (!type) {
     return 0;
   }
-  /* `string` is a two-field record, {chars, length}, and it is an aggregate on
-   * exactly the same terms as a struct a programmer writes with those fields.
-   *
-   * It used to be excluded, which gave the type two representations at once: a
-   * value was a pointer to the record, a local was the record. Every site that
-   * moved a string had to know which it was holding, several disagreed, and
-   * returning one built in the callee wrote its fields through an
-   * uninitialized pointer. A struct with the identical two fields worked,
-   * because the aggregate machinery already answers all of this. */
   return type->kind == MTLC_TYPE_STRUCT || type->kind == MTLC_TYPE_ARRAY ||
          type->kind == MTLC_TYPE_TAGGED_ENUM ||
          type->kind == MTLC_TYPE_STRING;

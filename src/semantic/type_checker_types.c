@@ -1,10 +1,6 @@
-// Type checker: type construction, builtins, numeric promotion, conversions.
 #include "type_checker_internal.h"
 #include "string_intern.h"
 
-/* A shared non-NULL marker used as closure_env for a boundary closure type
- * (`Fn(...)->R`), where the specific environment layout is opaque. Call dispatch
- * only checks closure_env for non-NULL; the concrete env is known to the callee. */
 Type *type_checker_closure_env_sentinel(void) {
   static Type *sentinel = NULL;
   if (!sentinel) {
@@ -13,15 +9,6 @@ Type *type_checker_closure_env_sentinel(void) {
   return sentinel;
 }
 
-/* The bracket group that gives an array type its OUTER dimension, and the
- * matching ']'. Dimensions read left to right, so `int32[3][4]` is three rows
- * of four and the first group is the one this array measures; everything after
- * it belongs to the element. Answers 0 when the name is not an array.
- *
- * The search starts from the END so a bracket inside the element type is not
- * mistaken for a dimension: the element of `(fn(int32[4]) -> int32)[2]` is the
- * whole parenthesised function type. It then steps left, group by group, to
- * reach the first. A single-dimension name never enters that loop. */
 static int type_checker_array_outer_group(const char *name,
                                           const char **lbracket_out,
                                           const char **rbracket_out) {
@@ -111,9 +98,6 @@ Type *type_checker_parse_array_type(TypeChecker *checker,
     return NULL;
   }
 
-  /* The element is the base plus whatever dimensions follow this one, so
-   * `int32[3][4]` resolves its element as `int32[4]` and recurses. With one
-   * dimension the tail is empty and this is the base name on its own. */
   size_t tail_len = strlen(rbracket + 1);
   char *base_name = malloc(base_len + tail_len + 1);
   if (!base_name) {
@@ -134,10 +118,6 @@ Type *type_checker_parse_array_type(TypeChecker *checker,
     return NULL;
   }
 
-  /* Scanned here rather than through strtoull: the owned runtime's strtoull
-   * wraps modulo 2^64 and never reports ERANGE, so `int64[2^64 + 1]` came back
-   * as an array of one element. A digit past the range is the type not naming
-   * an array size at all. */
   unsigned long long array_size_ull = 0;
   int size_is_literal = size_start < rbracket;
   for (const char *digit = size_start; digit < rbracket; digit++) {
@@ -185,11 +165,6 @@ Type *type_checker_parse_array_type(TypeChecker *checker,
   }
 
   size_t array_size = (size_t)array_size_ull;
-  /* SIZE_MAX is not a bound any object can actually reach: the backend keeps
-   * frame offsets and local storage sizes in `int`, so an array whose bytes
-   * pass INT_MAX arrived there as a negative size and was reported as an
-   * internal compiler error. int64[1152921504606846976] fit under SIZE_MAX/8
-   * and did exactly that. */
   if (base_type->size > 0 &&
       array_size > (size_t)INT_MAX / base_type->size) {
     return NULL;
@@ -234,10 +209,6 @@ int type_checker_ensure_multi_return_type(TypeChecker *checker,
   for (size_t i = 0; i < function->return_type_count; i++) {
     field_types[i] = type_checker_get_type_by_name(
         checker, function->return_types[i]);
-    /* Every other type is copied whole into the tuple and back out again. An
-     * array is not: it would decay to its first element's address and the
-     * caller would read a slot that has already been reused. Reject it here,
-     * where the function's own signature is what the message can point at. */
     if (field_types[i] && field_types[i]->kind == TYPE_ARRAY) {
       type_checker_set_error_at_location(
           checker, location,
@@ -286,11 +257,6 @@ int type_checker_ensure_multi_return_type(TypeChecker *checker,
   return 1;
 }
 
-/* A slice of `element`: the fat pointer `{ data, length }` that carries its own
- * extent. It is spelled `T[]`, it is what a `T[N]` becomes when it is handed to
- * something that does not know N, and it is what `new T[n]` produces. The two
- * fields are ordinary ones, so `.length` and `.data` read the way any struct's
- * fields read, and the value copies and passes the way a 16-byte struct does. */
 Type *type_checker_device_slice_of(TypeChecker *checker, Type *element,
                                    unsigned char space, size_t align,
                                    const char *qualifiers) {
@@ -406,14 +372,6 @@ Type *type_checker_device_view_of(TypeChecker *checker, Type *element,
   return type_checker_canon_type(checker, view);
 }
 
-/* Pointer to an arbitrary type, built from the type rather than from its
- * spelling. Address-of used to mangle "<name>*" and look the result up, which
- * works while the name is a plain identifier and fails the moment it is not:
- * `&slot` on a `fn(int32) -> int32` global asked for a type named
- * "fn(int32) -> int32*", which nothing registers. */
-/* A view whose extents are in its type: one pointer, and a shape nobody has to
-   carry. The element count is the product of the extents, so an allocation of
-   one is a fixed size and every index into one is bounded by the declaration. */
 Type *type_checker_static_view_of(TypeChecker *checker, Type *element,
                                   const char *name, const size_t *extents,
                                   size_t rank) {
@@ -553,13 +511,6 @@ Type *type_checker_volatile_of(TypeChecker *checker, Type *base) {
   }
 }
 
-/* Peel `global`, `shared`, `constant`, `local` and `align(N)` off the head of
-   a type spelling. The parser writes them in that order and always directly in
-   front of the pointer, slice or view suffix they qualify, so the tail of the
-   head is the whole search. Returns the length of what is left. */
-/* `layout row`, `layout swizzle128`, `layout interleave(4)` off the tail of a
-   type spelling. The names are data: std/warp declares one constant per form,
-   and the type refers to it by the same word. */
 static const struct {
   const char *word;
   unsigned char layout;
@@ -675,9 +626,6 @@ size_t type_checker_split_device_qualifiers(const char *name, size_t length,
   return length;
 }
 
-/* The spelling a qualified head had, minus the head itself: ` global align(16)`
-   out of `float32 global align(16)*`. The pointer type's own name is built back
-   from it so a diagnostic reads the way the source did. */
 static char *type_checker_qualifier_text(const char *name, size_t head_length,
                                          size_t plain_length) {
   size_t extra = head_length - plain_length;
@@ -782,8 +730,6 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
     return NULL;
   }
 
-  // Check if it's a function pointer type: fn(param1,param2)->returntype (thin)
-  // or Fn(...)->returntype (a stateful closure type). Both prefixes are 3 chars.
   int is_closure_type = 0;
   if (strlen(name) < 4 || strncmp(name, "fn(", 3) != 0) {
     if (strlen(name) >= 4 && strncmp(name, "Fn(", 3) == 0) {
@@ -817,8 +763,7 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
     return NULL;
   }
 
-  // Parse parameter types
-  const char *params_start = name + 3; // skip "fn("
+  const char *params_start = name + 3;
   const char *params_end = name + close_index;
   size_t params_len = params_end - params_start;
 
@@ -827,7 +772,6 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
   char *params_copy = NULL;
 
   if (params_len > 0) {
-    // Parse comma-separated parameter types, splitting only on top-level commas.
     params_copy = malloc(params_len + 1);
     if (!params_copy) {
       return NULL;
@@ -835,7 +779,6 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
     memcpy(params_copy, params_start, params_len);
     params_copy[params_len] = '\0';
 
-    // Count top-level parameters.
     param_count = 1;
     int angle_depth = 0;
     int bracket_depth = 0;
@@ -872,7 +815,6 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
       return NULL;
     }
 
-    // Parse each top-level parameter type.
     size_t param_start = 0;
     size_t param_idx = 0;
     angle_depth = 0;
@@ -950,8 +892,7 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
     }
   }
 
-  // Parse return type
-  const char *return_type_start = name + close_index + 3; // skip ")->"
+  const char *return_type_start = name + close_index + 3;
   if (*return_type_start == '\0') {
     free(params_copy);
     free(param_types);
@@ -1009,16 +950,12 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
     return NULL;
   }
   if (is_closure_type) {
-    /* Name it with the resolvable `Fn(...)->R` string so an inferred closure
-     * local is sized as an 8-byte pointer by the backend, and mark it a
-     * closure so calls dispatch through the environment. */
     fp_type->name = (char *)string_intern(name);
     fp_type->closure_env = type_checker_closure_env_sentinel();
   }
 
   return fp_type;
 }
-
 
 Type *type_checker_refinement_base(Type *type) {
   while (type && type->refined_base) {
@@ -1109,52 +1046,43 @@ int type_checker_is_rawptr_type(const Type *type) {
          strcmp(type->name, "rawptr") == 0;
 }
 
-// Built-in type system functions implementation
-
 void type_checker_init_builtin_types(TypeChecker *checker) {
   if (!checker)
     return;
 
-  // Create built-in integer types
   checker->builtin_int8 = type_create(TYPE_INT8, "int8");
   checker->builtin_int16 = type_create(TYPE_INT16, "int16");
   checker->builtin_int32 = type_create(TYPE_INT32, "int32");
   checker->builtin_int64 = type_create(TYPE_INT64, "int64");
 
-  // Create built-in unsigned integer types
   checker->builtin_uint8 = type_create(TYPE_UINT8, "uint8");
   checker->builtin_uint16 = type_create(TYPE_UINT16, "uint16");
   checker->builtin_uint32 = type_create(TYPE_UINT32, "uint32");
   checker->builtin_uint64 = type_create(TYPE_UINT64, "uint64");
 
-  // Create first-class bool type (1-byte integer, distinct from uint8)
   checker->builtin_bool = type_create(TYPE_BOOL, "bool");
   if (checker->builtin_bool) {
     checker->builtin_bool->size = 1;
     checker->builtin_bool->alignment = 1;
   }
 
-  // Create first-class char type (1-byte character, distinct from uint8)
   checker->builtin_char = type_create(TYPE_CHAR, "char");
   if (checker->builtin_char) {
     checker->builtin_char->size = 1;
     checker->builtin_char->alignment = 1;
   }
 
-  // Create built-in floating-point types
   checker->builtin_float32 = type_create(TYPE_FLOAT32, "float32");
   checker->builtin_float64 = type_create(TYPE_FLOAT64, "float64");
   checker->builtin_float16 = type_create(TYPE_FLOAT16, "float16");
   checker->builtin_bfloat16 = type_create(TYPE_BFLOAT16, "bfloat16");
 
-  // C interop alias: cstring -> uint8*
   checker->builtin_cstring = type_create(TYPE_POINTER, "cstring");
   if (checker->builtin_cstring) {
     checker->builtin_cstring->base_type = checker->builtin_uint8;
     type_compute_layout(checker->builtin_cstring);
   }
 
-  // Create built-in string type backed by a uint8* and length
   checker->builtin_string = type_create(TYPE_STRING, "string");
   if (checker->builtin_string) {
     checker->builtin_string->size = 16;
@@ -1175,18 +1103,12 @@ void type_checker_init_builtin_types(TypeChecker *checker) {
     type_compute_layout(checker->builtin_string);
   }
 
-  // Create built-in void type
   checker->builtin_void = type_create(TYPE_VOID, "void");
   if (checker->builtin_void) {
     checker->builtin_void->size = 0;
     checker->builtin_void->alignment = 1;
   }
 
-  /* An address with no element type. The allocator hands one out and the
-   * deallocator takes one, so releasing an int32 buffer no longer requires
-   * claiming it holds characters. It converts to and from every pointer type,
-   * and only to them: with no element size there is nothing to index or offset
-   * by, and the checker's pointer arithmetic refuses it on those grounds. */
   checker->builtin_rawptr = type_create(TYPE_POINTER, "rawptr");
   if (checker->builtin_rawptr) {
     checker->builtin_rawptr->base_type = checker->builtin_void;
@@ -1194,7 +1116,6 @@ void type_checker_init_builtin_types(TypeChecker *checker) {
     checker->builtin_rawptr->alignment = 8;
   }
 
-  /* Type and Field are comptime-only: size 0, no backend kind. */
   checker->builtin_type = type_create(TYPE_TYPE, "Type");
   if (checker->builtin_type) {
     checker->builtin_type->size = 0;
@@ -1237,8 +1158,6 @@ void type_checker_init_builtin_types(TypeChecker *checker) {
   type_checker_intern_type(checker, checker->builtin_field);
   type_checker_intern_type(checker, checker->builtin_sequence);
 
-  // Register 'true' and 'false' as global bool constants so user code can
-  // reference them as plain identifiers without any extra keyword machinery.
   if (checker->builtin_bool && checker->symbol_table) {
     Symbol *true_sym =
         symbol_create("true", SYMBOL_CONSTANT, checker->builtin_bool);
@@ -1382,10 +1301,6 @@ static int type_checker_parse_view_layout(TypeChecker *checker, const char *name
       *out = NULL;
       return 1;
     }
-    /* The layout is the only difference, and the field arrays are the
-       base's. Interning directly rather than canonicalizing is what keeps
-       them the base's: a canonicalization that found an equal type would
-       destroy this one and take those arrays with it. */
     *laid_out = *base;
     laid_out->name = (char *)string_intern(name);
     laid_out->type_table_index = UINT32_MAX;
@@ -1561,7 +1476,6 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
   if (!checker || !name)
     return NULL;
 
-  // Check built-in types by name
   {
     Type *builtin = NULL;
     if (type_checker_builtin_by_name(checker, name, &builtin)) {
@@ -1569,29 +1483,18 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
     }
   }
 
-  /* A layout is part of the type, so it is peeled first and stamped on what is
-     left. `float16[128,64] layout swizzle128` is a swizzled view of the same
-     shape as the row-major one, and neither flows into the other. */
   if (type_checker_parse_view_layout(checker, name, &named)) {
     return named;
   }
 
-  /* `T[128,64]`: a view whose extents are in its type. It is a pointer and a
-     shape, so nothing travels beside the data and every index into one is
-     bounded by the declaration. */
   if (type_checker_parse_extent_view(checker, name, &named)) {
     return named;
   }
 
-  /* `T[]`: a slice, which is `T*` and a length in one value. The brackets are
-   * empty because the length is not part of the type. `T[..]` is the same type
-   * written where a parameter gathers its arguments. */
   if (type_checker_parse_slice(checker, name, &named)) {
     return named;
   }
 
-  /* A parenthesised type. Bare, it is the type inside; suffixed, the array and
-   * pointer branches below strip the suffix and land back here on the head. */
   if (name[0] == '(') {
     const char *scan;
     const char *close = NULL;
@@ -1622,7 +1525,6 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
     }
   }
 
-  // Check for function pointer types: fn(...)->R (thin) or Fn(...)->R (closure).
   if (strncmp(name, "fn(", 3) == 0 || strncmp(name, "Fn(", 3) == 0) {
     Type *fp_type = type_checker_parse_function_pointer_type(checker, name);
     if (fp_type) {
@@ -1644,9 +1546,6 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
     }
   }
 
-  /* `volatile T`. The qualifier binds to the value being accessed, so
-   * `volatile uint16*` is a pointer to volatile uint16: the pointer branch
-   * above strips the `*` first and lands back here on the element. */
   if (strncmp(name, "volatile ", 9) == 0) {
     Type *base = type_checker_get_type_by_name(checker, name + 9);
     if (base) {
@@ -1655,15 +1554,12 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
     return NULL;
   }
 
-  // Check for user-defined types in symbol table
   Symbol *struct_symbol = symbol_table_lookup(checker->symbol_table, name);
   if (struct_symbol && (struct_symbol->kind == SYMBOL_STRUCT ||
                         struct_symbol->kind == SYMBOL_ENUM)) {
     return struct_symbol->type;
   }
 
-  // Check for generic enum instantiation: "Option<int32>", "Result<int64,string>"
-  // Syntax stored by the parser as "Name<arg>" or "Name<arg1,arg2>"
   const char *lt = strchr(name, '<');
   if (lt && name[strlen(name) - 1] == '>') {
     size_t base_len = (size_t)(lt - name);
@@ -1743,8 +1639,6 @@ int type_checker_is_numeric_type(Type *type) {
          type_checker_is_floating_type(type);
 }
 
-// Type inference and promotion functions implementation
-
 static Type *type_checker_promote_base_types(TypeChecker *checker, Type *left,
                                              Type *right,
                                              const char *operator);
@@ -1796,19 +1690,12 @@ static Type *type_checker_promote_base_types(TypeChecker *checker, Type *left,
   if (!checker || !left || !right || !operator)
     return NULL;
 
-  // For comparison operators, result is always int32 (boolean represented as
-  // int)
   if (strcmp(operator, "==") == 0 || strcmp(operator, "!=") == 0 ||
       strcmp(operator, "<") == 0 || strcmp(operator, "<=") == 0 ||
       strcmp(operator, ">") == 0 || strcmp(operator, ">=") == 0) {
     return checker->builtin_int32;
   }
 
-  /* Character arithmetic promotes to int32, the way C promotes a char. `c -
-   * 'a'` is an index and `c + 1` is the next code point; neither is a
-   * character, and leaving them as one would print the answer as text.
-   * Comparison is unaffected: it returned above, and `c == 'h'` still asks
-   * whether two characters match. */
   if (left->kind == TYPE_CHAR) {
     left = checker->builtin_int32;
   }
@@ -1816,14 +1703,6 @@ static Type *type_checker_promote_base_types(TypeChecker *checker, Type *left,
     right = checker->builtin_int32;
   }
 
-  /* A bool used as a bit pattern promotes the same way, because the answer is
-   * a number and not a yes. `{flag | 2}` printed "true" where the value it
-   * held was 3, and the shift lowered at 64 bits rather than the width it
-   * reads as, so `flag << -11` answered 0 where `(int32)flag << -11` answered
-   * 2097152. Arithmetic on a bool already promotes through the larger-type
-   * rule below; only the bitwise operators, which have no case there, fell
-   * through to "the left type" and kept it. `&&` and `||` are unaffected: they
-   * return bool of their own accord, and a comparison returned above. */
   if (strcmp(operator, "&") == 0 || strcmp(operator, "|") == 0 ||
       strcmp(operator, "^") == 0 || strcmp(operator, "<<") == 0 ||
       strcmp(operator, ">>") == 0) {
@@ -1835,12 +1714,10 @@ static Type *type_checker_promote_base_types(TypeChecker *checker, Type *left,
     }
   }
 
-  // For arithmetic operators, promote to larger type
   if (strcmp(operator, "+") == 0 || strcmp(operator, "-") == 0 ||
       strcmp(operator, "*") == 0 || strcmp(operator, "/") == 0 ||
       strcmp(operator, "%") == 0) {
 
-    // If either operand is floating-point, result is floating-point
     if (type_checker_is_floating_type(left) ||
         type_checker_is_floating_type(right)) {
       int left_is_small = left->kind == TYPE_FLOAT16 || left->kind == TYPE_BFLOAT16;
@@ -1855,19 +1732,16 @@ static Type *type_checker_promote_base_types(TypeChecker *checker, Type *left,
       return type_checker_get_larger_type(checker, left, right);
     }
 
-    // Both are integers, promote to larger integer type
     if (type_checker_is_integer_type(left) &&
         type_checker_is_integer_type(right)) {
       return type_checker_get_larger_type(checker, left, right);
     }
   }
 
-  // For logical operators, result is int32 (boolean)
   if (strcmp(operator, "&&") == 0 || strcmp(operator, "||") == 0) {
     return checker->builtin_int32;
   }
 
-  // Default: return left type
   return left;
 }
 
@@ -1879,7 +1753,6 @@ Type *type_checker_get_larger_type(TypeChecker *checker, Type *type1,
   int rank1 = type_checker_get_type_rank(type1);
   int rank2 = type_checker_get_type_rank(type2);
 
-  // Return the type with higher rank
   return (rank1 >= rank2) ? type1 : type2;
 }
 
@@ -1887,7 +1760,6 @@ int type_checker_get_type_rank(Type *type) {
   if (!type)
     return -1;
 
-  // Type promotion ranking (higher number = higher rank)
   switch (type->kind) {
   case TYPE_INT8:
   case TYPE_UINT8:
@@ -1909,13 +1781,11 @@ int type_checker_get_type_rank(Type *type) {
   case TYPE_FLOAT64:
     return 6;
   case TYPE_STRING:
-    return 10; // Special case - strings don't promote with numbers
+    return 10;
   default:
     return 0;
   }
 }
-
-// Type compatibility and conversion functions implementation
 
 int type_checker_is_cast_valid(Type *from, Type *to) {
   if (!from || !to)
@@ -1928,15 +1798,12 @@ int type_checker_is_cast_valid(Type *from, Type *to) {
                                       type_checker_refinement_base(to));
   }
 
-  /* Reflection types have no runtime representation, so they cannot be
-   * cast to or from anything, including each other. */
   if (type_is_comptime_only(from) || type_is_comptime_only(to))
     return type_checker_types_equal(from, to);
 
   if (type_checker_types_equal(from, to))
     return 1;
 
-  // Numeric <-> numeric
   if (type_checker_is_numeric_type(from) && type_checker_is_numeric_type(to))
     return 1;
 
@@ -1945,35 +1812,25 @@ int type_checker_is_cast_valid(Type *from, Type *to) {
     return 1;
   }
 
-  /* A `string` reaches a pointer or an integer as its characters, which is
-   * exactly what the implicit coercion at a `cstring` binding already does. A
-   * cast must never be more restrictive than the conversion it spells out:
-   * while it was, `(int64)"main"` was refused although "main" passed to a
-   * cstring parameter and cast there was fine, so a one-line identity wrapper
-   * defeated the rule. A restriction a wrapper defeats is in the wrong place. */
   if (from->kind == TYPE_STRING &&
       (to->kind == TYPE_POINTER || to->kind == TYPE_FUNCTION_POINTER ||
        type_checker_is_integer_type(to))) {
     return 1;
   }
 
-  // Pointer <-> pointer
   if (from->kind == TYPE_POINTER && to->kind == TYPE_POINTER)
     return 1;
 
-  // Integer <-> pointer
   if ((type_checker_is_integer_type(from) && to->kind == TYPE_POINTER) ||
       (from->kind == TYPE_POINTER && type_checker_is_integer_type(to))) {
     return 1;
   }
 
-  // Pointer <-> function pointer
   if ((from->kind == TYPE_POINTER && to->kind == TYPE_FUNCTION_POINTER) ||
       (from->kind == TYPE_FUNCTION_POINTER && to->kind == TYPE_POINTER)) {
     return 1;
   }
 
-  // Integer <-> function pointer
   if ((type_checker_is_integer_type(from) &&
        to->kind == TYPE_FUNCTION_POINTER) ||
       (from->kind == TYPE_FUNCTION_POINTER &&
@@ -1981,7 +1838,6 @@ int type_checker_is_cast_valid(Type *from, Type *to) {
     return 1;
   }
 
-  // Function pointer <-> function pointer
   if (from->kind == TYPE_FUNCTION_POINTER &&
       to->kind == TYPE_FUNCTION_POINTER) {
     return 1;
@@ -1990,8 +1846,6 @@ int type_checker_is_cast_valid(Type *from, Type *to) {
   return 0;
 }
 
-// Type compatibility and conversion functions implementation
-
 static int type_checker_pointer_conversion_allowed(Type *dest_type,
                                                    Type *src_type) {
   if (type_checker_is_cstring_type(dest_type) &&
@@ -1999,14 +1853,8 @@ static int type_checker_pointer_conversion_allowed(Type *dest_type,
     return 1;
   }
 
-  /* A fixed array becomes a slice of the same element: the length the type
-     carried becomes the length the value carries. Nothing is lost, and it is
-     the conversion that lets a function be written once for any extent. */
   if (dest_type->kind == TYPE_SLICE && src_type->kind == TYPE_ARRAY &&
       dest_type->base_type &&
-      /* An array says nothing about which device memory it sits in, so it
-         cannot become a view that claims one. Whichever space the array's
-         binding has is the one to write. */
       dest_type->device_space == DEVICE_SPACE_NONE &&
       dest_type->declared_align == 0) {
     Type *inner = src_type;
@@ -2023,14 +1871,6 @@ static int type_checker_pointer_conversion_allowed(Type *dest_type,
     }
   }
 
-  /* A rawptr is an address with no element type, so it converts to and from
-   * every pointer in both directions. That is the whole of the opaque-pointer
-   * contract, and it is what lets `var a: int32* = malloc(n);` be written
-   * without a cast and `free(a)` without pretending the bytes are characters.
-   * An array decays to it the same way it decays to a typed pointer, and a
-   * string's bytes are an address like any other -- every rawptr consumer
-   * takes an explicit length, so no terminator is implied the way a cstring
-   * implies one. */
   if (type_checker_is_rawptr_type(dest_type) &&
       (src_type->kind == TYPE_POINTER || src_type->kind == TYPE_ARRAY ||
        src_type->kind == TYPE_FUNCTION_POINTER ||
@@ -2043,7 +1883,6 @@ static int type_checker_pointer_conversion_allowed(Type *dest_type,
     return 1;
   }
 
-  /* Allow int8* (e.g. from &array[0] for int8[]) to cstring (uint8*) for C interop */
   if (dest_type->kind == TYPE_POINTER && src_type->kind == TYPE_POINTER &&
       dest_type->name && strcmp(dest_type->name, "cstring") == 0 &&
       src_type->base_type && src_type->base_type->name &&
@@ -2051,7 +1890,6 @@ static int type_checker_pointer_conversion_allowed(Type *dest_type,
     return 1;
   }
 
-  /* Allow array to pointer decay (T[N] to T*) for function arguments */
   if (dest_type->kind == TYPE_POINTER && src_type->kind == TYPE_ARRAY &&
       dest_type->device_space == DEVICE_SPACE_NONE &&
       dest_type->declared_align == 0 && dest_type->base_type &&
@@ -2077,10 +1915,6 @@ int type_checker_is_assignable(TypeChecker *checker, Type *dest_type,
     src_type = type_checker_refinement_base(src_type);
   }
 
-  /* A closure (function-pointer type carrying an environment) and a thin
-   * function pointer are not interchangeable: a thin call site dispatches
-   * without the environment, and a closure call site reads a code pointer the
-   * thin value does not carry. Closures cross boundaries only as `Fn(...)->R`. */
   {
     int src_is_closure = src_type->kind == TYPE_FUNCTION_POINTER &&
                          src_type->closure_env;
@@ -2105,11 +1939,6 @@ int type_checker_is_assignable(TypeChecker *checker, Type *dest_type,
     return 1;
   }
 
-  /* A device pointer forgets where its data lives for free: `T global*` flows
-     into `T*`, which claims nothing. The other direction is a claim nobody
-     proved, so it needs the explicit cast the interpreter re-checks, and one
-     space where another is wanted is two different memories. An alignment
-     claim travels the same way: a stronger one satisfies a weaker one. */
   if (dest_type->kind == TYPE_POINTER && src_type->kind == TYPE_POINTER &&
       (dest_type->device_space || src_type->device_space ||
        dest_type->declared_align || src_type->declared_align) &&
@@ -2123,7 +1952,6 @@ int type_checker_is_assignable(TypeChecker *checker, Type *dest_type,
     return space_ok && align_ok;
   }
 
-  /* A Mettle string can flow to a cstring by exposing its chars pointer. */
   if (type_checker_pointer_conversion_allowed(dest_type, src_type)) {
     return 1;
   }
@@ -2134,14 +1962,9 @@ int type_checker_is_assignable(TypeChecker *checker, Type *dest_type,
     return 0;
   }
 
-  // Check for safe implicit conversions
   return type_checker_is_implicitly_convertible(src_type, dest_type);
 }
 
-/* Operators whose low N bits are decided by the operands' low N bits alone, so
- * computing them in a wider type and truncating gives what the narrow type
- * would have given. `/` and `%` are not here: they read the whole value. `>>`
- * is not here either: it feeds high bits downward. */
 static int type_checker_op_keeps_low_bits(const char *op) {
   if (!op) {
     return 0;
@@ -2152,20 +1975,6 @@ static int type_checker_op_keeps_low_bits(const char *op) {
          strcmp(op, "<<") == 0;
 }
 
-/* Is this expression already an expression OF the destination type, spelled
- * with a literal that a narrower type cannot hold on its own?
- *
- * `var n: int8 = s - 1;` where s is an int8 is that shape. The literal 1 has no
- * type of its own until something gives it one, so the subtraction typed as
- * int32 and the store was reported as a narrowing -- a cast that said nothing
- * the destination had not already said. Reading the literal at the destination
- * type instead, the arithmetic is int8 arithmetic and the result is the same
- * value the cast produced.
- *
- * Every leaf must fit the destination and every operator must be one whose
- * result's low bits come only from its operands' low bits, so nothing is lost
- * that the destination would have kept. Anything reaching a genuinely wider
- * value -- an int64 variable, a call result, a divide -- still narrows loudly. */
 static int type_checker_expression_is_destination_width(TypeChecker *checker,
                                                         Type *dest_type,
                                                         ASTNode *expression,
@@ -2220,8 +2029,6 @@ static int type_checker_expression_is_destination_width(TypeChecker *checker,
     break;
   }
 
-  /* Any other leaf: a variable, a field, a call. It counts only when its own
-   * type already reaches the destination without losing anything. */
   return expression->resolved_type &&
          type_checker_is_integer_type(expression->resolved_type) &&
          expression->resolved_type->kind != TYPE_ENUM &&
@@ -2393,7 +2200,6 @@ int type_checker_integer_bounds(const Type *type, long long *out_min,
     return 0;
   }
   switch (type->kind) {
-  /* A bool holds 0 or 1, so it widens into every integer type. */
   case TYPE_BOOL:   min = 0;         max = 1ULL;       break;
   case TYPE_INT8:   min = INT8_MIN;  max = INT8_MAX;   break;
   case TYPE_INT16:  min = INT16_MIN; max = INT16_MAX;  break;
@@ -2428,9 +2234,6 @@ int type_checker_int_conversion_is_value_preserving(const Type *from,
     return 0;
   }
 
-  /* An enum's value set is written down, so containment is decidable exactly
-   * rather than approximated by width: the conversion is value-preserving when
-   * every declared member fits. */
   if (from->kind == TYPE_ENUM) {
     if (from->enum_member_count == 0 || !from->enum_member_values) {
       return 0;
@@ -2461,9 +2264,6 @@ int type_checker_constant_fits_type(const Type *dest_type, const Type *src_type,
   if (!type_checker_integer_bounds(dest_type, &dest_min, &dest_max)) {
     return 0;
   }
-  /* The folder carries every constant in a long long, so a value typed
-   * unsigned above INT64_MAX arrives as a negative bit pattern. Read it back
-   * with the signedness the source was given, not the container's. */
   if (src_type && (src_type->kind == TYPE_UINT8 ||
                    src_type->kind == TYPE_UINT16 ||
                    src_type->kind == TYPE_UINT32 ||
@@ -2480,17 +2280,10 @@ int type_checker_is_implicitly_convertible(Type *from_type, Type *to_type) {
   if (!from_type || !to_type)
     return 0;
 
-  // Same type is always convertible
   if (from_type->kind == to_type->kind) {
     return type_checker_types_equal(from_type, to_type);
   }
 
-  /* Integer to integer: widen silently, narrow loudly. A conversion that can
-   * change the value is written at the site, where a reader can see it; one
-   * that cannot is not worth writing. Two destinations sit outside the rule
-   * because they are not integer range conversions at all: `bool` is a truth
-   * coercion (a comparison's result is an int32 that every `var b: bool = x >
-   * y;` stores), and an enum names a set rather than a range. */
   if (type_checker_is_integer_type(from_type) &&
       type_checker_is_integer_type(to_type)) {
     if (to_type->kind == TYPE_BOOL) {
@@ -2499,10 +2292,9 @@ int type_checker_is_implicitly_convertible(Type *from_type, Type *to_type) {
     return type_checker_int_conversion_is_value_preserving(from_type, to_type);
   }
 
-  // Integer to floating point conversions
   if (type_checker_is_integer_type(from_type) &&
       type_checker_is_floating_type(to_type)) {
-    return 1; // Generally safe
+    return 1;
   }
 
   if (type_checker_is_floating_type(from_type) &&
@@ -2518,7 +2310,6 @@ int type_checker_is_implicitly_convertible(Type *from_type, Type *to_type) {
     return 1;
   }
 
-  // No other implicit conversions are allowed
   return 0;
 }
 
@@ -2530,10 +2321,6 @@ int type_checker_are_compatible(Type *type1, Type *type2) {
     return 1;
   }
 
-  /* Comparison and match-arm unification, not assignment. The narrowing rule
-   * governs where a value is stored; `i < len` stores nothing, so both sides
-   * are read at their own width and every integer stays comparable with every
-   * other. */
   if (type_checker_is_integer_type(type1) &&
       type_checker_is_integer_type(type2)) {
     return 1;
@@ -2545,7 +2332,6 @@ int type_checker_are_compatible(Type *type1, Type *type2) {
     return 0;
   }
 
-  // Check for implicit numeric conversions
   return type_checker_is_implicitly_convertible(type1, type2) ||
          type_checker_is_implicitly_convertible(type2, type1);
 }
@@ -2562,17 +2348,7 @@ Type *type_checker_default_integer_literal_type(TypeChecker *checker,
     radix = 10u;
   }
 
-  /*
-   * Decimal defaults follow signed widening so large magnitudes usable with
-   * unary minus (-2147483648 via -(int64)...). Hex/binary infer uint32 in the
-   * (INT32_MAX, UINT32_MAX] range so 0xFFFFFFFF and similar stay uint32-ish.
-   */
   if (radix == 10u) {
-    /* A literal is never negative in source -- a leading '-' lexes as unary
-     * minus -- so a negative bit pattern here is a decimal past LLONG_MAX that
-     * the parser re-read unsigned. It is a uint64, and typing it int32 by its
-     * bit pattern (18446744073709551615 reading as -1) is how it used to reach
-     * codegen as the right bits for the wrong reason. */
     if (literal->int_value < 0) {
       return checker->builtin_uint64;
     }
@@ -2610,7 +2386,6 @@ Type *type_checker_canon_type(TypeChecker *checker, Type *type) {
         !type_checker_types_equal(existing, type)) {
       continue;
     }
-    /* cstring and uint8* are both pointer-to-uint8 but are distinct types. */
     if (existing->name && type->name &&
         strcmp(existing->name, type->name) != 0) {
       continue;
@@ -2659,11 +2434,6 @@ Type *type_checker_type_from_index(const TypeChecker *checker, uint32_t index) {
   return checker->type_table[index];
 }
 
-/* A type graph has cycles: `struct ArenaChunk { next: ArenaChunk* }` reaches
- * itself through its own field. Aggregates are recorded on the way down so a
- * cycle is walked once rather than forever. Only aggregates need recording --
- * pointer, array, slice and function types can only cycle by passing through
- * one. */
 typedef struct {
   const Type **types;
   size_t count;
@@ -2680,7 +2450,7 @@ static int type_visit_set_enter(TypeVisitSet *seen, const Type *type) {
     size_t next = seen->capacity ? seen->capacity * 2 : 16;
     const Type **grown = realloc(seen->types, next * sizeof(const Type *));
     if (!grown) {
-      return 0; /* treat as already seen: stop descending rather than crash */
+      return 0;
     }
     seen->types = grown;
     seen->capacity = next;
@@ -2780,12 +2550,6 @@ Type *type_checker_field_value(TypeChecker *checker, Type *owner,
   return checker->builtin_field;
 }
 
-/* True for the decimal literal `9223372036854775808`, the magnitude of int64's
- * minimum. A literal is never negative in source, so that number alone is past
- * LLONG_MAX and types uint64; negating it was then refused against a range the
- * diagnostic itself printed as containing the answer, which made int64's
- * minimum the one value nobody could write. Under a unary minus the number is
- * an int64 and the minus belongs to it. */
 int type_checker_is_int64_min_magnitude(const ASTNode *operand) {
   const NumberLiteral *literal;
   if (!operand || operand->type != AST_NUMBER_LITERAL) {

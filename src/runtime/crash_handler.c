@@ -90,20 +90,13 @@ static void mettle_crash_write_pointer(const void *value) {
 
 static void mettle_crash_write_newline(void);
 
-/* Heap classifier hook: --native-heap's allocator (stdlib/std/alloc.mettle)
- * registers a function here that answers whether an address lies inside a
- * quarantined (freed) heap block, returning the block's usable byte count
- * when it does and 0 otherwise. Lets the access-violation report say
- * "use-after-free" instead of printing an anonymous pointer. */
 extern long long (*mettle_crash_heap_classifier)(void *address);
 
-/* One line of insight about WHAT a faulting address is. The raw pointer
- * value rarely tells the user anything; its neighborhood usually does. */
 static void mettle_crash_classify_fault_address(uintptr_t fault_address,
                                                 uintptr_t stack_low,
                                                 uintptr_t stack_high) {
   if (fault_address == 0) {
-    return; /* the address line already says "(null pointer)" */
+    return;
   }
   if (fault_address < 4096) {
     mettle_crash_write_stderr("This address is null plus offset ");
@@ -219,20 +212,6 @@ static int mettle_crash_address_is_readable(const void *address,
 #endif
 }
 
-/* Two location records may share an address: a marker that opens a function and
- * the marker for its first statement land on the same byte when nothing is
- * emitted between them. The lookup below takes the LAST record at or before the
- * program counter, so which of the two answers depends on how the sort ordered
- * them -- and ordering equal keys is exactly what a sort is free to do as it
- * likes. glibc and the Microsoft runtime chose differently, so the same program
- * reported the faulting statement on Windows and the function's own declaration
- * on Linux.
- *
- * The order is total now: address, then the record's position in the emitted
- * table. Records are emitted in program order, so a later one describes code
- * that begins where an earlier one described none, and the later one is the
- * answer. `g_runtime_sort_base` is the array being permuted; registration runs
- * once, from startup, before anything else can be looking. */
 static const MettleCrashLocationInfo *g_runtime_sort_base = NULL;
 
 static int mettle_crash_compare_location_index(const void *left,
@@ -497,10 +476,6 @@ static void mettle_crash_write_trap_report(uintptr_t program_counter,
     return;
   }
 
-  /* A build without -s carries no trap sites, no line table and no function
-   * table, so everything above found nothing and the whole report is one line.
-   * Crash reporting is on by default, so this is what most people see, and it
-   * used to say nothing about where the answer lives. */
   mettle_crash_write_stderr(
       "  no source location in this build; rebuild with -s for the file, line "
       "and stack trace");
@@ -558,9 +533,6 @@ static void mettle_crash_print_frame(size_t index, uintptr_t program_counter) {
   }
 }
 
-/* Function records alone place a fault in a function, at the line that
- * function is declared on. Per-statement lines are a separate, larger table
- * that only -s / -d ask for, so say where the exact line is. */
 static void mettle_crash_write_precision_hint(void) {
   if (g_runtime_debug_location_count > 0 ||
       g_runtime_debug_function_count == 0) {
@@ -597,13 +569,6 @@ static void mettle_crash_print_trace_from_frame(uintptr_t program_counter,
       break;
     }
 
-    /* A trap raised from a runtime helper reports the caller's address as the
-     * program counter and the helper's own frame as the frame pointer, so the
-     * first link in the chain is the return into that same caller: the trace
-     * printed its innermost frame twice, one byte apart, on every report the
-     * safety path has ever made. Recognizing it costs one comparison and
-     * leaves the hardware-fault path alone, where a faulting address is never
-     * equal to a return address. */
     if (index == 1 && return_address == program_counter) {
       current_frame = next_frame;
       continue;
@@ -778,7 +743,6 @@ static void mettle_crash_crash_signal_handler(int signo, siginfo_t *info,
       mettle_crash_write_stderr("  (null pointer dereference)");
     }
     mettle_crash_write_stderr("\n");
-    /* no portable stack bounds here: classify null+offset and freed-heap */
     mettle_crash_classify_fault_address((uintptr_t)info->si_addr, 0, 0);
   }
 

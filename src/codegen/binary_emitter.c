@@ -187,7 +187,6 @@ static int binary_section_reserve(BinaryEmitter *emitter, BinarySection *section
 }
 
 static uint64_t binary_emitter_hash_name(const char *name) {
-  /* FNV-1a 64-bit. unsigned long is 32-bit on Windows, so use a fixed width. */
   uint64_t hash = 1469598103934665603ULL;
   for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
     hash ^= (uint64_t)*p;
@@ -196,8 +195,6 @@ static uint64_t binary_emitter_hash_name(const char *name) {
   return hash;
 }
 
-/* Rebuilds the symbol hash index from scratch over the current symbol array.
- * Called when the index would exceed a 0.7 load factor. */
 static int binary_emitter_symbol_index_rehash(BinaryEmitter *emitter,
                                               size_t new_bucket_count) {
   size_t *buckets = calloc(new_bucket_count, sizeof(size_t));
@@ -223,8 +220,6 @@ static int binary_emitter_symbol_index_rehash(BinaryEmitter *emitter,
   return 1;
 }
 
-/* Records that emitter->symbols[symbol_index] now exists in the hash index.
- * Grows the bucket array first if needed. */
 static int binary_emitter_symbol_index_insert(BinaryEmitter *emitter,
                                               size_t symbol_index) {
   size_t live = symbol_index + 1;
@@ -236,16 +231,13 @@ static int binary_emitter_symbol_index_insert(BinaryEmitter *emitter,
     if (!binary_emitter_symbol_index_rehash(emitter, next)) {
       return 0;
     }
-    /* Rehash already placed every existing symbol, including this one if it
-     * was appended before the call. Re-insert below is still safe because the
-     * caller invokes this exactly once per new symbol. */
   }
   size_t mask = emitter->symbol_index_bucket_count - 1;
   const char *name = emitter->symbols[symbol_index].name;
   size_t pos = (size_t)(binary_emitter_hash_name(name) & (uint64_t)mask);
   while (emitter->symbol_index_buckets[pos] != 0) {
     if (emitter->symbol_index_buckets[pos] == symbol_index + 1) {
-      return 1; /* already present (placed by a rehash) */
+      return 1;
     }
     pos = (pos + 1) & mask;
   }
@@ -275,7 +267,6 @@ static int binary_emitter_find_symbol_index(const BinaryEmitter *emitter,
     return -1;
   }
 
-  /* Index not built yet (no symbols defined), linear fallback. */
   for (size_t i = 0; i < emitter->symbol_count; i++) {
     if (emitter->symbols[i].name &&
         strcmp(emitter->symbols[i].name, name) == 0) {
@@ -715,9 +706,6 @@ static int binary_emitter_write_coff_object_file(BinaryEmitter *emitter,
     binary_emitter_set_error(emitter, "Failed to open object output file");
     return 0;
   }
-  /* The COFF writer emits the header, section table, and symbol table as many
-   * tiny 2/4-byte fwrites. A large stdio buffer collapses those into memory
-   * copies instead of one host write call per field. */
   setvbuf(file, NULL, _IOFBF, 1 << 20);
 
   uint32_t *section_name_offsets = NULL;
@@ -777,19 +765,12 @@ static int binary_emitter_write_coff_object_file(BinaryEmitter *emitter,
     }
     section_reloc_counts[relocation->section_index]++;
   }
-  /* COFF stores a section's relocation count in a 16-bit field. When a section
-   * has more than 0xFFFF relocations we use the IMAGE_SCN_LNK_NRELOC_OVFL
-   * mechanism: the count field is set to 0xFFFF, the flag is set in the section
-   * characteristics, and a synthetic first relocation record carries the real
-   * count (+1, to include itself) in its VirtualAddress. */
   uint32_t reloc_overflow_max = 0xFFFFu;
   for (size_t i = 0; i < emitter->section_count; i++) {
     if (section_reloc_counts[i] > reloc_overflow_max) {
       reloc_overflow_max = section_reloc_counts[i];
     }
   }
-  /* A section with exactly 0xFFFF real relocations would be ambiguous with the
-   * overflow sentinel, so it must also use the overflow form. */
 
   uint32_t offset = 20u + (uint32_t)(emitter->section_count * 40u);
   for (size_t i = 0; i < emitter->section_count; i++) {
@@ -804,7 +785,7 @@ static int binary_emitter_write_coff_object_file(BinaryEmitter *emitter,
       section_reloc_offsets[i] = offset;
       uint32_t records = section_reloc_counts[i];
       if (records >= 0xFFFFu) {
-        records += 1u; /* synthetic overflow-count record */
+        records += 1u;
       }
       offset += records * 10u;
     }
@@ -829,8 +810,6 @@ static int binary_emitter_write_coff_object_file(BinaryEmitter *emitter,
       characteristics =
           binary_emitter_default_section_characteristics(section->kind);
     }
-    /* >= 0xFFFF relocations -> overflow form: 0xFFFF in the count field plus the
-     * IMAGE_SCN_LNK_NRELOC_OVFL (0x01000000) flag. */
     uint16_t reloc_count_field = (uint16_t)section_reloc_counts[i];
     if (section_reloc_counts[i] >= 0xFFFFu) {
       reloc_count_field = 0xFFFFu;
@@ -840,13 +819,6 @@ static int binary_emitter_write_coff_object_file(BinaryEmitter *emitter,
                                            section_name_offsets[i]) ||
         !binary_emitter_write_u32(file, 0) ||
         !binary_emitter_write_u32(file, 0) ||
-        /* SizeOfRawData carries the section's size even for uninitialized
-         * data; it is PointerToRawData that is zero, which is what says the
-         * bytes are not in the file. Writing zero here left a .bss section
-         * whose symbols sat inside a region the header said was empty: GNU ld
-         * reserved nothing for it and the first write to an uninitialized
-         * global faulted. The internal linker sizes .bss from the section
-         * symbol's auxiliary record, so only external linkers saw it. */
         !binary_emitter_write_u32(file, (uint32_t)section->size) ||
         !binary_emitter_write_u32(file, section_raw_offsets[i]) ||
         !binary_emitter_write_u32(file, section_reloc_offsets[i]) ||
@@ -872,12 +844,6 @@ static int binary_emitter_write_coff_object_file(BinaryEmitter *emitter,
     }
   }
 
-  /* Emit relocations grouped by section. The previous implementation rescanned
-   * every relocation once per section (O(sections * relocations)). Instead do
-   * a single counting sort: compute each section's start index in a combined
-   * ordering, then place every relocation in one O(relocations) pass. Combined
-   * with the O(1) symbol-name hash index this drops the whole step from
-   * O(sections * relocations * symbols) to O(relocations). */
   if (emitter->relocation_count > 0) {
     size_t *section_reloc_start =
         calloc(emitter->section_count + 1, sizeof(size_t));
@@ -891,13 +857,11 @@ static int binary_emitter_write_coff_object_file(BinaryEmitter *emitter,
       goto cleanup;
     }
 
-    /* Prefix sums of per-section counts give each section's slot range. */
     for (size_t i = 0; i < emitter->section_count; i++) {
       section_reloc_start[i + 1] =
           section_reloc_start[i] + section_reloc_counts[i];
     }
 
-    /* Stable bucket placement preserves original within-section order. */
     size_t *cursor = calloc(emitter->section_count, sizeof(size_t));
     if (!cursor) {
       free(section_reloc_start);
@@ -913,8 +877,6 @@ static int binary_emitter_write_coff_object_file(BinaryEmitter *emitter,
     }
     free(cursor);
 
-    /* Write relocations per section so an overflow section can be prefixed by
-     * its synthetic count record (VirtualAddress = real count + 1). */
     int order_ok = 1;
     for (size_t s = 0; s < emitter->section_count && order_ok; s++) {
       if (section_reloc_counts[s] == 0) {

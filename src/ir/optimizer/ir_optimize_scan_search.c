@@ -271,9 +271,6 @@ static int ir_verify_minmax_preloop_init(const IRFunction *function,
       }
       continue;
     }
-    /* A pure write to a temp cannot disturb the seeds, the base, or the
-     * counter. Inlining leaves the argument's address math here (`%t <-
-     * &@arr` ahead of the parameter copy), which used to fail the walk. */
     if (ins->dest.kind == IR_OPERAND_TEMP &&
         (ins->op == IR_OP_ASSIGN || ins->op == IR_OP_ADDRESS_OF ||
          ins->op == IR_OP_BINARY || ins->op == IR_OP_UNARY ||
@@ -947,9 +944,6 @@ static int ir_try_fuse_prefix_sum_ptr_at(IRFunction *function,
       !ir_symbol_is_i32_ptr_param(function, dst_base)) {
     return 1;
   }
-  /* No unanchored fallback here: a `<<2` of some bound param floating before
-   * the loop proves nothing about (end - base)/4, which is the kernel's
-   * actual trip count. */
   if (!ir_find_ptr_loop_len_operand(function, bounds.compare_index,
                                     compare->rhs.name, src_base, &len)) {
     return 1;
@@ -1098,7 +1092,6 @@ int ir_prefix_sum_i32_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-
 typedef struct {
   IRInstruction *header;
   size_t branch_index;
@@ -1165,7 +1158,6 @@ static int ir_match_counted_loop(IRFunction *function, size_t header_index,
                                jump_index)) {
     return -1;
   }
-  /* A threaded exit would lose its edge when the loop is fused away. */
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, branch->text) ||
       ir_loop_body_is_unclaimable(function, branch_index + 1, jump_index)) {
     return -1;
@@ -1291,10 +1283,6 @@ static int ir_try_vectorize_dot_i32_at(IRFunction *function, size_t header_index
     return matched == 0 ? 0 : 1;
   }
 
-  /* Require FOUR-BYTE loads: the kernel reads and strides int32 elements, so a
-   * loop over byte arrays with an int64 accumulator matched here and was
-   * replayed four bytes at a time over the wrong memory. The byte dot is a
-   * separate recognizer, keyed on width 1. */
   if (!ir_dot_scan_body(function, &loop, 4, 0, &a_symbol, &b_symbol,
                         &a_unsigned, &b_unsigned, &sum_symbol) ||
       !sum_symbol || !a_symbol || !b_symbol ||
@@ -1311,12 +1299,6 @@ static int ir_try_vectorize_dot_i32_at(IRFunction *function, size_t header_index
   return ir_fuse_counted_loop(function, header_index, &loop, &fused, changed);
 }
 
-/* int8 x int8 -> int32 dot product: the quantized-GEMM inner loop
- *   sum(int32) += (int32)a[i] * (int32)b[i]
- * over a unit-stride counted loop, where a and b are int8 arrays. Recognized by
- * the same shape as the int32 dot but with BYTE loads (load width 1) and an
- * int32 accumulator; emits IR_OP_SIMD_DOT_I8. Matched by instruction pattern
- * (byte loads feeding a multiply-accumulate reduction), not by name. */
 static int ir_try_vectorize_dot_i8_at(IRFunction *function, size_t header_index,
                                       int *changed) {
   IRCountedLoop loop;
@@ -1324,11 +1306,6 @@ static int ir_try_vectorize_dot_i8_at(IRFunction *function, size_t header_index,
   const char *sum_symbol = NULL;
   const char *a_symbol = NULL;
   const char *b_symbol = NULL;
-  /* Whether the byte loads widen zero-extended. A uint8 array and an int8 array
-   * reach here in the same shape, and the two dot products differ: the kernel
-   * has to be told which widening the source asked for. Both sides have to
-   * widen the same way; a mixed int8/uint8 dot is not a shape this kernel
-   * has. */
   int a_unsigned = 0;
   int b_unsigned = 0;
   int matched = ir_match_counted_loop(function, header_index, &loop);
@@ -1491,8 +1468,6 @@ static int ir_try_memcmp_byte_loop_function(IRFunction *function,
       !ir_find_label_index(function, bounds.exit_label, &exit_label_index)) {
     return 1;
   }
-  /* memcmp compares bytes 0..len: the loop must start at iv == 0 (a loop from
-   * iv == 1 that skips byte 0 is NOT memcmp). */
   if (!ir_iv_zero_at_header(function, header_index, iv_symbol)) {
     return 1;
   }
@@ -1614,10 +1589,6 @@ int ir_memcmp_byte_loop_pass(IRFunction *function, int *changed) {
   return ir_try_memcmp_byte_loop_function(function, changed);
 }
 
-/* For a LOAD at `load_index` whose address temp is `addr = base + (index << 2)`,
- * recover the base symbol and the index. The index is either a symbol directly
- * (then *lane_base = that symbol, *lane = 0) or a temp `sym + C` for a small
- * constant C (then *lane_base = sym, *lane = C). Returns 1 on a clean match. */
 static int ir_slp_load_base_index(const IRFunction *function, size_t load_index,
                                   const char *addr_temp, const char **base_out,
                                   const char **lane_base_out, long long *lane_out) {
@@ -1637,7 +1608,6 @@ static int ir_slp_load_base_index(const IRFunction *function, size_t load_index,
       shl->rhs.int_value != 2) {
     return 0;
   }
-  /* shl->lhs is the index: a symbol (lane 0) or a temp `sym + C`. */
   if (shl->lhs.kind == IR_OPERAND_SYMBOL && shl->lhs.name) {
     *lane_base_out = shl->lhs.name;
     *lane_out = 0;
@@ -1658,8 +1628,6 @@ static int ir_slp_load_base_index(const IRFunction *function, size_t load_index,
   return 0;
 }
 
-/* Initial value (a symbol or int) assigned to `sym` by the nearest ASSIGN before
- * `before_index`. Returns a cloned operand in *out, or 0 if not found/clean. */
 static int ir_slp_find_init(const IRFunction *function, size_t before_index,
                             const char *sym, IROperand *out) {
   for (size_t i = before_index; i-- > 0;) {
@@ -1667,14 +1635,11 @@ static int ir_slp_find_init(const IRFunction *function, size_t before_index,
     if ((in->op == IR_OP_ASSIGN || in->op == IR_OP_CAST) &&
         in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
         strcmp(in->dest.name, sym) == 0) {
-      /* Use the source symbol/value directly (a cast of a symbol just renames
-       * its integer value for indexing). */
       if (in->lhs.kind == IR_OPERAND_SYMBOL || in->lhs.kind == IR_OPERAND_INT) {
         return ir_operand_clone(&in->lhs, out);
       }
       return 0;
     }
-    /* A non-NOP redefinition we don't understand: stop. */
     if (in->op == IR_OP_BINARY && in->dest.kind == IR_OPERAND_SYMBOL &&
         in->dest.name && strcmp(in->dest.name, sym) == 0) {
       return 0;
@@ -1683,16 +1648,8 @@ static int ir_slp_find_init(const IRFunction *function, size_t before_index,
   return 0;
 }
 
-/* SLP-vectorize a group of K parallel int32 multiply-accumulate reductions in a
- * counted loop: K isomorphic chains `sumJ = sumJ + (av * b[idxJ])` sharing one
- * broadcast scalar `av = a[a_idx]`, with contiguous loads (idxJ = b_base + J) and
- * K contiguous post-loop stores `c[out_idx + J] = sumJ`. Pattern-based: matches
- * the instruction-level parallelism, not any function or nest shape. */
 #define IR_SLP_MAX_LANES 8
 
-/* Find the K contiguous output stores `c[out_idx + lane] = sum_by_lane[lane]`
- * just after the loop-exit label. Fills c_base/out_idx_sym/store_idx, returns 1
- * if all K are found and consistent. */
 static int ir_slp_find_stores(IRFunction *function, size_t exit_label_index,
                               int K, const char *const *sum_by_lane,
                               const char **c_base_out,
@@ -1739,21 +1696,12 @@ static int ir_slp_find_stores(IRFunction *function, size_t exit_label_index,
   return found == K && c_base && out_idx_sym;
 }
 
-/* The SLP MAC kernels run exactly `compare->rhs` iterations from the recorded
- * a_off/b_off starting indexes, i.e. they replay the loop as iv = 0..bound-1.
- * That is only the scalar trip count when the iv provably starts at 0, steps
- * by exactly +1, and the bound symbol is loop-invariant -- none of which the
- * body scans below establish on their own. */
 static int ir_slp_loop_frame_is_replayable(const IRFunction *function,
                                            size_t header_index,
                                            size_t branch_index,
                                            size_t jump_index,
                                            const IRInstruction *compare,
                                            const char *iv_symbol) {
-  /* The bound is either a loop-invariant symbol or a compile-time constant
-   * (the latter appears once a global bound like `N` is folded, or when the
-   * source writes a literal `while (k < 32)`). A constant is trivially
-   * invariant, so only a symbolic bound needs the body-write check below. */
   const char *bound_sym = NULL;
   if (compare->rhs.kind == IR_OPERAND_SYMBOL && compare->rhs.name) {
     bound_sym = compare->rhs.name;
@@ -1770,14 +1718,10 @@ static int ir_slp_loop_frame_is_replayable(const IRFunction *function,
       iv_inc_ok = 1;
       continue;
     }
-    /* Any other write to the iv (a second increment, a reset) breaks the
-     * trip-count identity. */
     if (ir_instruction_writes_destination(ins) &&
         ir_operand_is_symbol_named(&ins->dest, iv_symbol)) {
       return 0;
     }
-    /* A symbolic bound is read once by the kernel: a write in the body
-     * diverges. (A constant bound cannot be written.) */
     if (bound_sym && ir_instruction_writes_destination(ins) &&
         ir_operand_is_symbol_named(&ins->dest, bound_sym)) {
       return 0;
@@ -1813,7 +1757,6 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
   }
   const char *iv_symbol = compare->lhs.name;
 
-  /* Back-edge jump to the header. */
   size_t jump_index = (size_t)-1;
   for (size_t i = branch_index + 1; i < function->instruction_count; i++) {
     if (function->instructions[i].op == IR_OP_JUMP &&
@@ -1831,15 +1774,13 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, branch->text)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
   if (!ir_slp_loop_frame_is_replayable(function, header_index, branch_index,
                                        jump_index, compare, iv_symbol)) {
     return 1;
   }
 
-  /* Collect accumulator chains: `S = S + T` where T = av * bload. The shared
-   * broadcast `av` is a symbol (a named local); each `bload` is a temp. */
   const char *sum_sym[IR_SLP_MAX_LANES];
   const char *bload_temp[IR_SLP_MAX_LANES];
   const char *av_sym = NULL;
@@ -1858,7 +1799,6 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
         strcmp(mul->text, "*") != 0 || mul->is_float) {
       continue;
     }
-    /* One operand is the shared symbol (av), the other the per-lane load temp. */
     const char *cand_av = NULL, *cand_ld = NULL;
     if (mul->lhs.kind == IR_OPERAND_SYMBOL && mul->lhs.name &&
         mul->rhs.kind == IR_OPERAND_TEMP && mul->rhs.name) {
@@ -1889,7 +1829,6 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
     return 1;
   }
 
-  /* av = a[a_idx]: a load into the symbol av, address a_base + (a_idx << 2). */
   const IRInstruction *avld = NULL;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *in = &function->instructions[i];
@@ -1907,8 +1846,6 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
     return 1;
   }
 
-  /* Each bload: b_base + ((b_idx_sym + lane) << 2), lanes 0..K-1 (a permutation);
-   * build sum_by_lane[lane] = that chain's accumulator. */
   const char *b_base = NULL, *b_idx_sym = NULL;
   const char *sum_by_lane[IR_SLP_MAX_LANES] = {0};
   for (int j = 0; j < K; j++) {
@@ -1937,7 +1874,7 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
       return 1;
     }
     if (sum_by_lane[lane]) {
-      return 1; /* duplicate lane */
+      return 1;
     }
     sum_by_lane[lane] = sum_sym[j];
   }
@@ -1945,11 +1882,6 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
     return 1;
   }
 
-  /* Loop IV increments: iv (k) += 1, a_idx += 1, b_idx += stride. The stride
-   * is the matrix row length: a loop-invariant symbol, OR a compile-time
-   * constant -- directly, or as a cast of one -- which is what a folded
-   * global bound (`(int64)N` -> `(int64)32`) or a literal row length lowers
-   * to. The kernel consumes the stride as an INT or a symbol equally. */
   IROperand stride_op = {0};
   int have_stride = 0;
   int a_inc_ok = 0, b_inc_ok = 0;
@@ -1990,7 +1922,6 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
     return 1;
   }
 
-  /* Initial index values (before the loop). */
   IROperand a_off = {0}, b_off = {0};
   if (!ir_slp_find_init(function, header_index, a_idx_sym, &a_off) ||
       !ir_slp_find_init(function, header_index, b_idx_sym, &b_off)) {
@@ -2000,8 +1931,6 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
     return 1;
   }
 
-  /* Post-loop: K contiguous stores `c[out_idx + lane] = sum_by_lane[lane]` right
-   * after the loop-exit label. */
   size_t exit_label_index = (size_t)-1;
   for (size_t i = jump_index + 1; i < function->instruction_count; i++) {
     if (function->instructions[i].op == IR_OP_LABEL &&
@@ -2036,13 +1965,10 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
     return 1;
   }
 
-  /* The trip count: a symbol (loop-invariant bound) or a constant (a folded
-   * global / literal bound). The kernel accepts either. */
   IROperand count_op = (compare->rhs.kind == IR_OPERAND_INT)
                            ? ir_operand_int(compare->rhs.int_value)
                            : ir_operand_symbol(compare->rhs.name);
 
-  /* Build the op at the first store; out_idx is live there. */
   IRInstruction fused = {0};
   fused.op = IR_OP_SIMD_SLP_MAC_I32;
   fused.location = header->location;
@@ -2059,16 +1985,15 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
   }
   fused.argument_count = 6;
   fused.arguments[0] = ir_operand_int(K);
-  fused.arguments[1] = count_op;                       /* count (sym or int) */
-  fused.arguments[2] = a_off;                          /* a_off */
-  fused.arguments[3] = b_off;                          /* b_off */
-  fused.arguments[4] = stride_op;                      /* b stride (sym/int) */
-  fused.arguments[5] = ir_operand_symbol(out_idx_sym); /* out_off */
+  fused.arguments[1] = count_op;
+  fused.arguments[2] = a_off;
+  fused.arguments[3] = b_off;
+  fused.arguments[4] = stride_op;
+  fused.arguments[5] = ir_operand_symbol(out_idx_sym);
 
   size_t place = store_idx[0];
   ir_instruction_destroy_storage(&function->instructions[place]);
   function->instructions[place] = fused;
-  /* NOP the loop (header..jump) and the other stores. */
   for (size_t i = header_index; i <= jump_index; i++) {
     ir_instruction_make_nop(&function->instructions[i]);
   }
@@ -2096,13 +2021,6 @@ int ir_simd_slp_mac_i32_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* int8 variant of the SLP MAC value resolver. The multiply operand `val_name`
- * (the broadcast symbol `av`, or a per-lane bload temp) is the result of a
- * `(int32)` cast of a BYTE load: follow cast -> byte load (width 1) -> address
- * temp, then resolve the address as `base + index` with NO <<2 shift (int8
- * arrays are 1-byte-indexed, unlike the int32 path's base + (index<<2)). The
- * index is a symbol (lane 0) or a temp `sym + C` (lane C, a congruent-IV form).
- * val_is_temp selects whether val_name is a temp (bload) or symbol (av). */
 static int ir_slp_i8_resolve(IRFunction *fn, size_t lo, size_t hi,
                              int val_is_temp, const char *val_name,
                              const char **base_out, const char **lane_base_out,
@@ -2166,11 +2084,6 @@ static int ir_slp_i8_resolve(IRFunction *fn, size_t lo, size_t hi,
   return 0;
 }
 
-/* int8 x int8 -> int32 SLP MAC: the quantized-GEMM tile. Same K-parallel
- * broadcast-MAC shape as ir_try_vectorize_slp_mac_i32_at, but a/b are int8
- * arrays (byte loads + (int32) casts, scale-1 indexing) while c is int32
- * (scale-4 stores, resolved by the shared ir_slp_find_stores). Emits
- * IR_OP_SIMD_SLP_MAC_I8. */
 static int ir_try_vectorize_slp_mac_i8_at(IRFunction *function,
                                           size_t header_index, int *changed) {
   if (!function || header_index + 4 >= function->instruction_count) {
@@ -2215,14 +2128,13 @@ static int ir_try_vectorize_slp_mac_i8_at(IRFunction *function,
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, branch->text)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
   if (!ir_slp_loop_frame_is_replayable(function, header_index, branch_index,
                                        jump_index, compare, iv_symbol)) {
     return 1;
   }
 
-  /* Collect chains `S = S + (av * bload)`, av a symbol, bload a temp. */
   const char *sum_sym[IR_SLP_MAX_LANES];
   const char *bload_temp[IR_SLP_MAX_LANES];
   const char *av_sym = NULL;
@@ -2271,7 +2183,6 @@ static int ir_try_vectorize_slp_mac_i8_at(IRFunction *function,
     return 1;
   }
 
-  /* av = (int32)a[a_idx] (byte load, scale-1 address). */
   const char *a_base = NULL, *a_idx_sym = NULL;
   long long a_lane = 0;
   if (!ir_slp_i8_resolve(function, branch_index + 1, jump_index, 0, av_sym,
@@ -2280,7 +2191,6 @@ static int ir_try_vectorize_slp_mac_i8_at(IRFunction *function,
     return 1;
   }
 
-  /* Each bload = (int32)b[b_idx + lane] (byte load, scale-1). */
   const char *b_base = NULL, *b_idx_sym = NULL;
   const char *sum_by_lane[IR_SLP_MAX_LANES] = {0};
   for (int j = 0; j < K; j++) {
@@ -2306,7 +2216,6 @@ static int ir_try_vectorize_slp_mac_i8_at(IRFunction *function,
     return 1;
   }
 
-  /* IV increments: a_idx += 1, b_idx += stride. */
   const char *stride_sym = NULL;
   int a_inc_ok = 0, b_inc_ok = 0;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
@@ -2427,12 +2336,6 @@ int ir_simd_slp_mac_i8_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* In-place vectorization of `a[i] = expf(a[i])` over a float32 array: a counted
- * unit stride loop whose body loads a float, calls the owned `expf`, and stores
- * the result back to the same element. Like a compiler's libm vectorizer
- * (libmvec/SVML), it replaces the call loop with an AVX2 polynomial exp
- * (IR_OP_SIMD_EXP_F32). Matched by the math-function call + element-wise map
- * shape, not a benchmark. The result tracks the owned expf within tolerance. */
 static int ir_try_vectorize_exp_f32_at(IRFunction *function, size_t header_index,
                                        int *changed) {
   if (!function || header_index + 4 >= function->instruction_count) {
@@ -2478,10 +2381,9 @@ static int ir_try_vectorize_exp_f32_at(IRFunction *function, size_t header_index
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, branch->text)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
 
-  /* The expf call: r = expf(v), with v and r temps. */
   const char *call_arg = NULL, *call_res = NULL;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *in = &function->instructions[i];
@@ -2498,7 +2400,6 @@ static int ir_try_vectorize_exp_f32_at(IRFunction *function, size_t header_index
     return 1;
   }
 
-  /* The load that feeds the call: v = a[i] (float32, base+(i<<2), lane 0). */
   const char *a_base = NULL, *a_idx = NULL;
   long long lane = 0;
   int found_load = 0;
@@ -2517,7 +2418,6 @@ static int ir_try_vectorize_exp_f32_at(IRFunction *function, size_t header_index
     return 1;
   }
 
-  /* The store of the result back to a[i] (same base, in-place). */
   int found_store = 0;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *in = &function->instructions[i];
@@ -2537,7 +2437,6 @@ static int ir_try_vectorize_exp_f32_at(IRFunction *function, size_t header_index
     return 1;
   }
 
-  /* i increments by 1. */
   int inc_ok = 0;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     if (ir_try_parse_direct_unit_increment(&function->instructions[i],
@@ -2549,8 +2448,6 @@ static int ir_try_vectorize_exp_f32_at(IRFunction *function, size_t header_index
   if (!inc_ok) {
     return 1;
   }
-  /* The kernel maps a[0..n) in place: the loop must start at iv == 0, and the
-   * iv must be dead after the loop (the fused op drops it). */
   if (!ir_iv_zero_at_header(function, header_index, iv_symbol) ||
       ir_symbol_live_after_loop(function, jump_index + 1, iv_symbol)) {
     return 1;
@@ -2565,7 +2462,7 @@ static int ir_try_vectorize_exp_f32_at(IRFunction *function, size_t header_index
     return 0;
   }
   fused.argument_count = 1;
-  fused.arguments[0] = ir_operand_symbol(compare->rhs.name); /* count n */
+  fused.arguments[0] = ir_operand_symbol(compare->rhs.name);
 
   ir_instruction_destroy_storage(header);
   *header = fused;
@@ -2593,14 +2490,6 @@ int ir_simd_exp_f32_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* In-place SiLU / SwiGLU gate over a float32 array:
- *   out[i] = silu(g[i])          -> SiLU
- *   out[i] = silu(g[i]) * u[i]   -> SwiGLU gate (the FFN activation)
- * where silu(x) = x / (1 + expf(0 - x)). The body (after inlining `silu`) is the
- * fixed DAG: load g -> `0 - g` -> expf -> `1 + e` -> `g / (1+e)` -> [load u, mul]
- * -> store g (in-place). Lowered to IR_OP_SIMD_SILU_F32, which reuses the AVX2
- * exp polynomial. Matched by shape (not a benchmark); the result tracks the
- * scalar silu within the exp kernel's tolerance. */
 static int ir_try_vectorize_silu_f32_at(IRFunction *function,
                                         size_t header_index, int *changed) {
   if (!function || header_index + 4 >= function->instruction_count) {
@@ -2646,10 +2535,9 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, branch->text)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
 
-  /* expf call: exp_res = expf(exp_arg). */
   const char *exp_arg = NULL, *exp_res = NULL;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *in = &function->instructions[i];
@@ -2666,7 +2554,6 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
     return 1;
   }
 
-  /* exp_arg = 0.0 - g_temp  (float negate). */
   const IRInstruction *neg =
       ir_find_temp_producer_before(function, jump_index, exp_arg);
   if (!neg || neg->op != IR_OP_BINARY || !neg->is_float || !neg->text ||
@@ -2677,7 +2564,6 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
   }
   const char *g_temp = neg->rhs.name;
 
-  /* g_temp = load base_g[iv] (unit stride, lane 0). */
   const IRInstruction *gload =
       ir_find_temp_producer_before(function, jump_index, g_temp);
   const char *base_g = NULL, *gidx = NULL;
@@ -2691,7 +2577,6 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
     return 1;
   }
 
-  /* add_res = 1.0 + exp_res  (commutative). */
   const char *add_res = NULL;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *in = &function->instructions[i];
@@ -2710,9 +2595,6 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
     return 1;
   }
 
-  /* silu_res = g / add_res. The numerator is g: either the exact temp the negate
-   * used (inlined `silu(v)` loads g once), or a second load of base_g[iv] (a
-   * directly-written `g[i] / (1 + expf(-g[i]))` loads g[i] twice). */
   const char *silu_res = NULL;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *in = &function->instructions[i];
@@ -2745,8 +2627,6 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
     return 1;
   }
 
-  /* Store base_out[iv] = final, base_out == base_g (in-place). final is silu_res
-   * (plain SiLU) or silu_res * u[iv] (SwiGLU gate). */
   const char *base_u = NULL;
   int has_mul = 0;
   int found_store = 0;
@@ -2799,7 +2679,6 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
     return 1;
   }
 
-  /* iv increments by 1, starts at 0, and is dead after the loop. */
   int inc_ok = 0;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     if (ir_try_parse_direct_unit_increment(&function->instructions[i],
@@ -2818,7 +2697,7 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
   fused.location = header->location;
   fused.is_float = 1;
   fused.float_bits = 32;
-  fused.dest = ir_operand_symbol(base_g); /* in-place: out == g */
+  fused.dest = ir_operand_symbol(base_g);
   fused.lhs = ir_operand_symbol(base_g);
   if (has_mul) {
     fused.rhs = ir_operand_symbol(base_u);
@@ -2828,7 +2707,7 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
     return 0;
   }
   fused.argument_count = 1;
-  fused.arguments[0] = ir_operand_symbol(compare->rhs.name); /* count n */
+  fused.arguments[0] = ir_operand_symbol(compare->rhs.name);
 
   ir_instruction_destroy_storage(header);
   *header = fused;

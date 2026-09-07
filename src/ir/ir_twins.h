@@ -20,8 +20,6 @@ int ir_program_has_twins(const IRProgram *program);
 int ir_twins_check(IRProgram *program, ErrorReporter *reporter, FILE *report,
                    const char *stage, IRTwinStats *stats);
 
-/* Snapshot every reference before the optimizer runs, so the pair can be
-   re-checked afterwards even when the reference itself was swept as dead. */
 IRTwinSnapshots *ir_twins_capture(IRProgram *program);
 void ir_twins_snapshots_free(IRTwinSnapshots *snapshots);
 int ir_twins_recheck(IRProgram *program, const IRTwinSnapshots *snapshots,

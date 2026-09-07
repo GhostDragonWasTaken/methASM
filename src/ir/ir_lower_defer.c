@@ -1,4 +1,3 @@
-// AST->IR lowering: defer-statement capture and replay.
 #include "ir_lowering_internal.h"
 
 int ir_defer_stack_push(IRLoweringContext *context, IRDeferStack *stack,
@@ -26,7 +25,6 @@ int ir_defer_stack_push(IRLoweringContext *context, IRDeferStack *stack,
   return 1;
 }
 
-// Release a defer stack's entries along with any by-value capture metadata.
 void ir_defer_stack_free(IRDeferStack *stack) {
   if (!stack) {
     return;
@@ -46,13 +44,6 @@ void ir_defer_stack_free(IRDeferStack *stack) {
   stack->capacity = 0;
 }
 
-// If `defer_node` defers a direct function call with arguments, snapshot each
-// argument value into a fresh temp local at the current (defer-point) position
-// and record the call name + temp names for by-value replay. Returns 1 when the
-// call was captured; 0 means the deferred statement should be replayed by
-// re-lowering its AST (no arguments, a method/indirect call, or an argument
-// whose type we cannot snapshot). Returns -1 if a real error occurred while
-// emitting the snapshots (an error has been set on the context).
 int ir_defer_capture_call(IRLoweringContext *context,
                                  IRFunction *function, ASTNode *defer_node,
                                  char **out_call_name, char ***out_temps,
@@ -70,7 +61,6 @@ int ir_defer_capture_call(IRLoweringContext *context,
   if (!call || !call->function_name || call->argument_count == 0) {
     return 0;
   }
-  // Method calls (with a receiver) and indirect calls keep by-reference replay.
   if (call->object || call->is_indirect_call) {
     return 0;
   }
@@ -78,8 +68,6 @@ int ir_defer_capture_call(IRLoweringContext *context,
       strcmp(call->function_name, "static_assert") == 0) {
     return 0;
   }
-  // Each argument needs a concrete resolved type so the snapshot local can be
-  // declared with an explicit type (required by the binary backend).
   for (size_t i = 0; i < call->argument_count; i++) {
     if (!call->arguments[i] || !call->arguments[i]->resolved_type ||
         !call->arguments[i]->resolved_type->name) {
@@ -167,8 +155,6 @@ int ir_emit_deferred_calls_filtered(IRLoweringContext *context,
       continue;
     }
 
-    // By-value capture: replay the call against the argument snapshots taken at
-    // the defer point instead of re-evaluating the original argument exprs.
     if (stack->entries[i - 1].capture_call_name) {
       size_t argc = stack->entries[i - 1].capture_arg_count;
       char **temps = stack->entries[i - 1].capture_arg_temps;
@@ -248,11 +234,6 @@ int ir_emit_deferred_calls_non_err(IRLoweringContext *context,
   return ir_emit_deferred_calls_filtered(context, function, stack, 0);
 }
 
-/* A `break` or `continue` leaves every scope between the jump and the loop it
-   targets, so those scopes' deferred statements run first. `stop` is the
-   chain the loop was entered with and stays untouched: the loop is inside it,
-   and the jump does not leave it. `errdefer` entries are skipped, since they
-   belong to the function's return. */
 int ir_emit_defers_until_scope(IRLoweringContext *context,
                                IRFunction *function, const IRDeferScope *from,
                                const IRDeferScope *stop) {
@@ -314,25 +295,12 @@ static int ir_emit_errdefer_condition(IRLoweringContext *context,
   Type *value_type = ir_returned_symbol_type(context, function, value);
   IROperand address = ir_operand_none();
   IRInstruction load = {0};
-  /* Whether the value is a pointer or a float is decided from the FUNCTION's
-   * declared return type, not the returned operand's. The operand is often a
-   * temp -- a cast, an arithmetic result -- or a parameter, and neither
-   * carries a type resolvable here, so `return (Buf*)0` and `return n` fell
-   * through to "nonzero means error" in a function whose signature says
-   * exactly what it returns. The tagged-enum path below still keys off the
-   * operand, because it needs the symbol's address to load the discriminant. */
   Type *declared = (function && function->return_type_name)
                        ? ir_resolve_named_type(context,
                                                function->return_type_name)
                        : NULL;
 
   if (!value_type || value_type->kind != TYPE_TAGGED_ENUM) {
-    /* Only a tagged enum carries a discriminant an errdefer can read. A struct
-     * or an array has no scalar to test at all, and copying one here would ask
-     * every backend to load a whole record into a branch condition.
-     *
-     * A float has no failure convention: 0.0 is an ordinary result, so
-     * `return 1.5` must not count as an error. */
     Type *shape = declared ? declared : value_type;
     int aggregate = shape && (shape->kind == TYPE_STRUCT ||
                               shape->kind == TYPE_ARRAY ||
@@ -340,17 +308,6 @@ static int ir_emit_errdefer_condition(IRLoweringContext *context,
                               shape->kind == TYPE_FLOAT64 ||
                               shape->kind == TYPE_FLOAT16 ||
                               shape->kind == TYPE_BFLOAT16);
-    /* A pointer fails by being NULL, so the test is inverted from the integer
-     * status-code one. Reading a pointer the same way as an int had the
-     * documented idiom exactly backwards:
-     *
-     *   var p: Buf* = new Buf;
-     *   errdefer release(p);
-     *   ...
-     *   return p;            // non-null: the cleanup RAN, freeing the
-     *                        // buffer the caller just received
-     *
-     * and the failure path, returning null, skipped the cleanup and leaked. */
     if (shape && value->kind != IR_OPERAND_NONE &&
         (shape->kind == TYPE_POINTER ||
          shape->kind == TYPE_FUNCTION_POINTER)) {
@@ -400,11 +357,6 @@ static int ir_emit_errdefer_condition(IRLoweringContext *context,
   return 1;
 }
 
-/* A scope exists around every function body, deferred statement or not, so the
- * pointer alone does not say there is anything to run. Only a chain that holds
- * one needs the returned value copied out of reach of it, and for an aggregate
- * the copy is not free: it costs `--safe` the allocation identity the value
- * carries, which is a real loss on every function that returns a struct. */
 static int ir_defer_scope_has_any(const IRDeferScope *scope) {
   for (; scope; scope = scope->parent) {
     if (scope->stack.count > 0) {
@@ -423,14 +375,6 @@ static Type *ir_current_return_type(IRLoweringContext *context) {
                                        context->current_return_type_name);
 }
 
-/* Whether the value this function returns is one a plain ASSIGN can carry.
- *
- * An aggregate needs the copy too, but it cannot have this one: it goes back
- * by address or in a shape the return path builds for it, so assigning its
- * name into a temp changes what the RETURN is looking at. `errdefer` then
- * reads the address of a tagged enum instead of its tag, and `--safe` loses
- * the origin the value was carrying. It gets a declared local of its own type
- * instead -- see ir_snapshot_returned_aggregate. */
 static int ir_return_type_is_plain_scalar(IRLoweringContext *context) {
   Type *type = ir_current_return_type(context);
   if (!type) {
@@ -451,8 +395,6 @@ static int ir_return_type_is_plain_scalar(IRLoweringContext *context) {
   case TYPE_FLOAT64:
   case TYPE_FLOAT16:
   case TYPE_BFLOAT16:
-  /* A pointer is register-width and the errdefer test on one reads the value,
-   * not the storage, so the copy carries everything the return path wants. */
   case TYPE_POINTER:
     return 1;
   default:
@@ -468,15 +410,6 @@ static int ir_return_type_is_copyable_aggregate(Type *type) {
          type->kind == TYPE_SLICE || type->kind == TYPE_TAGGED_ENUM;
 }
 
-/* The aggregate half of the same problem the scalar snapshot solves.
- *
- * `return p` on a struct hands the RETURN the name of the local, and the
- * deferred statements run before the value leaves, so `defer p.x = 0` reached
- * the caller. A temp cannot hold the copy -- the RETURN has to keep looking at
- * a named value of the declared type for the by-address path and for the tag
- * `errdefer` reads -- so declare a local of that same type and copy into it.
- * Above eight bytes that is the whole-struct memcpy an ordinary `var q: P = p`
- * lowers to; at or below it, the one word an ASSIGN moves is the whole value. */
 static int ir_snapshot_returned_aggregate(IRLoweringContext *context,
                                           IRFunction *function, Type *type,
                                           const IROperand *value,
@@ -523,15 +456,6 @@ int ir_emit_return_with_defers(IRLoweringContext *context,
     return 0;
   }
 
-  /* `return x` reads x before the deferred statements run, and a deferred
-   * statement is allowed to write x: `defer done = 0` after `return done` is
-   * the shape this exists for. A named operand still names its storage when
-   * the RETURN reads it, so the cleanup's write reached the returned value and
-   * the caller saw what the cleanup left rather than what the function
-   * computed.
-   *
-   * Take a copy first and return the copy. Only a name needs it: a temp
-   * already holds a value nothing else writes, and a literal is a literal. */
   if (value->kind == IR_OPERAND_SYMBOL && ir_defer_scope_has_any(defers)) {
     Type *return_type = ir_current_return_type(context);
     if (ir_return_type_is_plain_scalar(context)) {

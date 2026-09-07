@@ -1,5 +1,3 @@
-/* Included by safety.c. All identities and memory metadata share its lock.
- * Pointer values and public layouts remain ordinary machine values. */
 
 uint64_t mettle_safety_identity(const void *pointer) {
   if (!pointer) return 0;
@@ -13,7 +11,6 @@ static SafetyRegion safety_identity_snapshot(uint64_t identity) {
   const SafetyRegion *region = safety_region((uint32_t)(identity & 0xffffffu));
   if (region && region->identity == identity) result = *region;
   safety_unlock();
-  /* Reusing a descriptor must not revive any pointer that named it. */
   if (result.state == SAFETY_STATE_FREELIST) result.state = SAFETY_STATE_DEAD;
   return result;
 }
@@ -51,15 +48,11 @@ int64_t mettle_safety_span_identity(const void *base, uint64_t identity) {
   return (int64_t)(region.size - (address - region.start));
 }
 
-/* A value can carry at most one allocation origin. Combining two different
- * origins cannot create a valid pointer, but subtracting them may form an
- * ordinary integer. Keep an invalid identity if it later reaches an access. */
 uint64_t mettle_safety_merge_identity(uint64_t a, uint64_t b) {
   return !a ? b : !b || a == b ? a : UINT64_MAX;
 }
 
 uint64_t mettle_safety_subtract_identity(uint64_t a, uint64_t b) {
-  /* The difference between two addresses is an integer distance. */
   return a && b ? 0 : a ? a : b;
 }
 
@@ -83,7 +76,6 @@ static size_t safety_value_bucket(uintptr_t address) {
   return (size_t)((address >> 3) ^ (address >> 17)) & (SAFETY_VALUE_BUCKETS - 1);
 }
 
-/* Caller holds the lock. */
 static uint64_t safety_owner_identity(uintptr_t address) {
   uint32_t id = safety_lookup(address);
   SafetyRegion *region = id >= SAFETY_ID_FIRST ? safety_region(id) : NULL;
@@ -147,8 +139,6 @@ void mettle_safety_value_store(void *slot, uint64_t value, uint64_t identity,
   safety_lock();
   uint64_t width = size > 8 ? 8 : size;
   int ok = 1;
-  /* Byte metadata preserves pointer origins through packed fields and ordinary
-   * byte copy loops as well as through native word loads and stores. */
   for (uint64_t i = 0; i < width; i++) {
     if (!safety_value_set(address + (uintptr_t)i, (value >> (8 * i)) & 255, identity)) {
       ok = 0;
@@ -271,11 +261,6 @@ void mettle_safety_region_begin(void *pointer, int64_t size) {
   mettle_safety_register_static(pointer, (uint64_t)size);
 }
 
-/* The process hands main its argument vector, so nothing in the program ever
- * allocated it. Describe it here and give every string an identity of its own,
- * which is what lets an index into either one be checked rather than waved
- * through. Adjacent short arguments share a granule; the exact descriptor
- * bounds settle which one an address belongs to. */
 void mettle_safety_entry_arguments(void *vector) {
   if (!vector) return;
   char **arguments = (char **)vector;
@@ -312,7 +297,6 @@ uint64_t mettle_safety_string_identity(const void *record, uint64_t size) {
   return identity;
 }
 
-/* Only the compiler calls this for a pointer relocation in a static image. */
 void mettle_safety_global_pointer(void *slot, uint64_t mode, uint64_t size) {
   if (mode == 3) {
     mettle_safety_string_identity(slot, size);
@@ -334,9 +318,6 @@ void mettle_safety_buffer_check(void *pointer, int64_t size, uint32_t kind,
   mettle_safety_check_identity(pointer, 0, size, kind, line, identity);
 }
 
-/* Thread scoped call metadata preserves the native calling convention. The
- * callee must claim its own frame, so a foreign callback cannot accidentally
- * take the metadata meant for the foreign function. */
 typedef struct SafetyPacket {
   struct SafetyPacket *next;
   size_t size;
@@ -479,14 +460,6 @@ void mettle_safety_call_arg_copy(void *call, uint64_t index, const void *source,
   frame->arguments[index] = (uint64_t)(uintptr_t)safety_packet_capture(frame, source, size);
 }
 
-/* Describe the characters a string value points at, and record that origin on
- * the value's own pointer field.
- *
- * mettle_safety_string_identity describes the RECORD as well, which is right
- * for one sitting in the image and wrong for one on the stack: registering a
- * stack slot as a static region leaves a description behind that outlives the
- * frame. A local holding a copy of a literal needs only its characters
- * described. */
 void mettle_safety_string_contents(void *record, uint64_t chars) {
   const void *data;
   uint64_t identity;

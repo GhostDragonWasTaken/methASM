@@ -671,7 +671,6 @@ int code_generator_binary_emit_dwarf_debug_sections(CodeGenerator *generator) {
   producer_offset = (uint32_t)debug_str.size;
   if (!binary_debug_append_cstring(&debug_str, "mettle")) goto cleanup;
 
-  /* Abbrev 1: a compact compile-unit DIE with a line table reference. */
   if (!binary_debug_append_uleb128(&debug_abbrev, 1) ||
       !binary_debug_append_uleb128(&debug_abbrev, 0x11) ||
       !binary_code_buffer_append_u8(&debug_abbrev, 0) ||

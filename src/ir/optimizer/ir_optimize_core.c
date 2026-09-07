@@ -1,5 +1,5 @@
 #include "ir_optimize_internal.h"
-#include "../../common.h" // mettle_free_string
+#include "../../common.h"
 
 #include <limits.h>
 
@@ -174,11 +174,6 @@ void ir_name_map_destroy(IRNameMap *map) {
 }
 
 char *ir_make_inline_prefix(const char *callee_name, size_t inline_id) {
-  /* The site id alone is unique (one shared counter per inlining run; the
-   * forced-inline simulator uses a disjoint high base). The callee name used
-   * to be embedded for readability, but nested inlining compounds prefixes
-   * into very long names whose hashing/compare/copy cost was measurable in
-   * every downstream pass -- keep them short. */
   (void)callee_name;
   int length = snprintf(NULL, 0, "__inl_%zu", inline_id);
   if (length < 0) {
@@ -254,10 +249,6 @@ int ir_instruction_writes_temp(const IRInstruction *instruction) {
   case IR_OP_CALL_INDIRECT:
   case IR_OP_NEW:
   case IR_OP_CAST:
-  /* A three-operand select and the LCG kernel both name their result in
-   * dest. Leaving them out told every caller the symbol was never written,
-   * which is the unsound direction: a pass that asks whether a variable is
-   * assigned anywhere concluded no and treated it as a constant. */
   case IR_OP_SELECT:
   case IR_OP_SIMD_LCG_U32:
     return 1;
@@ -285,7 +276,7 @@ int ir_instruction_writes_symbol(const IRInstruction *instruction) {
   case IR_OP_CAST:
   case IR_OP_COUNT_WORD_STARTS:
   case IR_OP_MEMCPY_INLINE:
-  case IR_OP_SIMD_FILL: /* dest, when set, receives the final byte offset */
+  case IR_OP_SIMD_FILL:
   case IR_OP_SIMD_SUM_I32:
   case IR_OP_SIMD_SUM_U8:
   case IR_OP_SIMD_MATMUL_N32:
@@ -315,7 +306,6 @@ int ir_instruction_writes_symbol(const IRInstruction *instruction) {
   case IR_OP_SIMD_OUTER_LANE_F64:
   case IR_OP_SELECT:
   case IR_OP_SIMD_LCG_U32:
-  /* GPU shared/local allocation names its pointer in dest. */
   case IR_OP_ADDRESS_SPACE_ALLOC:
     return 1;
   default:
@@ -341,7 +331,7 @@ int ir_instruction_writes_destination(const IRInstruction *instruction) {
   case IR_OP_CAST:
   case IR_OP_COUNT_WORD_STARTS:
   case IR_OP_MEMCPY_INLINE:
-  case IR_OP_SIMD_FILL: /* dest, when set, receives the final byte offset */
+  case IR_OP_SIMD_FILL:
   case IR_OP_SIMD_SUM_I32:
   case IR_OP_SIMD_SUM_U8:
   case IR_OP_SIMD_MATMUL_N32:
@@ -371,7 +361,6 @@ int ir_instruction_writes_destination(const IRInstruction *instruction) {
   case IR_OP_SIMD_OUTER_LANE_F64:
   case IR_OP_SELECT:
   case IR_OP_SIMD_LCG_U32:
-  /* GPU shared/local allocation names its pointer in dest. */
   case IR_OP_ADDRESS_SPACE_ALLOC:
     return 1;
   default:
@@ -379,18 +368,6 @@ int ir_instruction_writes_destination(const IRInstruction *instruction) {
   }
 }
 
-/* An integer divide or modulo faults on the machine, and a fault is something
- * the program does. Removing one because nothing reads its result removes the
- * trap with it, and `if ((b % (a / b)) != 0) { a = a; }` is a whole branch
- * whose only effect IS the trap: debug stopped with a divide-by-zero report at
- * the right line and -O returned a number. `--verify` calls that a miscompile
- * and quarantines whichever pass did it, so the passes and the validator
- * disagreed about the same instruction.
- *
- * A constant divisor settles it. Zero is the fault everyone means; on x86 the
- * signed form also faults on the minimum over -1, so -1 stays live too. Any
- * other constant cannot fault and the instruction is as dead as an add. A
- * float divide answers inf or nan and never faults. */
 static int ir_binary_divide_may_fault(const IRInstruction *instruction) {
   if (instruction->op != IR_OP_BINARY || instruction->is_float ||
       !instruction->text) {
@@ -425,17 +402,11 @@ int ir_instruction_is_trivially_dead_if_dest_unused(
   }
 }
 
-/* True when a declared type name makes the SYMBOL denote storage rather than a
- * value: a string, an array, a struct. `@a <- @b` on one of those is a block
- * copy, so `@a` still names its own bytes afterwards -- rewriting a later use
- * of `@a` to `@b` would send `*(@a + k) <- v` through the source instead, and
- * when the source is a literal that means a write into rodata. Scalars,
- * pointers and function pointers carry their whole value in the symbol. */
 static int ir_type_name_denotes_storage(const char *type) {
   size_t len = type ? strlen(type) : 0;
 
   if (len == 0 || type[len - 1] == '*') {
-    return 0; /* unknown, or a pointer */
+    return 0;
   }
   if (strncmp(type, "fn(", 3) == 0 || strncmp(type, "Fn(", 3) == 0) {
     return 0;
@@ -448,7 +419,7 @@ static int ir_type_name_denotes_storage(const char *type) {
   if (ir_int_type_name_info(type, NULL, NULL)) {
     return 0;
   }
-  return 1; /* string, T[N], a struct name */
+  return 1;
 }
 
 int ir_storage_symbol_set_build(const IRFunction *function,
@@ -491,13 +462,6 @@ int ir_operand_is_propagatable_value(const IROperand *operand) {
   case IR_OPERAND_SYMBOL:
   case IR_OPERAND_TEMP:
     return 1;
-  /* A string literal operand means different things in different positions:
-   * as a LOAD base it addresses the literal's 16-byte {chars, length} record
-   * (that is how a string-to-cstring coercion reads the pointer out), and as
-   * an ASSIGN value it is the character data. Propagating one from an assign
-   * into a load therefore reads the low byte of a pointer where the program
-   * asked for the first character. The frontend puts each literal in the
-   * position it means; the optimizer must leave it there. */
   case IR_OPERAND_STRING:
   default:
     return 0;
@@ -622,13 +586,6 @@ int ir_instruction_vector_append_move(IRInstructionVector *vector,
   }
 
   vector->items[vector->count++] = *instruction;
-  /* A move: the vector now owns every heap block the instruction carried, so
-   * the source must not. `argument_types` is one of them -- it is a separate
-   * allocation from `arguments`, and leaving it behind here left the moved
-   * copy pointing at memory the caller's destroy sweep then freed. Only a
-   * frontend that supplies typed call arguments (the public builder does;
-   * Mettle source does not) ever fills that array, which is why the dangling
-   * read stayed hidden. */
   instruction->tensor = NULL;
   instruction->op = IR_OP_NOP;
   instruction->dest = ir_operand_none();
@@ -737,12 +694,6 @@ int ir_temp_value_map_init(IRTempValueMap *map) {
   return 1;
 }
 
-/* ---- hash index over the entry array --------------------------------------
- * find/set/remove were linear strcmp scans; on the multi-thousand-entry maps
- * copy-propagation builds inside post-inlining functions that turned the pass
- * quadratic (it was 26s of a 29s compile on a 4000-function fixture). The
- * array remains the storage passes iterate; this index only maps name->slot. */
-
 #define IR_TVM_TOMB UINT_MAX
 
 static unsigned int ir_tvm_hash(const char *s) {
@@ -799,8 +750,6 @@ int ir_temp_value_map_reindex(IRTempValueMap *map) {
   return 1;
 }
 
-/* Make sure the index exists and is healthy; falls back to "no index" on
- * allocation failure (find then degrades to the linear scan). */
 static void ir_tvm_index_ensure(IRTempValueMap *map) {
   if (!map->ix || (map->count + map->ix_tombstones) * 2 >= map->ix_capacity) {
     ir_temp_value_map_reindex(map);
@@ -815,7 +764,6 @@ static int ir_temp_value_map_find_with(const IRTempValueMap *map,
 
   ir_tvm_index_ensure((IRTempValueMap *)map);
   if (!map->ix) {
-    /* Allocation failed: stay correct via the linear scan. */
     for (size_t i = 0; i < map->count; i++) {
       if (map->items[i].name && map->items[i].name[0] == name[0] &&
           strcmp(map->items[i].name, name) == 0) {
@@ -845,7 +793,6 @@ static int ir_temp_value_map_find(const IRTempValueMap *map, const char *name) {
   return name ? ir_temp_value_map_find_with(map, name, ir_tvm_hash(name)) : -1;
 }
 
-/* Tombstone the bucket that points at `slot` for `name`. */
 static void ir_tvm_index_erase(IRTempValueMap *map, const char *name,
                                size_t slot) {
   if (!map->ix) {
@@ -863,8 +810,6 @@ static void ir_tvm_index_erase(IRTempValueMap *map, const char *name,
   }
 }
 
-/* Repoint the bucket of `name` from `old_slot` to `new_slot` (swap-remove
- * moved it). */
 static void ir_tvm_index_move(IRTempValueMap *map, const char *name,
                               size_t old_slot, size_t new_slot) {
   if (!map->ix) {
@@ -880,13 +825,6 @@ static void ir_tvm_index_move(IRTempValueMap *map, const char *name,
     b = (b + 1) & mask;
   }
 }
-
-/* ---- reverse value-symbol counts -------------------------------------------
- * vsym_counts maps a symbol name to the number of entries whose VALUE is that
- * symbol, so per-symbol-write invalidation can skip the full-entry scan when
- * nothing maps to the written symbol (the common case -- this scan per write
- * was quadratic inside copy-propagation on big inlined functions). Built
- * lazily on first use, then maintained by set/remove and the compactors. */
 
 static void ir_tvm_vsym_adjust(IRTempValueMap *counts, const char *sym,
                                long long delta) {
@@ -911,8 +849,6 @@ static void ir_tvm_vsym_note_value(IRTempValueMap *map, const IROperand *value,
   }
 }
 
-/* Lazily build the reverse counts; returns 0 (and leaves the map without
- * counts) on allocation failure, in which case callers use the plain scan. */
 static int ir_tvm_vsym_ensure(IRTempValueMap *map) {
   if (map->vsym_counts) {
     return 1;
@@ -947,7 +883,6 @@ void ir_temp_value_map_remove(IRTempValueMap *map, const char *name) {
 
   size_t last = map->count - 1;
   if (idx != last) {
-    /* Swap-remove; entry order carries no meaning for these maps. */
     map->items[idx] = map->items[last];
     if (map->items[idx].name) {
       ir_tvm_index_move(map, map->items[idx].name, last, idx);
@@ -1014,9 +949,6 @@ void ir_temp_value_map_remove_symbol_values(IRTempValueMap *map,
     return;
   }
 
-  /* O(1) fast path: nothing in the map values this symbol. This call happens
-   * once per symbol WRITE in copy-propagation, so without the reverse count
-   * it was an O(entries) scan per write -- quadratic on inlined functions. */
   if (symbol_name && ir_tvm_vsym_ensure(map) &&
       !ir_temp_value_map_lookup(map->vsym_counts, symbol_name)) {
     return;
@@ -1052,11 +984,6 @@ void ir_temp_value_map_remove_symbol_values(IRTempValueMap *map,
   }
 }
 
-/* The set of symbols whose address is taken anywhere in `function`, built in
- * one scan so store invalidation can test membership in O(1) instead of
- * rescanning the whole function per map entry per store. The pass that uses
- * it builds it once: copy-propagation never introduces ADDRESS_OF, so the set
- * is stable across a pass run. */
 static IRProgram *g_ir_optimize_program = NULL;
 
 void ir_optimize_set_program(IRProgram *program) {
@@ -1098,16 +1025,6 @@ int ir_addr_taken_set_build(const IRFunction *function, IRTempValueMap *set) {
   return 1;
 }
 
-/* Store-aware invalidation for copy-propagation's temp and symbol value maps.
- * A store writes memory; it cannot change a mapping unless the mapped key is an
- * address-taken symbol (the store may overwrite its storage) or the mapped
- * value embeds an address-taken symbol (that value may now be stale). Constants,
- * temps, and non-escaped symbol copies such as `%t <- @i` survive, so copy
- * propagation can see through `buf[i] = ...; ... buf[i] ...`.
- *
- * Works for both the temp map (keys are temps, never address-taken) and the
- * symbol map (keys are symbols). Matches the old clear-on-store for escaped
- * symbols while preserving non-escaped ones. */
 void ir_temp_value_map_invalidate_after_store(IRTempValueMap *map,
                                               const IRTempValueMap *addr_taken) {
   if (!map) {
@@ -1150,7 +1067,7 @@ void ir_temp_value_map_invalidate_after_store(IRTempValueMap *map,
 int ir_temp_value_map_any_value_symbol(IRTempValueMap *map,
                                        const char *symbol_name) {
   if (!map || !symbol_name) {
-    return 1; /* unknown: caller must scan */
+    return 1;
   }
   if (!ir_tvm_vsym_ensure(map)) {
     return 1;
@@ -1202,8 +1119,6 @@ void ir_temp_value_map_destroy(IRTempValueMap *map) {
   }
 
   if (map->vsym_counts) {
-    /* Detach first so the recursive destroy (depth 1: counts hold ints,
-     * never their own counts) doesn't see a half-torn map. */
     IRTempValueMap *counts = map->vsym_counts;
     map->vsym_counts = NULL;
     ir_temp_value_map_destroy(counts);
@@ -1384,10 +1299,6 @@ int ir_operand_equals(const IROperand *lhs, const IROperand *rhs) {
   case IR_OPERAND_INT:
     return lhs->int_value == rhs->int_value;
   case IR_OPERAND_FLOAT:
-    /* Same numeric value at different IEEE-754 widths is NOT the same operand
-     * for CSE/propagation purposes: a float32 0.1 and float64 0.1 have
-     * distinct bit patterns and must not be coalesced. Treat unspecified (0)
-     * as the default 64 so legacy float64-only IR keeps matching. */
     return lhs->float_value == rhs->float_value &&
            ((lhs->float_bits == 32) == (rhs->float_bits == 32));
   case IR_OPERAND_STRING: {
@@ -1577,8 +1488,6 @@ static size_t ir_expr_operand_hash(const IROperand *operand) {
     }
     break;
   default:
-    /* IR_OPERAND_FLOAT contributes only its kind: equality there also weighs
-     * the IEEE width, and hashing less is always safe. */
     break;
   }
   return h ? h : 1u;
@@ -1594,9 +1503,6 @@ static size_t ir_expr_shape_hash(IRExpressionKind kind, int is_float,
       h ^= (size_t)mettle_fnv1a_hash(op_text);
     }
   }
-  /* Added, not ordered: the matcher accepts a commutative binary in either
-   * order, so the two must hash alike. For a non-commutative operator this
-   * only widens the bucket. */
   size_t operands = ir_expr_operand_hash(lhs);
   if (kind == IR_EXPR_BINARY) {
     operands += ir_expr_operand_hash(rhs);
@@ -1674,7 +1580,7 @@ static void ir_expression_map_add_occurrence(IRExpressionMap *map,
     IRExprNameOcc *items =
         (IRExprNameOcc *)realloc(map->occ, grown * sizeof(IRExprNameOcc));
     if (!items) {
-      map->occ_head_capacity = 0; /* fall back to walking the map */
+      map->occ_head_capacity = 0;
       return;
     }
     map->occ = items;
@@ -1706,12 +1612,6 @@ static void ir_expression_map_add_occurrence(IRExpressionMap *map,
   map->occ_count++;
 }
 
-/* List an entry among the ones a store can reach. The VALUE counts as much as
- * the operands: an entry says "this expression is already available in that
- * place", and a store through a pointer to a symbol changes what the place
- * holds. `-3.5 -> @fy` outlived `*(&fy) <- x` and a later `-3.5` was rewritten
- * to a read of @fy, which by then held something else. Duplicates are harmless:
- * the store path only kills, and killing twice is a no-op. */
 static void ir_expression_map_note_symbol_entry(IRExpressionMap *map,
                                                 size_t index) {
   if (map->sym_count == map->sym_capacity) {
@@ -1720,7 +1620,7 @@ static void ir_expression_map_note_symbol_entry(IRExpressionMap *map,
     if (!items) {
       map->sym_capacity = 0;
       map->sym_count = 0;
-      return; /* the store path then falls back to walking the map */
+      return;
     }
     map->sym_entries = items;
     map->sym_capacity = grown;
@@ -1750,18 +1650,9 @@ static void ir_expression_map_kill(IRExpressionMap *map, size_t index) {
   map->dead_count++;
 }
 
-/* Once the dead outnumber the living, so the cost of rebuilding the indices is
- * spread over the removals that caused it -- or once the occurrence array has
- * outgrown the entries it describes. That second condition is not optional: an
- * occurrence is only dropped by a rebuild, so a symbol written every iteration
- * accumulates a chain of stale occurrences and walking it becomes the very
- * cost the chain was meant to remove. */
 static void ir_expression_map_maybe_compact(IRExpressionMap *map) {
   size_t live = map->count - map->dead_count;
   int crowded = map->dead_count * 2 > map->count;
-  /* Measured against the LIVE entries, not every entry ever added: an
-   * occurrence naming a dead entry is exactly the stale weight a chain walk
-   * pays for, and comparing against the total let it grow without bound. */
   int chained = map->occ_count > 32 && map->occ_count > (live + 1u) * 4u;
   if (!crowded && !chained) {
     return;
@@ -1799,7 +1690,7 @@ static int ir_expression_map_find_matching_instruction(
   IRExpressionMap *mutable_map = (IRExpressionMap *)map;
   if (map->count != 0 && ir_expr_instruction_hash(instruction, &wanted)) {
     if (!mutable_map->expr_valid && !ir_expression_map_index_build(mutable_map)) {
-      goto scan; /* out of memory: the walk still answers correctly */
+      goto scan;
     }
     size_t mask = map->expr_capacity - 1u;
     size_t s = wanted & mask;
@@ -1842,11 +1733,6 @@ static int ir_expression_map_store_value_for_instruction(
     return 0;
   }
 
-  /* Refuse self-referential definitions such as `@i = @i + 1`, where the
-   * destination is also one of the source operands. Recording `@i + 1 -> @i`
-   * is invalid: this instruction redefines @i, so the operand named in the key
-   * now holds a different value than when the expression was evaluated. A later
-   * textual `@i + 1` (using the new @i) would wrongly be rewritten to @i. */
   if (ir_operand_equals(&instruction->dest, &instruction->lhs) ||
       ir_operand_equals(&instruction->dest, &instruction->rhs)) {
     return 1;
@@ -1862,8 +1748,6 @@ static int ir_expression_map_store_value_for_instruction(
     ir_operand_destroy(&map->items[existing_index].value);
     map->items[existing_index].value = new_value;
     ir_expression_map_note_name(map, &map->items[existing_index].value);
-    /* The entry now holds its value in a symbol, so a store can reach it even
-     * if neither operand named one when it was registered. */
     if (new_value.kind == IR_OPERAND_SYMBOL &&
         map->items[existing_index].lhs.kind != IR_OPERAND_SYMBOL &&
         map->items[existing_index].rhs.kind != IR_OPERAND_SYMBOL) {
@@ -1954,7 +1838,7 @@ static int ir_expression_map_store_value_for_instruction(
   ir_expression_map_register_entry(map, map->count - 1u);
   if (map->expr_valid) {
     if ((map->count + 1u) * 2u > map->expr_capacity) {
-      map->expr_valid = 0; /* rebuilt, larger, on the next lookup */
+      map->expr_valid = 0;
     } else {
       ir_expression_map_index_put(map, map->count - 1u);
     }
@@ -1962,7 +1846,6 @@ static int ir_expression_map_store_value_for_instruction(
   return 1;
 }
 
-/* 0 marks an empty slot, so a name hashing to 0 is nudged to 1. */
 static size_t ir_expr_name_hash(const char *name) {
   size_t h = (size_t)mettle_fnv1a_hash(name);
   return h ? h : (size_t)1;
@@ -1978,7 +1861,7 @@ static void ir_expression_map_note_name(IRExpressionMap *map,
     size_t grown = map->name_hash_capacity ? map->name_hash_capacity * 2 : 64;
     size_t *slots = (size_t *)calloc(grown, sizeof(size_t));
     if (!slots) {
-      return; /* the set only ever proves absence; losing it costs speed */
+      return;
     }
     for (size_t i = 0; i < map->name_hash_capacity; i++) {
       size_t h = map->name_hashes[i];
@@ -2055,18 +1938,10 @@ static void ir_expression_map_invalidate_named(IRExpressionMap *map,
     return;
   }
 
-  /* A name that has never been an operand of any entry in this map cannot
-   * match one, and a fresh temp -- which is most of what a straight-line
-   * function writes -- is exactly that. Skipping those turns the compaction
-   * from once per instruction into once per instruction that can matter. */
   if (!ir_expression_map_may_hold_name(map, name)) {
     return;
   }
 
-  /* The name IS an operand here, so follow its chain and clear only the
-   * entries that actually name it. Walking the map instead was the other half
-   * of the quadratic: a symbol written every iteration matches this guard
-   * every time. */
   if (map->occ_head_capacity != 0) {
     size_t h = ir_expr_name_hash(name);
     size_t o = map->occ_heads[h & (map->occ_head_capacity - 1u)];
@@ -2095,35 +1970,18 @@ static void ir_expression_map_invalidate_named(IRExpressionMap *map,
   ir_expression_map_maybe_compact(map);
 }
 
-/* True if @operand names a symbol whose address is taken (and so could be
- * aliased by a store/call through a pointer). Temps, constants, and symbols
- * that never escape cannot be reached by such a store. `addr_taken` is the
- * function's precomputed address-taken set: consulting it per entry is O(1),
- * where rescanning the function per entry per store was a cubic term on
- * large functions. */
 static int ir_operand_is_aliasable_symbol(const IRTempValueMap *addr_taken,
                                           const IROperand *operand) {
   return operand && operand->kind == IR_OPERAND_SYMBOL && operand->name &&
          ir_temp_value_map_lookup(addr_taken, operand->name) != NULL;
 }
 
-/* A STORE writes memory but cannot change the value of a pure arithmetic
- * expression unless one of its operands is a symbol whose address has escaped.
- * Rather than clearing the whole CSE map on every store, drop only the entries
- * that could actually be invalidated; pointer arithmetic such as `@buf + @i`
- * (over non-escaped symbols) then survives across the store in `buf[i] = ...`.
- *
- * ADDRESS_OF entries cache `&@sym`, whose value never changes, but @sym is by
- * definition address-taken, so they are conservatively dropped here exactly as
- * the old clear-on-store did -- no regression. */
 static void ir_expression_map_invalidate_after_store(
     IRExpressionMap *map, const IRTempValueMap *addr_taken) {
   if (!map) {
     return;
   }
 
-  /* Only an entry with a SYMBOL operand can be reached by a store, and those
-   * are listed, so the rest of the map is not walked. */
   if (map->sym_capacity != 0) {
     for (size_t i = 0; i < map->sym_count; i++) {
       size_t idx = map->sym_entries[i];
@@ -2235,9 +2093,6 @@ int ir_temp_use_map_init(IRTempUseMap *map) {
   return 1;
 }
 
-/* Insert items[index] into the hash table (hash table must have room). The
- * caller passes the key's hash when it already had to compute one to look the
- * key up and miss, which is every insert that comes through add. */
 static void ir_temp_use_map_hash_put_with(IRTempUseMap *map, size_t index,
                                           size_t hash) {
   size_t mask = map->hash_count - 1;
@@ -2245,7 +2100,7 @@ static void ir_temp_use_map_hash_put_with(IRTempUseMap *map, size_t index,
   while (map->hash[h] != 0) {
     h = (h + 1) & mask;
   }
-  map->hash[h] = index + 1; /* store index+1; 0 == empty */
+  map->hash[h] = index + 1;
 }
 
 static void ir_temp_use_map_hash_put(IRTempUseMap *map, size_t index) {
@@ -2253,8 +2108,6 @@ static void ir_temp_use_map_hash_put(IRTempUseMap *map, size_t index) {
                                 mettle_fnv1a_hash(map->items[index].name));
 }
 
-/* Grow/allocate the hash table so it can hold map->count entries at <0.5 load,
- * rehashing all existing items. Returns 0 on allocation failure. */
 static int ir_temp_use_map_hash_reserve(IRTempUseMap *map, size_t needed) {
   size_t target = 16;
   while (target < needed * 2) {
@@ -2327,7 +2180,6 @@ static int ir_temp_use_map_add(IRTempUseMap *map, const char *name) {
     map->capacity = new_capacity;
   }
 
-  /* Ensure the hash can hold one more entry (rehashes existing items if so). */
   if (!ir_temp_use_map_hash_reserve(map, map->count + 1)) {
     return 0;
   }
@@ -2580,10 +2432,6 @@ int ir_collect_instruction_temp_uses(IRTempUseMap *uses,
     break;
   }
 
-  /* The argument vector is always an input list, including for first-class
-   * operations that do not otherwise fit the scalar opcode groups above (for
-   * example TENSOR_MMA). Keep this generic so adding a neutral operation cannot
-   * make dead-temp elimination erase its operand producers. */
   for (size_t i = 0; i < instruction->argument_count; i++) {
     if (!ir_collect_operand_temp_use(uses, &instruction->arguments[i])) {
       return 0;

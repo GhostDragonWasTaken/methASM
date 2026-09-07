@@ -1,80 +1,31 @@
 #include "ir_optimize_internal.h"
-#include "../../common.h" // mettle_free_string
-
-/* ============================================================================
- * Declarative algebraic rewrite engine.
- *
- * The point of this file: teaching Mettle a new integer algebraic identity is
- * adding ONE ROW to g_binary_identities below -- no new control flow, no new
- * operand-kind dispatch, no hand-rolled commutativity. The engine does the
- * matching, the operand cloning, the change tracking, and the IR plumbing.
- *
- * A rule matches an `dest = lhs <op> rhs` IR_OP_BINARY instruction by operator
- * text plus a pattern on each operand slot, then rewrites it in place. Slot `a`
- * is the "variable" slot for any rule whose action keeps, shifts, or masks a
- * value (A_KEEP / A_SHL / A_SHR / A_AND_MASK read the operand that `a`
- * matched); `commutative` rules are also tried with the slots swapped, so a
- * single row covers `x + 0` and `0 + x`. Constant folding of `INT <op> INT`
- * happens before the table runs (ir_try_fold_integer_binary), so the patterns
- * only ever face the mixed/symbolic cases.
- *
- * Most patterns match on operand SHAPE, which makes them true everywhere. One
- * does not: P_NONNEG asks the value-range analysis
- * (ir_optimize_value_range.c) whether the operand can be negative at THIS
- * instruction. That is what lets `x / 2^k -> x >> k` and `x % 2^k -> x & m`
- * live in the table at all -- they are ordinary identities gated on a proof
- * rather than on a literal -- and it is available to any future row. A caller
- * that passes no range context simply gets the shape-only table.
- *
- * Everything here is integer-only and operates on already-decomposed operands
- * (each operand is a temp/symbol/constant computed by an earlier instruction),
- * so discarding an operand -- `x * 0 -> 0` drops `x` -- is safe: the value was
- * materialized elsewhere and dead-code elimination reclaims it. Floats are left
- * untouched (NaN makes `x < x -> 0` and friends unsound).
- *
- * The second half of the file is ir_reassociate_constants_pass, and it follows
- * the same principle with a second table: g_const_chains has one row per
- * two-instruction chain `(x <op> c1) <op> c2` that collapses to `x <op> K`.
- * Every row is bit-exact under two's-complement wraparound at every operand
- * width -- additive (with subtraction normalized into a signed sum),
- * multiplicative, the three bitwise merges, and width-bounded shifts -- and the
- * shared driver proves the kept value `x` is unchanged between the producer and
- * the use before folding. This is where the table-driven identities above earn
- * their keep: the combined `x * K` / `x + 0` it produces is picked up by the
- * table on the next fixpoint iteration (e.g. `x * (8*1)` -> `x * 8` ->
- * `x << 3`).
- * ==========================================================================*/
+#include "../../common.h"
 
 typedef enum {
-  RWP_VAR,         /* matches any operand; the kept value when slot `a` */
-  RWP_INT,         /* matches an INT operand whose value == pat.value */
-  RWP_INT_NONZERO, /* matches any INT operand whose value != 0 */
-  RWP_POW2,        /* matches an INT operand equal to 2^k for some k >= 1 */
-  RWP_SAME,        /* matches iff this operand structurally equals the other */
-  /* Matches any operand the value-range analysis proves cannot be negative
-   * HERE. This is the one pattern that depends on where the instruction sits,
-   * and it is what lets a rule be conditional on a proof instead of on the
-   * literal shape of its operands. Without a range context it never matches,
-   * so a caller with no context simply gets the shape-only table. */
+  RWP_VAR,
+  RWP_INT,
+  RWP_INT_NONZERO,
+  RWP_POW2,
+  RWP_SAME,
   RWP_NONNEG
 } IRRwPatKind;
 
 typedef struct {
   IRRwPatKind kind;
-  long long value; /* RWP_INT */
+  long long value;
 } IRRwPat;
 
 typedef enum {
-  RWA_KEEP_VAR, /* dest <- the operand slot `a` matched */
-  RWA_CONST,    /* dest <- act.value */
-  RWA_SHL_VAR,  /* dest <- (slot `a`) << log2(the POW2 operand) */
-  RWA_SHR_VAR,  /* dest <- (slot `a`) >> log2(the POW2 operand) */
-  RWA_AND_VAR   /* dest <- (slot `a`) & (the POW2 operand - 1) */
+  RWA_KEEP_VAR,
+  RWA_CONST,
+  RWA_SHL_VAR,
+  RWA_SHR_VAR,
+  RWA_AND_VAR
 } IRRwActKind;
 
 typedef struct {
   IRRwActKind kind;
-  long long value; /* RWA_CONST */
+  long long value;
 } IRRwAct;
 
 typedef struct {
@@ -109,7 +60,6 @@ typedef struct {
   { RWA_AND_VAR, 0 }
 
 static const IRBinaryIdentity g_binary_identities[] = {
-    /* x <op> x -- slot b matches "the other operand". */
     {"-", P_ANY, P_SAME, 0, A_INT(0)},
     {"^", P_ANY, P_SAME, 0, A_INT(0)},
     {"|", P_ANY, P_SAME, 0, A_KEEP},
@@ -121,37 +71,27 @@ static const IRBinaryIdentity g_binary_identities[] = {
     {"<", P_ANY, P_SAME, 0, A_INT(0)},
     {">", P_ANY, P_SAME, 0, A_INT(0)},
 
-    /* additive */
     {"+", P_ANY, P_INT(0), 1, A_KEEP},
     {"-", P_ANY, P_INT(0), 0, A_KEEP},
 
-    /* multiplicative -- POW2 (>= 2) before the *1 / *0 rows; they are disjoint
-     * (1 and 0 are not POW2), so order only documents intent. */
     {"*", P_ANY, P_P2, 1, A_SHL},
     {"*", P_ANY, P_INT(0), 1, A_INT(0)},
     {"*", P_ANY, P_INT(1), 1, A_KEEP},
     {"/", P_ANY, P_INT(1), 0, A_KEEP},
     {"%", P_ANY, P_INT(1), 0, A_INT(0)},
-    /* Division and remainder by a power of two are a shift and a mask -- but
-     * only for a dividend that cannot be negative, because signed division
-     * truncates toward zero while a shift floors. These two rows are why the
-     * table can consult the range analysis at all: everything above matches on
-     * operand shape, and these match on a proof. */
     {"/", P_NONNEG, P_P2, 0, A_SHR},
     {"%", P_NONNEG, P_P2, 0, A_AND_MASK},
 
-    /* bitwise */
     {"&", P_ANY, P_INT(0), 1, A_INT(0)},
     {"&", P_ANY, P_INT(-1), 1, A_KEEP},
     {"|", P_ANY, P_INT(0), 1, A_KEEP},
-    {"|", P_ANY, P_INT(-1), 1, A_INT(-1)}, /* x | all-ones = all-ones */
+    {"|", P_ANY, P_INT(-1), 1, A_INT(-1)},
     {"^", P_ANY, P_INT(0), 1, A_KEEP},
     {"<<", P_ANY, P_INT(0), 0, A_KEEP},
     {">>", P_ANY, P_INT(0), 0, A_KEEP},
-    {"<<", P_INT(0), P_ANY, 0, A_INT(0)}, /* 0 << x = 0 */
-    {">>", P_INT(0), P_ANY, 0, A_INT(0)}, /* 0 >> x = 0 */
+    {"<<", P_INT(0), P_ANY, 0, A_INT(0)},
+    {">>", P_INT(0), P_ANY, 0, A_INT(0)},
 
-    /* logical (result is boolean; only the short-circuit constants fold) */
     {"&&", P_ANY, P_INT(0), 1, A_INT(0)},
     {"||", P_ANY, P_NZ, 1, A_INT(1)},
 };
@@ -198,8 +138,6 @@ static int rw_match(const IRRwPat *pat, const IROperand *operand,
   return 0;
 }
 
-/* dest <- base <op> value, in place (base may alias the instruction's own
- * operands, so it is cloned before anything is destroyed). */
 static int rw_to_binary(IRInstruction *instruction, const IROperand *base,
                         const char *text, long long value, int *changed) {
   IROperand cloned = ir_operand_none();
@@ -229,8 +167,6 @@ static int rw_to_binary(IRInstruction *instruction, const IROperand *base,
 
 static int rw_apply(IRInstruction *instruction, const IRBinaryIdentity *rule,
                     int swapped, int *changed) {
-  /* By construction slot `a` is the variable slot and slot `b` is the
-   * constant/structural slot, so the matched operands are: */
   const IROperand *var = swapped ? &instruction->rhs : &instruction->lhs;
   const IROperand *bop = swapped ? &instruction->lhs : &instruction->rhs;
 
@@ -258,8 +194,6 @@ static int rw_apply(IRInstruction *instruction, const IRBinaryIdentity *rule,
   return 1;
 }
 
-/* Apply the first matching algebraic identity to one integer binary
- * instruction. Returns 0 only on allocation failure. */
 int ir_rewrite_apply_binary_identities(IRInstruction *instruction,
                                        IRValueRangeCtx *ranges, size_t at,
                                        int *changed) {
@@ -286,12 +220,6 @@ int ir_rewrite_apply_binary_identities(IRInstruction *instruction,
   return 1;
 }
 
-/* ---------------------------------------------------------------------------
- * Constant reassociation: (x <op> c1) <op> c2  ->  x <op> K
- * ------------------------------------------------------------------------- */
-
-/* If `instruction` is `x <op> c` (or `c <op> x` when const_either is set) with
- * c an INT and x a non-INT value, bind *x_out and *c_out and return 1. */
 static int rw_split_var_const(const IRInstruction *instruction, const char *op,
                               int const_either, const IROperand **x_out,
                               long long *c_out) {
@@ -314,9 +242,6 @@ static int rw_split_var_const(const IRInstruction *instruction, const char *op,
   return 0;
 }
 
-/* Nearest writer of temp `name` strictly before `before`, within the current
- * block (the backward scan stops at a label, so a found producer dominates the
- * use with no intervening control-flow join). */
 static int rw_find_block_producer(const IRFunction *function, size_t before,
                                   const char *name, size_t *out_index) {
   for (size_t i = before; i > 0;) {
@@ -337,9 +262,6 @@ static int rw_find_block_producer(const IRFunction *function, size_t before,
   return 0;
 }
 
-/* True if `x`'s value cannot change on the straight-line run (producer, use).
- * A temp can only change by being rewritten; a symbol can also change through a
- * call/store/asm that might alias it. */
 static int rw_var_unchanged_between(const IRFunction *function, size_t producer,
                                     size_t use, const IROperand *x) {
   int x_is_symbol = (x->kind == IR_OPERAND_SYMBOL);
@@ -392,16 +314,13 @@ static int rw_set_binary(IRInstruction *instruction, const IROperand *x,
   return 1;
 }
 
-/* How a rule merges the producer's constant with the use's. Every one of these
- * is bit-exact under two's-complement wraparound at every operand width, which
- * is what makes the merge legal without knowing the values' declared types. */
 typedef enum {
-  RWC_ADD, /* signed sum, with each side's sign from the rule */
+  RWC_ADD,
   RWC_MUL,
   RWC_AND,
   RWC_OR,
   RWC_XOR,
-  RWC_SHIFT /* shift counts add, subject to the width cap below */
+  RWC_SHIFT
 } IRRwCombineKind;
 
 typedef struct {
@@ -409,44 +328,27 @@ typedef struct {
   const char *producer_op;
   const char *result_op;
   IRRwCombineKind combine;
-  int producer_const_either; /* the producer's constant may sit on either side */
+  int producer_const_either;
   int use_const_either;
-  int producer_sign; /* RWC_ADD only */
-  int use_sign;      /* RWC_ADD only */
+  int producer_sign;
+  int use_sign;
 } IRConstChainRule;
 
-/* One row per `(x <prod> c1) <use> c2` chain the optimizer knows how to
- * collapse. Adding a chain is adding a row; the driver below does the operand
- * extraction, the safety proof, and the rewrite.
- *
- * Subtraction is normalized into RWC_ADD by carrying each side's sign, so the
- * four +/- combinations are four rows rather than four code paths. */
 static const IRConstChainRule g_const_chains[] = {
     {"+", "+", "+", RWC_ADD, 1, 1, +1, +1},
     {"+", "-", "+", RWC_ADD, 0, 1, -1, +1},
     {"-", "+", "+", RWC_ADD, 1, 0, +1, -1},
     {"-", "-", "+", RWC_ADD, 0, 0, -1, -1},
     {"*", "*", "*", RWC_MUL, 1, 1, 0, 0},
-    /* Bitwise merges are exact at every width: the combined constant masks,
-     * sets, or flips exactly the bits the two steps did. */
     {"&", "&", "&", RWC_AND, 1, 1, 0, 0},
     {"|", "|", "|", RWC_OR, 1, 1, 0, 0},
     {"^", "^", "^", RWC_XOR, 1, 1, 0, 0},
-    /* Shift counts add. Both directions compose exactly -- the second shift
-     * cannot recover bits the first discarded -- as long as the total stays
-     * inside the operand width (see the cap in rw_combine_constants). */
     {"<<", "<<", "<<", RWC_SHIFT, 0, 0, 0, 0},
     {">>", ">>", ">>", RWC_SHIFT, 0, 0, 0, 0},
 };
 
-/* x86 masks a shift count to the operand width, so merging two shifts is only
- * exact when the total cannot reach the narrowest width the operands might
- * have (32 covers both 32- and 64-bit values). */
 #define RW_SHIFT_MERGE_LIMIT 32
 
-/* Does this instruction compute with unsigned semantics? The flag is the
- * primary signal; the baked result type is the fallback for instructions the
- * frontend typed but never flagged (same rule the constant evaluator uses). */
 static int rw_binary_is_unsigned(const IRInstruction *in) {
   if (in->is_unsigned) {
     return 1;
@@ -496,8 +398,6 @@ static int rw_combine_constants(const IRConstChainRule *rule, long long cp,
   return 0;
 }
 
-/* Bind (temp T, constant c) from `dest = T <op> c` (or the mirrored form when
- * the rule allows it). */
 static int rw_split_use(const IRInstruction *use, int const_either,
                         const char **t_name, long long *c_out) {
   if (use->lhs.kind == IR_OPERAND_TEMP && use->lhs.name &&
@@ -544,10 +444,6 @@ static int rw_try_chain_rule(IRFunction *function, size_t use_index,
     return 1;
   }
 
-  /* A right shift means different things signed and unsigned, and merging two
-   * of them is only exact when both agree: `(x >>arith a) >>logical b` keeps
-   * the sign bits the first shift replicated, which `x >>logical (a+b)` does
-   * not. Left shift and the bitwise merges carry no such distinction. */
   if (strcmp(rule->result_op, ">>") == 0 &&
       rw_binary_is_unsigned(producer) != rw_binary_is_unsigned(use)) {
     return 1;
@@ -558,8 +454,6 @@ static int rw_try_chain_rule(IRFunction *function, size_t use_index,
     return 1;
   }
 
-  /* `x = x <op> cp` would make x's value at the use differ from the value the
-   * algebra assumes (the producer's input). Reject self-referential producers. */
   if (producer->dest.name && producer->dest.kind == x->kind &&
       strcmp(producer->dest.name, x->name) == 0) {
     return 1;

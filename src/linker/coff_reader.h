@@ -84,4 +84,4 @@ CoffSectionKind coff_section_kind_from_name(const char *name);
 const char *coff_section_kind_name(CoffSectionKind kind);
 const char *coff_relocation_type_name(uint16_t type);
 
-#endif // COFF_READER_H
+#endif

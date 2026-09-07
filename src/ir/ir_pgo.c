@@ -1,4 +1,3 @@
-/* Zero-run PGO: compile-time interpreted profiling. See ir_pgo.h. */
 #include "ir_pgo.h"
 #include "ir_interp.h"
 #include "../common.h"
@@ -12,7 +11,7 @@
 typedef struct {
   char *name;
   long long calls;
-  long long body_steps; /* instructions executed inside the function */
+  long long body_steps;
 } IRPgoEntry;
 
 typedef struct {
@@ -209,7 +208,6 @@ int ir_pgo_profile_program(IRProgram *program) {
     break;
   }
 
-  /* Harvest: for each executed CALL, credit the callee; sum body steps. */
   for (size_t f = 0; f < program->function_count; f++) {
     IRFunction *fn = program->functions[f];
     if (!fn) {
@@ -241,8 +239,6 @@ int ir_pgo_profile_program(IRProgram *program) {
   }
   ir_interp_destroy(machine);
 
-  /* A profile that never left main() is still valid (it proves everything
-   * else is cold on this run), but demand SOME execution. */
   g_profile_valid = g_total_steps > 0;
   return g_profile_valid;
 }
@@ -274,10 +270,6 @@ long long ir_pgo_site_count(const char *function_name,
     return entry->count;
   }
 
-  /* Inlining moves a callee's instructions into the caller but preserves the
-   * original source location. If the function-qualified lookup misses, fall
-   * back to the location total so a hot inlined loop does not become falsely
-   * cold just because its containing IRFunction changed. */
   const char *filename = location.filename ? location.filename : "";
   long long total = 0;
   for (size_t i = 0; i < g_site_count; i++) {
@@ -310,7 +302,6 @@ void ir_pgo_print_summary(void) {
           "%zu functions touched, hot threshold %lld calls\n",
           g_total_steps, g_run_status, g_entry_count, ir_pgo_hot_threshold());
 
-  /* Top functions by interpreted calls. */
   unsigned char shown_flags[512] = {0};
   for (int rank = 0; rank < 5; rank++) {
     size_t best = (size_t)-1;

@@ -1,8 +1,6 @@
 #include "ir_optimize_internal.h"
 #include "../ir_explain_ledger.h"
 
-/* Reads of `sym` in one instruction: lhs/rhs/arguments, plus dest on a STORE
- * (a store's dest is the address operand, which is read, not written). */
 static size_t ir_load_copy_count_symbol_reads(const IRInstruction *ins,
                                               const char *sym) {
   size_t count = 0;
@@ -23,8 +21,6 @@ static size_t ir_load_copy_count_symbol_reads(const IRInstruction *ins,
   return count;
 }
 
-/* The symbol an operand names, or NULL. Mirrors ir_operand_is_symbol_named's
- * rule so the tally below counts exactly what the scan it replaces looked at. */
 static const char *ir_load_copy_mentioned_name(const IROperand *operand) {
   return (operand && operand->kind == IR_OPERAND_SYMBOL) ? operand->name : NULL;
 }
@@ -57,13 +53,9 @@ static void ir_load_copy_replace_operand(IROperand *operand, const char *sym,
   int float_bits = operand->float_bits;
   ir_operand_destroy(operand);
   *operand = ir_operand_temp(temp);
-  /* Keep the IEEE-754 width tag the symbol operand carried; consumers use it
-   * to tell float32 values from the default double width. */
   operand->float_bits = float_bits;
 }
 
-/* A loop's entry label, as opposed to the exit label that carries it as a
- * prefix (`ir_while_9` vs `ir_while_end_9`). */
 static int ir_cleanup_label_is_loop_header(const char *label) {
   if (!label) {
     return 0;
@@ -75,8 +67,6 @@ static int ir_cleanup_label_is_loop_header(const char *label) {
          strstr(label, "ir_while_end_") == NULL;
 }
 
-/* The latch: the last jump back to `label`. Everything between the header and
- * it is the loop, body and nested loops alike. */
 static size_t ir_cleanup_loop_latch(const IRFunction *function, size_t header,
                                     const char *label) {
   size_t latch = 0;
@@ -89,17 +79,6 @@ static size_t ir_cleanup_loop_latch(const IRFunction *function, size_t header,
   return latch;
 }
 
-/* Move a loop body's declarations above its header.
- *
- * `var v: int32 = a[i] * 2;` in a loop body lowers to a DECLARE_LOCAL followed
- * by a separate store; the declaration names storage and carries no value, so
- * where it sits is free. It is not free to the recognizers: each walks a body
- * expecting load->compute->store and stops at the first instruction it does not
- * model, so one declaration between a load and the arithmetic costs the loop
- * its kernel. That is why `--explain` has been telling writers to "declare `v`
- * before the loop" -- advice for an edit the compiler can make itself. Doing it
- * here means idiomatic code (a named intermediate per iteration) vectorizes as
- * readily as the same loop written as one expression. */
 int ir_hoist_body_locals_pass(IRFunction *function, int *changed) {
   if (!function) {
     return 0;
@@ -134,48 +113,17 @@ int ir_hoist_body_locals_pass(IRFunction *function, int *changed) {
         *changed = 1;
       }
     }
-    /* The declarations landed before the header, so the header moved down by
-     * as many; resume the outer scan from it rather than re-reading them. */
     header = insert;
   }
   return 1;
 }
 
-/* Does the loop canonical form actually hold?
- *
- * The stage driver proves the canonicalizers CONVERGED, which is a statement
- * about the passes rather than about the IR. It is satisfied by a matcher that
- * has quietly stopped recognizing its shape: the pass reports clean, the stage
- * settles, and every recognizer downstream then fails to match for a reason
- * nothing reports. That is exactly how a recognizer rots.
- *
- * So this states the property independently of the pass that establishes it.
- * The redundancy is the point: two separate statements of one invariant, and a
- * disagreement means the hoister stopped doing its job. It asserts only what
- * ir_hoist_body_locals_pass guarantees unconditionally -- no declaration
- * survives inside a loop body -- because the global-base hoister legitimately
- * declines (a base whose pointer type is unknown, a temp that escapes), and a
- * verifier that reports those would be crying wolf about correct output.
- *
- * Returns 1 when the form holds. On failure fills `detail` with the loop and
- * the symbol, which is the whole diagnostic value: it names what to look at. */
 int ir_verify_loop_canonical_form(const IRFunction *function, char *detail,
                                   size_t detail_size) {
   if (!function || function->instruction_count == 0) {
     return 1;
   }
 
-  /* Three linear sweeps rather than a latch search per header.
-   *
-   * The obvious formulation -- for every loop header, scan forward for its
-   * back edge -- costs a full tail walk per loop, which is quadratic in the
-   * number of loops one function holds. That is invisible on ordinary code
-   * and very visible on generated code: a single function with 400 sequential
-   * loops paid 35% more compile time for this check alone, and the check runs
-   * on every build. So: collect the headers, resolve every back edge in one
-   * pass over the jumps, then sweep once carrying the furthest back edge of
-   * any loop opened so far, which answers "is this instruction inside a
-   * loop" in constant time per instruction. */
   size_t count = 0;
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *ins = &function->instructions[i];
@@ -192,8 +140,6 @@ int ir_verify_loop_canonical_form(const IRFunction *function, char *detail,
   const char **header_label =
       (const char **)malloc(count * sizeof(const char *));
   if (!header_idx || !latch || !header_label) {
-    /* Out of memory checking an invariant is not a reason to fail the build;
-     * the passes themselves still ran. */
     free(header_idx);
     free(latch);
     free(header_label);
@@ -228,7 +174,7 @@ int ir_verify_loop_canonical_form(const IRFunction *function, char *detail,
 
   int ok = 1;
   size_t next_header = 0;
-  size_t reach = 0; /* furthest back edge of any loop opened at or before i */
+  size_t reach = 0;
   for (size_t i = 0; i < function->instruction_count && ok; i++) {
     while (next_header < count && header_idx[next_header] <= i) {
       if (latch[next_header] > reach) {
@@ -237,7 +183,7 @@ int ir_verify_loop_canonical_form(const IRFunction *function, char *detail,
       next_header++;
     }
     if (reach <= i) {
-      continue; /* outside every loop */
+      continue;
     }
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op != IR_OP_DECLARE_LOCAL ||
@@ -245,8 +191,6 @@ int ir_verify_loop_canonical_form(const IRFunction *function, char *detail,
       continue;
     }
     if (detail && detail_size) {
-      /* Name the innermost enclosing loop. Only the failure path pays for
-       * this search, so it can be the simple one. */
       const char *loop = "?";
       for (size_t k = 0; k < count; k++) {
         if (header_idx[k] < i && latch[k] > i) {
@@ -281,8 +225,6 @@ static const char *ir_hoist_element_pointer_type(const IRInstruction *mem) {
   }
 }
 
-/* The address operand of a memory op, or NULL if it is not one. A store's dest
- * is the address it writes through. */
 static const IROperand *ir_hoist_memory_address(const IRInstruction *ins) {
   if (ins->op == IR_OP_LOAD) {
     return &ins->lhs;
@@ -293,10 +235,6 @@ static const IROperand *ir_hoist_memory_address(const IRInstruction *ins) {
   return NULL;
 }
 
-/* The element type reached through `addr_temp`, as a pointer type for the
- * hoisted base's declaration. An index lands one `+` past the base, so follow
- * that step as well as reading straight through. Returning NULL means nothing
- * in the loop indexes off this address, and there is no base worth naming. */
 static const char *ir_hoist_base_pointer_type(const IRFunction *function,
                                               size_t lo, size_t hi,
                                               const char *addr_temp) {
@@ -326,7 +264,6 @@ static const char *ir_hoist_base_pointer_type(const IRFunction *function,
   return NULL;
 }
 
-/* True if `sym` names a global rather than anything this function declares. */
 static int ir_hoist_symbol_is_global(const IRFunction *function,
                                      const char *sym) {
   return sym && !ir_function_symbol_is_parameter(function, sym) &&
@@ -364,7 +301,6 @@ static void ir_hoist_rename_temp_reads(IRFunction *function, size_t lo,
   }
 }
 
-/* Reads of a temp anywhere outside [lo,hi). */
 static int ir_hoist_temp_escapes(const IRFunction *function, size_t lo,
                                  size_t hi, const char *temp) {
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -386,20 +322,6 @@ static int ir_hoist_temp_escapes(const IRFunction *function, size_t lo,
   return 0;
 }
 
-/* Give a loop-invariant `&global` a name above the loop.
- *
- * `G[i]`, where G is a global array, lowers to `%t <- &@G` INSIDE the body and
- * then indexes off the temp. Every recognizer reads a base as a symbol, so the
- * temp hid the array from all of them at once: a program that keeps its buffers
- * at file scope, which is how most C-shaped code is written, vectorized
- * nowhere. `--explain` has been printing "hoist the invariant part of the index
- * into a base pointer before the loop" for exactly this, which is advice for an
- * edit the compiler can make itself.
- *
- * A global's address is a link-time constant, so the hoist is unconditional and
- * needs no invariance proof. Doing it here rather than in each recognizer means
- * every kernel gains global arrays at once, and none of them had to learn a
- * second spelling of a base. */
 int ir_hoist_global_bases_pass(IRFunction *function, int *changed) {
   if (!function) {
     return 0;
@@ -422,8 +344,6 @@ int ir_hoist_global_bases_pass(IRFunction *function, int *changed) {
       continue;
     }
 
-    /* Every insertion below can realloc the instruction array, so nothing here
-     * holds a pointer into it across one. */
     for (size_t i = header + 1; i < latch; i++) {
       char base_name[128];
       char global[128];
@@ -452,8 +372,6 @@ int ir_hoist_global_bases_pass(IRFunction *function, int *changed) {
       if (!ptr_type || ir_hoist_temp_escapes(function, header, latch, temp)) {
         continue;
       }
-      /* Named per loop, so one body's several `&@G` share a base while a
-       * sibling loop gets its own and stays independent of this one's region. */
       if (snprintf(base_name, sizeof(base_name), "__gbase_%s_%s", loop_label,
                    global) >= (int)sizeof(base_name)) {
         continue;
@@ -483,8 +401,6 @@ int ir_hoist_global_bases_pass(IRFunction *function, int *changed) {
       }
       ir_instruction_destroy_storage(&decl);
       ir_instruction_destroy_storage(&init);
-      /* The pair landed before the label, so the label, this instruction and
-       * the latch all sit two further along. */
       header += 2;
       i += 2;
       latch += 2;
@@ -885,7 +801,6 @@ int ir_hoist_invariant_assigns_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* Is `sym` written by any instruction in [lo, hi)? */
 static int ir_row_symbol_written(const IRFunction *function, size_t lo,
                                  size_t hi, const char *sym) {
   for (size_t i = lo; i < hi && i < function->instruction_count; i++) {
@@ -899,8 +814,6 @@ static int ir_row_symbol_written(const IRFunction *function, size_t lo,
   return 0;
 }
 
-/* The pointer type `sym` carries in this function: a local's declared type or
- * a parameter's. NULL unless it actually is a pointer. */
 static const char *ir_row_symbol_pointer_type(const IRFunction *function,
                                               const char *sym) {
   const char *t = ir_function_local_declared_type(function, sym);
@@ -924,8 +837,6 @@ static const char *ir_row_symbol_pointer_type(const IRFunction *function,
   return NULL;
 }
 
-/* Does `ins` read the temp named `name` anywhere: lhs/rhs, a store's address,
- * or a call/SIMD argument? */
 static int ir_row_instruction_reads_temp(const IRInstruction *ins,
                                          const char *name) {
   if (ir_operand_is_temp_named(&ins->lhs, name) ||
@@ -943,11 +854,6 @@ static int ir_row_instruction_reads_temp(const IRInstruction *ins,
   return 0;
 }
 
-/* One side of an index add that the loop never changes: a symbol neither
- * written inside [lo, hi) nor aliasable through a taken address. A literal
- * deliberately does NOT count: `a[i + 3]` is the straight-line shape the SLP
- * matcher and the backend's constant-displacement fold already consume, and
- * splitting its base away breaks their view of adjacent accesses. */
 static int ir_row_operand_invariant(const IRFunction *function, size_t lo,
                                     size_t hi, const IROperand *op) {
   return op->kind == IR_OPERAND_SYMBOL && op->name &&
@@ -955,30 +861,6 @@ static int ir_row_operand_invariant(const IRFunction *function, size_t lo,
          !ir_symbol_address_taken(function, op->name);
 }
 
-/* Loop-invariant pure arithmetic.
- *
- * The other hoisters in this file each move one shape: a global's address, a
- * row pointer, an invariant load. None move plain computation, so a loop that
- * indexes `w->live[i]` while only `k` moves recomputed `i * 32` every
- * iteration.
- *
- * Hoisting is not free: the result becomes live across the whole body, and a
- * loop that was already using every register pays for that in spills far more
- * than it saves in arithmetic. So this only moves a computation when doing so
- * cannot RAISE pressure -- every operand it reads must have no other reader
- * left in the loop, so the value moving out takes its inputs with it. That is
- * checkable here, unlike the register demand itself, and it is the difference
- * between scale_i32 getting 18% faster and physics_grid getting 12% slower.
- *
- * Divide and remainder are excluded: they trap on a zero divisor, and hoisting
- * one runs it on iterations the loop would never have taken. The definition
- * moves to the preheader, which dominates every point the original dominated.
- * A header reachable only by a jump has no preheader and is skipped.
- *
- * A divisor whose declared type rules out zero is the exception, and it is the
- * only one: the trap the exclusion exists for cannot happen, so the divide
- * moves like any other arithmetic. The proof is the type's, established by the
- * prover before any of this ran. */
 #define IR_LICM_MAX_PER_LOOP 8
 
 static int ir_licm_divisor_never_zero(const IRFunction *function,
@@ -994,13 +876,6 @@ static int ir_licm_divisor_never_zero(const IRFunction *function,
   return ir_type_is_nonzero(declared);
 }
 
-/* Whether anything defining this operand is a volatile access.
- *
- * A global declared volatile is read as a plain symbol operand, and lowering
- * marks the instruction that reads it rather than the operand, so the direct
- * test on the candidate catches that shape. This covers the other one: a
- * pointer to volatile is a LOAD into a temp, and arithmetic over that temp is
- * only as movable as the load, which is not at all. */
 static int ir_licm_reads_volatile_definition(const IRFunction *function,
                                              const IROperand *op) {
   if (!op || !op->name ||
@@ -1022,10 +897,6 @@ static int ir_licm_op_is_pure_arith(const IRFunction *function,
   if (!ins) {
     return 0;
   }
-  /* A volatile access is observable in itself, so it cannot move and neither
-   * can arithmetic that reads one. Hoisting the poll out of a spin loop turns
-   * the loop into an infinite one, which is why the whole bare-metal idiom
-   * used to refuse to build at --release. */
   if (ins->is_volatile ||
       ir_licm_reads_volatile_definition(function, &ins->lhs) ||
       ir_licm_reads_volatile_definition(function, &ins->rhs)) {
@@ -1066,7 +937,6 @@ static int ir_licm_operand_named(const IROperand *op, const char **name) {
   return 0;
 }
 
-/* Does `ins` read `name`, whether it is spelled a temp or a symbol? */
 static int ir_licm_instruction_reads(const IRInstruction *ins,
                                      const char *name) {
   const IROperand *slots[3] = {&ins->lhs, &ins->rhs,
@@ -1090,7 +960,6 @@ static int ir_licm_instruction_reads(const IRInstruction *ins,
   return 0;
 }
 
-/* Reads of `name` in [lo, hi), not counting the instruction at `skip`. */
 static size_t ir_licm_read_count(const IRFunction *function, size_t lo,
                                  size_t hi, size_t skip, const char *name) {
   size_t count = 0;
@@ -1156,11 +1025,6 @@ int ir_hoist_invariant_arith_pass(IRFunction *function, int *changed) {
       }
     }
     latch = ir_cleanup_loop_latch(function, header, loop_label);
-    /* Only small loops. A big body is already using every register it can get,
-     * and a value hoisted into it is live for the whole loop: physics_grid and
-     * interp_ast each lost more than 12% to exactly that, while the small
-     * integer loops that have registers to spare gained up to 18%. Size is the
-     * one proxy for spare pressure available here. */
     if (!latch || header == 0 || latch - header > 40) {
       continue;
     }
@@ -1226,8 +1090,6 @@ int ir_hoist_invariant_arith_pass(IRFunction *function, int *changed) {
     if (pick_count == 0) {
       continue;
     }
-    /* Clone first, then NOP, then insert the batch: one shift for the whole
-     * loop instead of one per instruction moved. */
     for (size_t k = 0; k < pick_count; k++) {
       IRInstruction hoisted;
       if (!ir_clone_instruction_plain(&function->instructions[picked[k]],
@@ -1254,26 +1116,6 @@ int ir_hoist_invariant_arith_pass(IRFunction *function, int *changed) {
 }
 #define IR_ROW_MAX_CONSUMERS 8
 
-/* Hoist the invariant half of an indexed access out of the loop.
- *
- * `m[r + i]` with `r` fixed across the loop lowers to
- *     %idx = r + i ; %sh = %idx << k ; %addr = m + %sh
- * and every recognizer reads a base indexed by the counter alone, so the sum
- * hid the access from all of them: the row-major inner loop, a windowed dot,
- * any offset slice. Rewriting it as
- *     row = m + (r << k)              (before the loop)
- *     %sh = i << k ; %addr = row + %sh
- * is the edit `--explain` has been prescribing ("bind the row to a pointer
- * before the loop"), made by the compiler. The addresses agree (both orders
- * are equal modulo 2^64), the loop saves an add per access, and the result is
- * the one address form every kernel reads.
- *
- * Soundness gates: the hoisted half and each pointer base must be
- * loop-invariant (never written in the loop, address never taken), the
- * counter half must not be rewritten between the index add and the shift, and
- * EVERY reader of the shifted index must be a `base + %sh` add this rewrite
- * also retargets. One consumer left behind would compute an address missing
- * the hoisted term. */
 typedef struct {
   long long k;
   long long bias;
@@ -1314,11 +1156,6 @@ static const IRInstruction *ir_row_nearest_def(const IRFunction *function,
   return NULL;
 }
 
-/* An int32 index expression is cut back to int32 before it is scaled, because
- * that is where the language says the arithmetic wraps. The row pointer this
- * pass forms is the same address for every index the array actually holds, so
- * the shape is read through the truncation the way it was before one was
- * emitted. An index that wraps is out of bounds either way. */
 static const IRInstruction *ir_row_see_through_narrowing(
     const IRFunction *function, size_t header, const IRInstruction *idx,
     size_t *at) {
@@ -1349,10 +1186,6 @@ static const IRInstruction *ir_row_carry_bias(const IRFunction *function,
                                               IRRowShape *out) {
   size_t inner_at = 0;
   const IRInstruction *inner;
-  /* A neighbour reads `m[r + i - 1]`, and the constant lands between
-   * the index add and the shift. It belongs to the fixed half, because
-   * (r + i - c) << k is ((r - c) + i) << k, so it is carried across and
-   * folded into the row pointer rather than refusing the shape. */
   if (!idx || idx->op != IR_OP_BINARY || idx->is_float || !idx->text ||
       (strcmp(idx->text, "+") != 0 && strcmp(idx->text, "-") != 0) ||
       idx->rhs.kind != IR_OPERAND_INT || idx->lhs.kind != IR_OPERAND_TEMP ||
@@ -1381,7 +1214,7 @@ static int ir_row_pick_sides(const IRFunction *function, size_t header,
   int rhs_inv =
       ir_row_operand_invariant(function, header + 1, latch, &idx->rhs);
   if (lhs_inv == rhs_inv) {
-    return 0; /* both fixed is plain LICM; both moving has no hoist. */
+    return 0;
   }
   inv_side = lhs_inv ? &idx->lhs : &idx->rhs;
   var_side = lhs_inv ? &idx->rhs : &idx->lhs;
@@ -1394,9 +1227,6 @@ static int ir_row_pick_sides(const IRFunction *function, size_t header,
       inv_side->int_value + out->bias == 0) {
     return 0;
   }
-  /* The moving half must still hold the index add's value at the
-   * shift: nothing may redefine it in between. At scale 1 they are the
-   * same instruction, so there is no in between. */
   if (!ir_row_still_holds(function, out->idx_pos + 1, s, var_side)) {
     return 0;
   }
@@ -1409,11 +1239,6 @@ static int ir_row_match_shape(const IRFunction *function, size_t header,
                               size_t latch, size_t s, IRRowShape *out) {
   const IRInstruction *shl = &function->instructions[s];
   const IRInstruction *idx = NULL;
-  /* A byte array scales by one, so the shift the pattern keys on is not
-   * emitted at all and `m[r + i]` reaches the consumer as the index add
-   * itself. Every string scan in the language has that shape, so the
-   * scale-1 form is matched here with the index add standing in for the
-   * shift and the same gates applied to it. */
   int scaled = shl->op == IR_OP_BINARY && !shl->is_float && shl->text &&
                strcmp(shl->text, "<<") == 0 &&
                shl->rhs.kind == IR_OPERAND_INT && shl->rhs.int_value >= 1 &&
@@ -1433,18 +1258,10 @@ static int ir_row_match_shape(const IRFunction *function, size_t header,
   }
   out->k = scaled ? shl->rhs.int_value : 0;
 
-  /* Cheap rejection first. Everything below this point walks the loop
-   * (the invariance tests) and then the whole function (the reader
-   * scan), and admitting the scale-1 form means every `+` in every loop
-   * is a candidate. Unless some instruction in this loop already reads
-   * the index as `base + %sh`, there is nothing to rewrite and those
-   * walks would only prove it. The loop body is the smaller thing to
-   * search, so search it first. */
   if (!ir_row_index_is_read_in_loop(function, s, latch, out->sh_name)) {
     return 0;
   }
 
-  /* The shifted value must be `invariant + counter`, defined in-loop. */
   if (scaled) {
     idx = ir_row_nearest_def(function, s, header, shl->lhs.name,
                              &out->idx_pos);
@@ -1505,9 +1322,6 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
         var = shape.var;
       }
 
-      /* Every reader of the shifted index, in or out of the loop, must be a
-       * rewritable `base + %sh` add inside this loop; and nothing else may
-       * define the same temp. */
       for (size_t j = 0; j < function->instruction_count && !bad; j++) {
         const IRInstruction *ins = &function->instructions[j];
         if (j != s && ir_instruction_writes_destination(ins) &&
@@ -1545,8 +1359,6 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
         continue;
       }
 
-      /* Capture each consumer's base and its pointer type before touching
-       * anything, then rewrite in place (inserting reallocates the array). */
       char base_names[IR_ROW_MAX_CONSUMERS][128];
       char ptr_types[IR_ROW_MAX_CONSUMERS][64];
       char row_names[IR_ROW_MAX_CONSUMERS][48];
@@ -1584,9 +1396,6 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
         IRInstruction *shl = &function->instructions[s];
         ir_operand_destroy(&shl->lhs);
         if (k == 0) {
-          /* At scale 1 this instruction IS the index add. The row pointer now
-           * carries the invariant half, so what the consumers still need from
-           * it is the moving half alone. */
           ir_operand_destroy(&shl->rhs);
           mettle_free_string(shl->text);
           shl->text = NULL;
@@ -1597,10 +1406,6 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
         var = ir_operand_none();
       }
 
-      /* The shift no longer reads the index add, and the row pointer carries
-       * what it contributed. Retire it when nothing else reads it: left in
-       * place it is dead code that still describes an offset, and a later
-       * recognizer can charge that offset on top of the row pointer. */
       if (k != 0) {
         IRInstruction *idx_ins = &function->instructions[idx_pos];
         if (idx_ins->dest.kind == IR_OPERAND_TEMP && idx_ins->dest.name) {
@@ -1621,9 +1426,6 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
         }
       }
 
-      /* Preheader, inserted at the header label: declarations, the scaled
-       * offset when the hoisted half is a runtime symbol, then one add per
-       * row. Build each instruction with owned storage; insertion copies. */
       size_t at = header;
       size_t inserted = 0;
       int failed = 0;
@@ -1642,8 +1444,6 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
           inserted++;
         }
       }
-      /* The fixed half plus the constant carried out of the index, when the
-       * fixed half is a name and so cannot be folded at compile time. */
       if (!failed && bias != 0 && inv.kind != IR_OPERAND_INT) {
         IRInstruction adj = {0};
         adj.op = IR_OP_BINARY;
@@ -1661,7 +1461,7 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
           inserted++;
           ir_operand_destroy(&inv);
           inv = ir_operand_temp(bias_name);
-          bias = 0; /* now carried by the name */
+          bias = 0;
         }
       }
       if (!failed && need_off_temp) {
@@ -1718,8 +1518,6 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* `base + (iv << k)`, the address of `base[iv]`. Fills the base symbol and the
- * element width the shift implies. */
 static int ir_scan_decode_indexed(const IRFunction *function, size_t before,
                                   const char *addr_temp, const char *iv,
                                   const char **base_out, long long *width_out) {
@@ -1744,8 +1542,6 @@ static int ir_scan_decode_indexed(const IRFunction *function, size_t before,
   return 1;
 }
 
-/* The element a body instruction assigns to `sym`, when it assigns exactly
- * `base[iv]` and nothing derived from it. */
 static int ir_scan_assigns_element(const IRFunction *function, size_t at,
                                    const char *sym, const char *iv,
                                    const char **base_out, long long *width_out) {
@@ -1777,18 +1573,6 @@ static int ir_scan_assigns_element(const IRFunction *function, size_t at,
   }
 }
 
-/* Start a scan seeded from the first element at 0 rather than 1.
- *
- * `var m = a[0]; var i = 1; while (i < n) { if (a[i] > m) { m = a[i]; } }` is
- * how a maximum is usually written, and every kernel walks its arrays from
- * element 0 and reads the compare bound as a count, so the recognizers refuse
- * a counter that starts anywhere else. The awkward spelling, seeding from a
- * sentinel and counting from 0, vectorized; the ordinary one did not.
- *
- * Iteration 0 is a no-op here: the body's only effect is to assign `m` an
- * element of the same array at the same index, and at i == 0 that element is
- * the seed `m` already holds. So the counter can start at 0 and the loop runs
- * one extra iteration that cannot change anything. */
 int ir_normalize_scan_from_first_pass(IRFunction *function, int *changed) {
   if (!function) {
     return 0;
@@ -1827,7 +1611,6 @@ int ir_normalize_scan_from_first_pass(IRFunction *function, int *changed) {
       }
       iv = cmp->lhs.name;
     }
-    /* The counter's last setting before the loop must be the literal 1. */
     for (size_t k = 0; k < header; k++) {
       const IRInstruction *ins = &function->instructions[k];
       if (ir_instruction_writes_destination(ins) &&
@@ -1840,8 +1623,6 @@ int ir_normalize_scan_from_first_pass(IRFunction *function, int *changed) {
     if (!found_init) {
       continue;
     }
-    /* Every symbol the body writes, other than the counter, is one accumulator
-     * assigned exactly `base[iv]`. */
     for (size_t k = header + 1; k < latch && ok; k++) {
       const IRInstruction *ins = &function->instructions[k];
       const char *b = NULL;
@@ -1873,7 +1654,6 @@ int ir_normalize_scan_from_first_pass(IRFunction *function, int *changed) {
     if (!ok || !acc || !base) {
       continue;
     }
-    /* And its seed, before the loop, is that array's first element. */
     {
       const IRInstruction *seed = NULL;
       for (size_t k = 0; k < header; k++) {
@@ -1882,7 +1662,6 @@ int ir_normalize_scan_from_first_pass(IRFunction *function, int *changed) {
             ir_operand_is_symbol_named(&ins->dest, acc)) {
           seed = ins;
         }
-        /* The base must not move between the seed and the loop. */
         if (seed && ir_instruction_writes_destination(ins) &&
             ir_operand_is_symbol_named(&ins->dest, base)) {
           seed = NULL;
@@ -1907,8 +1686,6 @@ int ir_normalize_scan_from_first_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* True if `temp` is produced by a comparison, so it holds 0 or 1 rather than
- * the merely-nonzero that `branch_zero` would also accept. */
 static int ir_accum_condition_is_boolean(const IRFunction *function, size_t at,
                                          const char *temp) {
   const IRInstruction *p = ir_find_temp_producer_before(function, at, temp);
@@ -1920,31 +1697,12 @@ static int ir_accum_condition_is_boolean(const IRFunction *function, size_t at,
          strcmp(p->text, "==") == 0 || strcmp(p->text, "!=") == 0;
 }
 
-/* `if (a[i] != 0)` reaches here as a bare `branch_zero` on the loaded value:
- * an earlier peephole folds `t = x != 0; branch_zero t` to `branch_zero x`,
- * which is right for scalar code and erases the comparison this pass needs.
- * The value is an int32 that may be any number, so `c = c + x` would count 5
- * for a 5. Putting the comparison back makes it a boolean again.
- *
- * Only an integer LOAD qualifies. A guard on a computed value (`if (x & 6)`)
- * is left alone: rewriting it would be correct, and it is the shape the
- * reader most likely meant to spell as a comparison, so a silent conversion
- * would hide a real question about their code behind a speed win.
- *
- * The slot the folded comparison vacated is still there as a NOP, so the
- * comparison goes back where it was and nothing moves. */
 static int ir_accum_condition_is_nonzero_load(const IRFunction *function,
                                               size_t at, const char *temp) {
   const IRInstruction *p = ir_find_temp_producer_before(function, at, temp);
   return p && p->op == IR_OP_LOAD && !p->is_float;
 }
 
-/* The NOP nearest the branch, searching back to the loop header. Returns 0
- * when the region holds none. */
-/* A retired slot inside the loop body to put the comparison back into, at or
- * after the point `cond` is computed: the rewrite makes the multiply read the
- * comparison's result, so a slot ahead of the load that defines `cond` would
- * compare whatever the previous iteration left there. */
 static size_t ir_accum_condition_defined_at(const IRFunction *function,
                                             size_t header, size_t before,
                                             const char *cond) {
@@ -1972,9 +1730,6 @@ static size_t ir_accum_free_nop_slot(const IRFunction *function, size_t header,
   return 0;
 }
 
-/* No retired slot to put the comparison back into, so make one. The loop's own
- * indices move with it, which is why the caller hands them over to be
- * adjusted. */
 static size_t ir_accum_open_nop_slot(IRFunction *function, size_t header,
                                      size_t *before, size_t *latch,
                                      const char *cond) {
@@ -1991,8 +1746,6 @@ static size_t ir_accum_open_nop_slot(IRFunction *function, size_t header,
   return at;
 }
 
-/* Structural equality of two operands, and of the chains that compute two
- * temps. Used to prove one load reads exactly what another already read. */
 static int ir_accum_operand_same(const IROperand *a, const IROperand *b) {
   if (a->kind != b->kind) {
     return 0;
@@ -2032,7 +1785,7 @@ static int ir_accum_chain_same(const IRFunction *function, size_t at_a,
   }
   if (pa->op != IR_OP_BINARY && pa->op != IR_OP_ADDRESS_OF &&
       pa->op != IR_OP_CAST) {
-    return 0; /* only pure address arithmetic is followed */
+    return 0;
   }
   if ((pa->text == NULL) != (pb->text == NULL) ||
       (pa->text && strcmp(pa->text, pb->text) != 0)) {
@@ -2047,10 +1800,6 @@ static int ir_accum_chain_same(const IRFunction *function, size_t at_a,
   }
 }
 
-/* True if the LOAD at `at` reads exactly what some load in [lo, at) already
- * read. Nothing between them writes memory (the caller admits no stores or
- * calls), so hoisting it out of its guard can neither fault nor see a
- * different value: the earlier load already touched that address. */
 static int ir_accum_load_is_redundant(const IRFunction *function, size_t lo,
                                       size_t at) {
   const IRInstruction *load = &function->instructions[at];
@@ -2071,9 +1820,6 @@ static int ir_accum_load_is_redundant(const IRFunction *function, size_t lo,
   return 0;
 }
 
-/* Whether any jump or branch still names `label`. The accumulate rewrite below
- * retires the guard it converted, and may only retire the labels that guard
- * reached if nothing else reaches them. */
 static int ir_accum_label_is_reached(const IRFunction *function,
                                      const char *label) {
   if (!label) {
@@ -2090,20 +1836,6 @@ static int ir_accum_label_is_reached(const IRFunction *function,
   return 0;
 }
 
-/* Turn a counted-under-a-condition accumulator into an unconditional one.
- *
- * `if (a[i] > t) { c = c + 1; }` is the ordinary way to count matches, and no
- * reduction kernel reads a body that branches. `--explain` has been telling
- * writers to make the accumulation unconditional by multiplying in the
- * comparison, which is exactly this rewrite, done by hand.
- *
- * The comparison already holds 0 or 1, so `c = c + X * cond` adds X on the
- * iterations the branch would have taken and 0 on the rest. Doing it here
- * rather than in a kernel means the int32 sum, the general reduction and the
- * float sums all gain predicated counting together.
- *
- * The rewrite lands in the slots the branch and its jump occupied, so nothing
- * moves and no instruction is inserted. */
 typedef struct {
   size_t add_index;
   size_t jump;
@@ -2112,9 +1844,6 @@ typedef struct {
   const char *acc;
 } IRAccumArm;
 
-/* The arm writes one symbol, the accumulator. Everything else in it must be
- * arithmetic into temps, and any load must be one the condition already
- * performed, since the rewrite makes the arm unconditional. */
 static size_t ir_accum_find_add(const IRFunction *function, size_t header,
                                 size_t latch, size_t branch_index,
                                 size_t *jump_out) {
@@ -2180,8 +1909,6 @@ static int ir_accum_match_arm(const IRFunction *function, size_t header,
   }
   arm->acc = add->dest.name;
 
-  /* Both labels must follow, and the else arm must be empty: a value chosen on
-   * the other side is a select, not an accumulate. */
   if (!ir_find_next_non_nop(function, arm->jump + 1, &arm->else_label) ||
       arm->else_label >= latch ||
       !ir_find_next_non_nop(function, arm->else_label + 1, &arm->end_label) ||
@@ -2196,8 +1923,6 @@ static int ir_accum_match_arm(const IRFunction *function, size_t header,
     return 0;
   }
 
-  /* Nothing else in the loop may write the accumulator, or the two writes
-   * would race in a way one unconditional add cannot reproduce. */
   for (size_t k = header + 1; k < latch; k++) {
     if (k != arm->add_index &&
         ir_instruction_writes_destination(&function->instructions[k]) &&
@@ -2208,9 +1933,6 @@ static int ir_accum_match_arm(const IRFunction *function, size_t header,
   return 1;
 }
 
-/* The addend may be computed inside the arm, so the multiply has to follow it:
- * it takes the accumulate's slot and the accumulate moves down into the one
- * the jump occupied. */
 static int ir_accum_scale_addend(IRFunction *function, const IRAccumArm *arm,
                                  const char *cond, unsigned *minted) {
   IRInstruction *add = &function->instructions[arm->add_index];
@@ -2253,8 +1975,6 @@ static int ir_accum_rewrite_arm(IRFunction *function, size_t branch_index,
       add->rhs.kind == IR_OPERAND_INT && add->rhs.int_value == 1;
   char boolean[64];
 
-  /* Put the folded `!= 0` back, in the slot it was folded out of, and multiply
-   * by that instead of by the raw loaded value. */
   if (rematerialize_at) {
     IRInstruction cmp = {0};
     snprintf(boolean, sizeof(boolean), ".ifne%u", (*minted)++);
@@ -2273,11 +1993,7 @@ static int ir_accum_rewrite_arm(IRFunction *function, size_t branch_index,
     cond = boolean;
   }
 
-  /* `cond` points into the branch's own operand, and retiring an instruction
-   * frees its operands. The branch is therefore NOPed only after both rewrites
-   * below have copied the name out of it. */
   if (addend_is_one) {
-    /* `c = c + 1` under the condition IS `c = c + cond`. */
     ir_operand_destroy(&add->rhs);
     add->rhs = ir_operand_temp(cond);
     if (!add->rhs.name) {
@@ -2289,12 +2005,6 @@ static int ir_accum_rewrite_arm(IRFunction *function, size_t branch_index,
   }
   ir_instruction_make_nop(&function->instructions[branch_index]);
 
-  /* Both labels can have a second predecessor. A short-circuit `&&` lowers to
-   * two branches at the same else label, so retiring it on behalf of the inner
-   * guard alone left the outer branch pointing at nothing -- codegen refused
-   * the function, and the shapes that did not refuse it counted the wrong
-   * thing. Retire each only once the guard that just went away held its last
-   * reference; remove_unused_labels collects whatever this leaves behind. */
   if (!ir_accum_label_is_reached(
           function, function->instructions[arm->else_label].text)) {
     ir_instruction_make_nop(&function->instructions[arm->else_label]);
@@ -2310,10 +2020,6 @@ static int ir_accum_rewrite_arm(IRFunction *function, size_t branch_index,
 }
 
 int ir_if_convert_accumulate_pass(IRFunction *function, int *changed) {
-  /* The two temporaries below used to be named after the instruction index
-   * they were written at. A name is only unique while positions hold still,
-   * and any pass that inserts or retires ahead of this one moves them, so two
-   * unrelated values could end up sharing a name and then a home. */
   static unsigned minted;
 
   if (!function) {
@@ -2336,8 +2042,6 @@ int ir_if_convert_accumulate_pass(IRFunction *function, int *changed) {
       const IRInstruction *br = &function->instructions[i];
       IRAccumArm arm = {0};
       const char *cond = NULL;
-      /* Set when the guard reached here as a folded `!= 0` and the comparison
-         has to be put back before the addend can be multiplied by it. */
       size_t rematerialize_at = 0;
 
       if (br->op != IR_OP_BRANCH_ZERO || !br->text ||
@@ -2374,16 +2078,6 @@ int ir_if_convert_accumulate_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* Every symbol an ADDRESS_OF names, and how many times each symbol is read,
- * both in one walk.
- *
- * The pass asked each of those questions per candidate copy and answered by
- * scanning the whole function, so a straight-line body of assignments cost the
- * square of its length. Folding a copy neither creates nor removes an
- * ADDRESS_OF -- a symbol whose address is taken is skipped before any rewrite
- * -- so that set holds for the whole pass; the read counts do change, and are
- * rebuilt when a fold actually lands, which is rare next to the number of
- * candidates rejected. */
 static int ir_load_copy_build_facts(const IRFunction *function,
                                     IRNameIndex *address_taken,
                                     IRNameIndex *reads) {
@@ -2456,10 +2150,6 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
       continue;
     }
 
-    /* The assign usually follows the load directly, but the inliner's
-     * parameter materialization interposes the parameter's DECLARE_LOCAL
-     * (`%t <- *addr; local @p; @p <- %t`). Neither a NOP nor a declaration
-     * reads or writes the temp or the symbol, so skip past them. */
     while (assign_index < function->instruction_count &&
            (function->instructions[assign_index].op == IR_OP_NOP ||
             function->instructions[assign_index].op == IR_OP_DECLARE_LOCAL)) {
@@ -2477,12 +2167,6 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
       continue;
     }
 
-    /* A float ASSIGN may carry an IEEE-754 width contract (e.g. the inliner
-     * tags a float32 parameter copy with float_bits=32 so a float64-tracked
-     * argument is narrowed). Replacing the symbol's uses with the raw load
-     * temp drops that conversion, so only fold when the loaded scalar already
-     * has the assign's exact width (4-byte load for float32, 8 for float64) --
-     * then the conversion is an identity and the copy is safe to elide. */
     if (assign->is_float) {
       long long width_bytes = (assign->float_bits == 32) ? 4 : 8;
       if (load->rhs.kind != IR_OPERAND_INT ||
@@ -2494,8 +2178,6 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
     sym = assign->dest.name;
     temp = load->dest.name;
 
-    /* An address-taken symbol can be read through memory the operand scan
-     * below cannot see. */
     if (ir_name_index_find(&address_taken, sym, NULL)) {
       continue;
     }
@@ -2504,8 +2186,6 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
       total_reads = 0;
     }
 
-    /* Scan the straight-line window after the assign. It ends at the first
-     * control-flow instruction or the first re-write of the symbol. */
     for (j = assign_index + 1; j < function->instruction_count; j++) {
       const IRInstruction *ins = &function->instructions[j];
       if (ins->op == IR_OP_LABEL || ins->op == IR_OP_JUMP ||
@@ -2515,8 +2195,6 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
       }
       if (ir_instruction_writes_symbol(ins) &&
           ir_operand_is_symbol_named(&ins->dest, sym)) {
-        /* A re-write that also reads the symbol (`@s = @s + 1`) would read a
-         * stale value once the copy is gone. */
         if (ir_load_copy_count_symbol_reads(ins, sym) > 0) {
           unsafe_use = 1;
         }
@@ -2525,19 +2203,10 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
       }
       if (ins->op == IR_OP_STORE &&
           ir_operand_is_symbol_named(&ins->dest, sym)) {
-        /* Store-through-symbol addresses are left alone; folding around one
-         * would leave a stale read. */
         unsafe_use = 1;
         break;
       }
       window_reads += ir_load_copy_count_symbol_reads(ins, sym);
-      /* Two reasons to stop early, both of which leave the outcome unchanged.
-       * Past six reads the fold is rejected below whatever follows. And once
-       * the window holds every read of the symbol in the function, nothing
-       * later reads it: no further instruction can add a read, make the use
-       * unsafe, or need rewriting, so the window ends here. Without this the
-       * scan runs to the end of the function for every candidate, which is
-       * quadratic in a straight-line body. */
       if (window_reads > 6) {
         window_end = j + 1;
         break;
@@ -2552,10 +2221,6 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
       continue;
     }
 
-    /* The symbol may be read outside the window: beyond the control-flow edge
-     * that ended it, or earlier in a loop body (reading the previous
-     * iteration's value). Either read would go stale once the copy is nop'd,
-     * so only fold when the window accounts for every read in the function. */
     if (window_reads != total_reads) {
       continue;
     }
@@ -2570,9 +2235,6 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
     }
 
     ir_instruction_make_nop(assign);
-    /* The rewrite moved reads off `sym` and onto `temp`, so the tally is stale.
-     * A landed fold is rare next to the candidates rejected above, which is why
-     * this is a rebuild rather than an incremental update. */
     ir_name_index_destroy(&reads);
     if (!ir_load_copy_build_facts(function, NULL, &reads)) {
       ir_name_index_destroy(&address_taken);
@@ -2586,17 +2248,6 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
   ir_name_index_destroy(&address_taken);
   ir_name_index_destroy(&reads);
 
-  /* Folding a copy can leave its DECLARE_LOCAL dead (the inliner's parameter
-   * local once every read is rewritten to the argument temp). A dead
-   * declaration in a loop body still spoils the vectorizers' body-shape
-   * matching and the --explain diagnosis, so sweep declarations whose symbol
-   * no other instruction references.
-   *
-   * Asking that per declaration by scanning the function is quadratic, and a
-   * body of assignments is nearly all declarations. One tally of how often each
-   * symbol is named answers it: the declaration is dead when the only mentions
-   * left are its own. Retiring one takes its mentions back out, which is what
-   * the scan's "skip NOPs" did. */
   {
     IRNameIndex mentions;
     if (!ir_name_index_init(&mentions, function->instruction_count)) {
@@ -2644,9 +2295,6 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
   return 1;
 }
 
-/* ---- redundant narrowing ---------------------------------------------- */
-
-/* Width in bytes of a narrow integer type name, or 0 for anything else. */
 static size_t ir_narrowing_width(const char *type_name) {
   if (!type_name) {
     return 0;
@@ -2663,10 +2311,6 @@ static size_t ir_narrowing_width(const char *type_name) {
   return 0;
 }
 
-/* Does the low half of this operation's result depend only on the low half of
- * the operand in this slot? Then a truncation feeding that slot is dead when
- * the result is cut at least as far. A shift's right operand is a count rather
- * than a value, so it is excluded. */
 static int ir_narrowing_op_keeps_low_bits(const IRInstruction *in, int slot) {
   if (in->op != IR_OP_BINARY || in->is_float || !in->text) {
     return 0;
@@ -2700,19 +2344,12 @@ static void ir_narrowing_facts_destroy(IRNarrowingFacts *facts) {
   facts->narrowed_to = NULL;
 }
 
-/* A temp is not an SSA value here: lowering merges the arms of an expression
- * by assigning the same one from several blocks. Forwarding past a cast is
- * only the same program when the cast is the temp's one definition. */
 static int ir_narrowing_single_def(const IRNarrowingFacts *facts,
                                    const char *name) {
   size_t count = 0;
   return ir_name_index_find(&facts->defs, name, &count) && count == 1;
 }
 
-/* Is this temp the result of integer arithmetic? Only those are what lowering
- * cut back to a declared width, and only those are safe to forward past: a
- * cast off a byte load is a WIDENING, and dropping it loses the sign extension
- * the element type asks for. */
 static int ir_narrowing_from_arithmetic(const IRFunction *function,
                                         const IRNarrowingFacts *facts,
                                         const char *name) {
@@ -2732,8 +2369,6 @@ static int ir_narrowing_single_use(const IRNarrowingFacts *facts,
   return ir_name_index_find(&facts->uses, name, &count) && count == 1;
 }
 
-/* Everything above `width` bytes is discarded on the way into this use, so a
- * truncation to that width feeding it is dead. */
 static int ir_narrowing_sink_is_narrower(const IRFunction *function,
                                          const IRNarrowingFacts *facts,
                                          size_t use_at, int slot,
@@ -2753,13 +2388,6 @@ static int ir_narrowing_sink_is_narrower(const IRFunction *function,
   return sink != 0 && sink <= width;
 }
 
-/* Lowering brings every narrow arithmetic result back to its declared width,
- * because a 64-bit temp holding an `int32 + int32` has to wrap where the
- * language says it wraps. Most of those truncations are dead the moment they
- * are emitted: the value goes straight into a location of that width, or into
- * an operation whose own result is cut to it, and the same bits are discarded
- * either way. Retiring them here, before any recognizer runs, is what keeps an
- * int32 accumulator loop looking like one. */
 static void ir_narrowing_count_names(IRFunction *function,
                                      IRNarrowingFacts *facts) {
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -2781,7 +2409,6 @@ static void ir_narrowing_count_names(IRFunction *function,
   }
 }
 
-/* Which results are cut back down right after they are produced. */
 static void ir_narrowing_mark_producers(IRFunction *function,
                                         IRNarrowingFacts *facts) {
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -2909,8 +2536,6 @@ int ir_drop_dead_narrowing_pass(IRFunction *function, int *changed) {
     ir_narrowing_facts_destroy(&facts);
     return 0;
   }
-  /* Decide first, rewrite after: the name indexes borrow the operand names
-   * they were built from, and retiring one cast frees a few of them. */
   ir_narrowing_choose_retirements(function, &facts, retire, retire_use);
   ir_narrowing_facts_destroy(&facts);
 

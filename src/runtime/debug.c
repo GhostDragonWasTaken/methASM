@@ -1,35 +1,4 @@
-/* Mettle interactive debug runtime (opt-in: --debug-hooks).
- *
- * The compiler instruments the program with calls to the mettle_dbg_*
- * symbols below; the internal linker pulls this object in when it sees them
- * undefined (mirroring crash_handler/profile auto-linking).
- *
- * With no debugger attached (METTLE_DBG_PIPE unset) every hook is a single
- * predictable-branch early-out. With one attached, the runtime connects to
- * the named pipe the editor's debug adapter owns and speaks a line-based
- * tab-separated protocol:
- *
- *   runtime -> adapter: hello, file/fn tables, stopped events, frame/var
- *                       listings, eval/set replies
- *   adapter -> runtime: breakpoint sets, continue/pause/step, stack/variable
- *                       queries, variable writes, detach
- *
- * Variable values are read (and written) through LIVE POINTERS the
- * instrumentation registered via mettle_dbg_local -- the IR pass takes the
- * address of every local and parameter, which forces a memory home, so the
- * pointer always sees the current value.
- *
- * Single-threaded model: only the thread that performs the first
- * mettle_dbg_enter (main) is debugged; hooks from other threads return
- * immediately.
- *
- * The protocol and everything above it is platform-neutral. What differs is
- * the surface underneath: a named pipe and Win32 synchronization on Windows,
- * a FIFO and the owned runtime's threads, futexes and system calls
- * everywhere else. Both are provided under one set of names below. */
 
-/* Keep MinGW headers from redirecting these calls to compiler library
- * wrappers. Mettle's owned runtime provides the selected ABI symbols. */
 #if defined(_WIN32) || defined(_WIN64)
 #define __USE_MINGW_ANSI_STDIO 0
 #endif
@@ -44,8 +13,6 @@
 
 #include <windows.h>
 
-/* Bind the formatter to the plain symbol that the owned runtime exports.
- * The asm name avoids MinGW's dllimport declaration. */
 extern int dbg_owned_vsnprintf(char *buffer, size_t cap, const char *format,
                                va_list args) __asm__("vsnprintf");
 
@@ -73,8 +40,6 @@ static int dbg_vsnprintf_impl(char *buffer, size_t cap, const char *format,
 #define snprintf dbg_snprintf_impl
 #define vsnprintf dbg_vsnprintf_impl
 
-/* MinGW's stdlib.h redirects strtod to a compiler helper. Bind to the plain
- * symbol that Mettle's owned runtime exports. */
 extern double dbg_owned_strtod(const char *str, char **end) __asm__("strtod");
 #undef strtod
 #define strtod dbg_owned_strtod
@@ -88,17 +53,7 @@ extern uint64_t dbg_owned_strtoui64(const char *str, char **end, int base)
 #define _strtoi64 dbg_owned_strtoi64
 #define _strtoui64 dbg_owned_strtoui64
 
-#else /* POSIX */
-
-/* The protocol below is platform-neutral: frames, locals, breakpoints, the
- * command queue and the wire format say nothing about how bytes move or how
- * threads wait. Only the surface underneath differs, so it is provided here
- * under the same names and the body compiles unchanged.
- *
- * Everything called here is exported by the owned runtime, which reaches the
- * kernel directly. No libc appears on the link line on this platform either.
- * METTLE_DBG_PIPE names a FIFO the adapter creates, standing in for the
- * Windows named pipe. */
+#else
 
 typedef int HANDLE;
 typedef long LONG;
@@ -113,8 +68,6 @@ extern int ioctl(int fd, unsigned long request, void *argument);
 extern void usleep(unsigned long microseconds);
 extern unsigned int mettle_thread_current_id(void);
 extern int32_t mettle_atomic_exchange_i32(int32_t *target, int32_t value);
-/* Same argument order as InterlockedCompareExchange, and it returns the old
- * value too, so the mapping below is a rename. */
 extern int32_t mettle_atomic_compare_exchange_i32(int32_t *target,
                                                   int32_t exchange,
                                                   int32_t comparand);
@@ -127,8 +80,6 @@ extern int pthread_cond_init(void *cond, const void *attr);
 extern int pthread_cond_wait(void *cond, void *mutex);
 extern int pthread_cond_broadcast(void *cond);
 
-/* Opaque storage sized past glibc's pthread_mutex_t (40) and pthread_cond_t
- * (48); the owned runtime's own types are smaller. */
 typedef struct { unsigned char opaque[64]; } CRITICAL_SECTION;
 typedef struct { unsigned char opaque[64]; } CONDITION_VARIABLE;
 
@@ -177,9 +128,6 @@ static int dbg_posix_read(HANDLE fd, void *buffer, DWORD count, DWORD *got,
   return n > 0;
 }
 
-/* FIONREAD reports what can be read without blocking, which is what
- * PeekNamedPipe is used for: never block the reader while the program thread
- * may be writing the next event. */
 #define DBG_FIONREAD 0x541Bul
 
 static int dbg_posix_peek(HANDLE fd, void *a, DWORD b, void *c, DWORD *avail,
@@ -198,9 +146,6 @@ static HANDLE dbg_posix_open(const char *path) {
   return stream ? fileno(stream) : INVALID_HANDLE_VALUE;
 }
 
-/* glibc's headers redirect the string conversions to versioned symbols
- * (__isoc23_strtoul and friends) that the owned runtime does not export. Bind
- * the plain names it does, the same way the Windows arm binds around MinGW. */
 extern unsigned long dbg_owned_strtoul(const char *str, char **end, int base)
     __asm__("strtoul");
 extern long long dbg_owned_strtoll(const char *str, char **end, int base)
@@ -222,18 +167,13 @@ extern int dbg_owned_sscanf(const char *input, const char *format, ...)
 #define strtoull dbg_owned_strtoull
 #define strtod dbg_owned_strtod_posix
 
-/* The parser reaches for the MSVC-spelled 64-bit conversions. */
 #define _strtoi64 dbg_owned_strtoll
 #define _strtoui64 dbg_owned_strtoull
 
-/* The owned runtime already answers "may I read this address" for the crash
- * handler; the debugger asks the same question before dereferencing a local. */
 extern int mettle_address_is_readable(const void *address,
                                       unsigned long long length);
 extern int mettle_install_signal_handler(int signal_number,
                                          void (*handler)(int, void *, void *));
-/* The owned runtime exports no getpid; on Linux the main thread's id is the
- * process id, and dbg_try_init runs on the main thread. */
 #define GetCurrentProcessId() ((DWORD)mettle_thread_current_id())
 
 static DWORD dbg_posix_getenv(const char *name, char *buffer, DWORD cap) {
@@ -248,9 +188,6 @@ static DWORD dbg_posix_getenv(const char *name, char *buffer, DWORD cap) {
   return i;
 }
 
-/* pthreads wants void *(*)(void *) where Win32 wants DWORD (*)(LPVOID), so the
- * reader routine is held here and reached through a trampoline of the right
- * shape. */
 typedef DWORD (*DbgThreadStart)(void *);
 static DbgThreadStart g_dbg_thread_start = 0;
 
@@ -262,13 +199,11 @@ static void *dbg_posix_thread_trampoline(void *argument) {
 }
 
 static HANDLE dbg_posix_spawn(DbgThreadStart start) {
-  /* pthread_t is one word on every target the owned runtime supports. */
   unsigned long thread = 0;
   g_dbg_thread_start = start;
   if (pthread_create(&thread, 0, dbg_posix_thread_trampoline, 0) != 0) {
     return 0;
   }
-  /* Only tested against 0, so any nonzero value stands for "running". */
   return 1;
 }
 
@@ -289,12 +224,10 @@ static HANDLE dbg_posix_spawn(DbgThreadStart start) {
 #define GetEnvironmentVariableA(name, buf, cap)                                \
   dbg_posix_getenv((name), (buf), (cap))
 
-/* pthreads hands the start routine a void* and takes one back; the Win32
- * spelling below is kept so the reader thread reads the same on both. */
 #define WINAPI
 typedef void *LPVOID;
 
-#endif /* platform surface */
+#endif
 
 extern uint64_t mettle_profile_name_count;
 extern const char *mettle_profile_names[];
@@ -312,14 +245,12 @@ extern const char *mettle_dbg_field_names[];
 extern const char *mettle_dbg_field_types[];
 extern uint64_t mettle_dbg_field_offsets[];
 
-/* --- value classification ------------------------------------------------- */
-
 typedef enum {
   DBG_K_I8, DBG_K_U8, DBG_K_I16, DBG_K_U16, DBG_K_I32, DBG_K_U32,
   DBG_K_I64, DBG_K_U64, DBG_K_F32, DBG_K_F64, DBG_K_BOOL,
-  DBG_K_PTR,    /* any T*, cstring, fn pointers: 8-byte address */
-  DBG_K_STRING, /* the 16-byte { chars, length } struct */
-  DBG_K_OTHER   /* structs, arrays: shown as their address */
+  DBG_K_PTR,
+  DBG_K_STRING,
+  DBG_K_OTHER
 } DbgKind;
 
 static DbgKind dbg_classify_type(const char *type_name) {
@@ -346,9 +277,6 @@ static DbgKind dbg_classify_type(const char *type_name) {
   return DBG_K_OTHER;
 }
 
-/* --- type metadata (the embedded struct layout tables) ----------------------- */
-
-/* Index of `name` in the struct table, or -1. */
 static int64_t dbg_struct_index(const char *name, size_t name_len) {
   for (uint64_t i = 0; i < mettle_dbg_struct_count; i++) {
     const char *candidate = mettle_dbg_struct_names[i];
@@ -360,8 +288,6 @@ static int64_t dbg_struct_index(const char *name, size_t name_len) {
   return -1;
 }
 
-/* Parse `T[N]` into the element type (written to elem/elem_cap) and N.
- * Returns 1 on match. */
 static int dbg_parse_array_type(const char *type_name, char *elem,
                                 size_t elem_cap, uint64_t *count_out) {
   const char *bracket = type_name ? strrchr(type_name, '[') : NULL;
@@ -375,7 +301,6 @@ static int dbg_parse_array_type(const char *type_name, char *elem,
   return 1;
 }
 
-/* Byte size of a value of this type (0 = unknown). */
 static uint64_t dbg_type_size(const char *type_name) {
   switch (dbg_classify_type(type_name)) {
   case DBG_K_I8: case DBG_K_U8: case DBG_K_BOOL: return 1;
@@ -396,8 +321,6 @@ static uint64_t dbg_type_size(const char *type_name) {
   }
 }
 
-/* Whether a value of this type expands to children in the variables tree:
- * structs and arrays do; pointers do when they point at a struct or array. */
 static int dbg_type_has_kids(const char *type_name) {
   if (!type_name) return 0;
   size_t len = strlen(type_name);
@@ -406,7 +329,6 @@ static int dbg_type_has_kids(const char *type_name) {
     if (len - 1 >= sizeof(base)) return 0;
     memcpy(base, type_name, len - 1);
     base[len - 1] = '\0';
-    /* strip any remaining pointer levels for the struct check */
     size_t blen = strlen(base);
     while (blen > 0 && base[blen - 1] == '*') base[--blen] = '\0';
     return dbg_struct_index(base, blen) >= 0 || strchr(base, '[') != NULL;
@@ -415,15 +337,10 @@ static int dbg_type_has_kids(const char *type_name) {
   return dbg_struct_index(type_name, len) >= 0;
 }
 
-/* --- state ----------------------------------------------------------------- */
-
 #define DBG_MAX_STACK 1024
 #define DBG_MAX_LOCALS 8192
 #define DBG_MAX_BREAKPOINTS 512
 #define DBG_MAX_FILES 256
-/* Keep line buffers (and so stack frames) under the 4KB Windows stack-probe
- * threshold: gcc emits ___chkstk_ms calls for larger frames, which the
- * internal PE linker has no runtime for. Protocol lines are short. */
 #define DBG_LINE_MAX 1024
 
 typedef struct {
@@ -433,7 +350,7 @@ typedef struct {
 } DbgFrame;
 
 typedef struct {
-  const char *name;      /* points into the embedded .rdata string literal */
+  const char *name;
   const char *type_name;
   void *ptr;
   DbgKind kind;
@@ -443,7 +360,7 @@ typedef struct {
 typedef struct {
   uint32_t file_id;
   uint32_t line;
-  char cond[160]; /* empty = unconditional */
+  char cond[160];
 } DbgBreakpoint;
 
 typedef enum {
@@ -454,41 +371,31 @@ typedef enum {
   DBG_PAUSE_REQ
 } DbgRunMode;
 
-static volatile LONG g_active = 0;     /* hooks early-out when 0 */
+static volatile LONG g_active = 0;
 static DWORD g_main_thread = 0;
 static HANDLE g_pipe = INVALID_HANDLE_VALUE;
-/* 0 rather than NULL: the POSIX arm types HANDLE as an int, and clang rejects
- * a pointer initializer for it where gcc only warns. 0 is a null pointer
- * constant for the Win32 arm and plain zero here. */
 static HANDLE g_reader_thread = 0;
 
-/* The big tables live on the heap (allocated in dbg_try_init): the internal
- * PE linker rejects runtime objects with very large .bss sections, and with
- * no debugger attached none of this memory is needed anyway. */
 static DbgFrame *g_stack = NULL;
 static uint32_t g_depth = 0;
 static DbgLocal *g_locals = NULL;
 static uint32_t g_local_count = 0;
 
-static const char **g_file_paths = NULL; /* file_id -> path */
+static const char **g_file_paths = NULL;
 static uint32_t g_file_count = 0;
-static uint32_t *g_fn_file = NULL;       /* fn_id -> file_id */
+static uint32_t *g_fn_file = NULL;
 
 static CRITICAL_SECTION g_lock;
 static CONDITION_VARIABLE g_wake;
 static volatile LONG g_paused = 0;
 static DbgRunMode g_mode = DBG_RUN;
 static uint32_t g_step_depth = 0;
-static DbgBreakpoint *g_breakpoints = NULL; /* heap: see the .bss note above */
+static DbgBreakpoint *g_breakpoints = NULL;
 static volatile LONG g_bp_count = 0;
 
-/* Command queue: the reader thread enqueues lines for the paused program
- * thread to execute (queries must run on the thread that owns the frames). */
 #define DBG_CMD_QUEUE 32
 static char (*g_cmd_queue)[DBG_LINE_MAX] = NULL;
 static uint32_t g_cmd_head = 0, g_cmd_tail = 0;
-
-/* --- pipe I/O ----------------------------------------------------------------- */
 
 static void dbg_send(const char *line) {
   char framed[DBG_LINE_MAX + 1];
@@ -511,8 +418,6 @@ static void dbg_sendf(const char *format, ...) {
   dbg_send(buffer);
 }
 
-/* --- memory probing -------------------------------------------------------------- */
-
 static int dbg_mem_readable(const void *ptr, size_t size) {
 #if defined(_WIN32) || defined(_WIN64)
   MEMORY_BASIC_INFORMATION info;
@@ -520,7 +425,6 @@ static int dbg_mem_readable(const void *ptr, size_t size) {
   if (VirtualQuery(ptr, &info, sizeof(info)) == 0) return 0;
   if (info.State != MEM_COMMIT) return 0;
   if (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
-  /* conservative: require the whole range inside this region */
   return (const char *)ptr + size <=
          (const char *)info.BaseAddress + info.RegionSize;
 #else
@@ -528,8 +432,6 @@ static int dbg_mem_readable(const void *ptr, size_t size) {
   return mettle_address_is_readable(ptr, (unsigned long long)size);
 #endif
 }
-
-/* --- value rendering ----------------------------------------------------------------- */
 
 static void dbg_escape_into(char *out, size_t out_cap, const char *bytes,
                             size_t count) {
@@ -570,7 +472,6 @@ static void dbg_format_value(void *p, const char *type_name, DbgKind kind,
     if (!target) {
       snprintf(out, cap, "null");
     } else if (dbg_mem_readable(target, 1)) {
-      /* show the address plus a short byte preview for cstring-ish data */
       char preview[80];
       size_t n = 0;
       while (n < 24 && dbg_mem_readable(target + n, 1) && target[n] != '\0' &&
@@ -635,11 +536,6 @@ static int dbg_write_value(void *p, DbgKind kind, const char *text) {
   }
 }
 
-/* --- path resolution ----------------------------------------------------------------
- * `name(.field | ->field | [index])*` resolves to an address + type using
- * the embedded struct layout tables. Pointers auto-dereference for field
- * access, so `p.x` works whether p is `Point` or `Point*`. */
-
 static DbgLocal *dbg_find_local_in_frame(uint32_t frame_index,
                                          const char *name, size_t name_len);
 
@@ -648,7 +544,6 @@ static int dbg_resolve_path(uint32_t frame_index, const char *path,
   const char *cursor = path;
   void *addr = NULL;
 
-  /* leading identifier: a local/param in the frame */
   const char *start = cursor;
   while (*cursor && (*cursor == '_' || (*cursor >= 'a' && *cursor <= 'z') ||
                      (*cursor >= 'A' && *cursor <= 'Z') ||
@@ -667,7 +562,6 @@ static int dbg_resolve_path(uint32_t frame_index, const char *path,
   while (*cursor) {
     if (cursor[0] == '.' || (cursor[0] == '-' && cursor[1] == '>')) {
       cursor += cursor[0] == '.' ? 1 : 2;
-      /* auto-deref any pointer levels before field access */
       size_t tlen = strlen(type_buf);
       while (tlen > 0 && type_buf[tlen - 1] == '*') {
         if (!dbg_mem_readable(addr, 8)) return 0;
@@ -728,23 +622,19 @@ static int dbg_resolve_path(uint32_t frame_index, const char *path,
       }
       return 0;
     }
-    return 0; /* unexpected character */
+    return 0;
   }
 
   *addr_out = addr;
   return 1;
 }
 
-/* --- conditional breakpoints --------------------------------------------------------
- * Condition grammar: `<path> <op> <literal>` with op in == != < <= > >= and a
- * numeric/true/false literal. Evaluated on the program thread at hit time. */
-
 static int dbg_condition_true(uint32_t frame_index, const char *cond) {
   char path[128];
   char op[3] = {0};
   char lit[64];
   if (sscanf(cond, "%127s %2s %63s", path, op, lit) != 3) {
-    return 1; /* unparseable condition: stop rather than silently skip */
+    return 1;
   }
   void *addr = NULL;
   char type_buf[96];
@@ -786,8 +676,6 @@ static int dbg_condition_true(uint32_t frame_index, const char *cond) {
   return 1;
 }
 
-/* --- tables ----------------------------------------------------------------------- */
-
 static uint32_t dbg_intern_file(const char *path) {
   for (uint32_t i = 0; i < g_file_count; i++) {
     if (strcmp(g_file_paths[i], path) == 0) return i;
@@ -818,11 +706,9 @@ static void dbg_build_and_send_tables(void) {
   dbg_send("tablesdone");
 }
 
-/* --- queries (run on the paused program thread) -------------------------------------- */
-
 static void dbg_reply_stack(void) {
   for (uint32_t i = 0; i < g_depth; i++) {
-    const DbgFrame *frame = &g_stack[g_depth - 1 - i]; /* top first */
+    const DbgFrame *frame = &g_stack[g_depth - 1 - i];
     dbg_sendf("frame\t%u\t%u\t%u", i, frame->fn_id, frame->line);
   }
   dbg_send("framesdone");
@@ -865,7 +751,6 @@ static DbgLocal *dbg_find_local_in_frame(uint32_t frame_index,
   uint32_t begin = 0, end = 0;
   if (!frame || !name) return NULL;
   dbg_frame_local_range(frame, &begin, &end);
-  /* latest registration wins (block-scoped shadowing) */
   for (uint32_t i = end; i > begin; i--) {
     if (g_locals[i - 1].name && strlen(g_locals[i - 1].name) == name_len &&
         strncmp(g_locals[i - 1].name, name, name_len) == 0) {
@@ -875,8 +760,6 @@ static DbgLocal *dbg_find_local_in_frame(uint32_t frame_index,
   return NULL;
 }
 
-/* List the children of the value at `path`: struct fields, array elements
- * (capped), with pointers auto-dereferenced first. Same line shape as vars. */
 static void dbg_reply_expand(uint32_t frame_index, const char *path) {
   void *addr = NULL;
   char type_buf[96];
@@ -884,7 +767,6 @@ static void dbg_reply_expand(uint32_t frame_index, const char *path) {
     dbg_send("varsdone");
     return;
   }
-  /* auto-deref pointer levels so expanding `p: Point*` shows the fields */
   size_t tlen = strlen(type_buf);
   int guard = 0;
   while (tlen > 0 && type_buf[tlen - 1] == '*' && guard++ < 4) {
@@ -962,9 +844,6 @@ static void dbg_reply_set(uint32_t frame_index, const char *path,
   dbg_sendf("setr\t1\t%s", value);
 }
 
-/* --- command handling --------------------------------------------------------------------- */
-
-/* Split a command line on tabs in place. Returns the field count. */
 static int dbg_split(char *line, char *fields[], int max_fields) {
   int count = 0;
   char *cursor = line;
@@ -977,8 +856,6 @@ static int dbg_split(char *line, char *fields[], int max_fields) {
   return count;
 }
 
-/* Apply a control command. Returns 1 when it resumes execution (the paused
- * loop should exit), 0 otherwise. Caller holds g_lock. */
 static int dbg_apply_control(char *fields[], int field_count) {
   const char *verb = fields[0];
   if (strcmp(verb, "go") == 0) {
@@ -1009,8 +886,6 @@ static int dbg_apply_control(char *fields[], int field_count) {
     return 1;
   }
   if (strcmp(verb, "setbp") == 0 && field_count >= 3) {
-    /* setbp <file_id> <comma-separated lines>: replace that file's set
-     * (conditional breakpoints are re-added afterwards via bpadd) */
     uint32_t file_id = (uint32_t)strtoul(fields[1], NULL, 10);
     LONG kept = 0;
     for (LONG i = 0; i < g_bp_count; i++) {
@@ -1036,7 +911,6 @@ static int dbg_apply_control(char *fields[], int field_count) {
     return 0;
   }
   if (strcmp(verb, "bpadd") == 0 && field_count >= 4) {
-    /* bpadd <file_id> <line> <condition>: one conditional breakpoint */
     if (g_bp_count < DBG_MAX_BREAKPOINTS) {
       g_breakpoints[g_bp_count].file_id =
           (uint32_t)strtoul(fields[1], NULL, 10);
@@ -1055,7 +929,6 @@ static int dbg_apply_control(char *fields[], int field_count) {
   return 0;
 }
 
-/* Execute one query command (paused program thread only). */
 static void dbg_apply_query(char *fields[], int field_count) {
   const char *verb = fields[0];
   if (strcmp(verb, "stack") == 0) {
@@ -1077,23 +950,15 @@ static int dbg_is_query(const char *verb) {
          strcmp(verb, "set") == 0;
 }
 
-/* Reader thread: parses lines off the pipe. Control commands apply
- * immediately; queries are queued for the paused program thread. */
 static DWORD WINAPI dbg_reader_main(LPVOID unused) {
   char buffer[DBG_LINE_MAX];
   size_t buffered = 0;
   (void)unused;
 
   for (;;) {
-    /* NEVER hold a blocking ReadFile on the (synchronous) pipe handle: Win32
-     * serializes operations per handle, so a pending read would block the
-     * program thread's WriteFile of the next `stopped` event -- a deadlock
-     * until the adapter happens to send something. Peek, then read only
-     * what is already there. */
     DWORD avail = 0;
     DWORD bytes_read = 0;
     if (!PeekNamedPipe(g_pipe, NULL, 0, NULL, &avail, NULL)) {
-      /* adapter went away: keep running at full speed */
       EnterCriticalSection(&g_lock);
       InterlockedExchange(&g_active, 0);
       g_mode = DBG_RUN;
@@ -1138,7 +1003,6 @@ static DWORD WINAPI dbg_reader_main(LPVOID unused) {
         if (field_count > 0) {
           if (dbg_is_query(fields[0]) ||
               (g_paused && !dbg_is_query(fields[0]))) {
-            /* paused: everything runs on the program thread, in order */
             uint32_t next_tail = (g_cmd_tail + 1) % DBG_CMD_QUEUE;
             if (next_tail != g_cmd_head) {
               strncpy(g_cmd_queue[g_cmd_tail], line_start, DBG_LINE_MAX - 1);
@@ -1158,8 +1022,6 @@ static DWORD WINAPI dbg_reader_main(LPVOID unused) {
     memmove(buffer, line_start, buffered + 1);
   }
 }
-
-/* --- the pause loop (program thread) --------------------------------------------------- */
 
 static DWORD g_exc_code = 0;
 static uint64_t g_exc_addr = 0;
@@ -1201,7 +1063,6 @@ static void dbg_pause_here(const char *reason) {
       field_count = dbg_split(working, fields, 8);
       if (field_count == 0) continue;
       if (dbg_is_query(fields[0])) {
-        /* release the lock while reading program memory / writing the pipe */
         LeaveCriticalSection(&g_lock);
         dbg_apply_query(fields, field_count);
         EnterCriticalSection(&g_lock);
@@ -1216,21 +1077,8 @@ static void dbg_pause_here(const char *reason) {
   LeaveCriticalSection(&g_lock);
 }
 
-/* --- crash interception --------------------------------------------------------------------
- * A vectored exception handler (registered first) turns a hardware fault
- * into a debugger stop at the faulting source line: the shadow stack and
- * variable registry are intact, so the full stack and every variable are
- * inspectable at the moment of the crash. `continue` returns
- * EXCEPTION_CONTINUE_SEARCH, handing the fault to the default handling
- * (the crash trace, then process death) -- a fault is not resumable. */
-
 #if !defined(_WIN32) && !defined(_WIN64)
 
-/* POSIX arm of the same idea: a fault stops the program where it happened and
- * hands it to the adapter, so the stack and every variable are inspectable at
- * that moment. Reported through the signal handler the owned runtime installs
- * for the crash tracer, then returned so the default handling still runs: a
- * fault is not resumable. */
 static void dbg_signal_handler(int signal_number, void *address, void *context) {
   static LONG in_handler = 0;
   (void)context;
@@ -1249,8 +1097,6 @@ static void dbg_signal_handler(int signal_number, void *address, void *context) 
   InterlockedExchange(&in_handler, 0);
 }
 
-/* SIGSEGV, SIGFPE, SIGILL, SIGBUS. Stack overflow is left alone for the same
- * reason as on Windows: no stack remains to pause on. */
 static void dbg_install_fault_handlers(void) {
   static const int signals[] = {11, 8, 4, 7};
   for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
@@ -1268,7 +1114,6 @@ static LONG WINAPI dbg_vectored_handler(EXCEPTION_POINTERS *info) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
   code = info->ExceptionRecord->ExceptionCode;
-  /* genuine faults only; stack overflow excluded (no stack left to pause on) */
   if (code != EXCEPTION_ACCESS_VIOLATION &&
       code != EXCEPTION_INT_DIVIDE_BY_ZERO &&
       code != EXCEPTION_ILLEGAL_INSTRUCTION &&
@@ -1290,9 +1135,7 @@ static LONG WINAPI dbg_vectored_handler(EXCEPTION_POINTERS *info) {
   return EXCEPTION_CONTINUE_SEARCH;
 }
 
-#endif /* fault handler */
-
-/* --- initialization ----------------------------------------------------------------------- */
+#endif
 
 static void dbg_try_init(void) {
   char pipe_name[512];
@@ -1305,7 +1148,7 @@ static void dbg_try_init(void) {
   g_pipe = CreateFileA(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
                        OPEN_EXISTING, 0, NULL);
   if (g_pipe == INVALID_HANDLE_VALUE) {
-    return; /* adapter not listening: run normally */
+    return;
   }
 
   g_stack = calloc(DBG_MAX_STACK, sizeof(DbgFrame));
@@ -1337,15 +1180,11 @@ static void dbg_try_init(void) {
   InterlockedExchange(&g_active, 1);
 }
 
-/* --- the instrumentation hooks -------------------------------------------------------------- */
-
 void mettle_dbg_enter(uint32_t fn_id) {
   static LONG initialized = 0;
   if (InterlockedCompareExchange(&initialized, 1, 0) == 0) {
     dbg_try_init();
     if (g_active) {
-      /* hold at the very first function until the adapter configures
-       * breakpoints and resumes (or requests a stop-on-entry) */
       if (g_depth < DBG_MAX_STACK) {
         g_stack[g_depth].fn_id = fn_id;
         g_stack[g_depth].line = 0;
@@ -1380,9 +1219,6 @@ void mettle_dbg_local(int64_t local_id, void *ptr, int64_t is_param) {
   {
     const char *name = mettle_dbg_local_names[local_id];
     const char *type_name = mettle_dbg_local_types[local_id];
-    /* re-registration in the same frame (loop-scoped declarations) updates
-     * in place; shadowing in nested blocks appends and lookup prefers the
-     * latest entry */
     DbgFrame *top = &g_stack[g_depth - 1];
     for (uint32_t i = g_local_count; i > top->locals_base; i--) {
       if (g_locals[i - 1].ptr == ptr &&
@@ -1441,8 +1277,6 @@ void mettle_dbg_line(uint32_t line) {
         }
       }
       LeaveCriticalSection(&g_lock);
-      /* condition evaluated OUTSIDE the lock: it reads program memory via
-       * the path resolver, which only this (the program) thread touches */
       if (hit && (cond[0] == '\0' || dbg_condition_true(0, cond))) {
         reason = "breakpoint";
       }

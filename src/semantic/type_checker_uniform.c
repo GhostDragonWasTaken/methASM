@@ -1,18 +1,3 @@
-/* Uniformity: which values are the same for every work item of a group.
- *
- * A group collective is only meaningful where every work item of the group
- * reaches it, and that is decided by the values the control flow tests. So the
- * question "is this value the same in every lane" has to be answerable in the
- * frontend, before any of it reaches IR: a declared type says a value is
- * uniform, and this is what discharges the claim.
- *
- * A value is uniform when it depends on no work-item index, on no load from
- * memory, and on no value that is not itself uniform. A kernel's parameters
- * are uniform because the launch gave every work item the same ones; `block.x`
- * and the launch geometry are uniform; `thread.x` and the subgroup lane are
- * not. The answer is computed to a fixed point through calls, which is what
- * lets a helper stay reusable rather than being uniform by decree.
- */
 #include "type_checker_internal.h"
 #include "codegen/target.h"
 #include <stdio.h>
@@ -21,8 +6,8 @@
 
 typedef struct {
   TypeChecker *checker;
-  const char *why;          /* the term that made the answer no */
-  const char *visiting[16]; /* locals already on the path, to stop a cycle */
+  const char *why;
+  const char *visiting[16];
   size_t visiting_count;
   int depth;
 } UniformContext;
@@ -31,11 +16,6 @@ static int uniform_expression(UniformContext *context, ASTNode *expression);
 
 static ASTNode *uniform_function_body(TypeChecker *checker, const char *name);
 
-/* A function body that reads a work-item index, or memory, cannot promise its
-   result is the same in every lane whatever it was handed. Calls are followed:
-   a helper that hides the index one level down hides nothing. The device call
-   graph is a DAG of direct calls, and the walk carries the names already on
-   its path so a shared helper is not a cycle. */
 static int uniform_body_reads_a_varying_thing(UniformContext *context,
                                               ASTNode *node, int depth) {
   if (!node || depth > 64) {
@@ -58,8 +38,6 @@ static int uniform_body_reads_a_varying_thing(UniformContext *context,
           }
         }
         if (!callee) {
-          /* Nothing to read: an extern or a name from another module. It is
-             not known to be the same in every work item. */
           return 1;
         }
         if (!already && context->visiting_count < 16) {
@@ -87,8 +65,6 @@ static int uniform_body_reads_a_varying_thing(UniformContext *context,
   return 0;
 }
 
-/* The body of a function by name, out of the module being checked. A device
-   call graph is a DAG of direct calls, so a name is enough to find it. */
 static ASTNode *uniform_function_body(TypeChecker *checker, const char *name) {
   ASTNode *module = checker->module_program;
   Program *program = module && module->data ? (Program *)module->data : NULL;
@@ -108,8 +84,6 @@ static ASTNode *uniform_function_body(TypeChecker *checker, const char *name) {
   return NULL;
 }
 
-/* Every write to a local in the function being checked. A local is uniform
-   only when its declaration and every assignment to it are. */
 static int uniform_local_writes(UniformContext *context, ASTNode *node,
                                 const char *name, int depth) {
   if (!node || depth > 128) {
@@ -156,13 +130,10 @@ static int uniform_identifier(UniformContext *context, ASTNode *expression) {
                                                   : "an unknown name";
     return 0;
   }
-  /* A declared type may already say it. */
   if (symbol->type && symbol->type->refine_uniform) {
     return 1;
   }
   if (symbol->kind == SYMBOL_PARAMETER) {
-    /* A kernel's parameters come from the launch, so every work item has the
-       same ones. A helper's do not, unless their type says so. */
     if (owner && owner->is_kernel) {
       return 1;
     }
@@ -174,16 +145,13 @@ static int uniform_identifier(UniformContext *context, ASTNode *expression) {
   }
   if (symbol->kind == SYMBOL_VARIABLE && symbol->scope &&
       symbol->scope->type == SCOPE_GLOBAL) {
-    /* A module-scope binding is device memory, and reading one is a load like
-       any other. Only a `const`, which is laid out before anything runs, is
-       the same in every work item by construction. */
     context->why = identifier->name;
     return 0;
   }
   if (symbol->kind == SYMBOL_VARIABLE || symbol->kind == SYMBOL_CONSTANT) {
     for (size_t i = 0; i < context->visiting_count; i++) {
       if (context->visiting[i] == identifier->name) {
-        return 1; /* already on the path: it constrains nothing new */
+        return 1;
       }
     }
     if (!owner || !owner->body || context->visiting_count >= 16) {
@@ -304,7 +272,6 @@ static int uniform_expression(UniformContext *context, ASTNode *expression) {
 int type_checker_expression_is_uniform(TypeChecker *checker,
                                        ASTNode *expression,
                                        const char **why) {
-  /* `why` is optional: a caller that only wants the answer passes NULL. */
   UniformContext context;
   int uniform;
   if (why) {
@@ -322,18 +289,12 @@ int type_checker_expression_is_uniform(TypeChecker *checker,
   return uniform;
 }
 
-/* --- what the device analyses concluded ------------------------------------
- *
- * `--report-gpu-types` and `--explain` both print this: one line per device
- * type a declaration named, saying where its data lives, how tightly it is
- * aligned and how it is laid out, and one line per bank proof discharged. A
- * choice the compiler made and the proof it consumed, in the same place. */
 typedef struct {
   const char *owner;
   const char *binding;
   const char *type_name;
   size_t line;
-  int proof;            /* 1 = a bank proof, 0 = a declared device type */
+  int proof;
   char detail[160];
 } GpuTypeNote;
 
@@ -481,19 +442,6 @@ void type_checker_print_gpu_type_report(FILE *out) {
           g_gpu_report_seconds * 1000.0);
 }
 
-/* --- bank-conflict freedom ------------------------------------------------
- *
- * Workgroup memory is cut into banks, and a subgroup's access is one access
- * only where the addresses it touches fall in distinct banks. The layout is
- * what decides that, so it is a fact about the type and provable from it: the
- * indices are evaluated for every lane of a subgroup, the layout turns each
- * pair into an offset, and the banks are compared. What the machine has --
- * how wide a subgroup is, how many banks there are, how many bytes each one
- * holds -- is read from the target description rather than assumed. */
-
-/* Evaluate an index expression for one lane of a subgroup. Returns 0 where
-   the value does not follow from the lane alone, which is where the proof
-   stops rather than guesses. */
 static int lane_value(TypeChecker *checker, ASTNode *expression, long long lane,
                       int depth, long long *out);
 
@@ -622,9 +570,6 @@ static int lane_value(TypeChecker *checker, ASTNode *expression, long long lane,
   return 0;
 }
 
-/* Where element (i, j) of a view sits, in elements from its base. This is the
-   same arithmetic ir_lower_static_view_offset emits, and the byte-layout round
-   trip in tests/gpu is what holds the two to each other. */
 long long type_checker_view_element_offset(const Type *view, long long row,
                                            long long column) {
   long long rows = (long long)view->view_extents[0];
@@ -682,10 +627,6 @@ static void conflict_check_access(ConflictContext *context, ASTNode *outer,
                        : 4;
   long long element_size = view->base_type ? (long long)view->base_type->size : 4;
   long long seen[128];
-  /* One of the two indices may be uniform rather than a function of the work
-     item: a loop counter every work item is at the same value of. The proof
-     then has to hold at each of its values, and the view's own extent says
-     how many there are. */
   long long fixed_row = 0;
   long long fixed_column = 0;
   int row_from_lane = lane_value(context->checker, inner_index->index, 0, 0,

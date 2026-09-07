@@ -1,9 +1,5 @@
-/* --ml-opt: apply the native model's dispositions (NOP / COPY <src> / CONST <int>
- * / REWRITE <postfix>) to the IR after the classical optimizer, gating every
- * applied disposition through the reference-interpreter differential
- * (ir_verify_check_rewrite). The model proposes; the validator disposes. */
 #include "ml_opt.h"
-#include "../common.h" // mettle_free_string
+#include "../common.h"
 #include "ir_verify.h"
 
 #include <stdio.h>
@@ -26,8 +22,6 @@ int ir_function_insert_instruction(IRFunction *function, size_t index,
                                    const IRInstruction *instruction);
 int ir_function_rebuild_cfg(IRFunction *function);
 
-/* Hoist a >imm32 constant used 3+ times into a temp at function entry so the
- * allocator keeps it in a register instead of re-emitting a movabs at every use. */
 static int fits_imm32(long long v) { return v >= -2147483648LL && v <= 2147483647LL; }
 
 static void hoist_replace(IROperand *op, long long v, const char *tname) {
@@ -41,7 +35,6 @@ static int hoist_constants_fn(IRFunction *f) {
   if (!f) return 0;
   int hoisted = 0, tag = 0;
   for (int pass = 0; pass < 24; pass++) {
-    /* find the most-used large constant not yet hoisted */
     long long best_v = 0; size_t best_n = 0;
     for (size_t i = 0; i < f->instruction_count; i++) {
       IRInstruction *in = &f->instructions[i];
@@ -60,7 +53,7 @@ static int hoist_constants_fn(IRFunction *f) {
         if (n > best_n) { best_n = n; best_v = v; }
       }
     }
-    if (best_n < 3) break;             /* nothing worth hoisting */
+    if (best_n < 3) break;
     char tname[32];
     snprintf(tname, sizeof(tname), "__kh%d", tag++);
     IRInstruction def = {0};
@@ -164,8 +157,6 @@ static IROperand rw_operand(const char *tok) {
   return ir_operand_int(atoll(tok));
 }
 
-/* Materialize a REWRITE postfix (RPN over ~ & | ^ << >> and operands) as new
- * instructions before gidx, the last writing the root's dest, then NOP the root. */
 static int apply_rewrite(IRFunction *fn, size_t gidx, char *postfix) {
   if (gidx >= fn->instruction_count) return 0;
   IROperand root_dest = ir_operand_copy(&fn->instructions[gidx].dest);
@@ -183,7 +174,6 @@ static int apply_rewrite(IRFunction *fn, size_t gidx, char *postfix) {
         strcmp(t, "^") == 0 || is_shift) {
       int unary = (t[0] == '~');
       if (sp < (unary ? 1 : 2 - is_shift) || nops >= 64) { ok = 0; break; }
-      /* shift: a << count, count is the digits after the operator token */
       IROperand b = unary ? ir_operand_none()
                   : is_shift ? ir_operand_int(atoll(t + 2)) : stack[--sp];
       IROperand a = stack[--sp];
@@ -207,7 +197,7 @@ static int apply_rewrite(IRFunction *fn, size_t gidx, char *postfix) {
   }
   for (int i = 0; i < sp; i++) ir_operand_destroy(&stack[i]);
   ir_operand_destroy(&ops[nops - 1].dest);
-  ops[nops - 1].dest = root_dest;                 /* final op writes the root dest */
+  ops[nops - 1].dest = root_dest;
 
   int good = 1;
   for (int i = 0; i < nops && good; i++)
@@ -227,8 +217,6 @@ static const char *base_name(const char *p) {
   return b;
 }
 
-/* ---------------- the dispositions ---------------- */
-
 enum { MLK_NOP, MLK_COPY, MLK_CONST, MLK_REWRITE };
 enum { MLV_PENDING, MLV_VALIDATED, MLV_PROVEN, MLV_REJECTED, MLV_SKIPPED };
 
@@ -236,10 +224,10 @@ typedef struct {
   char fn[256];
   long long gidx;
   int kind;
-  int unproven;  /* source is a model guess, not a construction-time proof */
-  char *arg;     /* COPY/CONST operand or REWRITE postfix (immutable here) */
-  int applied;   /* changed the IR and currently stands */
-  int verdict;   /* MLV_* */
+  int unproven;
+  char *arg;
+  int applied;
+  int verdict;
 } MLDisp;
 
 static const char *mlv_name(int verdict) {
@@ -260,23 +248,6 @@ static const char *mlk_name(int kind) {
   }
 }
 
-/* Which dispositions may NOT stand on their own authority.
- *
- * NOP is the model's speculative dead-code delete: no construction-time proof,
- * so it stands only when the validator can check the function. COPY/CONST/
- * REWRITE have historically come from sound transforms (GVN dataflow, collapse
- * probing, truth-table/GF(2) superoptimization), so they are proven by
- * construction and may stand even when the gate cannot run the function.
- *
- * That reasoning is about PROVENANCE, not about the kind. A `COPY` whose source
- * a model chose is not proven by anything, and treating it as proven would apply
- * an unchecked rewrite to every function the interpreter cannot execute. So a
- * disposition may mark itself unproven by suffixing its kind with `?`
- * (`COPY? %t7`), and anything unproven is gated exactly like a NOP.
- *
- * This matters concretely: the pointer head in gnn_oracle names its own reuse
- * target, and must emit `COPY?`. Without this distinction, enabling that head
- * would silently widen what the compiler applies without validation. */
 static int disp_speculative(const MLDisp *d) {
   return d->kind == MLK_NOP || d->unproven;
 }
@@ -304,8 +275,6 @@ static MLDisp *parse_disps(char *text, int *out_n) {
       m->gidx = gi;
       m->verdict = MLV_PENDING;
       m->arg = strdup(p + consumed);
-      /* A `?` suffix marks the disposition as model-sourced rather than proven
-       * by construction; see disp_speculative. */
       size_t klen = strlen(kind);
       if (klen && kind[klen - 1] == '?') {
         m->unproven = 1;
@@ -329,17 +298,6 @@ static MLDisp *parse_disps(char *text, int *out_n) {
   return d;
 }
 
-/* METTLE_ML_SABOTAGE: corrupt a COPY/CONST disposition into a wrong constant,
- * proving end to end that the validator catches and discards a bad model
- * proposal - the ml-opt twin of METTLE_VERIFY_BREAK.
- *
- * It has to land on a function the validator can actually snapshot. A CONST is
- * proven by construction and stands on that proof wherever the gate cannot run,
- * so arming one on an unsnapshottable function -- anything calling out to an
- * extern, say -- applies the wrong constant and reports nothing, which reads as
- * the gate failing when it was never consulted. That is a self-test claiming
- * the opposite of what it measured, so the candidate is checked here rather
- * than taken in list order. */
 static void maybe_sabotage(IRProgram *program, MLDisp *d, int n) {
   const char *spec = getenv("METTLE_ML_SABOTAGE");
   if (!spec || !spec[0] || strcmp(spec, "0") == 0) {
@@ -356,11 +314,6 @@ static void maybe_sabotage(IRProgram *program, MLDisp *d, int n) {
     if (!snap) {
       continue;
     }
-    /* Ask the gate about this function while nothing has been changed. A
-     * function still identical to its snapshot must come back VALIDATED; the
-     * only other answer it can give is that it cannot run the function at all,
-     * which is the case to skip. Nothing is mutated, so this costs a run and
-     * decides nothing else. */
     dry = ir_verify_check_rewrite(program, fn, snap, why, sizeof(why), cex,
                                   sizeof(cex), skip, sizeof(skip));
     if (dry != IR_VERIFY_REWRITE_VALIDATED) {
@@ -382,14 +335,12 @@ static void maybe_sabotage(IRProgram *program, MLDisp *d, int n) {
           "function the validator can run\n");
 }
 
-/* Apply one disposition. Returns 1 when the IR changed (the disposition now
- * stands until validation says otherwise), 0 when the applier declined. */
 static int apply_one(IRFunction *fn, const MLDisp *d) {
   if (!fn->cfg_valid && !ir_function_rebuild_cfg(fn)) {
     return 0;
   }
   if (d->kind == MLK_REWRITE) {
-    char *scratch = strdup(d->arg); /* apply_rewrite tokenizes destructively */
+    char *scratch = strdup(d->arg);
     if (!scratch) return 0;
     int changed = apply_rewrite(fn, (size_t)d->gidx, scratch);
     free(scratch);
@@ -400,8 +351,6 @@ static int apply_one(IRFunction *fn, const MLDisp *d) {
     return 0;
   }
   if (d->kind == MLK_NOP) {
-    /* Deleting control flow would leave the CFG lying about the stream;
-     * the model has no business proposing it and the applier refuses. */
     if (ins->op == IR_OP_NOP || ins->op == IR_OP_LABEL ||
         ins->op == IR_OP_JUMP || ins->op == IR_OP_BRANCH_ZERO ||
         ins->op == IR_OP_BRANCH_EQ || ins->op == IR_OP_RETURN) {
@@ -451,25 +400,18 @@ static void report_rejection(const MLDisp *d, const char *cex,
           cyan, reset, d->fn);
 }
 
-/* Restore the pre-disposition IR and leave the function in an appliable
- * state (blocks rebuilt: apply_one and redirect_uses walk fn->blocks). */
 static void restore_fn(IRFunction *fn, const IRVerifySnapshot *snap) {
   if (ir_verify_snapshot_restore(fn, snap)) {
     ir_function_rebuild_cfg(fn);
   }
 }
 
-/* Validate the disposition group of one function. `idx`/`count` index into
- * `d` in apply order (non-REWRITE first in model order, then REWRITEs by
- * descending gidx so insertions never shift a pending target). */
 static void run_function_group(IRProgram *program, IRFunction *fn, MLDisp *d,
                                const int *idx, int count, MLOptStats *stats) {
   IRVerifySnapshot *snap = ir_verify_snapshot_capture(fn);
   char why[192], cex[320], skip[160];
 
   if (!snap) {
-    /* Function too large (or empty) to snapshot: no gate possible. Proven
-     * dispositions stand on their proofs; speculative ones never stand. */
     for (int i = 0; i < count; i++) {
       MLDisp *m = &d[idx[i]];
       if (disp_speculative(m)) {
@@ -518,9 +460,6 @@ static void run_function_group(IRProgram *program, IRFunction *fn, MLDisp *d,
   }
 
   if (verdict == IR_VERIFY_REWRITE_UNVERIFIABLE) {
-    /* The gate cannot run this function. Proven dispositions stand; any
-     * applied speculative one must come back out, which means restoring and
-     * re-applying only the proven ones. */
     int has_spec = 0;
     for (int i = 0; i < count; i++) {
       if (d[idx[i]].applied && disp_speculative(&d[idx[i]])) has_spec = 1;
@@ -552,14 +491,11 @@ static void run_function_group(IRProgram *program, IRFunction *fn, MLDisp *d,
     return;
   }
 
-  /* Divergence. Roll everything back and bisect: re-apply one disposition at
-   * a time, each against a fresh snapshot, so exactly the offending
-   * proposal(s) are named and discarded while the innocent ones stand. */
   restore_fn(fn, snap);
   ir_verify_snapshot_free(snap);
   for (int i = 0; i < count; i++) {
     MLDisp *m = &d[idx[i]];
-    if (!m->applied) continue; /* already counted as skipped */
+    if (!m->applied) continue;
     m->applied = 0;
     IRVerifySnapshot *one = ir_verify_snapshot_capture(fn);
     if (!one) {
@@ -586,7 +522,7 @@ static void run_function_group(IRProgram *program, IRFunction *fn, MLDisp *d,
       m->verdict = MLV_REJECTED;
       stats->rejected++;
       break;
-    default: /* function became unverifiable mid-bisect */
+    default:
       if (disp_speculative(m)) {
         restore_fn(fn, one);
         m->verdict = MLV_SKIPPED;
@@ -602,10 +538,6 @@ static void run_function_group(IRProgram *program, IRFunction *fn, MLDisp *d,
   }
 }
 
-/* ---------------- explain-record annotation ---------------- */
-
-/* Append source file:line to each explain record, resolved from the pristine
- * program (must run before any disposition shifts indices). */
 static void annotate_explain(IRProgram *program) {
   FILE *in = fopen("_mlopt.explain", "rb");
   if (!in) {
@@ -657,14 +589,6 @@ static void annotate_explain(IRProgram *program) {
   free(buf);
 }
 
-/* After validation, append each record's verdict (matched by fn+gidx) so the
- * --explain report can say which rewrites stood and which were rejected. */
-/* METTLE_ML_TRACE=<path>: append one machine-readable record per disposition,
- * `file<TAB>function<TAB>gidx<TAB>kind<TAB>verdict`. The --explain report is for
- * humans; this is for tooling that has to pair every proposal with the
- * validator's ruling on it, which the summary line and the explain report cannot
- * do reliably (they are prose, and they pluralize). Off unless the variable is
- * set; appends, so a whole-corpus build accumulates into one file. */
 static void write_trace(const MLDisp *d, int n, const char *ir_path) {
   const char *path = getenv("METTLE_ML_TRACE");
   if (!path || !path[0]) {
@@ -733,8 +657,6 @@ static void append_verdicts(const MLDisp *d, int n) {
   free(buf);
 }
 
-/* ---------------- entry ---------------- */
-
 int ir_apply_ml_opt(IRProgram *program, MLOptStats *stats) {
   MLOptStats local;
   if (!stats) stats = &local;
@@ -787,9 +709,6 @@ int ir_apply_ml_opt(IRProgram *program, MLOptStats *stats) {
   maybe_sabotage(program, d, n);
   stats->proposals = n;
 
-  /* Group by function, preserving first-seen order. Apply order inside a
-   * group: non-REWRITEs in model order (in-place, index-stable), then
-   * REWRITEs by descending gidx (insertions never shift a pending target). */
   int *idx = malloc(n ? (size_t)n * sizeof(int) : sizeof(int));
   char *done = calloc(n ? (size_t)n : 1, 1);
   if (idx && done) {

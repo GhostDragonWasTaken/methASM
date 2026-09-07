@@ -78,7 +78,6 @@ static uint64_t elf_sh_size(const unsigned char *shdr) {
     return linker_read_u64(shdr + 32);
 }
 
-
 static char *elf_dup_string(const unsigned char *table, uint64_t table_size, uint32_t offset) {
     const char *start = NULL;
     uint64_t length = 0;

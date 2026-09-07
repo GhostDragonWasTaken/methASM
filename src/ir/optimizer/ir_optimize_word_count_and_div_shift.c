@@ -1,5 +1,5 @@
 #include "ir_optimize_internal.h"
-#include "../../common.h" // mettle_free_string
+#include "../../common.h"
 
 static int ir_symbol_zero_initialized_before(const IRFunction *function,
                                              size_t before_index,
@@ -71,17 +71,12 @@ static int ir_try_match_word_count_load(const IRFunction *function,
       continue;
     }
 
-    /* Direct-to-symbol byte load: `@c <- *addr [1]`. Copy propagation +
-     * eliminate_load_symbol_copy fold the old load-to-temp-then-cast into a
-     * single load whose destination is the char symbol itself. */
     if (load->dest.kind == IR_OPERAND_SYMBOL && load->dest.name) {
       *buf_symbol_out = buf_symbol;
       *char_symbol_out = load->dest.name;
       return 1;
     }
 
-    /* Legacy shape: `%t <- *addr [1]; @c = (uint8)%t` (load to temp, then a
-     * cast into the char symbol). */
     if (load->dest.kind != IR_OPERAND_TEMP || !load->dest.name) {
       continue;
     }
@@ -354,7 +349,7 @@ static int ir_try_vectorize_word_count_at(IRFunction *function,
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, exit_label)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
 
   size_t increment_index = jump_index;
@@ -533,14 +528,6 @@ int ir_build_symbol_int_map_before(const IRFunction *function,
       }
     }
 
-    /* Any other instruction that writes a symbol destination produces a value
-     * we are not tracking as a constant (BINARY, UNARY, LOAD, CAST, NEW, ...).
-     * It MUST invalidate the symbol's stale constant, otherwise a later
-     * mutation like `binary i = i + 4` leaves `i` recorded at its pre-loop
-     * value and downstream consumers (e.g. the constant-bound loop unroller's
-     * trip-count computation) read a counter value that is no longer correct.
-     * ASSIGN and ROTATE_ADD are fully handled above; everything else is
-     * conservatively dropped here. */
     if (instruction->op != IR_OP_ASSIGN &&
         instruction->op != IR_OP_ROTATE_ADD &&
         ir_instruction_writes_destination(instruction) &&
@@ -549,30 +536,6 @@ int ir_build_symbol_int_map_before(const IRFunction *function,
     }
   }
 
-  /* The linear scan above only sees writes that precede `before_index` in
-   * program order. That is not the same as execution order: when
-   * `before_index` sits inside a loop, every write between it and the loop's
-   * back-edge runs before control reaches `before_index` again, so those
-   * symbols are NOT constant there even though the scan never saw them change.
-   *
-   * This is what made the constant-bound unroller miscompile a nested loop
-   * whose inner bound is the outer counter:
-   *
-   *     while (i <= 5) { j = 0; while (j < i) { ... } i = i + 1; }
-   *
-   * `i = i + 1` follows the inner header in program order, so `i` stayed
-   * mapped to its pre-loop value and the inner loop was unrolled with a fixed
-   * trip count of one for every outer iteration.
-   *
-   * Find the enclosing loops -- a JUMP at or after `before_index` whose target
-   * LABEL lies at or before it -- and drop every symbol written between
-   * `before_index` and the furthest such back-edge. Writes earlier in the loop
-   * body are left alone: those re-execute on the way to `before_index`, so
-   * their values still hold on arrival. */
-  /* When `before_index` is a loop header, locate that loop's own back-edge:
-   * the JUMP returning to it. Writes inside its body are the iteration being
-   * modelled -- notably the counter increment -- and must keep their mapped
-   * values, or the unroller loses the start value and stops unrolling. */
   if (before_index >= function->instruction_count ||
       function->instructions[before_index].op != IR_OP_LABEL ||
       !function->instructions[before_index].text) {
@@ -595,24 +558,6 @@ int ir_build_symbol_int_map_before(const IRFunction *function,
     return 1;
   }
 
-  /* Everything past this loop's back-edge is either an enclosing loop's body or
-   * code after the loop. If an enclosing loop exists, its writes run before
-   * control returns here, so any symbol written out there is not constant on
-   * re-entry -- even though the forward scan above never saw it change.
-   *
-   * This is what made the unroller miscompile a nested loop whose inner bound
-   * is the outer counter:
-   *
-   *     while (i <= 5) { j = 0; while (j < i) { ... } i = i + 1; }
-   *
-   * `i = i + 1` follows the inner header in program order, so `i` stayed mapped
-   * to its pre-loop value and every unrolled copy of the outer body used a
-   * fixed inner trip count of one.
-   *
-   * Invalidating unconditionally past the back-edge is conservative -- writes
-   * after the whole enclosing loop are dropped too -- but it is one linear pass
-   * rather than a per-jump search for the enclosing extent, which mattered:
-   * the search version cost ~4.5x on loop-dense functions. */
   for (size_t k = own_backedge + 1; k < function->instruction_count; k++) {
     const IRInstruction *instruction = &function->instructions[k];
     if (instruction->op == IR_OP_NOP) {
@@ -626,7 +571,6 @@ int ir_build_symbol_int_map_before(const IRFunction *function,
       break;
     }
     if (instruction->op == IR_OP_ROTATE_ADD) {
-      /* Mutates its operands in place, not just the destination. */
       if (instruction->lhs.name) {
         ir_temp_value_map_remove(symbol_map, instruction->lhs.name);
       }

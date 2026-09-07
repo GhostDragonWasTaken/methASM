@@ -73,13 +73,6 @@ static long long op_cost(const IRDeadlineCosts *costs,
 
 static long long function_cost(Ctx *ctx, IRFunction *fn);
 
-/* Some of the calls in a function are the compiler's own: the trap a bounds
- * check branches to, the counters `--check-deadlines` keeps, the lines
- * `--record-trace` writes, the frames `--check-effects` pushes. Each does a
- * fixed amount of work and returns (a trap ends the program, which is less
- * still), so each costs one call. Reading them as opaque would make every
- * deadline in a checked build unbounded, and the point of a deadline is to
- * say what the checks cost. */
 static int deadline_is_helper(const char *name) {
   if (!name) {
     return 0;
@@ -112,12 +105,6 @@ static long long call_cost(Ctx *ctx, const IRInstruction *insn) {
   }
 }
 
-/* The natural loop of a back edge u -> h is h together with everything that
- * can still reach u without passing through h. The search has to follow every
- * edge, back edges included: an inner body reaches the outer latch only by
- * going round its own loop, and a walk that refused to do that would leave the
- * inner loop out of the outer one, pick the outer loop as the smaller of the
- * two, and cost a nest at one trip of its inner half. */
 static int reaches(const IRBasicBlock *blocks, size_t count, size_t from,
                    size_t to, size_t avoid, char *seen) {
   size_t stack[DEADLINE_MAX_BLOCKS];
@@ -312,10 +299,6 @@ static const IRInstruction *defines_temp(const IRBasicBlock *block,
   return NULL;
 }
 
-/* A temp has one definition, so where it was written does not have to be the
- * block that reads it. A checked increment puts the add and the store either
- * side of the branch that tests it, and a walk that only looked in one block
- * would lose the induction variable and call the loop unbounded. */
 static const IRInstruction *defines_temp_anywhere(const IRBasicBlock *blocks,
                                                   size_t count,
                                                   const IROperand *temp) {
@@ -397,11 +380,6 @@ static int iv_entry(const IRFunction *fn, const IRBasicBlock *blocks,
   return seen;
 }
 
-/* The constant a symbol holds where the loop starts. A limit written as a
- * literal is the easy case; a limit held in a binding the program set once
- * before the loop and never touches inside it is the same fact spelled
- * differently, and refusing that one would make a deadline something only
- * loops with a magic number in them could carry. */
 static int symbol_constant_before(const IRFunction *fn,
                                   const IRBasicBlock *blocks, size_t count,
                                   const char *member, size_t header,
@@ -468,7 +446,6 @@ static long long loop_trip_count(const IRFunction *fn,
   }
   iv = test->lhs.name;
   if (strcmp(test->text, "<") == 0) {
-    /* the bound is exclusive as written */
   } else if (strcmp(test->text, "<=") == 0) {
     limit += 1;
   } else if (strcmp(test->text, ">") == 0) {

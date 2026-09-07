@@ -302,10 +302,6 @@ static int coff_reader_parse_sections(CoffObject *object,
     section->number_of_line_numbers = linker_read_u16(header + 34);
     section->characteristics = linker_read_u32(header + 36);
 
-    /* PointerToRawData zero means the bytes are not in the file at all --
-     * uninitialized data, whose SizeOfRawData still states how much space it
-     * needs. Copying from file offset 0 would hand back the COFF header as the
-     * section's contents. */
     if (section->size_of_raw_data > 0u && section->pointer_to_raw_data != 0u) {
       if (!coff_reader_range_ok(file_size, section->pointer_to_raw_data,
                                 section->size_of_raw_data)) {
@@ -327,10 +323,6 @@ static int coff_reader_parse_sections(CoffObject *object,
              section->size_of_raw_data);
     }
 
-    /* Relocation-overflow form (IMAGE_SCN_LNK_NRELOC_OVFL): when the 16-bit
-     * count field is 0xFFFF and the flag is set, the true count lives in the
-     * VirtualAddress of a synthetic first relocation record (and includes that
-     * record), so the real relocations start at record index 1. */
     uint32_t actual_relocations = section->number_of_relocations;
     uint32_t relocation_base_record = 0u;
     if ((section->characteristics & 0x01000000u) != 0u &&
@@ -352,7 +344,7 @@ static int coff_reader_parse_sections(CoffObject *object,
                               section->name);
         return 0;
       }
-      actual_relocations = stored - 1u; /* exclude the synthetic record */
+      actual_relocations = stored - 1u;
       relocation_base_record = 1u;
     }
 
@@ -393,11 +385,6 @@ static int coff_reader_parse_sections(CoffObject *object,
       }
     }
 
-    /* MinGW gcc with -fdata-sections emits zero-initialized statics as
-     * `.data$name` sections whose raw data is present but entirely zero.
-     * Those bytes would be copied into the image verbatim; carry them as
-     * .bss instead so they cost nothing on disk. Only safe when nothing
-     * relocates within the section. */
     if (section->kind == COFF_SECTION_KIND_DATA &&
         section->relocation_count == 0u && section->size_of_raw_data > 0u &&
         section->raw_data) {

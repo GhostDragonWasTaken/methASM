@@ -115,7 +115,6 @@ void mettle_set_error(char **dest, const char *fmt, ...) {
   *dest = copy;
 }
 
-/* Free a string unless it is interned (shared and managed by the interner). */
 void mettle_free_string(char *str) {
   if (!str) {
     return;

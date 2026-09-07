@@ -2058,7 +2058,6 @@ static int asm_far_branch(AsmState *state, int line, int is_call,
   return asm_value(state, operands[0].far_segment, 2);
 }
 
-
 typedef struct {
   const char *name;
   int digit;

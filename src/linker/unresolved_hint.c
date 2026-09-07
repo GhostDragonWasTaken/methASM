@@ -5,8 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Cap the diagnostic so it stays a diagnostic, not a page. The generic helps
- * are ~900 bytes; a referrer line and two conditional hints still fit. */
 #define UNRESOLVED_BUFFER_SIZE 4096u
 
 static const char *unresolved_basename(const char *path) {
@@ -42,9 +40,6 @@ static int unresolved_is_float64_math(const char *name) {
   return 0;
 }
 
-/* Levenshtein distance with an early exit once the running minimum exceeds
- * max_dist. Candidates are short symbol names and the table is two rows, so
- * this is cheap even across a few hundred defined symbols on a failure path. */
 static size_t unresolved_edit_distance(const char *left, const char *right,
                                        size_t max_dist) {
   size_t left_len = strlen(left);
@@ -109,7 +104,6 @@ unresolved_suggest(const LinkResolution *resolution, const char *name) {
     return NULL;
   }
   name_len = strlen(name);
-  /* Short names have little room for error: only near-exact matches help. */
   max_dist = name_len <= 4 ? 1 : name_len <= 8 ? 2 : 3;
   best_dist = max_dist + 1;
   for (i = 0; i < resolution->symbol_count; i++) {
@@ -121,7 +115,6 @@ unresolved_suggest(const LinkResolution *resolution, const char *name) {
     if (strcmp(symbol->name, name) == 0) {
       continue;
     }
-    /* Import thunks and section symbols never help a source-level typo. */
     if (strncmp(symbol->name, "__imp_", 6) == 0 || symbol->name[0] == '.') {
       continue;
     }
@@ -170,9 +163,6 @@ void link_unresolved_format(const LinkResolution *resolution,
     *error_message_out = NULL;
   }
 
-  /* Prefer program objects as the referrer: runtime defaults referencing a
-   * missing symbol is a compiler bug, not a user typo, and naming a temp
-   * runtime path would only confuse. */
   if (resolution) {
     for (int pass = 0; pass < 2 && referrer_count < 2; pass++) {
       for (i = 0; i < resolution->object_count && referrer_count < 2; i++) {

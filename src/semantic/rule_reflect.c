@@ -253,11 +253,6 @@ static int add_match(Reflect *reflect, RFunction *function, const Type *owner,
                             &function->match_capacity, kept);
 }
 
-/* Where a function allocates, where it frees, and which module-scope bindings
- * it writes. These are the facts an arena or a region discipline is written
- * against, and they come from the same walk that already finds the callees, so
- * a rule sees exactly what the call graph does: a name it can follow, and a
- * gap where it cannot. */
 static int add_site_fact(IRRuleSite **sites, size_t *count, size_t *capacity,
                          SourceLocation location) {
   IRRuleSite site;
@@ -706,16 +701,6 @@ static size_t field_offset(const Type *type, const char *field, Image *image) {
   return type->field_offsets[index];
 }
 
-static const Type *field_type(const Type *type, const char *field,
-                              Image *image) {
-  int index = type ? type_get_field_index(type, field) : -1;
-  if (index < 0 || !type->field_types) {
-    image->failed = 1;
-    return NULL;
-  }
-  return type->field_types[index];
-}
-
 static void put_site(Image *image, const Type *site_type, size_t base,
                      const IRRuleSite *site) {
   image_put_string(image, base + field_offset(site_type, "file", image),
@@ -1133,16 +1118,6 @@ static int build_image(Reflect *reflect, const char *root_file,
   return 1;
 }
 
-/* The machine image: what became of the program once it was code. Everything
- * in it was recorded by the passes as they decided, and nothing in it is IR or
- * a pass's internal state -- a frame size, a spill count, an instruction count,
- * whether a loop vectorized, whether a call was inlined, and the effects the
- * function was proven to hold. std/rule owns the shape; III.3's line is that a
- * rule sees a snapshot and never the machinery that produced it. */
-/* The trace image: what happened while the program ran, as events the
- * interpreter recorded on the way through. Same shape as the other two images
- * and the same line: a rule sees the events, never the machine that produced
- * them. */
 int rule_reflect_build_trace(TypeChecker *checker, const char *root_file,
                              IRRuleImage *out, char **error_message) {
   const Type *trace_type = lookup_qualified(checker, "std/rule.Trace");

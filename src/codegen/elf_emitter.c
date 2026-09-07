@@ -1,27 +1,3 @@
-/* ELF64 relocatable object writer for x86-64 and AArch64.
- *
- * Consumes the format-neutral BinaryEmitter model (sections, symbols,
- * relocations) and serializes a relocatable ELF object that the system linker
- * (ld/gcc) accepts. The COFF writer for the same model lives in
- * binary_emitter.c; this file is the ELF half of the dispatch in
- * binary_emitter_write_object_file.
- *
- * Layout produced (in file order):
- *   ELF header
- *   section payloads: .text/.rodata/.data (.bss occupies no file bytes)
- *   .rela.<name> payloads (one per content section that has relocations)
- *   .symtab payload
- *   .strtab payload (symbol names)
- *   .shstrtab payload (section header names)
- *   section header table
- *
- * Relocation note: callers built the model for COFF, where the AMD64 REL32
- * relocation type implicitly biases by the 4-byte field width (it resolves
- * S - P with P at the field *end*). ELF R_X86_64_PC32 resolves S + A - P with P
- * at the field *start* and the code buffer stores 0 in the field, so we inject
- * an addend of -4 for PC-relative kinds to reproduce call/branch displacement
- * semantics. Any explicit emitter addend is added on top.
- */
 
 #include "binary_emitter.h"
 #include "binary_emitter_internal.h"
@@ -32,7 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* --- ELF constants (subset we need) --- */
 #define ELF_NIDENT 16
 #define ELFCLASS64 2
 #define ELFDATA2LSB 1
@@ -66,7 +41,6 @@
 #define R_X86_64_PC32 2
 #define R_X86_64_PLT32 4
 
-/* AAELF64 2025Q4, sections 5.7.5-5.7.7. */
 #define R_AARCH64_ABS64 257
 #define R_AARCH64_ADR_PREL_PG_HI21 275
 #define R_AARCH64_ADD_ABS_LO12_NC 277
@@ -75,8 +49,6 @@
 #define ELF64_ST_INFO(bind, type) (((bind) << 4) + ((type) & 0xf))
 #define ELF64_R_INFO(sym, type) (((uint64_t)(sym) << 32) | ((uint32_t)(type)))
 
-/* A growable byte buffer for assembling the string tables before we know their
- * final size. */
 typedef struct {
   char *data;
   size_t size;
@@ -84,7 +56,6 @@ typedef struct {
 } ElfStrtab;
 
 static int elf_strtab_init(ElfStrtab *table) {
-  /* ELF string tables begin with a NUL so offset 0 is the empty string. */
   table->capacity = 64;
   table->data = malloc(table->capacity);
   if (!table->data) {
@@ -102,8 +73,6 @@ static void elf_strtab_free(ElfStrtab *table) {
   table->capacity = 0;
 }
 
-/* Appends a name and returns its byte offset within the table. The empty
- * string and NULL both map to offset 0 (the leading NUL). */
 static int elf_strtab_add(ElfStrtab *table, const char *name, uint32_t *out) {
   if (!name || name[0] == '\0') {
     *out = 0;
@@ -128,13 +97,11 @@ static int elf_strtab_add(ElfStrtab *table, const char *name, uint32_t *out) {
   return 1;
 }
 
-/* One ELF section header we will emit, plus bookkeeping to locate its payload
- * and tie relocations/symbols back to it. */
 typedef struct {
-  uint32_t name_offset; /* into .shstrtab */
+  uint32_t name_offset;
   uint32_t type;
   uint64_t flags;
-  uint64_t offset; /* file offset of payload */
+  uint64_t offset;
   uint64_t size;
   uint32_t link;
   uint32_t info;
@@ -173,8 +140,6 @@ static uint32_t elf_section_type(BinarySectionKind kind) {
   }
 }
 
-/* Translates an abstract relocation kind into an ELF x86-64 relocation type and
- * the implicit addend that reproduces the model's COFF-derived semantics. */
 static int elf_map_relocation(BinaryTargetFormat target,
                               BinaryRelocationKind kind, uint32_t *type_out,
                               int64_t *implicit_addend_out) {
@@ -211,8 +176,6 @@ static int elf_map_relocation(BinaryTargetFormat target,
     *implicit_addend_out = 0;
     return 1;
   default:
-    /* ADDR32NB / SECTION_REL32 are COFF debug-table relocations with no direct
-     * ELF analogue; debug tables are not emitted on ELF yet. */
     return 0;
   }
 }
@@ -246,14 +209,6 @@ static uint64_t elf_align_up(uint64_t value, uint64_t align) {
 
 int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
                                          const char *filename) {
-  /* Section header layout:
-   *   [0]                 SHT_NULL
-   *   [1 .. N]            one per emitter content section (.text, ...)
-   *   per content section with relocs: a .rela.<name> section
-   *   [.symtab]
-   *   [.strtab]
-   *   [.shstrtab]
-   */
   size_t content_count = emitter->section_count;
   int ok = 0;
   FILE *file = NULL;
@@ -264,13 +219,9 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
   size_t header_count = 0;
   size_t header_capacity = 0;
 
-  /* Maps emitter content-section index -> ELF section header index. */
   uint32_t *content_shndx = NULL;
-  /* Maps emitter symbol index -> .symtab entry index. */
   uint32_t *symbol_symtab_index = NULL;
-  /* Number of relocations targeting each content section. */
   size_t *reloc_counts = NULL;
-  /* ELF header index of the .rela section for each content section, or 0. */
   size_t *rela_shndx = NULL;
 
   unsigned char *symtab_bytes = NULL;
@@ -299,7 +250,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     }
   }
 
-  /* Tally relocations per section and validate their kinds up front. */
   for (size_t i = 0; i < emitter->relocation_count; i++) {
     const BinaryRelocation *reloc = &emitter->relocations[i];
     uint32_t type;
@@ -318,8 +268,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     reloc_counts[reloc->section_index]++;
   }
 
-  /* Reserve header slots: null + content + one rela per relocated content
-   * section + symtab + strtab + shstrtab. */
   header_capacity = 1 + content_count;
   for (size_t i = 0; i < content_count; i++) {
     if (reloc_counts[i] > 0) {
@@ -327,17 +275,15 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     }
   }
   header_capacity += 3;
-  header_capacity += 1; /* .note.GNU-stack */
+  header_capacity += 1;
   headers = calloc(header_capacity, sizeof(ElfSectionHeader));
   if (!headers) {
     binary_emitter_record_error(emitter, "Out of memory preparing ELF headers");
     goto cleanup;
   }
 
-  /* [0] null section. */
   header_count = 1;
 
-  /* Content sections. */
   for (size_t i = 0; i < content_count; i++) {
     const BinarySection *section = &emitter->sections[i];
     ElfSectionHeader *header = &headers[header_count];
@@ -357,10 +303,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     header_count++;
   }
 
-  /* An empty, non-executable .note.GNU-stack section. Its presence (with no
-   * SHF_EXECINSTR flag) tells the linker the program does not need an
-   * executable stack; without it ld defaults to marking the stack executable
-   * and warns. Zero-size with no payload, so it does not affect offsets. */
   {
     ElfSectionHeader *header = &headers[header_count];
     if (!elf_strtab_add(&shstrtab, ".note.GNU-stack", &header->name_offset)) {
@@ -375,22 +317,18 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     header_count++;
   }
 
-  /* Build .symtab. ELF requires all local symbols before global ones, and the
-   * symtab's sh_info must be the index of the first global. Entry 0 is the
-   * reserved undefined symbol. We emit locals first, then globals/externals. */
   {
     size_t entry_count = 1 + emitter->symbol_count;
-    symtab_size = entry_count * 24; /* sizeof(Elf64_Sym) */
+    symtab_size = entry_count * 24;
     symtab_bytes = calloc(entry_count, 24);
     if (!symtab_bytes) {
       binary_emitter_record_error(emitter, "Out of memory building ELF symtab");
       goto cleanup;
     }
 
-    size_t cursor = 1; /* entry 0 left zeroed (STN_UNDEF) */
-    uint32_t first_global = (uint32_t)entry_count; /* default: no globals */
+    size_t cursor = 1;
+    uint32_t first_global = (uint32_t)entry_count;
 
-    /* Pass 1: locals. */
     for (size_t pass = 0; pass < 2; pass++) {
       int want_local = (pass == 0);
       if (pass == 1) {
@@ -415,7 +353,7 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
         unsigned char bind;
         if (symbol->section_index == BINARY_EMITTER_SECTION_INDEX_NONE) {
           shndx = SHN_UNDEF;
-          bind = STB_GLOBAL; /* undefined references are global/external */
+          bind = STB_GLOBAL;
         } else {
           if (symbol->section_index >= content_count) {
             binary_emitter_record_error(emitter,
@@ -457,17 +395,12 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
       }
     }
 
-    /* If there were no globals at all, sh_info points just past the locals. */
     if (first_global > (uint32_t)cursor) {
       first_global = (uint32_t)cursor;
     }
 
-    /* .rela sections, one per content section with relocations. They must
-     * precede symtab in our index assignment-independent layout, but the link
-     * fields reference symtab, so reserve symtab's index now. */
     uint32_t symtab_index =
-        (uint32_t)(header_count + /* rela sections counted next */ 0);
-    /* Count rela sections to know symtab's eventual index. */
+        (uint32_t)(header_count +  0);
     size_t rela_section_count = 0;
     for (size_t i = 0; i < content_count; i++) {
       if (reloc_counts[i] > 0) {
@@ -476,7 +409,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     }
     symtab_index = (uint32_t)(header_count + rela_section_count);
 
-    /* Emit .rela.<name> headers. */
     for (size_t i = 0; i < content_count; i++) {
       if (reloc_counts[i] == 0) {
         continue;
@@ -493,7 +425,7 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
       }
       header->type = SHT_RELA;
       header->flags = 0;
-      header->size = reloc_counts[i] * 24; /* sizeof(Elf64_Rela) */
+      header->size = reloc_counts[i] * 24;
       header->addralign = 8;
       header->entsize = 24;
       header->link = symtab_index;
@@ -502,7 +434,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
       header_count++;
     }
 
-    /* .symtab header. */
     {
       ElfSectionHeader *header = &headers[header_count];
       if (!elf_strtab_add(&shstrtab, ".symtab", &header->name_offset)) {
@@ -513,13 +444,12 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
       header->size = symtab_size;
       header->addralign = 8;
       header->entsize = 24;
-      header->link = (uint32_t)(header_count + 1); /* .strtab follows */
+      header->link = (uint32_t)(header_count + 1);
       header->info = first_global;
       header_count++;
     }
   }
 
-  /* .strtab header. */
   {
     ElfSectionHeader *header = &headers[header_count];
     if (!elf_strtab_add(&shstrtab, ".strtab", &header->name_offset)) {
@@ -532,7 +462,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     header_count++;
   }
 
-  /* .shstrtab header (its own name must be in itself). */
   size_t shstrtab_header_index = header_count;
   {
     ElfSectionHeader *header = &headers[header_count];
@@ -546,22 +475,17 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
   }
   headers[shstrtab_header_index].size = shstrtab.size;
 
-  /* --- Assign file offsets. ELF header is 64 bytes; section headers are 64
-   * bytes each. Payloads go between the ELF header and the section header
-   * table. --- */
   uint64_t offset = 64;
-  /* Content payloads (NOBITS/.bss take no file space). */
   for (size_t i = 0; i < content_count; i++) {
     ElfSectionHeader *header = &headers[content_shndx[i]];
     if (header->type == SHT_NOBITS) {
-      header->offset = offset; /* conventional, occupies no bytes */
+      header->offset = offset;
       continue;
     }
     offset = elf_align_up(offset, header->addralign);
     header->offset = offset;
     offset += header->size;
   }
-  /* rela payloads. */
   for (size_t i = 0; i < content_count; i++) {
     if (reloc_counts[i] == 0) {
       continue;
@@ -571,8 +495,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     header->offset = offset;
     offset += header->size;
   }
-  /* symtab, strtab, shstrtab, find them by walking the tail headers. They were
-   * appended in this order: [rela...] symtab strtab shstrtab. */
   size_t symtab_header_index = shstrtab_header_index - 2;
   size_t strtab_header_index = shstrtab_header_index - 1;
   offset = elf_align_up(offset, 8);
@@ -586,7 +508,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
   offset = elf_align_up(offset, 8);
   uint64_t section_header_offset = offset;
 
-  /* --- Write the file. --- */
   file = fopen(filename, "wb");
   if (!file) {
     binary_emitter_record_error(emitter, "Failed to open ELF output file");
@@ -594,7 +515,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
   }
   setvbuf(file, NULL, _IOFBF, 1 << 20);
 
-  /* ELF header (Elf64_Ehdr, 64 bytes). */
   {
     unsigned char e_ident[ELF_NIDENT] = {0};
     e_ident[0] = 0x7f;
@@ -643,7 +563,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
 
   uint64_t written = 64;
 
-  /* Content payloads. */
   for (size_t i = 0; i < content_count; i++) {
     const BinarySection *section = &emitter->sections[i];
     ElfSectionHeader *header = &headers[content_shndx[i]];
@@ -660,7 +579,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     written += section->size;
   }
 
-  /* rela payloads. */
   for (size_t i = 0; i < content_count; i++) {
     if (reloc_counts[i] == 0) {
       continue;
@@ -704,7 +622,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     }
   }
 
-  /* symtab. */
   if (!elf_pad_to(file, written, headers[symtab_header_index].offset)) {
     goto write_error;
   }
@@ -714,7 +631,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
   }
   written += symtab_size;
 
-  /* strtab. */
   if (!elf_pad_to(file, written, headers[strtab_header_index].offset)) {
     goto write_error;
   }
@@ -724,7 +640,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
   }
   written += strtab.size;
 
-  /* shstrtab. */
   if (!elf_pad_to(file, written, headers[shstrtab_header_index].offset)) {
     goto write_error;
   }
@@ -734,7 +649,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
   }
   written += shstrtab.size;
 
-  /* Section header table. */
   if (!elf_pad_to(file, written, section_header_offset)) {
     goto write_error;
   }
@@ -751,7 +665,6 @@ int binary_emitter_write_elf_object_file(BinaryEmitter *emitter,
     uint64_t sh_addralign = h->addralign;
     uint64_t sh_entsize = h->entsize;
     if (i == 0) {
-      /* Null section header is all zeros. */
       sh_name = 0;
       sh_type = 0;
       sh_flags = 0;

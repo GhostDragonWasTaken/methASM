@@ -1,7 +1,6 @@
 #ifndef MTLC_RUNTIME_MT_MATH_H
 #define MTLC_RUNTIME_MT_MATH_H
 
-
 static double mt_exp(double value) {
   if (value > 709.0) {
     return 1.0 / 0.0;

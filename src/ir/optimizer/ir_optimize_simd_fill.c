@@ -1,37 +1,5 @@
 #include "ir_optimize_internal.h"
 
-/* -------------------------------------------------------------------------- */
-/* Invariant fill -> IR_OP_SIMD_FILL (the memset / frame-clear class)          */
-/*                                                                            */
-/* Recognizes counted loops whose entire body is one store of a loop-         */
-/* invariant value, in the forms such loops actually have by vectorizer time: */
-/*                                                                            */
-/*   A (indexed, `while (i < n) { buf[i] = c; i++ }`, including rect fills    */
-/*      `while (xx < x1) { px[row + xx] = c; xx++ }` with xx from x0):        */
-/*        [%m = yy * fw]              (invariant offset producer, optional)   */
-/*        [%a = %m + @xx]             (offset + iv, optional)                 */
-/*        %t1 = (@i | %a) << shift    (absent for byte stores)                */
-/*        %t2 = @base + %t1                                                   */
-/*        *%t2 <- value [size]                                                */
-/*        @i = @i + 1                                                         */
-/*                                                                            */
-/*   B (pointer walk, what range-for fills become after pointer induction):   */
-/*        *@p <- value [size]; @p = @p + size; [@i = @i + 1 dead counter]     */
-/*      with header compare `@p < @pend`.                                     */
-/*                                                                            */
-/*   C (byte-offset walk, the stdlib mem_zero/mem_fill shape):                */
-/*        %t = @base + @i; *%t <- value [size]; @i = @i + size                */
-/*      with int64 locals and `@i < bound`.                                   */
-/*                                                                            */
-/* The fused kernel stores 16 bytes per iteration with a scalar element tail. */
-/* Fills are bit-pattern operations: float and integer stores of every width  */
-/* (1/2/4/8) use the same kernel, and constant float values are recorded as   */
-/* their raw bit patterns.                                                    */
-
-/* A loop-invariant fill value: a constant, a parameter, or a local that the
- * region never writes and whose address is never taken (an escaped local
- * could alias the destination buffer). Constants are normalized to raw-bit
- * INT operands so the backend splat is type-blind. */
 static int ir_fill_value_operand(const IRFunction *function, size_t begin,
                                  size_t end, const IROperand *value,
                                  long long size, IROperand *out) {
@@ -59,8 +27,6 @@ static int ir_fill_value_operand(const IRFunction *function, size_t begin,
   if (value->kind != IR_OPERAND_SYMBOL || !value->name) {
     return 0;
   }
-  /* Param, local, or global -- in every case with no escaped address (an
-   * aliased value symbol could be overwritten by the fill's own stores). */
   if (ir_symbol_address_taken(function, value->name)) {
     return 0;
   }
@@ -76,10 +42,6 @@ static int ir_fill_value_operand(const IRFunction *function, size_t begin,
   return out->name != NULL;
 }
 
-/* A usable base/bound/offset symbol: parameter, declared local, or a global
- * whose address never escapes -- in every case not written inside the loop.
- * (Real applications keep hot buffers in global pointers; see
- * ir_symbol_is_float_array_base for the same policy.) */
 static int ir_fill_symbol_is_invariant(const IRFunction *function,
                                        size_t begin, size_t end,
                                        const char *name) {
@@ -89,7 +51,7 @@ static int ir_fill_symbol_is_invariant(const IRFunction *function,
   if (!ir_function_symbol_is_parameter(function, name) &&
       !ir_function_local_declared_type(function, name) &&
       ir_symbol_address_taken(function, name)) {
-    return 0; /* a global with an escaped address could alias anything */
+    return 0;
   }
   for (size_t i = begin; i < end; i++) {
     const IRInstruction *ins = &function->instructions[i];
@@ -108,9 +70,6 @@ static int ir_fill_local_has_type(const IRFunction *function, const char *name,
   return declared && strcmp(declared, type) == 0;
 }
 
-/* Install the fused op (and, when the index offset is a body-computed temp,
- * a clone of its producer just before it -- that clone becomes the temp's
- * single definition once the body is nop'd). */
 static int ir_fill_install(IRFunction *function, size_t header_index,
                            size_t jump_index, int mode, long long size,
                            const IROperand *lhs_sym, const IROperand *rhs_op,
@@ -164,11 +123,6 @@ static int ir_fill_install(IRFunction *function, size_t header_index,
     }
   }
 
-  /* Pointer-walk mode: the walking pointer ends at `pend` in the scalar loop;
-   * preserve that for any later reads (dead-store elimination removes it when
-   * nothing looks). Built HERE, before the teardown below, because
-   * final_assign_to/from point at operand names owned by the loop body that the
-   * teardown is about to free. */
   IRInstruction final_assign = {0};
   int want_final_assign =
       final_assign_to && final_assign_from && header_index + 2 <= jump_index;
@@ -199,7 +153,6 @@ static int ir_fill_install(IRFunction *function, size_t header_index,
   }
 
   if (want_final_assign) {
-    /* The slot was nop'd above, so it owns nothing and can be overwritten. */
     function->instructions[header_index + (offset_producer ? 2 : 1)] =
         final_assign;
   }
@@ -210,8 +163,6 @@ static int ir_fill_install(IRFunction *function, size_t header_index,
   return 1;
 }
 
-/* Shared loop frame: header label, `<` compare, branch_zero to exit, back
- * jump, no nested loop. Returns 1 with *matched on a clean frame. */
 static int ir_fill_frame(IRFunction *function, size_t header_index,
                          size_t *compare_out, size_t *branch_out,
                          size_t *jump_out, int *matched) {
@@ -258,7 +209,7 @@ static int ir_fill_frame(IRFunction *function, size_t header_index,
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, branch->text)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
   *compare_out = compare_index;
   *branch_out = branch_index;
@@ -267,8 +218,6 @@ static int ir_fill_frame(IRFunction *function, size_t header_index,
   return 1;
 }
 
-/* Form results: 1 = installed, 0 = hard failure (abort the pass),
- * -1 = no match (try the next form). */
 #define FILL_NO_MATCH (-1)
 
 static int ir_fill_try_pointer_walk(IRFunction *function, size_t header_index,
@@ -326,7 +275,7 @@ static int ir_fill_try_pointer_walk(IRFunction *function, size_t header_index,
     return FILL_NO_MATCH;
   }
   int p_live_after = ir_symbol_live_after_loop(function, jump_index + 1, p);
-  int ok = ir_fill_install(function, header_index, jump_index, /*mode=*/1,
+  int ok = ir_fill_install(function, header_index, jump_index, 1,
                             size, &compare->lhs, &compare->rhs, &value, NULL,
                             NULL, NULL, p_live_after ? p : NULL,
                             p_live_after ? pend : NULL, changed);
@@ -352,7 +301,7 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
   int iv_from_zero = ir_iv_zero_at_header(function, header_index, iv);
 
   const IRInstruction *offset_producer_seen = NULL;
-  const IRInstruction *idx_add = NULL; /* %a = offset + iv (rect fills) */
+  const IRInstruction *idx_add = NULL;
   const IRInstruction *shl = NULL;
   const IRInstruction *addr = NULL;
   const IRInstruction *store = NULL;
@@ -395,9 +344,6 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
       increment = ins;
     } else if (ins->op == IR_OP_BINARY && !ins->is_float && k == 0 &&
                ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name) {
-      /* A leading temp computation (e.g. `yy * fw`): tolerated as the
-       * potential invariant-offset producer, validated below if the index
-       * add actually consumes it. */
       offset_producer_seen = ins;
     } else {
       return FILL_NO_MATCH;
@@ -407,10 +353,6 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
     return FILL_NO_MATCH;
   }
 
-  /* An index add the address chain never reads is not this loop's offset.
-   * hoist_row_pointers folds the invariant half into a row pointer and leaves
-   * the original `offset + iv` behind with no consumer; charging its offset
-   * here would displace the base a second time. */
   if (idx_add) {
     const IROperand *consumer = shl ? &shl->lhs : &addr->rhs;
     if (!ir_operand_is_temp_named(consumer, idx_add->dest.name)) {
@@ -418,7 +360,6 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
     }
   }
 
-  /* Validate the offset half of `offset + iv` when present. */
   const IROperand *offset_op = NULL;
   const IRInstruction *offset_producer = NULL;
   if (idx_add) {
@@ -437,8 +378,6 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
     } else if (other->kind == IR_OPERAND_TEMP && other->name &&
                offset_producer_seen &&
                ir_operand_is_temp_named(other, offset_producer_seen->dest.name)) {
-      /* Offset computed INSIDE the body (`yy * fw` each iteration): its
-       * producer is validated and cloned ahead of the fused op. */
       const IRInstruction *prod = offset_producer_seen;
       const IROperand *sides[2] = {&prod->lhs, &prod->rhs};
       for (int s = 0; s < 2; s++) {
@@ -455,10 +394,6 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
       offset_op = other;
       offset_producer = prod;
     } else if (other->kind == IR_OPERAND_TEMP && other->name) {
-      /* Offset temp defined BEFORE the loop (CSE hoisted `h*HD` shared by
-       * several uses): single-definition temps are invariant by
-       * construction, and the temp is a valid operand at the op's position.
-       * Just confirm the definition really is above the header. */
       int defined_before = 0;
       for (size_t i = 0; i < header_index; i++) {
         const IRInstruction *ins = &function->instructions[i];
@@ -477,13 +412,9 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
       return FILL_NO_MATCH;
     }
   } else if (offset_producer_seen) {
-    return FILL_NO_MATCH; /* a leading temp nothing consumed: not a fill */
+    return FILL_NO_MATCH;
   }
 
-  /* Nonzero start or an offset term need `bound - start` / `offset + start`
-   * arithmetic in the kernel at the iv's own width: int32 ivs use 32-bit
-   * math (their 8-byte homes may carry garbage upper bits), int64 ivs use
-   * 64-bit. Anything else stays scalar. */
   long long index_width = 0;
   if (!iv_from_zero || idx_add) {
     if (ir_fill_local_has_type(function, iv, "int32")) {
@@ -504,16 +435,12 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
       return FILL_NO_MATCH;
     }
   } else if (size != 1) {
-    return FILL_NO_MATCH; /* no scale shift: only byte stores index directly */
+    return FILL_NO_MATCH;
   }
   if (!ir_fill_symbol_is_invariant(function, branch_index + 1, jump_index,
                                    addr->lhs.name)) {
     return FILL_NO_MATCH;
   }
-  /* A live-after iv is fine: the kernel writes back the exact final value,
-   * max(start, bound) for this unit-stride frame -- robust against any
-   * control flow after the loop (textual liveness scans are not). The
-   * write-back needs the iv's width for exact arithmetic. */
   int iv_live_after = ir_symbol_live_after_loop(function, jump_index + 1, iv);
   if (iv_live_after && index_width == 0) {
     if (ir_fill_local_has_type(function, iv, "int32")) {
@@ -532,22 +459,20 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
   IROperand start = {0};
   const IROperand *start_op = NULL;
   if (!iv_from_zero) {
-    start = ir_operand_symbol(iv); /* reads the iv's ENTRY value at the op */
+    start = ir_operand_symbol(iv);
     if (!start.name) {
       ir_operand_destroy(&value);
       return 0;
     }
     start_op = &start;
   }
-  /* install rewrites the loop, freeing the compare that owns `iv`'s name, so
-   * take a copy while it is still valid. */
   char *iv_name = iv_live_after ? mettle_strdup(iv) : NULL;
   if (iv_live_after && !iv_name) {
     ir_operand_destroy(&value);
     ir_operand_destroy(&start);
     return 0;
   }
-  int ok = ir_fill_install(function, header_index, jump_index, /*mode=*/0,
+  int ok = ir_fill_install(function, header_index, jump_index, 0,
                            size, &addr->lhs, &compare->rhs, &value, start_op,
                            offset_op, offset_producer, NULL, NULL, changed);
   if (ok && iv_name) {
@@ -558,7 +483,6 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
   }
   mettle_free_string(iv_name);
   if (ok && index_width == 64) {
-    /* Flag the 64-bit index path for the kernel (args[5]). */
     IRInstruction *fused =
         &function->instructions[header_index + (offset_producer ? 1 : 0)];
     IROperand *grown = realloc(fused->arguments, 6 * sizeof(IROperand));
@@ -573,11 +497,6 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
   return ok;
 }
 
-/* Resolve an operand through at most one non-float CAST in the body's cast
- * list: `(int64)8` becomes the INT 8, `(int64)@v` becomes the symbol @v, a
- * pointer cast of an address temp becomes that temp. Integer casts are
- * bit-preserving for a fill (the store writes the low `size` bytes either
- * way); float conversions are not, and are rejected. */
 static const IROperand *ir_fill_uncast(const IRInstruction *const *casts,
                                        size_t cast_count,
                                        const IROperand *operand) {
@@ -607,15 +526,10 @@ static int ir_fill_try_byte_walk(IRFunction *function, size_t header_index,
                                    compare->rhs.name)) {
     return FILL_NO_MATCH;
   }
-  /* 64-bit byte math throughout: the iv must be a declared int64 so its
-   * 8-byte home holds a clean value. */
   if (!ir_fill_local_has_type(function, iv, "int64")) {
     return FILL_NO_MATCH;
   }
 
-  /* This form (the stdlib mem_zero/mem_fill style) routes the value, the
-   * pointer, and the stride through explicit no-op casts; collect them and
-   * look through. */
   const IRInstruction *casts[4];
   size_t cast_count = 0;
   const IRInstruction *addr = NULL;
@@ -677,24 +591,17 @@ static int ir_fill_try_byte_walk(IRFunction *function, size_t header_index,
     ir_operand_destroy(&value);
     return 0;
   }
-  /* The iv often feeds a follow-up loop (mem_zero's word loop hands its
-   * offset to the byte tail). The kernel computes the exact final offset --
-   * start + ceil(len/size)*size, overshoot included -- and writes it back
-   * when anything reads the iv afterwards. */
   int iv_live_after = ir_symbol_live_after_loop(function, jump_index + 1, iv);
-  /* install rewrites the loop, freeing the compare that owns `iv`'s name, so
-   * take a copy while it is still valid. */
   char *iv_name = iv_live_after ? mettle_strdup(iv) : NULL;
   if (iv_live_after && !iv_name) {
     ir_operand_destroy(&value);
     ir_operand_destroy(&start);
     return 0;
   }
-  int ok = ir_fill_install(function, header_index, jump_index, /*mode=*/2,
+  int ok = ir_fill_install(function, header_index, jump_index, 2,
                            size, &addr->lhs, &compare->rhs, &value, &start,
                            NULL, NULL, NULL, NULL, changed);
   if (ok && iv_name) {
-    /* install placed the fused op at header_index. */
     IRInstruction *fused = &function->instructions[header_index];
     ir_operand_destroy(&fused->dest);
     fused->dest = ir_operand_symbol(iv_name);
@@ -718,7 +625,6 @@ static int ir_try_vectorize_fill_at(IRFunction *function, size_t header_index,
   }
   const IRInstruction *compare = &function->instructions[compare_index];
 
-  /* Collect the body's non-nop instructions (excluding the back jump). */
   const IRInstruction *body[6];
   size_t body_count = 0;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
@@ -727,7 +633,7 @@ static int ir_try_vectorize_fill_at(IRFunction *function, size_t header_index,
       continue;
     }
     if (body_count >= 6) {
-      return 1; /* too big to be a pure fill */
+      return 1;
     }
     body[body_count++] = ins;
   }

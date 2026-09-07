@@ -36,7 +36,7 @@ typedef struct {
   char **type_params;
   char **type_param_traits;
   size_t type_param_count;
-  int is_struct; // 1 = struct, 0 = function
+  int is_struct;
 } GenericDef;
 
 typedef struct {
@@ -50,9 +50,6 @@ typedef struct {
   size_t def_count;
   Instantiation *instances;
   size_t instance_count;
-  /* The module, so inference can read a called function's return type. It is
-     held as the program, whose declaration array moves as instantiations are
-     appended. */
   Program *module;
 } MonoContext;
 
@@ -721,7 +718,6 @@ static int parse_generic_type_name(const char *type_str, char **out_base,
   const char *start = lt + 1;
   const char *end = type_str + strlen(type_str);
 
-  // Find matching '>'
   const char *gt = NULL;
   int depth = 1;
   for (const char *p = start; *p; p++) {
@@ -742,7 +738,6 @@ static int parse_generic_type_name(const char *type_str, char **out_base,
     return 0;
   }
 
-  // Parse comma-separated args between start and gt
   char **args = NULL;
   size_t count = 0;
   const char *p = start;
@@ -780,14 +775,8 @@ static int parse_generic_type_name(const char *type_str, char **out_base,
       p++;
   }
 
-  // Check for pointer suffix after '>' (e.g., "List<int32>*")
   const char *suffix = gt + 1;
   if (suffix < end && *suffix != '\0') {
-    // There's a suffix like "*", we need to incorporate it
-    // The base stays the same, but we need the caller to handle the suffix
-    // For simplicity, append the suffix to the last arg? No, the suffix
-    // applies to the whole generic type. We'll handle this by including
-    // the suffix in the base name replacement later.
   }
 
   *out_args = args;
@@ -809,13 +798,6 @@ static void record_generic_type_use(MonoContext *ctx, const char *type_name,
     return;
   }
 
-  /* A type argument may itself be a generic instantiation, as in
-   * `Pair<Box<int32>, int32>`. Substitution already mangles the field type to
-   * `Box__int32`, but nothing ever asked for `Box<int32>` to be generated, so
-   * the field referred to a struct that did not exist. Record the arguments
-   * BEFORE the type that uses them: emission follows list order, and Mettle
-   * requires a type to be declared before it is used, so `Box__int32` has to
-   * land in the program ahead of the struct whose field names it. */
   for (size_t i = 0; i < arg_count; i++) {
     record_generic_type_use(ctx, args[i], location);
   }
@@ -837,12 +819,10 @@ static char *substitute_type_string(const char *type_str, char **param_names,
 
   size_t ts_len = strlen(type_str);
 
-  // Strip trailing pointer stars and array suffixes to get the core type
   size_t core_len = ts_len;
   size_t ptr_count = 0;
   char *array_suffix = NULL;
 
-  // Check for array suffix first: "type[N]"
   const char *lbr = NULL;
   int depth = 0;
   for (size_t i = 0; i < ts_len; i++) {
@@ -861,7 +841,6 @@ static char *substitute_type_string(const char *type_str, char **param_names,
     core_len = (size_t)(lbr - type_str);
   }
 
-  // Strip trailing '*' from core
   while (core_len > 0 && type_str[core_len - 1] == '*') {
     ptr_count++;
     core_len--;
@@ -871,7 +850,6 @@ static char *substitute_type_string(const char *type_str, char **param_names,
   memcpy(core, type_str, core_len);
   core[core_len] = '\0';
 
-  // Check if core is a type parameter
   for (size_t i = 0; i < count; i++) {
     if (strcmp(core, param_names[i]) == 0) {
       free(core);
@@ -889,30 +867,21 @@ static char *substitute_type_string(const char *type_str, char **param_names,
     }
   }
 
-  // Check if core is a generic type instantiation like "List<T>"
   char *gen_base = NULL;
   char **gen_args = NULL;
   size_t gen_arg_count = 0;
   if (parse_generic_type_name(core, &gen_base, &gen_args, &gen_arg_count)) {
-    // Substitute type params within the generic args
     char **subst_args = malloc(gen_arg_count * sizeof(char *));
     for (size_t i = 0; i < gen_arg_count; i++) {
       subst_args[i] =
           substitute_type_string(gen_args[i], param_names, arg_names, count, ctx);
     }
 
-    /* Only a generic this pass owns gets a mangled name. A generic enum is
-     * instantiated by the type checker instead, off the name the program
-     * wrote, so substituting inside its arguments is the whole job: mangling
-     * it here hands the type checker a name it has never heard of, and the
-     * function that returned it goes undefined along with the type.
-     * rewrite_generic_type_name_in_place makes the same check. */
     int owned = !ctx || find_generic_def(ctx, gen_base) != NULL;
     char *mangled = owned ? mangle_name(gen_base, subst_args, gen_arg_count)
                           : written_generic_name(gen_base, subst_args,
                                                  gen_arg_count);
 
-    // Record this as an instantiation if not already recorded
     if (ctx && owned) {
       int found = 0;
       for (size_t i = 0; i < ctx->instance_count; i++) {
@@ -995,7 +964,6 @@ static void substitute_types_in_ast(ASTNode *node, char **param_names,
   case AST_FUNCTION_CALL: {
     CallExpression *ce = (CallExpression *)node->data;
     if (ce) {
-      // Substitute type args in generic function calls
       if (ce->type_arg_count > 0 && ce->type_args) {
         for (size_t i = 0; i < ce->type_arg_count; i++) {
           char *new_arg = substitute_type_string(ce->type_args[i], param_names,
@@ -1316,7 +1284,6 @@ static void collect_type_instantiations(ASTNode *node, MonoContext *ctx) {
     FunctionDeclaration *fd = (FunctionDeclaration *)node->data;
     if (fd && fd->type_param_count == 0 && fd->body)
       collect_type_instantiations(fd->body, ctx);
-    // Also check parameter types for generic type uses
     if (fd && fd->type_param_count == 0) {
       for (size_t i = 0; i < fd->parameter_count; i++) {
         if (fd->parameter_types[i]) {
@@ -1330,9 +1297,6 @@ static void collect_type_instantiations(ASTNode *node, MonoContext *ctx) {
     break;
   }
   case AST_STRUCT_DECLARATION: {
-    /* A field type and a method body are both places a generic type can be
-     * named. The template's own are skipped: they still name type parameters,
-     * and their instantiations are collected from the monomorphized copy. */
     StructDeclaration *sd = (StructDeclaration *)node->data;
     if (sd && sd->type_param_count == 0) {
       for (size_t i = 0; i < sd->field_count; i++) {
@@ -1509,9 +1473,6 @@ static void rewrite_generic_type_name_in_place(char **slot,
   (void)concrete_types;
   (void)type_param_count;
 
-  /* An array suffix belongs to the field, not to the type argument: the `[3]`
-   * of `Inner<int32>[3]` has to survive the rewrite, and the `[4]` of
-   * `Inner<int32[4]>` is part of the argument and must not be mistaken for it. */
   for (size_t i = 0; i < len; i++) {
     if (type_str[i] == '<') {
       depth++;
@@ -1845,18 +1806,12 @@ static ASTNode *create_monomorphized_struct(GenericDef *def,
 
   StructDeclaration *sd = (StructDeclaration *)clone->data;
 
-  /* Substituting a field type can discover a further instantiation, which
-   * reallocs ctx->instances and leaves `inst` dangling. The arrays these name
-   * are allocated per instantiation and do not move, so copying the handles out
-   * first is enough -- but nothing may read through `inst` past this point. */
   char **type_args = inst->type_args;
   size_t type_arg_count = inst->type_arg_count;
 
-  // Set the mangled name
   mettle_free_string(sd->name);
   sd->name = strdup(inst->mangled_name);
 
-  // Clear type params (this is now a concrete type)
   for (size_t i = 0; i < sd->type_param_count; i++)
     mettle_free_string(sd->type_params[i]);
   free(sd->type_params);
@@ -1867,7 +1822,6 @@ static ASTNode *create_monomorphized_struct(GenericDef *def,
   sd->type_param_traits = NULL;
   sd->type_param_count = 0;
 
-  // Substitute type params in field types
   for (size_t i = 0; i < sd->field_count; i++) {
     char *new_type = substitute_type_string(
         sd->field_types[i], def->type_params, type_args,
@@ -1878,10 +1832,6 @@ static ASTNode *create_monomorphized_struct(GenericDef *def,
     }
   }
 
-  /* Methods are part of the instantiation, not of the template: their
-   * signatures and bodies name the type parameters the same way the fields do,
-   * so they take the same substitution before being lifted to top-level
-   * functions. */
   for (size_t i = 0; i < sd->method_count; i++) {
     ASTNode *method = sd->methods[i];
     FunctionDeclaration *md =
@@ -1928,16 +1878,12 @@ static ASTNode *create_monomorphized_function(GenericDef *def,
 
   FunctionDeclaration *fd = (FunctionDeclaration *)clone->data;
 
-  /* As in create_monomorphized_struct: substitution can realloc ctx->instances
-   * out from under `inst`, so nothing below reads through it. */
   char **type_args = inst->type_args;
   size_t type_arg_count = inst->type_arg_count;
 
-  // Set the mangled name
   mettle_free_string(fd->name);
   fd->name = strdup(inst->mangled_name);
 
-  // Clear type params
   for (size_t i = 0; i < fd->type_param_count; i++)
     mettle_free_string(fd->type_params[i]);
   free(fd->type_params);
@@ -1948,7 +1894,6 @@ static ASTNode *create_monomorphized_function(GenericDef *def,
   fd->type_param_traits = NULL;
   fd->type_param_count = 0;
 
-  // Substitute type params in parameter types
   for (size_t i = 0; i < fd->parameter_count; i++) {
     char *new_type = substitute_type_string(
         fd->parameter_types[i], def->type_params, type_args,
@@ -1959,7 +1904,6 @@ static ASTNode *create_monomorphized_function(GenericDef *def,
     }
   }
 
-  // Substitute type params in return type
   if (fd->return_type) {
     char *new_type = substitute_type_string(
         fd->return_type, def->type_params, type_args,
@@ -1970,7 +1914,6 @@ static ASTNode *create_monomorphized_function(GenericDef *def,
     }
   }
 
-  // Substitute type params throughout the function body
   if (fd->body) {
     substitute_types_in_ast(fd->body, def->type_params, type_args,
                             type_arg_count, ctx);
@@ -2223,19 +2166,6 @@ cleanup:
   return ok;
 }
 
-/* ---- Type-argument inference ---------------------------------------------
- * A call names its type arguments when nothing else can say what they are.
- * When the arguments already say it, `id(7)` is the same call as
- * `id<int32>(7)`, and writing the second adds nothing. Inference runs here,
- * before instantiation, because what it decides is which instantiation to
- * make. It reads the type text the program wrote: a parameter spelled with a
- * type parameter is matched against the argument's static type, and the
- * parameter's binding is whatever the argument put where it sits.
- *
- * It binds only what it is sure of and contradicts nothing else, so a call it
- * cannot read is reported as one to name the arguments on, never guessed at.
- */
-
 typedef struct {
   const char *name;
   char *bound;
@@ -2279,7 +2209,6 @@ static int mono_type_param_index(char **params, size_t count,
   return -1;
 }
 
-/* The head of `Name<...>`, or NULL when the text is not a generic use. */
 static const char *mono_generic_args_start(const char *text) {
   const char *open = text ? strchr(text, '<') : NULL;
   if (!open || open == text) {
@@ -2295,7 +2224,6 @@ static int mono_match_type_text(const char *pattern, const char *actual,
                                 char **params, size_t param_count,
                                 MonoTypeBinding *bindings);
 
-/* Match `Name<A, B>` against `Name<X, Y>`, argument by argument. */
 static int mono_match_generic_args(const char *pattern, const char *actual,
                                    char **params, size_t param_count,
                                    MonoTypeBinding *bindings) {
@@ -2364,9 +2292,6 @@ static int mono_match_generic_args(const char *pattern, const char *actual,
   return 1;
 }
 
-/* Bind what `pattern` says about `actual`. Returns 0 only on a contradiction
- * between two uses of the same type parameter, which is what makes a call
- * ambiguous. */
 static int mono_match_type_text(const char *pattern, const char *actual,
                                 char **params, size_t param_count,
                                 MonoTypeBinding *bindings) {
@@ -2450,9 +2375,6 @@ static char *mono_static_return_type_of_call(MonoContext *ctx,
 static char *mono_static_type_of_element(MonoContext *ctx, ASTNode *expr,
                                          MonoVarEnv *env);
 
-/* The type text of an expression, read off the program without checking it.
- * NULL means "this expression does not say", which costs nothing: another
- * argument may still say it, and if none does the call is reported. */
 static char *mono_static_type_of(MonoContext *ctx, ASTNode *expr,
                                  MonoVarEnv *env) {
   if (!expr) {
@@ -2826,12 +2748,6 @@ static int mono_emit_impl_method_functions(MonoContext *ctx, ASTNode *program) {
   return 1;
 }
 
-/* Turn every `this` in a method body into `*this`, in place. The node is
- * rewritten rather than replaced so that the parent's payload pointer and its
- * child slot -- which both name this node -- stay correct without the walk
- * needing to know what kind of parent it has. `this.x` becomes `(*this).x` and
- * `return this` becomes `return *this`, which is what the body means once the
- * receiver arrives as a pointer. */
 static void mono_this_to_deref(ASTNode *node) {
   if (!node) {
     return;
@@ -2898,13 +2814,6 @@ static void mono_name_set_add(MonoNameSet *set, const char *name) {
   set->names[set->count++] = name;
 }
 
-/* Which method names some call reaches through a pointer, as `p->m()` -- which
- * the parser has already turned into a call whose receiver is a deref. Only
- * those get a pointer-taking copy, so a program that never calls a method
- * through a pointer emits exactly the functions it did before, and `objdump -t`
- * shows it. The test is the same one the type checker applies, minus the
- * receiver's type, which is not known until later: this set is therefore a
- * superset of what gets resolved, never a subset. */
 static void mono_collect_pointer_receiver_methods(ASTNode *node,
                                                   MonoNameSet *set) {
   if (!node) {
@@ -2925,12 +2834,6 @@ static void mono_collect_pointer_receiver_methods(ASTNode *node,
   }
 }
 
-/* Build the free function a method call resolves to. `receiver_is_pointer`
- * selects between the two forms the language distinguishes: `s.m(x)` passes the
- * struct by value, `p->m(x)` passes the pointer, so each gets its own lifted
- * function and the call site picks by how the receiver was spelled. The pointer
- * form takes a cloned body with `this` dereferenced throughout; the value form
- * takes the original body, which the struct declaration gives up. */
 static ASTNode *mono_lift_one_method(MonoContext *ctx, const char *struct_name,
                                      ASTNode *method, int receiver_is_pointer) {
   FunctionDeclaration *md = (FunctionDeclaration *)method->data;
@@ -3023,25 +2926,13 @@ static ASTNode *mono_lift_one_method(MonoContext *ctx, const char *struct_name,
   fn->is_interrupt = md->is_interrupt;
   fn->simd_mode = md->simd_mode;
   if (!receiver_is_pointer) {
-    md->body = NULL; /* ownership moves to the lifted function */
+    md->body = NULL;
   }
   fn_node->data = fn;
   ast_add_child(fn_node, fn->body);
   return fn_node;
 }
 
-/* `struct S { method m(a: T) -> R { ... } }` is called as `s.m(x)`, which the
- * type checker rewrites into a plain call to `S_m(s, x)`. Nothing ever created
- * S_m: the parser stored the method on the struct declaration and every later
- * pass ignored it, so the documented form failed with "Undefined method 'S.m'
- * (expected function 'S_m')" and methods only worked if you hand-wrote the free
- * function yourself.
- *
- * A method lifts once per receiver form the program actually uses: `S_m` takes
- * the struct by value for `s.m(x)`, and `S_m<suffix>` takes `S*` for `p->m(x)`,
- * so a method reached through a pointer can write to its receiver. The struct
- * declaration keeps the method node for diagnostics but gives up its body, which
- * the by-value function takes over; the pointer function gets a clone. */
 static int mono_lift_struct_methods(MonoContext *ctx, Program *prog,
                                     ASTNode *program) {
   MonoNameSet pointer_methods = {0};
@@ -3059,8 +2950,6 @@ static int mono_lift_struct_methods(MonoContext *ctx, Program *prog,
     if (!sd || !sd->name || sd->method_count == 0) {
       continue;
     }
-    /* A generic template is removed from the program after instantiation; its
-     * methods would name type parameters that no longer exist. */
     if (sd->type_param_count > 0) {
       continue;
     }
@@ -3075,7 +2964,6 @@ static int mono_lift_struct_methods(MonoContext *ctx, Program *prog,
         continue;
       }
 
-      /* Pointer form first: it clones the body, which the value form consumes. */
       for (int ptr = 1; ptr >= 0; ptr--) {
         ASTNode *fn_node = NULL;
         ASTNode **grown = NULL;
@@ -3174,10 +3062,6 @@ static int mono_emit_instantiation(MonoContext *ctx, Program *prog,
   prog->declaration_count++;
   ast_add_child(program, mono_node);
 
-  /* Not `inst->emitted`: creating this one may have discovered others, which
-   * reallocs the array `inst` pointed into. Marking it through the index is
-   * what actually records the emission -- through the stale pointer it was
-   * written to freed memory, and the instantiation stayed marked unemitted. */
   ctx->instances[index].emitted = 1;
   if (mono_node->type == AST_FUNCTION_DECLARATION &&
       !mono_infer_type_args_in_function(ctx, mono_node)) {
@@ -3188,17 +3072,6 @@ static int mono_emit_instantiation(MonoContext *ctx, Program *prog,
   return 1;
 }
 
-/* ---- Closure conversion --------------------------------------------------
- * Anonymous `fn(...) { }` expressions parse to AST_LAMBDA_EXPRESSION nodes
- * carrying a FunctionDeclaration payload with a NULL name. This pass lifts each
- * lambda body to a uniquely-named top-level function and records that name on
- * the lambda node (fd->name) so the type checker and IR lowering treat the
- * lambda value as the address of that function. A lambda that references a
- * variable from an enclosing function is a true (capturing) closure, handled in
- * a later step. */
-
-/* A scope's variable names paired with their declared type strings (NULL when
- * the type was inferred and no annotation is available). */
 typedef struct {
   char **names;
   char **types;
@@ -3258,8 +3131,6 @@ static void cc_env_free(CCEnv *e) {
   e->cap = 0;
 }
 
-/* Var-declaration names (with their type strings) inside `node`, not descending
- * into nested lambdas (which open their own scope). */
 static void cc_collect_vars(ASTNode *node, CCEnv *env) {
   if (!node || node->type == AST_LAMBDA_EXPRESSION)
     return;
@@ -3278,9 +3149,6 @@ static void cc_collect_fn_env(FunctionDeclaration *fd, CCEnv *env) {
   cc_collect_vars(fd->body, env);
 }
 
-/* A name used in the lambda body that is bound in an enclosing function (and not
- * rebound inside the lambda) is a capture. Does not descend into nested lambdas.
- * Captures are accumulated in first-reference order in `caps`. */
 static void cc_scan_captures(ASTNode *node, const CCEnv *enclosing,
                              const CCEnv *bound, CCEnv *caps) {
   if (!node || node->type == AST_LAMBDA_EXPRESSION)
@@ -3302,7 +3170,6 @@ static void cc_scan_captures(ASTNode *node, const CCEnv *enclosing,
     cc_scan_captures(node->children[i], enclosing, bound, caps);
 }
 
-/* Growable text buffer for synthesizing source. */
 typedef struct {
   char *data;
   size_t len;
@@ -3347,13 +3214,6 @@ static ASTNode *cc_env_field_access(int idx, SourceLocation loc) {
   return env_id ? ast_create_member_access(env_id, field, loc) : NULL;
 }
 
-/* Rewrite captured-variable references inside a lifted closure body into direct
- * accesses to the heap environment (`__env.__capN`), so reads and writes go
- * through the environment and mutations persist across calls. A captured name is
- * never re-declared inside the lambda body (else it would not be a capture), so
- * every matching reference is the capture. Nested lambdas are not descended into
- * (their captures are handled when they are themselves lifted). Replaced payload
- * nodes are left unfreed - a small, bounded compile-time allocation. */
 static void cc_rewrite_captures(ASTNode *node, const CCEnv *caps) {
   if (!node || node->type == AST_LAMBDA_EXPRESSION)
     return;
@@ -3407,7 +3267,7 @@ static void cc_rewrite_captures(ASTNode *node, const CCEnv *caps) {
         ASTNode *member = cc_env_field_access(idx, node->location);
         if (member) {
           a->target = member;
-          a->variable_name = NULL; /* force the field-assignment path */
+          a->variable_name = NULL;
           ast_add_child(node, member);
         }
       }
@@ -3420,11 +3280,6 @@ static void cc_rewrite_captures(ASTNode *node, const CCEnv *caps) {
 
 static int g_cc_counter;
 
-/* Lift a capturing lambda: synthesize an environment struct, a lifted function
- * (env pointer + user params; captures copied from the env at entry), and a
- * constructor that allocates and populates the env. The lambda value becomes a
- * call to the constructor. Built as source text and parsed, then the original
- * body is grafted onto the lifted function. */
 static void cc_emit_capturing(ASTNode *lambda, FunctionDeclaration *fd,
                               CCEnv *caps, ASTNode *program, Program *prog,
                               ErrorReporter *reporter, int *had_error) {
@@ -3451,7 +3306,6 @@ static void cc_emit_capturing(ASTNode *lambda, FunctionDeclaration *fd,
   const char *ret = fd->return_type ? fd->return_type : "void";
 
   CCBuf src = {0};
-  /* struct __ClosEnv_N { __code: fn(__ClosEnv_N*, userparams)->R; cap: T; ... } */
   cc_buf_add(&src, "struct ");
   cc_buf_add(&src, env_name);
   cc_buf_add(&src, " {\n  __code: fn(");
@@ -3473,7 +3327,6 @@ static void cc_emit_capturing(ASTNode *lambda, FunctionDeclaration *fd,
   }
   cc_buf_add(&src, "}\n");
 
-  /* fn __lam_N(__env: __ClosEnv_N*, userparams) -> R { var cap: T = __env.__capK; ... } */
   cc_buf_add(&src, "fn ");
   cc_buf_add(&src, lam_name);
   cc_buf_add(&src, "(__env: ");
@@ -3487,11 +3340,8 @@ static void cc_emit_capturing(ASTNode *lambda, FunctionDeclaration *fd,
   }
   cc_buf_add(&src, ") -> ");
   cc_buf_add(&src, ret);
-  /* Empty body: the original statements are grafted in, with captured-variable
-   * references rewritten to `__env.__capN` accesses (see cc_rewrite_captures). */
   cc_buf_add(&src, " {\n}\n");
 
-  /* fn __make_lam_N(cap: T, ...) -> __ClosEnv_N* { var __e = new ...; ... return __e; } */
   cc_buf_add(&src, "fn ");
   cc_buf_add(&src, make_name);
   cc_buf_add(&src, "(");
@@ -3538,8 +3388,6 @@ static void cc_emit_capturing(ASTNode *lambda, FunctionDeclaration *fd,
     return;
   }
 
-  /* Graft the lambda's original body statements onto the lifted function (the
-   * second synthesized declaration), after the injected capture locals. */
   ASTNode *lifted = subp->declarations[1];
   ASTNode *body = fd->body;
   fd->body = NULL;
@@ -3570,12 +3418,8 @@ static void cc_emit_capturing(ASTNode *lambda, FunctionDeclaration *fd,
           lbody->declarations[lbody->declaration_count++] = stmt;
           ast_add_child(lf->body, stmt);
         }
-        /* Detach the moved statements from the old body so destroying it does
-         * not free them. */
         obody->declaration_count = 0;
         body->child_count = 0;
-        /* Rewrite captured references in the grafted body to env accesses so
-         * mutations persist across calls. */
         for (size_t i = 0; i < lbody->declaration_count; i++)
           cc_rewrite_captures(lbody->declarations[i], caps);
       }
@@ -3584,7 +3428,6 @@ static void cc_emit_capturing(ASTNode *lambda, FunctionDeclaration *fd,
   if (body)
     ast_destroy_node(body);
 
-  /* Move the three synthesized declarations into the program. */
   for (size_t i = 0; i < subp->declaration_count; i++) {
     ASTNode *d = subp->declarations[i];
     ASTNode **grown =
@@ -3598,12 +3441,7 @@ static void cc_emit_capturing(ASTNode *lambda, FunctionDeclaration *fd,
     prog->declarations[prog->declaration_count++] = d;
     ast_add_child(program, d);
   }
-  /* The sub-program shell still references the moved nodes via its own arrays;
-   * leave it unfreed (a small, bounded compile-time allocation) rather than
-   * risk double-freeing the transferred declarations. */
 
-  /* Record the closure on the lambda node: the value is produced by calling the
-   * constructor, passing the current value of each captured variable. */
   fd->name = (char *)string_intern(make_name);
   fd->env_struct_name = (char *)string_intern(env_name);
   fd->captured_count = caps->count;
@@ -3622,7 +3460,7 @@ static void cc_lift_lambda(ASTNode *lambda, ASTNode *program, Program *prog,
                            int *had_error) {
   FunctionDeclaration *fd = (FunctionDeclaration *)lambda->data;
   if (!fd || fd->name)
-    return; // already lifted
+    return;
 
   CCEnv bound = {0};
   cc_collect_fn_env(fd, &bound);
@@ -3637,8 +3475,6 @@ static void cc_lift_lambda(ASTNode *lambda, ASTNode *program, Program *prog,
   }
   cc_env_free(&caps);
 
-  /* Non-capturing: lift the body to a top-level function and let the lambda
-   * value be its address (a thin function pointer). */
   char name[32];
   snprintf(name, sizeof(name), "__lam_%d", g_cc_counter++);
 
@@ -3686,7 +3522,7 @@ static void cc_walk(ASTNode *node, const CCEnv *enclosing, ASTNode *program,
     return;
   if (node->type == AST_LAMBDA_EXPRESSION) {
     cc_lift_lambda(node, program, prog, enclosing, reporter, had_error);
-    return; // the original in-place body is moved out; do not descend
+    return;
   }
   for (size_t i = 0; i < node->child_count; i++)
     cc_walk(node->children[i], enclosing, program, prog, reporter, had_error);
@@ -3739,18 +3575,6 @@ int closure_convert_program(ASTNode *program, ErrorReporter *reporter) {
 
   return had_error ? 0 : 1;
 }
-
-/* ---- Closure adaptation ---------------------------------------------------
- * A thin function value (`&func`, or a non-capturing lambda, which is itself a
- * thin `&__lam_N` once lifted) cannot be assigned where a closure (`Fn(...)->R`)
- * is expected: the closure calling convention passes a hidden environment
- * argument the thin value does not carry. This pass makes that boundary
- * transparent: wherever a thin source flows into an `Fn(...)` -spelled
- * destination (a var declaration, a return statement, or a call argument to a
- * plain top-level function), it is wrapped in a small generated ADAPTER - a
- * one-field heap environment holding the thin function pointer, plus a thunk
- * that calls through it - so the thin value becomes a real closure value.
- * Adapters are deduplicated by signature (one per distinct `(params)->ret`). */
 
 static void cc_detach_child(ASTNode *parent, ASTNode *child) {
   if (!parent || !child)
@@ -3823,12 +3647,6 @@ static void adapt_cache_free(AdaptCache *c) {
 
 static int g_adapt_counter;
 
-/* Name index over the top_decls snapshot (decl slot+1; 0 = empty). Duplicate
- * names keep every entry: linear probing places same-key entries along one
- * probe path in insertion order, so a lookup that continues to the first
- * empty bucket sees them in snapshot order, exactly what the old linear
- * scans (first name match / first name+arity match) relied on. Consulted per
- * call expression, so a linear scan is O(calls x functions). */
 typedef struct {
   size_t *buckets;
   size_t bucket_count;
@@ -3865,14 +3683,11 @@ static void adapt_fn_index_free(void) {
   g_adapt_fn_index.bucket_count = 0;
 }
 
-/* First snapshot entry whose name matches; want_arity < 0 matches any arity,
- * otherwise the parameter count must equal want_arity. */
 static FunctionDeclaration *adapt_fn_index_find(ASTNode **top_decls,
                                                 size_t top_count,
                                                 const char *name,
                                                 long long want_arity) {
   if (!g_adapt_fn_index.bucket_count) {
-    /* Index allocation failed: fall back to the linear scan. */
     for (size_t i = 0; i < top_count; i++) {
       FunctionDeclaration *fd = (FunctionDeclaration *)top_decls[i]->data;
       if (fd && fd->name && strcmp(fd->name, name) == 0 &&
@@ -3896,10 +3711,6 @@ static FunctionDeclaration *adapt_fn_index_find(ASTNode **top_decls,
   return NULL;
 }
 
-/* Synthesizes struct __Adapt_K { __code: fn(__Adapt_K*, P...)->R; __real:
- * fn(P...)->R; }, fn __athunk_K(__env: __Adapt_K*, p0: P0, ...) -> R { return
- * __env.__real(p0, ...); }, and fn __amake_K(__real: fn(P...)->R) -> __Adapt_K*
- * { ... }. Returns the interned constructor name, or NULL on failure. */
 static const char *adapt_emit_adapter(char **param_types, size_t param_count,
                                       const char *return_type,
                                       ASTNode *program, Program *prog,
@@ -4004,8 +3815,6 @@ static const char *adapt_emit_adapter(char **param_types, size_t param_count,
     prog->declarations[prog->declaration_count++] = d;
     ast_add_child(program, d);
   }
-  /* The sub-program shell is intentionally left unfreed, as in
-   * cc_emit_capturing: a small, bounded compile-time allocation. */
 
   return string_intern(make_name);
 }
@@ -4038,11 +3847,6 @@ static int adapt_type_is_closure_string(const char *s) {
   return s && strlen(s) >= 4 && strncmp(s, "Fn(", 3) == 0;
 }
 
-/* Recognizes a "thin" source expression eligible for adaptation: `&plainFunc`
- * (a top-level function found by name) or a non-capturing lambda (already
- * lifted by closure_convert_program). On success, fills the borrowed
- * (not owned by the caller) param_types/param_count/return_type describing the
- * source's signature. */
 static int adapt_thin_signature(ASTNode *expr, ASTNode **top_decls,
                                 size_t top_count, char ***out_param_types,
                                 size_t *out_param_count,
@@ -4080,8 +3884,6 @@ static int adapt_thin_signature(ASTNode *expr, ASTNode **top_decls,
   return 0;
 }
 
-/* If `dest_type_str` is a closure boundary (`Fn(...)`) and `*slot` is a thin,
- * adaptable source, wraps `*slot` in a generated adapter call in place. */
 static void adapt_wrap_if_needed(ASTNode **slot, ASTNode *owner,
                                  const char *dest_type_str,
                                  ASTNode **top_decls, size_t top_count,
@@ -4310,9 +4112,7 @@ static void adapt_process_fn(ASTNode *fnnode, ASTNode **top_decls,
 }
 
 int closure_adapt_program(ASTNode *program, ErrorReporter *reporter) {
-  (void)reporter; /* adaptation failures are internal allocation errors only;
-                    * signature mismatches surface later as ordinary type
-                    * errors once the wrapped node is type-checked. */
+  (void)reporter;
   if (!program || program->type != AST_PROGRAM)
     return 1;
   Program *prog = (Program *)program->data;
@@ -4322,9 +4122,6 @@ int closure_adapt_program(ASTNode *program, ErrorReporter *reporter) {
   g_adapt_counter = 0;
   int had_error = 0;
 
-  /* Snapshot of callable top-level function signatures (by name), taken before
-   * any adapters are synthesized: adapters are never themselves user-callable
-   * boundary targets, so they do not need to be discoverable here. */
   ASTNode **top_decls = malloc(prog->declaration_count * sizeof(ASTNode *));
   size_t top_count = 0;
   if (!top_decls && prog->declaration_count > 0) {
@@ -4373,8 +4170,6 @@ int closure_adapt_program(ASTNode *program, ErrorReporter *reporter) {
   return had_error ? 0 : 1;
 }
 
-/* The base of a field type, with any `*` and `[N]` suffix dropped: `Box__int32`
- * for all of `Box__int32`, `Box__int32*` and `Box__int32[4]`. */
 static size_t mono_base_type_length(const char *type_str) {
   size_t length = strlen(type_str);
   const char *bracket = strchr(type_str, '[');
@@ -4433,25 +4228,6 @@ static void mono_move_declaration(Program *prog, size_t from, size_t to) {
   prog->declarations[to] = node;
 }
 
-/* Instantiations are appended as they are discovered, which puts them after the
- * code that asked for them. That is invisible for a local, whose type may name
- * a struct declared later, but Mettle requires a struct field's type to be
- * declared first, so `struct Holder { b: Box<int32>; }` named a type that came
- * later in the program and failed with "Unknown type 'Box__int32'".
- *
- * Move each one to just before the first field that names it. Everything it
- * depends on -- its type arguments, and whatever its template's fields name --
- * is already declared before that field, since the field could name them too,
- * so the new position is after its own dependencies and before its use. One
- * forward sweep settles it: a declaration is only ever moved to the index being
- * examined, which leaves the prefix behind that index untouched, and the
- * moved-to index is re-examined so that a struct pulled forward can pull its
- * own dependencies forward ahead of itself.
- *
- * That settles each instantiation with at most one move, so the move budget is
- * their count. Two structs whose fields name each other exhaust it instead of
- * chasing each other forever: no order satisfies them, which the type checker
- * then reports the way it does for two hand-written structs. */
 static void mono_order_instantiations_before_use(MonoContext *ctx,
                                                  Program *prog) {
   size_t index = 0;
@@ -4506,7 +4282,6 @@ int monomorphize_program(ASTNode *program, ErrorReporter *reporter) {
   int success = 1;
   ctx.reporter = reporter;
 
-  // Step 1: Collect generic definitions
   collect_generic_defs(program, &ctx);
   if (ctx.had_error) {
     success = 0;
@@ -4519,20 +4294,14 @@ int monomorphize_program(ASTNode *program, ErrorReporter *reporter) {
   }
 
   if (ctx.def_count > 0) {
-    /* Step 1.5: fill in the type arguments a call did not name, from what its
-       arguments already say. It runs before collection because what it decides
-       is which instantiations there are to collect. */
     ctx.module = prog;
     if (!mono_infer_type_args(&ctx, program)) {
       success = 0;
       goto cleanup;
     }
 
-    // Step 2: Collect all instantiations from non-generic code
     collect_type_instantiations(program, &ctx);
 
-    // Step 3: Generate monomorphized definitions, iterating until no new
-    // instantiations are discovered (handles transitive generic usage).
     size_t processed = 0;
     while (processed < ctx.instance_count) {
       size_t current_count = ctx.instance_count;
@@ -4547,11 +4316,8 @@ int monomorphize_program(ASTNode *program, ErrorReporter *reporter) {
       processed = current_count;
     }
 
-    // Step 4: Rewrite all generic references to use mangled names
     rewrite_generic_references(program, &ctx);
 
-    /* Field types are mangled by now, so an instantiation used as a field can
-     * be recognized and moved ahead of the struct that names it. */
     mono_order_instantiations_before_use(&ctx, prog);
   }
 
@@ -4560,13 +4326,11 @@ int monomorphize_program(ASTNode *program, ErrorReporter *reporter) {
     goto cleanup;
   }
 
-  /* After instantiation, so a monomorphized struct's methods are lifted too. */
   if (!mono_lift_struct_methods(&ctx, prog, program)) {
     success = 0;
     goto cleanup;
   }
 
-  // Step 5: Remove generic (template) definitions from the program
   size_t write_idx = 0;
   for (size_t i = 0; i < prog->declaration_count; i++) {
     ASTNode *decl = prog->declarations[i];
@@ -4594,7 +4358,6 @@ int monomorphize_program(ASTNode *program, ErrorReporter *reporter) {
   prog->declaration_count = write_idx;
 
 cleanup:
-  // Clean up context
   for (size_t i = 0; i < ctx.trait_count; i++) {
     free(ctx.traits[i].name);
   }

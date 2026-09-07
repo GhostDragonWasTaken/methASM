@@ -1,10 +1,6 @@
-/* mettle test / mettle trace: compile-time execution DX surfaces.
- * See ir_comptime.h. */
 #include "ir_comptime.h"
 #include "ir_trace.h"
 
-/* What to do with a trace once a test has produced one. The driver installs
-   this; nothing here knows what a rule is. */
 static int (*g_trace_rules_hook)(void *, const char *);
 static void *g_trace_rules_context;
 
@@ -41,7 +37,6 @@ static int ict_color(void) {
   return cached;
 }
 
-/* Strip import-mangling prefixes: "__import_<hex>_name" -> "name". */
 static const char *ict_display_name(const char *name) {
   if (!name) {
     return "?";
@@ -69,8 +64,6 @@ static void ict_format_value(const IRInterpValue *value, char *buffer,
   }
 }
 
-/* ---------------- mettle test ---------------- */
-
 typedef struct {
   int passed;
   int failed;
@@ -89,8 +82,6 @@ static void ict_report_assert_failure(ErrorReporter *reporter,
   char message[192];
   snprintf(message, sizeof(message), "assertion failed in test '%s'",
            ict_display_name(test_name));
-  /* Snap from the line start: the call location points at '(' which is
-   * after the name. */
   SourceSpan span = source_span_create(line, 1, is_eq ? 9 : 6);
   span = error_reporter_span_snap_to_token(reporter, span,
                                            is_eq ? "assert_eq" : "assert");
@@ -156,7 +147,6 @@ int ir_comptime_run_tests(IRProgram *program, ErrorReporter *reporter,
   const char *dim = ict_color() ? "\x1b[2m" : "";
   const char *reset = ict_color() ? "\x1b[0m" : "";
 
-  /* Surface any warnings the front end accumulated (unused vars etc.). */
   if (reporter->count > 0) {
     error_reporter_print_errors(reporter);
   }
@@ -300,18 +290,12 @@ int ir_comptime_run_tests(IRProgram *program, ErrorReporter *reporter,
   return totals.failed > 0 ? 1 : 0;
 }
 
-/* ---------------- mettle trace ---------------- */
-
 #define ICT_TRACE_MAX_ENTRIES 256
 #define ICT_TRACE_SAMPLES 4
 
 typedef struct {
   size_t line;
   const char *name;
-  /* The `comptime for` iteration that generated the instruction, or NULL for
-   * written code. Part of the entry's identity: without it every expansion of
-   * one written line merges into a single run of values with no way to tell
-   * which iteration produced which. */
   const char *expansion_note;
   long long count;
   char samples[ICT_TRACE_SAMPLES][40];
@@ -328,7 +312,6 @@ typedef struct {
 static void ict_trace_hook(void *ctx, size_t line, const char *name,
                            IRInterpValue value, const char *expansion_note) {
   ICTTraceLog *log = (ICTTraceLog *)ctx;
-  /* Compiler temps and synthesized locals are noise; show user symbols. */
   if (!name || name[0] == '.' || name[0] == '_') {
     return;
   }
@@ -367,8 +350,6 @@ static void ict_trace_hook(void *ctx, size_t line, const char *name,
   }
 }
 
-/* Size of a by-value aggregate parameter (struct/array/tagged enum), from the
- * module symbol table; 0 for scalars, pointers, and strings. */
 static long long ict_param_aggregate_size(IRProgram *program,
                                           const char *function_name,
                                           size_t index) {
@@ -446,8 +427,6 @@ int ir_comptime_trace(IRProgram *program, ErrorReporter *reporter,
     return 1;
   }
 
-  /* Build arguments: CLI values fill int/float parameters in order; pointer
-   * parameters get a synthesized 33-element seeded buffer. */
   IRInterpMachine *machine = ir_interp_create(program);
   if (!machine) {
     return 1;
@@ -514,8 +493,6 @@ int ir_comptime_trace(IRProgram *program, ErrorReporter *reporter,
       snprintf(arg_display[p], sizeof(arg_display[0]), "<buf:%lld x %.*s>",
                elems, (int)(type_len - 1), type);
     } else if (ict_param_aggregate_size(program, function_name, p) > 0) {
-      /* By-value aggregate parameter: synthesize zeroed storage of the
-       * type's size; the value convention passes its address. */
       long long bytes = ict_param_aggregate_size(program, function_name, p);
       unsigned long long addr = ir_interp_add_buffer(machine, NULL, bytes);
       call_args[p].i = (long long)addr;
@@ -569,7 +546,6 @@ int ir_comptime_trace(IRProgram *program, ErrorReporter *reporter,
   }
   printf(")\n\n");
 
-  /* Widen the printed range to the function's full extent when known. */
   for (size_t i = 0; i < fn->instruction_count; i++) {
     size_t line = fn->instructions[i].location.line;
     if (line == 0) {
@@ -595,10 +571,6 @@ int ir_comptime_trace(IRProgram *program, ErrorReporter *reporter,
           continue;
         }
         printf("%s%s ", cyan, printed_any ? ";" : " <-");
-        /* The diagnostic's wording is "expanded from comptime-for iteration 1
-         * (field `kind`)". Inline against source that is too long, so show
-         * the parenthesized subject, which is what distinguishes one
-         * iteration from the next. */
         if (entry->expansion_note) {
           const char *subject = strchr(entry->expansion_note, '(');
           if (subject) {

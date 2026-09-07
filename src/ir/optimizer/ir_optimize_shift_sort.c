@@ -1,31 +1,5 @@
 #include "ir_optimize_internal.h"
 
-/* -------------------------------------------------------------------------- */
-/* Shift-loop idiom recognizer (detect-only, phase 1)                          */
-/*                                                                             */
-/* Matches the general "shift a contiguous run by one slot, stopping on a data */
-/* condition" loop -- the inner loop of insertion sort and any array-shift:    */
-/*                                                                             */
-/*   label LOOP                                                                */
-/*     %c1 = COUNTER >= 0 ; branch_zero %c1 -> END    // counter floor         */
-/*     SRC  = DST - STRIDE                              // src = dst - stride   */
-/*     VAL  = *SRC [SZ]                                 // load source          */
-/*     %c2  = VAL <cmp> KEY ; branch_zero %c2 -> BODY  // continue condition    */
-/*     jump END                                         // else stop (break)    */
-/*   label BODY                                                                */
-/*     *DST <- VAL [SZ]                                 // shift: dst = src     */
-/*     DST <- SRC                                       // walk back            */
-/*     COUNTER = COUNTER - 1                                                    */
-/*     jump LOOP                                                                */
-/*   label END                                                                 */
-/*                                                                             */
-/* This is matched purely by SHAPE -- symbol names, the stride constant, the   */
-/* element size, and the comparison operator are all read from the IR, never   */
-/* assumed. Any loop of this form is eligible; everything else is left alone.  */
-/* Phase 1 only detects and binds operands (no rewrite yet) so the match can be */
-/* validated against the whole corpus before any lowering is trusted.          */
-/* Like ir_find_next_non_nop but also skips IR_OP_DECLARE_LOCAL, which is a
- * declaration marker the shift-loop body interleaves with real computation. */
 static int ir_find_next_significant(const IRFunction *function,
                                     size_t start_index, size_t *out_index) {
   size_t i = start_index;
@@ -57,8 +31,6 @@ static int ir_match_shift_loop_at(const IRFunction *function, size_t header_inde
     return 0;
   }
 
-  /* Walk the body as a strict sequence of significant (non-NOP, non-declare)
-   * instructions. */
   size_t idx[9];
   size_t cur = header_index + 1;
   for (int n = 0; n < 9; n++) {
@@ -68,17 +40,16 @@ static int ir_match_shift_loop_at(const IRFunction *function, size_t header_inde
     cur = idx[n] + 1;
   }
 
-  const IRInstruction *guard = &function->instructions[idx[0]]; /* COUNTER>=0 */
-  const IRInstruction *gbr = &function->instructions[idx[1]];   /* branch_zero->END */
-  const IRInstruction *sub = &function->instructions[idx[2]];   /* SRC=DST-STRIDE */
-  const IRInstruction *load = &function->instructions[idx[3]];  /* VAL=*SRC */
-  const IRInstruction *cmp = &function->instructions[idx[4]];   /* %c2=VAL<cmp>KEY */
-  const IRInstruction *cbr = &function->instructions[idx[5]];   /* branch_zero->BODY */
-  const IRInstruction *jend = &function->instructions[idx[6]];  /* jump END */
-  const IRInstruction *body_lbl = &function->instructions[idx[7]]; /* label BODY */
-  const IRInstruction *store = &function->instructions[idx[8]];    /* *DST<-VAL */
+  const IRInstruction *guard = &function->instructions[idx[0]];
+  const IRInstruction *gbr = &function->instructions[idx[1]];
+  const IRInstruction *sub = &function->instructions[idx[2]];
+  const IRInstruction *load = &function->instructions[idx[3]];
+  const IRInstruction *cmp = &function->instructions[idx[4]];
+  const IRInstruction *cbr = &function->instructions[idx[5]];
+  const IRInstruction *jend = &function->instructions[idx[6]];
+  const IRInstruction *body_lbl = &function->instructions[idx[7]];
+  const IRInstruction *store = &function->instructions[idx[8]];
 
-  /* COUNTER >= 0 guard feeding a branch_zero to some END label. */
   if (guard->op != IR_OP_BINARY || guard->is_float || !guard->text ||
       strcmp(guard->text, ">=") != 0 ||
       guard->lhs.kind != IR_OPERAND_SYMBOL || !guard->lhs.name ||
@@ -91,7 +62,6 @@ static int ir_match_shift_loop_at(const IRFunction *function, size_t header_inde
   const char *counter = guard->lhs.name;
   const char *end_label = gbr->text;
 
-  /* SRC = DST - STRIDE (positive byte stride). */
   if (sub->op != IR_OP_BINARY || sub->is_float || !sub->text ||
       strcmp(sub->text, "-") != 0 ||
       sub->dest.kind != IR_OPERAND_SYMBOL || !sub->dest.name ||
@@ -103,7 +73,6 @@ static int ir_match_shift_loop_at(const IRFunction *function, size_t header_inde
   const char *dst = sub->lhs.name;
   long long stride = sub->rhs.int_value;
 
-  /* VAL = *SRC. */
   if (load->op != IR_OP_LOAD || load->dest.kind != IR_OPERAND_SYMBOL ||
       !load->dest.name || !ir_operand_is_symbol_named(&load->lhs, src)) {
     return 0;
@@ -114,7 +83,6 @@ static int ir_match_shift_loop_at(const IRFunction *function, size_t header_inde
     return 0;
   }
 
-  /* %c2 = VAL <cmp> KEY ; branch_zero %c2 -> BODY ; jump END. */
   if (cmp->op != IR_OP_BINARY || cmp->is_float || !cmp->text ||
       !ir_operand_is_symbol_named(&cmp->lhs, val) ||
       cmp->rhs.kind != IR_OPERAND_SYMBOL || !cmp->rhs.name ||
@@ -129,7 +97,6 @@ static int ir_match_shift_loop_at(const IRFunction *function, size_t header_inde
   }
   const char *key = cmp->rhs.name;
 
-  /* *DST <- VAL [elem_size]. */
   if (store->op != IR_OP_STORE ||
       !ir_operand_is_symbol_named(&store->dest, dst) ||
       !ir_operand_is_symbol_named(&store->lhs, val) ||
@@ -138,7 +105,6 @@ static int ir_match_shift_loop_at(const IRFunction *function, size_t header_inde
     return 0;
   }
 
-  /* DST <- SRC ; COUNTER = COUNTER - 1 ; jump LOOP. */
   size_t a1 = 0, a2 = 0, a3 = 0;
   if (!ir_find_next_significant(function, idx[8] + 1, &a1) ||
       !ir_find_next_significant(function, a1 + 1, &a2) ||
@@ -424,8 +390,4 @@ int ir_simd_insertion_sort_i32_pass(IRFunction *function, int *changed) {
   }
   return 1;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Eliminate LOAD -> ASSIGN @sym copies when @sym is single-use in loop body  */
-/* -------------------------------------------------------------------------- */
 

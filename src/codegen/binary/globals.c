@@ -136,10 +136,6 @@ int binary_global_const_table_add(const char *name, long long int_value,
     return 0;
   }
 
-  /* Float globals are never inline-loaded as a GP immediate: that path emits
-   * `mov GP_reg, imm64`, leaving the bits in a general-purpose register, but a
-   * float consumer reads its value from an XMM register. Force the RIP-relative
-   * load path (which is XMM-aware) so the value reaches an XMM lane. */
   if (is_float) {
     can_inline_load = 0;
   }
@@ -191,8 +187,6 @@ void binary_ir_function_index_insert(BinaryIRFunctionIndex *index,
   size_t mask = index->slot_count - 1;
   size_t i = mettle_fnv1a_hash(function->name) & mask;
   while (index->slots[i].name) {
-    /* First definition of a given name wins, matching the old linear scan
-     * which returned the earliest matching function. */
     if (strcmp(index->slots[i].name, function->name) == 0) {
       return;
     }
@@ -202,8 +196,6 @@ void binary_ir_function_index_insert(BinaryIRFunctionIndex *index,
   index->slots[i].function = function;
 }
 
-/* Returns 1 on success (index ready to query), 0 on allocation failure (caller
- * should fall back to a linear scan rather than miss real functions). */
 int binary_ir_function_index_ensure(const IRProgram *program) {
   if (g_binary_ir_function_index.program == program &&
       g_binary_ir_function_index.function_count == program->function_count &&
@@ -213,8 +205,6 @@ int binary_ir_function_index_ensure(const IRProgram *program) {
 
   binary_ir_function_index_reset();
 
-  /* Size to >=2x function count, power of two, min 16, to keep load factor
-   * under 0.5 and probe chains short. */
   size_t slot_count = 16;
   while (slot_count < program->function_count * 2) {
     slot_count *= 2;
@@ -262,7 +252,6 @@ IRFunction *code_generator_find_ir_function_binary(CodeGenerator *generator,
     return NULL;
   }
 
-  /* Fallback: index allocation failed; behave as before. */
   for (size_t i = 0; i < program->function_count; i++) {
     IRFunction *function = program->functions[i];
     if (function && function->name && strcmp(function->name, name) == 0) {
@@ -272,17 +261,7 @@ IRFunction *code_generator_find_ir_function_binary(CodeGenerator *generator,
 
   return NULL;
 }
-/* The AST-based global-initializer evaluator that used to live here was
- * removed in Phase 2 (2.4): initializer constants are now baked onto the IR
- * module symbol table at lowering (see src/frontend/mtlc_lower_module.c), so
- * codegen reads sym->init_bits/init_is_float/init_string directly instead of
- * re-evaluating the AST. */
 
-/* Emit a folded aggregate initializer: the bytes go to .data verbatim, then one
- * ADDR64 relocation per pointer-sized hole. A hole naming a module symbol
- * relocates against that symbol's linkage name; a hole holding a string element
- * gets its characters parked in .rdata under a generated label and relocates
- * against that. */
 static int code_generator_binary_emit_global_aggregate_image(
     CodeGenerator *generator, const char *link_name, const IRModuleSymbol *sym,
     size_t alignment) {
@@ -311,10 +290,6 @@ static int code_generator_binary_emit_global_aggregate_image(
     char *chars_label = NULL;
 
     if (!target) {
-      /* A string element. The characters go to .rdata; a `string` slot then
-       * points at a { chars, length } record built beside them (that is what a
-       * string value is everywhere else in the language), while a `cstring`
-       * slot points straight at the characters. */
       size_t rdata_section = binary_emitter_get_or_create_section(
           emitter, ".rdata", BINARY_SECTION_RDATA, 0, 8);
       size_t chars_offset = 0;
@@ -344,15 +319,6 @@ static int code_generator_binary_emit_global_aggregate_image(
       target = chars_label;
 
       if (reloc->string_wants_record) {
-        /* The field IS the {chars, length} record, sixteen bytes at the
-         * field's own offset: the relocation below fills the pointer half and
-         * the length is written beside it here.
-         *
-         * This used to emit a separate record in rodata and point the field at
-         * it, which made a string field of a constant the one place a string
-         * was still a pointer after the type became an ordinary aggregate.
-         * Reading such a field then produced the record's ADDRESS where every
-         * other site expected its contents. */
         BinarySection *image_section =
             binary_emitter_get_section(emitter, data_section);
         uint64_t encoded_length = (uint64_t)length;
@@ -368,8 +334,6 @@ static int code_generator_binary_emit_global_aggregate_image(
                sizeof(encoded_length));
       }
     } else if (generator->ir_program) {
-      /* Relocate against the referenced symbol's linkage name, which may
-       * differ from its source name. */
       const IRModuleSymbol *referenced =
           ir_program_lookup_symbol(generator->ir_program, target);
       if (referenced && referenced->link_name && referenced->link_name[0]) {
@@ -452,16 +416,6 @@ int code_generator_emit_binary_global_variable(CodeGenerator *generator,
         sym->has_initializer ? sym->init_string_length : 0);
   }
 
-  /* Aggregates: a global struct, array or tagged enum either carries a folded
-   * initializer image (`var t: int32[4] = [1, 2, 3, 4];`, and every aggregate
-   * `const`) or is plain zero-filled storage of its laid-out size. The image
-   * goes to .data with its relocations; the zero case stays in .bss, where it
-   * costs nothing in the object file. An all-zero image counts as the zero
-   * case: since an uninitialized aggregate starts zeroed, `var wm: Fact[100];`
-   * arrives here carrying five kilobytes of nothing. Handled ahead of the
-   * scalar path, whose type check is shared with ABI decisions and must keep
-   * rejecting them -- a tagged enum reaching it was refused outright, so a
-   * program could not declare one at global scope at all. */
   if (type->kind == MTLC_TYPE_STRUCT || type->kind == MTLC_TYPE_ARRAY ||
       type->kind == MTLC_TYPE_TAGGED_ENUM) {
     size_t aggregate_size = type->size;
@@ -476,9 +430,6 @@ int code_generator_emit_binary_global_variable(CodeGenerator *generator,
       return 0;
     }
     if (sym->has_initializer || sym->has_unfoldable_initializer) {
-      /* A scalar-shaped or unfoldable initializer on an aggregate: the
-       * frontend rejects these with a source location, so reaching here means
-       * something slipped through rather than a user error. */
       code_generator_set_error(
           generator,
           "Aggregate global '%s' carries an initializer that was not folded to "
@@ -521,9 +472,6 @@ int code_generator_emit_binary_global_variable(CodeGenerator *generator,
     return 1;
   }
 
-  /* `var p = &other;` -- a data pointer aliasing a global, or a function
-   * pointer naming an entry point. The value is a link-time address, so reserve
-   * a pointer-sized slot and let the linker fill it through a relocation. */
   if (sym->init_symbol_ref && sym->init_symbol_ref[0] != '\0') {
     size_t ref_section = 0;
     size_t ref_offset = 0;
@@ -539,8 +487,6 @@ int code_generator_emit_binary_global_variable(CodeGenerator *generator,
       return 0;
     }
 
-    /* Relocate against the referenced symbol's linkage name, which may differ
-     * from its source name (an extern with an explicit link name). */
     if (generator->ir_program) {
       referenced = ir_program_lookup_symbol(generator->ir_program, target);
       if (referenced && referenced->link_name && referenced->link_name[0]) {
@@ -689,20 +635,9 @@ int code_generator_emit_binary_global_variable(CodeGenerator *generator,
   return 1;
 }
 
-/* --- Written-global name set --------------------------------------------- *
- *
- * collect_global_constants needs to know, per candidate global, whether any
- * instruction writes it (or takes its address). Asking
- * code_generator_binary_global_is_written per global rescans every instruction
- * of every function, O(globals x instructions) with a strcmp inside, which
- * dominated codegen once a frontend with many string literals pushed module
- * globals into the tens of thousands. Build the set of written names in one
- * pass instead and answer each query from the table (the same cure
- * BinaryIRFunctionIndex applies to function lookup; see internal.h). Names are
- * borrowed from the IR, which outlives the set. */
 typedef struct {
-  const char **slots; /* open addressing; NULL = empty */
-  size_t slot_count;  /* power of two, 0 until first insert */
+  const char **slots;
+  size_t slot_count;
   size_t count;
 } BinaryWrittenSet;
 
@@ -733,7 +668,6 @@ static int binary_written_set_add(BinaryWrittenSet *set, const char *name) {
   if (!name) {
     return 1;
   }
-  /* grow at 50% load so probe chains stay short */
   if (set->slot_count == 0 || set->count * 2 >= set->slot_count) {
     if (!binary_written_set_grow(set)) {
       return 0;
@@ -768,8 +702,6 @@ static int binary_written_set_contains(const BinaryWrittenSet *set,
   return 0;
 }
 
-/* Collect every symbol name the program writes or takes the address of,
- * the same three cases code_generator_binary_global_is_written tests. */
 static int binary_written_set_build(BinaryWrittenSet *set,
                                     const IRProgram *ir_program) {
   for (size_t fn_i = 0; fn_i < ir_program->function_count; fn_i++) {
@@ -792,7 +724,6 @@ static int binary_written_set_build(BinaryWrittenSet *set,
           return 0;
         }
       }
-      /* An asm block is opaque, so every global it binds counts as written. */
       if (instruction->op == IR_OP_INLINE_ASM && instruction->text) {
         for (size_t sym_i = 0; sym_i < ir_program->module_symbol_count;
              sym_i++) {
@@ -871,13 +802,8 @@ int code_generator_binary_collect_global_constants(CodeGenerator *generator) {
     const IRModuleSymbol *sym = &generator->ir_program->module_symbols[i];
     if (sym->kind != IR_MODSYM_VARIABLE || sym->is_extern ||
         !sym->has_initializer || sym->init_string) {
-      continue; /* extern, no initializer, or a string initializer */
+      continue;
     }
-    /* An exported global is reachable from outside this compilation, so a scan
-     * of this program's writes proves nothing about its value. Folding its
-     * initializer into the reads made `export var SHARED: int64 = 7;` answer 7
-     * forever: a C caller that stored 99 saw its own store and Mettle's reader
-     * still returned the constant. */
     if (sym->is_exported) {
       continue;
     }
@@ -896,8 +822,6 @@ int code_generator_binary_collect_global_constants(CodeGenerator *generator) {
       int_value = (long long)float_value;
     }
 
-    /* Same predicate code_generator_binary_global_is_written applies, but
-     * answered from the precomputed set. A NULL name counts as written. */
     int is_const = sym->name && !binary_written_set_contains(&written, sym->name);
     if (!binary_global_const_table_add(sym->name, int_value, float_value,
                                        sym->init_is_float, is_const)) {

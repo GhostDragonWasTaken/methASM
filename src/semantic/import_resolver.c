@@ -231,23 +231,13 @@ static char *trim_whitespace_in_place(char *text) {
   return text;
 }
 
-/* mettle.deps ancestor-walk memoization.
- *
- * resolve_dependency_import() walks from the importer's directory up to the
- * filesystem root, fopen-probing for a "mettle.deps" file at every level. That
- * walk's result (the ordered list of existing mettle.deps files, each paired
- * with the directory it sits in) depends ONLY on the start directory, not on
- * the import string. In a real project every module lives in a handful of
- * directories, so the same multi-syscall walk is repeated for nearly every
- * import edge. Memoize it per canonical start directory. Most projects have
- * no mettle.deps at all, in which case this collapses ~all walks to one. */
 typedef struct {
-  char *deps_path; /* absolute path to an existing mettle.deps file */
-  char *deps_dir;  /* directory containing it (used as join base) */
+  char *deps_path;
+  char *deps_dir;
 } DepsFileLocation;
 
 typedef struct {
-  char *start_dir; /* canonical directory the walk started from */
+  char *start_dir;
   DepsFileLocation *locations;
   size_t location_count;
 } DepsWalkCacheEntry;
@@ -271,11 +261,6 @@ static void deps_walk_cache_reset(void) {
   g_deps_walk_cache_capacity = 0;
 }
 
-/* Returns the cached list of existing mettle.deps locations for `start_dir`,
- * performing (and caching) the filesystem walk on first use. The returned
- * array is owned by the cache; the caller must not free it. *out_count is
- * set to the number of locations (may be 0). Returns NULL only on hard
- * allocation failure (caller falls back to NULL = "no dependency import"). */
 static const DepsFileLocation *
 deps_walk_lookup(const char *start_dir, size_t *out_count) {
   *out_count = 0;
@@ -290,7 +275,6 @@ deps_walk_lookup(const char *start_dir, size_t *out_count) {
     }
   }
 
-  /* Perform the walk once. */
   DepsFileLocation *locations = NULL;
   size_t location_count = 0;
   size_t location_capacity = 0;
@@ -312,7 +296,7 @@ deps_walk_lookup(const char *start_dir, size_t *out_count) {
         locations[location_count].deps_path = deps_path;
         locations[location_count].deps_dir = strdup(walk_dir);
         location_count++;
-        deps_path = NULL; /* ownership moved into the cache entry */
+        deps_path = NULL;
       }
     }
     free(deps_path);
@@ -341,8 +325,6 @@ deps_walk_lookup(const char *start_dir, size_t *out_count) {
     return g_deps_walk_cache[g_deps_walk_cache_count - 1].locations;
   }
 
-  /* Cache full and realloc failed: return a transient result. Leak-free path
-   * would require ownership juggling; this branch only triggers under OOM. */
   for (size_t j = 0; j < location_count; j++) {
     free(locations[j].deps_path);
     free(locations[j].deps_dir);
@@ -385,7 +367,6 @@ static char *resolve_dependency_import(const char *current_file_path,
     return NULL;
   }
 
-  /* Resolve the mettle.deps locations once per start directory (memoized). */
   size_t deps_loc_count = 0;
   const DepsFileLocation *deps_locs =
       deps_walk_lookup(search_dir, &deps_loc_count);
@@ -456,16 +437,12 @@ static char *resolve_dependency_import(const char *current_file_path,
 }
 
 typedef struct {
-  // Fully-resolved module paths that have completed import resolution.
   char **resolved_files;
   size_t resolved_count;
   size_t resolved_capacity;
-  // Fully-resolved module paths currently being traversed (recursion stack).
-  // Used to detect true circular imports.
   char **active_files;
   size_t active_count;
   size_t active_capacity;
-  // Import chain for error reporting (stack of file paths)
   char **import_chain;
   size_t chain_depth;
   size_t chain_capacity;
@@ -1068,12 +1045,6 @@ static char *rewrite_type_string(const char *type_name,
   return rewritten;
 }
 
-/* Inline assembly is a text blob to every other pass, but the names inside it
- * are real references: `call helper` reaches a Mettle function and `{flag}`
- * binds a global. An import renames a module's private declarations, so those
- * names have to travel with them. Identifiers inside quoted runs are data
- * (`db "text"`) and are left alone, and a name the enclosing scope declares is
- * a local, which no import renames. */
 static char *rewrite_assembly_text(const char *assembly,
                                    const NameRewrite *rewrites,
                                    size_t rewrite_count,
@@ -1429,9 +1400,6 @@ static int rewrite_node_names(ASTNode *node, const NameRewrite *rewrites,
   }
 
   case AST_GPU_LAUNCH:
-    /* A launch contains only expressions and introduces no bindings. Rewriting
-     * its children handles namespaced kernel-handle/argument references while
-     * keeping launch semantics independent of runtime function names. */
     for (size_t i = 0; i < node->child_count; i++) {
       if (!rewrite_node_names(node->children[i], rewrites, rewrite_count,
                               bindings, binding_count, scope, 1)) {
@@ -2038,10 +2006,6 @@ static int rewrite_function_declaration_names(ASTNode *node,
   }
 }
 
-/* Renaming an imported declaration must not rename the symbol a foreign
- * declaration links against: `extern fn putchar(...)` still has to resolve to
- * putchar after the import gives it a namespaced or private name. Pin the
- * original spelling as the link name before the rewrite runs. */
 static int preserve_extern_link_name(ASTNode *decl) {
   char **link_name = NULL;
   const char *decl_name = NULL;
@@ -2253,30 +2217,16 @@ static int collect_private_dependency_rewrites(
   return 1;
 }
 
-/* Path-resolution memoization.
- *
- * resolve_import_path() walks the filesystem (_fullpath / fopen probes / .deps
- * reads) for every import edge. In a real project the same module is imported
- * from dozens of places, so the same (current_file, import_path) pair resolves
- * to the same file many times over. The result depends only on those two
- * strings plus the resolver options (fixed for one compilation), so it is safe
- * to memoize. The cache is process-static and reset at the start of every
- * top-level resolve so independent compilations never share state. */
 typedef struct {
-  char *key;    /* "<current_file_path>\n<import_path>" */
-  char *value;  /* resolved absolute path, or NULL if unresolvable */
-  int resolved; /* 1 if this entry represents a completed resolution */
+  char *key;
+  char *value;
+  int resolved;
 } ImportPathCacheEntry;
 
 static ImportPathCacheEntry *g_import_path_cache = NULL;
 static size_t g_import_path_cache_count = 0;
 static size_t g_import_path_cache_capacity = 0;
 
-/* Resolved file path -> the module spelling it was imported as. Reflection
- * qualifies type names with this, so `.name` can tell two modules' `Point`
- * apart. Keyed on the resolved path rather than the import edge, so a type
- * reports the module it was DEFINED in no matter how many hops of transitive
- * import reached it. Both strings are interned and outlive the compile. */
 typedef struct {
   const char *path;
   const char *module;
@@ -2293,8 +2243,6 @@ static void module_name_registry_reset(void) {
   g_module_name_capacity = 0;
 }
 
-/* First spelling wins: a file reached as both "std/net" and "../std/net" is
- * one module, and picking the first keeps the answer stable within a build. */
 static void module_name_registry_record(const char *resolved_path,
                                         const char *module_name) {
   if (!resolved_path || !module_name) {
@@ -2348,7 +2296,6 @@ static void import_path_cache_reset(void) {
   g_import_path_cache_capacity = 0;
 }
 
-/* Builds the lookup key. current_file_path may be NULL (root program). */
 static char *import_path_cache_make_key(const char *current_file_path,
                                         const char *import_path) {
   const char *cur = current_file_path ? current_file_path : "";
@@ -2382,7 +2329,6 @@ static char *resolve_import_path(ImportContext *ctx,
       if (strcmp(g_import_path_cache[i].key, key) == 0) {
         free(key);
         const char *cached = g_import_path_cache[i].value;
-        /* Callers free the returned string, so hand back a fresh copy. */
         if (!cached) {
           return NULL;
         }
@@ -2420,19 +2366,17 @@ static char *resolve_import_path(ImportContext *ctx,
           memcpy(value_copy, resolved, n);
         }
       }
-      /* Only cache when we could store the value faithfully (a NULL value is
-       * itself a valid "unresolvable" result). */
       if (resolved == NULL || value_copy != NULL) {
         g_import_path_cache[g_import_path_cache_count].key = key;
         g_import_path_cache[g_import_path_cache_count].value = value_copy;
         g_import_path_cache[g_import_path_cache_count].resolved = 1;
         g_import_path_cache_count++;
-        key = NULL; /* ownership transferred to the cache */
+        key = NULL;
       } else {
         free(value_copy);
       }
     }
-    free(key); /* no-op if ownership was transferred */
+    free(key);
   }
 
   return resolved;
@@ -2451,16 +2395,8 @@ static char *resolve_import_path_uncached(ImportContext *ctx,
 
   if (ctx && ctx->options && ctx->options->stdlib_directory &&
       import_uses_std_namespace(import_path)) {
-    /* On the native ELF (Linux) target, prefer an OS-specific
-     * `<name>.linux.mettle` sibling so std modules like io/bench/process can
-     * ship syscall-based variants while Windows keeps the plain `.mettle`
-     * file. The import path has no extension (e.g. "std/io"), so we append
-     * ".linux" and let resolve_candidate_path add the ".mettle" extension. */
     if (ctx->options->target_is_elf && !path_has_extension(import_path)) {
       size_t base_len = strlen(import_path);
-      /* ".linux.mettle" + NUL. The `.linux` infix makes path_has_extension
-       * true, so resolve_candidate_path would not auto-append `.mettle`; spell
-       * out the full extension here. */
       char *linux_import = malloc(base_len + 14);
       if (linux_import) {
         memcpy(linux_import, import_path, base_len);
@@ -2576,7 +2512,6 @@ static void stamp_source_locations(ASTNode *node, const char *filename) {
   }
 }
 
-// Check if a declaration is exported (for filtering during import)
 static int is_declaration_exported(ASTNode *decl) {
   if (!decl || !decl->data)
     return 0;
@@ -2634,22 +2569,13 @@ static const char *get_declaration_name(ASTNode *decl) {
   }
 }
 
-// Return values:
-//   1: added
-//   0: already present
-//  -1: internal failure (e.g. allocation failure)
 static int path_set_add(char ***paths, size_t *count, size_t *capacity,
                         const char *path);
 static char *format_import_chain(ImportContext *ctx);
 
-/* Open-addressing name -> declaration-index map, used by the export
- * dependency closure to resolve a called name to its declaration in O(1)
- * instead of a linear scan. Keys are borrowed pointers into the imported
- * module's AST (valid for the lifetime of the map). Stores (decl_index + 1)
- * so 0 marks an empty bucket. */
 typedef struct {
   const char **keys;
-  size_t *vals; /* decl_index + 1; 0 = empty */
+  size_t *vals;
   size_t bucket_count;
 } DeclNameMap;
 
@@ -2678,7 +2604,7 @@ static void decl_name_map_put(DeclNameMap *m, const char *key,
   size_t pos = mettle_fnv1a_hash(key) & mask;
   while (m->vals[pos] != 0) {
     if (strcmp(m->keys[pos], key) == 0) {
-      return; /* first declaration of a name wins, matching prior behavior */
+      return;
     }
     pos = (pos + 1) & mask;
   }
@@ -2738,10 +2664,6 @@ static void collect_type_name_dependencies(const char *type_name,
   }
 }
 
-/* Every identifier an asm block names, minus the ones inside quoted runs. The
- * closure cannot tell an instruction mnemonic from a symbol reference, and it
- * does not need to: an extra name keeps a declaration that would otherwise be
- * dropped, and keeping one costs nothing. */
 static void collect_assembly_identifiers(const char *assembly, char ***names,
                                          size_t *count, size_t *capacity) {
   size_t i = 0;
@@ -2875,9 +2797,6 @@ static void collect_dependency_names(ASTNode *node, char ***names,
     if (!assign) {
       return;
     }
-    /* `name = value` keeps the target in variable_name rather than in a node,
-     * so a global that a module only ever writes is reachable through this
-     * string alone. */
     if (assign->variable_name && assign->variable_name[0] != '\0') {
       (void)path_set_add(names, count, capacity, assign->variable_name);
     }
@@ -3241,10 +3160,6 @@ static int path_set_contains(char **paths, size_t count, const char *path) {
   return 0;
 }
 
-// Return values:
-//   1: added
-//   0: already present
-//  -1: internal failure (e.g. allocation failure)
 static int path_set_add(char ***paths, size_t *count, size_t *capacity,
                         const char *path) {
   if (!paths || !count || !capacity || !path) {
@@ -3323,18 +3238,15 @@ static void pop_import_chain(ImportContext *ctx) {
   }
 }
 
-// Build a human-readable import chain string like "main.mettle -> utils.mettle ->
-// math.mettle"
 static char *format_import_chain(ImportContext *ctx) {
   if (!ctx || ctx->chain_depth == 0)
     return strdup("");
 
-  // Calculate required length
   size_t total_len = 0;
   for (size_t i = 0; i < ctx->chain_depth; i++) {
     total_len += strlen(ctx->import_chain[i]);
     if (i < ctx->chain_depth - 1)
-      total_len += 4; // " -> "
+      total_len += 4;
   }
 
   char *chain_str = malloc(total_len + 1);
@@ -3397,7 +3309,6 @@ static void process_import_strs_in_node(ImportContext *ctx, ASTNode *node,
 
     free(full_path);
 
-    // Free old data and change node type in-place
     free(import_str->file_path);
     free(import_str);
 
@@ -3409,7 +3320,6 @@ static void process_import_strs_in_node(ImportContext *ctx, ASTNode *node,
     return;
   }
 
-  // Traverse via typed data structures to avoid cycles in children[].
   switch (node->type) {
   case AST_PROGRAM: {
     Program *prog = (Program *)node->data;
@@ -3529,7 +3439,6 @@ static void process_import_strs_in_node(ImportContext *ctx, ASTNode *node,
     break;
   }
   case AST_RETURN_STATEMENT: {
-    // Return value is child[0] if present
     if (node->child_count > 0) {
       process_import_strs_in_node(ctx, node->children[0], current_file_path,
                                   had_error);
@@ -3586,7 +3495,6 @@ static void process_import_strs_in_node(ImportContext *ctx, ASTNode *node,
   case AST_IF_STATEMENT:
   case AST_WHILE_STATEMENT:
   case AST_FOR_STATEMENT: {
-    // These use children[] but don't create cycles
     for (size_t i = 0; i < node->child_count; i++) {
       process_import_strs_in_node(ctx, node->children[i], current_file_path,
                                   had_error);
@@ -3651,17 +3559,13 @@ static void process_import_strs_in_node(ImportContext *ctx, ASTNode *node,
     break;
   }
   default:
-    // Leaf nodes or nodes that can't contain import_str (identifiers,
-    // literals, member access, etc.)
     break;
   }
 }
 
-// A guarded import (`import "..." if windows|linux;`) is included only when its
-// platform matches the requested output target.
 static int import_platform_matches(const char *guard, int target_is_elf) {
   if (!guard) {
-    return 1; // unconditional import
+    return 1;
   }
   const char *target = target_is_elf ? "linux" : "windows";
   return strcmp(guard, target) == 0;
@@ -3670,8 +3574,7 @@ static int import_platform_matches(const char *guard, int target_is_elf) {
 static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
                                           const char *current_file_path,
                                           int *had_error, int is_nested) {
-  (void)is_nested; // Reserved for future use (e.g. filtering main from nested
-                   // imports)
+  (void)is_nested;
   if (!program || program->type != AST_PROGRAM)
     return program;
   Program *prog_data = (Program *)program->data;
@@ -3704,8 +3607,6 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
     if (decl->type == AST_IMPORT) {
       ImportDeclaration *import_decl = (ImportDeclaration *)decl->data;
 
-      // Drop imports guarded for a different platform before resolving them,
-      // so a platform-specific module is never even looked up off-target.
       if (!import_platform_matches(
               import_decl->platform_guard,
               ctx && ctx->options && ctx->options->target_is_elf)) {
@@ -3751,7 +3652,6 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
       if (!import_decl->namespace_alias && import_decl->selected_count == 0 &&
           path_set_contains(ctx->resolved_files, ctx->resolved_count,
                             full_path)) {
-        // Duplicate plain import of an already-resolved module is a no-op.
         free(full_path);
         ast_destroy_node(decl);
         continue;
@@ -3870,7 +3770,6 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
 
         import_succeeded = imported_program != NULL;
         if (imported_program) {
-          // Recursively resolve imports in the imported module
           imported_program = process_imports_recursive(import_ctx,
                                                        imported_program,
                                                        full_path, had_error, 1);
@@ -3975,21 +3874,6 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
                       "Failed to process exports (out of memory)");
                 }
               } else {
-                /* Export dependency closure.
-                 *
-                 * Previous implementation: a `while(changed)` fixpoint that
-                 * rescanned every declaration each pass and tested membership
-                 * with a linear strcmp over the large required-names set,
-                 * O(D^2 * names) per module, the dominant import-phase cost on
-                 * real projects.
-                 *
-                 * New implementation: build a name -> declaration-index map
-                 * once (O(D)), then drive a worklist. Each declaration is
-                 * processed at most once; every dependency name is looked up
-                 * O(1) in the map
-                 * to discover the next declaration to pull in. Net cost is
-                 * O(D + total_dependency_names). The result (which declarations
-                 * end up included) is identical to the fixpoint. */
                 size_t decl_count = imported_prog_data->declaration_count;
                 DeclNameMap name_map;
                 decl_name_map_init(&name_map, decl_count);
@@ -4001,15 +3885,11 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
                   }
                 }
 
-                /* Worklist of declaration indices whose called-name set still
-                 * needs to be expanded. Seed with all exported declarations. */
                 size_t *worklist = malloc(decl_count ? decl_count *
                                                            sizeof(size_t)
                                                      : sizeof(size_t));
                 size_t worklist_len = 0;
                 if (!worklist) {
-                  /* Fall back to include-all on allocation failure rather than
-                   * silently dropping declarations. */
                   include_all = 1;
                   *had_error = 1;
                   if (ctx->reporter) {
@@ -4033,8 +3913,6 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
                     collect_dependency_names(
                         imported_prog_data->declarations[j], &required_names,
                         &required_count, &required_capacity);
-                    /* Only the freshly added names can unlock new
-                     * declarations; older names were already resolved. */
                     for (size_t n = names_before; n < required_count; n++) {
                       size_t target;
                       if (decl_name_map_get(&name_map, required_names[n],
@@ -4196,7 +4074,6 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
           }
           free(include_flags);
 
-          // Cleanup imported program AST container
           free(imported_prog_data->declarations);
           free(imported_prog_data);
           free(imported_program->children);
@@ -4235,7 +4112,7 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
       pop_import_chain(ctx);
       free(full_path);
 
-      ast_destroy_node(decl); // destroy the AST_IMPORT node itself
+      ast_destroy_node(decl);
 
     } else {
       ADD_DECL(decl);
@@ -4245,12 +4122,10 @@ static ASTNode *process_imports_recursive(ImportContext *ctx, ASTNode *program,
 #undef ADD_DECL
 
 process_imports_cleanup:
-  // Replace old declarations in current program
   free(prog_data->declarations);
   prog_data->declarations = new_declarations;
   prog_data->declaration_count = new_declaration_count;
 
-  // Update children array to match declarations perfectly
   free(program->children);
   if (new_declaration_count > 0) {
     program->children = malloc(new_declaration_count * sizeof(ASTNode *));
@@ -4285,7 +4160,6 @@ int resolve_imports_with_options(ASTNode *program, const char *base_path,
   if (!program || program->type != AST_PROGRAM)
     return 0;
 
-  /* Fresh path-resolution caches per top-level compilation. */
   import_path_cache_reset();
   module_name_registry_reset();
   deps_walk_cache_reset();
@@ -4303,7 +4177,6 @@ int resolve_imports_with_options(ASTNode *program, const char *base_path,
   ctx.reporter = reporter;
   ctx.options = options;
 
-  // Register the root file as active + push onto chain
   char *abs_base = canonicalize_path(base_path);
   if (abs_base) {
     path_set_add(&ctx.active_files, &ctx.active_count, &ctx.active_capacity,
@@ -4311,7 +4184,6 @@ int resolve_imports_with_options(ASTNode *program, const char *base_path,
     free(abs_base);
   }
 
-  // Extract filename for readable chain
   const char *last_slash = strrchr(base_path, '/');
   const char *last_backslash = strrchr(base_path, '\\');
   const char *last_sep =
@@ -4336,7 +4208,6 @@ int resolve_imports_with_options(ASTNode *program, const char *base_path,
   process_imports_recursive(&ctx, program, base_path, &had_error, 0);
   process_import_strs_in_node(&ctx, program, base_path, &had_error);
 
-  // Cleanup
   pop_import_chain(&ctx);
   for (size_t i = 0; i < ctx.resolved_count; i++) {
     free(ctx.resolved_files[i]);
@@ -4348,10 +4219,6 @@ int resolve_imports_with_options(ASTNode *program, const char *base_path,
   free(ctx.active_files);
   free(ctx.import_chain);
 
-  /* Release cache memory; it is rebuilt fresh on the next top-level resolve.
-   * The module-name registry is deliberately NOT released here: the type
-   * checker reads it after resolution to qualify type names, and it is reset
-   * at the start of the next top-level resolve instead. */
   import_path_cache_reset();
   deps_walk_cache_reset();
 

@@ -19,11 +19,11 @@ typedef struct {
     char* type_name;
     size_t line;
     size_t column;
-    size_t address;  // Memory address or offset
-    size_t size;     // Size in bytes
-    int is_register; // 1 if stored in register, 0 if in memory
-    char* register_name; // Register name if is_register is 1
-    int stack_offset;    // Stack offset if stored on stack
+    size_t address;
+    size_t size;
+    int is_register;
+    char* register_name;
+    int stack_offset;
 } DebugSymbol;
 
 typedef struct {
@@ -98,7 +98,6 @@ DebugSymbol* debug_info_find_symbol(DebugInfo* debug_info, const char* name);
 void debug_info_add_line_mapping(DebugInfo* debug_info, size_t source_line, size_t source_column,
                                 size_t assembly_line, const char* filename);
 
-// Runtime crash-trace metadata
 void debug_info_add_runtime_function_mapping(DebugInfo* debug_info,
                                              const char* function_name,
                                              const char* start_label,
@@ -127,4 +126,4 @@ void debug_info_generate_dwarf(DebugInfo* debug_info, const char* output_filenam
 void debug_info_generate_stabs(DebugInfo* debug_info, const char* output_filename);
 void debug_info_generate_debug_map(DebugInfo* debug_info, const char* output_filename);
 
-#endif // DEBUG_INFO_H
+#endif

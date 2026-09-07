@@ -4,21 +4,9 @@
 #include <stddef.h>
 #include <stdarg.h>
 
-/* The three modes that record something as verified without verifying it.
- *
- * METTLE_TRUST_REFINEMENTS sets an expression's proven refinement and returns
- * success without running the proof. METTLE_TRUST_EFFECTS skips every effect
- * obligation. METTLE_TRUST_DEADLINES prices an unbounded loop at one turn.
- * Each exists so the checking's own cost can be measured, and each makes the
- * compiler assert something it did not establish.
- *
- * They announce themselves rather than staying silent, and `--verify` refuses
- * to run beside one, because verification is the headline claim and a build
- * that quietly skipped it looks exactly like one that passed it. */
 int mettle_trust_mode_active(const char **name_out);
 void mettle_trust_mode_announce(void);
 
-/* Some Windows C compilers omit the POSIX strcasecmp declaration. */
 #if defined(_WIN32) && !defined(__MINGW32__)
 #include <string.h>
 #ifndef strcasecmp
@@ -33,22 +21,10 @@ typedef ptrdiff_t ssize_t;
 #endif
 #endif
 
-/* Thread-local storage qualifier. The backend keeps its mutable per-compile
- * diagnostic state (the --explain report/remarks and the --annotate-asm capture)
- * thread-local so two frontends can drive libmtlc concurrently on separate
- * threads without clobbering each other -- i.e. the backend has no shared
- * mutable global state. MettleCompilerContext uses the owned TLS layer too.
- * The freestanding host supplies __emutls_get_address on Windows and native
- * thread pointer setup on Linux, so this does not pull in a thread library. */
 #if defined(_MSC_VER)
 #define MTLC_THREAD_LOCAL __declspec(thread)
 #elif defined(_WIN32) && defined(__GNUC__) && !defined(__clang__) && \
     __GNUC__ >= 16
-/* MSYS2's gcc 16 emits native PE TLS (_tls_index + a loader TLS directory)
- * with no emutls fallback left. The freestanding host supplies only
- * __emutls_get_address, and the internal linker builds no TLS directory, so
- * native TLS cannot link self-contained. Degrade to plain statics: one
- * compile per process on this toolchain. */
 #define MTLC_THREAD_LOCAL
 #else
 #define MTLC_THREAD_LOCAL __thread

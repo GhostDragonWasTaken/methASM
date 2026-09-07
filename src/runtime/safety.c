@@ -1,5 +1,3 @@
-/* Shadow map and region registry for checked-access memory safety.
- * See safety.h for the design and for what the guarantee covers. */
 
 #include "safety.h"
 #include "crash_handler.h"
@@ -10,10 +8,6 @@
 #include <sys/mman.h>
 #endif
 
-/* Address space split. A granule index is the address with the low 4 bits
- * dropped, and the three table levels carve up the 44 bits that remain. One
- * level-three table describes a megabyte of address space in 256KB of shadow,
- * and the program pays for it only where it registers memory. */
 #define SAFETY_L1_BITS 12
 #define SAFETY_L2_BITS 16
 #define SAFETY_L3_BITS 16
@@ -23,36 +17,23 @@
 #define SAFETY_ADDRESS_BITS \
   (SAFETY_L1_BITS + SAFETY_L2_BITS + SAFETY_L3_BITS + 4)
 
-/* Reserved shadow values. Zero means Mettle never described the granule, and
- * an access there is allowed: foreign libraries hand back memory the runtime
- * cannot judge, and refusing it would reject correct programs. One means two
- * registrations wanted the same granule and the runtime declined to choose;
- * see safety_claim_granules. */
 #define SAFETY_ID_UNOWNED 0u
 #define SAFETY_ID_CONTESTED 1u
 #define SAFETY_ID_FIRST 2u
 
-/* Descriptors live in fixed blocks that are never moved or freed, so a reader
- * that resolved an id can always dereference it even while another thread is
- * growing the array. */
 #define SAFETY_BLOCK_SHIFT 12
 #define SAFETY_BLOCK_SIZE (1u << SAFETY_BLOCK_SHIFT)
 #define SAFETY_MAX_BLOCKS 4096
 
 typedef enum {
-  SAFETY_STATE_FREELIST = 0, /* unused descriptor, id available again */
-  SAFETY_STATE_LIVE = 1,     /* a live allocation */
-  SAFETY_STATE_DEAD = 2      /* freed, and still named by its old granules */
+  SAFETY_STATE_FREELIST = 0,
+  SAFETY_STATE_LIVE = 1,
+  SAFETY_STATE_DEAD = 2
 } SafetyState;
 
 typedef struct {
   uintptr_t start;
   uint64_t size;
-  /* Shadow entries still naming this descriptor. A freed allocation keeps its
-   * descriptor for exactly as long as this is nonzero, which is what lets a
-   * stale pointer be reported as use-after-free instead of read back as
-   * untracked memory. The count reaches zero when a later allocation has taken
-   * every granule, at which point the id is recycled. */
   uint64_t granules;
   uint32_t state;
   uint32_t next_free;
@@ -77,8 +58,6 @@ static void safety_values_clear_locked(uintptr_t address, uint64_t size);
 static void safety_values_reown(void *pointer, uint64_t size, uint64_t old_identity);
 static void safety_values_reset_locked(void);
 
-/* A missing safety record must never silently disable checks. Call only
- * without the registry lock, including on a failed registration. */
 static void safety_internal_failure(const char *message) {
   mettle_crash_trap_ex(METTLE_CRASH_TRAP_UNKNOWN, message,
                        __builtin_return_address(0),
@@ -86,10 +65,6 @@ static void safety_internal_failure(const char *message) {
   __builtin_trap();
 }
 
-/* ---- platform memory ------------------------------------------------------ */
-
-/* The shadow map cannot come from the allocator it describes, so it comes
- * straight from the operating system and arrives zeroed. */
 static void *safety_map(size_t bytes) {
 #ifdef METTLE_SAFETY_TESTING
   extern int mettle_safety_test_fail_map(void);
@@ -118,8 +93,6 @@ static void safety_unmap(void *memory, size_t bytes) {
 #endif
 }
 
-/* ---- lock ----------------------------------------------------------------- */
-
 static void safety_lock(void) {
   while (__atomic_exchange_n(&g_safety_lock, 1L, __ATOMIC_ACQUIRE)) {
     while (__atomic_load_n(&g_safety_lock, __ATOMIC_RELAXED)) {
@@ -134,8 +107,6 @@ static void safety_unlock(void) {
   __atomic_store_n(&g_safety_lock, 0L, __ATOMIC_RELEASE);
 }
 
-/* ---- descriptors ---------------------------------------------------------- */
-
 static SafetyRegion *safety_region(uint32_t id) {
   uint32_t block = id >> SAFETY_BLOCK_SHIFT;
   if (block >= SAFETY_MAX_BLOCKS) {
@@ -146,7 +117,6 @@ static SafetyRegion *safety_region(uint32_t id) {
   return entries ? &entries[id & (SAFETY_BLOCK_SIZE - 1)] : NULL;
 }
 
-/* Caller holds the lock. Zero makes the registration fail and trap. */
 static uint32_t safety_region_acquire(uintptr_t start, uint64_t size) {
   if (g_safety_generation == ((UINT64_C(1) << 40) - 1)) {
     return 0;
@@ -194,7 +164,6 @@ static uint32_t safety_region_acquire(uintptr_t start, uint64_t size) {
   return id;
 }
 
-/* Caller holds the lock. */
 static void safety_region_recycle(uint32_t id, SafetyRegion *region) {
   region->size = 0;
   region->granules = 0;
@@ -204,7 +173,6 @@ static void safety_region_recycle(uint32_t id, SafetyRegion *region) {
   g_safety_region_free = id;
 }
 
-/* Caller holds the lock. One granule stopped naming `id`. */
 static void safety_region_drop_granule(uint32_t id) {
   SafetyRegion *region = safety_region(id);
   if (!region || region->granules == 0) {
@@ -217,8 +185,6 @@ static void safety_region_drop_granule(uint32_t id) {
     safety_region_recycle(id, region);
   }
 }
-
-/* ---- shadow map ----------------------------------------------------------- */
 
 static uint32_t *safety_slot(uintptr_t address, int create) {
   if ((address >> SAFETY_ADDRESS_BITS) != 0) {
@@ -261,9 +227,6 @@ static uint32_t safety_lookup(uintptr_t address) {
   uint32_t *slot = safety_slot(address, 0);
   uint32_t id = slot ? __atomic_load_n(slot, __ATOMIC_RELAXED) : SAFETY_ID_UNOWNED;
   if (id != SAFETY_ID_CONTESTED) return id;
-  /* Small adjacent objects may share a granule. Resolve their byte ranges
-   * exactly instead of disabling the check for both objects. The caller holds
-   * the registry lock; this slow path is only for shared granules. */
   uint64_t newest = 0;
   uint32_t found = SAFETY_ID_UNOWNED;
   for (uint32_t candidate = SAFETY_ID_FIRST; candidate < g_safety_region_next; candidate++) {
@@ -278,18 +241,6 @@ static uint32_t safety_lookup(uintptr_t address) {
   return found;
 }
 
-/* Caller holds the lock. Stamps `id` across every granule the range touches
- * and records how many it took.
- *
- * A granule a LIVE allocation already owns is not taken. Stealing it would
- * make that allocation's own accesses resolve to the wrong descriptor and trap
- * on correct code, so the granule is marked contested instead: both sides lose
- * coverage there and neither is ever falsely accused. This only arises when
- * two registered objects sit closer than a granule apart, which the compiler
- * prevents by aligning everything it registers.
- *
- * A granule a DEAD allocation still names is taken freely, and that is how the
- * dead descriptor is eventually reclaimed. */
 static int safety_claim_granules(uintptr_t start, uint64_t size, uint32_t id) {
   SafetyRegion *region = safety_region(id);
   uint64_t claimed = 0;
@@ -332,8 +283,6 @@ static int safety_claim_granules(uintptr_t start, uint64_t size, uint32_t id) {
   return 1;
 }
 
-/* ---- registration --------------------------------------------------------- */
-
 int64_t mettle_safety_loop_length(int64_t bound, int64_t first_bound,
                                  int64_t counter_step, int64_t byte_step,
                                  int64_t access_size) {
@@ -357,9 +306,6 @@ static void safety_register_region(void *pointer, uint64_t size, uint32_t heap) 
   }
 
   safety_lock();
-  /* A live region already starting here means the allocator reused a block
-   * without a free reaching the runtime. Retire it so the map describes only
-   * the allocation that is actually there. */
   uint32_t existing = safety_lookup(start);
   if (existing >= SAFETY_ID_FIRST) {
     SafetyRegion *previous = safety_region(existing);
@@ -404,9 +350,6 @@ void mettle_safety_unregister(void *pointer) {
     if (region && region->start == start &&
         __atomic_load_n(&region->state, __ATOMIC_RELAXED) ==
             (uint32_t)SAFETY_STATE_LIVE) {
-      /* The granules keep naming this descriptor. That is deliberate: a
-       * pointer kept across the free still resolves here, and the check
-       * reports it as use-after-free rather than as untracked memory. */
       __atomic_store_n(&region->state, (uint32_t)SAFETY_STATE_DEAD,
                        __ATOMIC_RELEASE);
       safety_values_clear_locked(region->start, region->size);
@@ -419,8 +362,6 @@ void mettle_safety_unregister(void *pointer) {
 
 void mettle_safety_reregister(void *old_pointer, void *new_pointer,
                               uint64_t size) {
-  /* A failed growth leaves the original allocation alive. A zero size frees
-   * it in both owned runtime allocators. */
   if (!new_pointer && size != 0) {
     return;
   }
@@ -438,8 +379,6 @@ void mettle_safety_reregister(void *old_pointer, void *new_pointer,
   }
 }
 
-/* Windows FLS works with the owned linker without a PE TLS directory. Store
- * the depth itself in the slot so entering an allocator needs no allocation. */
 #if defined(_WIN32)
 static DWORD g_safety_allocator_slot = FLS_OUT_OF_INDEXES;
 
@@ -493,8 +432,6 @@ void mettle_safety_leave_allocator(void) {
     safety_set_allocator_depth(depth - 1);
   }
 }
-
-/* ---- reporting ------------------------------------------------------------ */
 
 static void safety_append(char *buffer, size_t capacity, size_t *offset,
                           const char *text) {
@@ -565,11 +502,6 @@ static void safety_report_and_trap(const SafetyFailure *failure,
                        program_counter, frame_pointer, 0, 0);
 }
 
-/* ---- the check ------------------------------------------------------------ */
-
-/* Copy under the writer lock. Descriptor storage stays mapped, but its fields
- * change when an id is recycled. Atomic shadow entries alone do not make
- * reading those fields safe. Never hold the lock across a trap or user code. */
 static SafetyRegion safety_snapshot(uintptr_t address) {
   SafetyRegion snapshot = {0};
   safety_lock();
@@ -584,19 +516,11 @@ static SafetyRegion safety_snapshot(uintptr_t address) {
   return snapshot;
 }
 
-/* Everything a failing check needs and a passing one must not pay for.
- *
- * Kept out of line and cold. Use the same snapshot that failed the check,
- * even if another thread has since recycled its descriptor. */
 SAFETY_COLD static void safety_check_failed(const void *base, int64_t offset,
                                             int64_t size, uint32_t line,
                                             const SafetyRegion *region,
                                             void *program_counter,
                                             void *frame_pointer) {
-  /* Only here, because only a failing access can be the allocator's. Its
-   * headers and poisoned blocks are the accesses that reach this point, and
-   * asking a thread-local on every check to spare them would charge the whole
-   * program for the exception. */
   if (safety_allocator_depth() != 0) {
     return;
   }
@@ -633,10 +557,6 @@ SAFETY_COLD static void safety_check_failed(const void *base, int64_t offset,
 void mettle_safety_check(const void *base, int64_t offset, int64_t size,
                          uint32_t access_kind, uint32_t line) {
   (void)access_kind;
-  /* An access of no bytes reaches no memory, so there is nothing about `base`
-   * worth asking. This is also what lets a loop's checks be replaced by one
-   * covering its range without a guard branch: the length comes out zero or
-   * less for a loop that never runs. */
   if (size <= 0) {
     return;
   }
@@ -644,9 +564,6 @@ void mettle_safety_check(const void *base, int64_t offset, int64_t size,
   uintptr_t start = (uintptr_t)base;
   uintptr_t address = start + (uintptr_t)offset;
 
-  /* Walk the map: find the allocation, confirm the access is inside it and
-   * that it is still live. Everything else a check might need to do belongs to
-   * the access that fails, and lives in safety_check_failed. */
   SafetyRegion region = safety_snapshot(start);
   if (region.state != SAFETY_STATE_FREELIST) {
     if (region.state == SAFETY_STATE_LIVE) {
@@ -664,9 +581,6 @@ void mettle_safety_check(const void *base, int64_t offset, int64_t size,
     return;
   }
 
-  /* No live allocation owns this address. Allowed, except for the one case
-   * worth naming: a null pointer is nobody's memory by mistake, not by
-   * provenance. */
   if (!base) {
     safety_check_failed(base, offset, size, line, NULL, __builtin_return_address(0),
                         __builtin_frame_address(0));
@@ -674,8 +588,6 @@ void mettle_safety_check(const void *base, int64_t offset, int64_t size,
 }
 
 int64_t mettle_safety_span(const void *base) {
-  /* Large enough that no real access can exceed it, small enough that adding
-   * an access width to it cannot overflow. */
   const int64_t unbounded = (int64_t)1 << 56;
 
   if (!base) {
@@ -698,8 +610,6 @@ int64_t mettle_safety_span(const void *base) {
 
 #include "safety_provenance.inc"
 
-/* One allocation lookup covers an ascending affine walk. Keep the source
- * access width on failure, even when scalar analysis exposed the whole range. */
 void mettle_safety_check_affine(const void *base, int64_t offset, int64_t length,
     uint32_t kind, uint32_t line, uint64_t identity, int64_t width, int64_t step) {
   if (length <= 0) return;
@@ -764,8 +674,6 @@ void mettle_safety_reset(void) {
   safety_unlock();
 }
 
-/* ---- the task-capture check ----------------------------------------------- */
-
 #define SAFETY_TASK_STACK_SPAN (8u * 1024u * 1024u)
 
 void *mettle_thread_stack_high(void);
@@ -816,8 +724,6 @@ void mettle_safety_task_capture_check(const void *pointer, const char *task,
   }
   mettle_crash_trap_ex(METTLE_CRASH_TRAP_UNKNOWN, g_task_message, 0, 0, 0, 0);
 }
-
-/* ---- the deadline check --------------------------------------------------- */
 
 #define SAFETY_DEADLINE_DEPTH 64
 

@@ -16,12 +16,6 @@ typedef struct StringInternEntry {
 
 #define STRING_INTERN_INITIAL_BUCKETS 4096u
 
-/* Both tables index the same entries: g_string_intern_buckets chains by content
- * hash (via entry->next) for interning lookups, g_string_intern_ptr_buckets
- * chains by pointer hash (via entry->ptr_next) for string_is_interned. They
- * share one bucket count and grow together so chains stay short -- with a fixed
- * 4096 buckets, a program with ~200k distinct identifiers gave ~50-long chains,
- * making both interning (parse) and string_is_interned (teardown) O(n^2). */
 static StringInternEntry **g_string_intern_buckets = NULL;
 static StringInternEntry **g_string_intern_ptr_buckets = NULL;
 static size_t g_string_intern_bucket_count = 0;
@@ -35,11 +29,6 @@ static void token_set_lexeme(Token *token, const char *data, size_t length) {
   token->lexeme.length = length;
 }
 
-/* Assign a fixed operator/punctuation spelling without heap allocation. The
- * value points at a string literal with static lifetime, so it is flagged
- * interned: token_destroy will not free it and token_clone will not deep-copy
- * it. This avoids a malloc+free per operator token, which dominated lexing of
- * punctuation-heavy source. */
 static void token_set_static_value(Token *token, const char *literal) {
   if (!token) {
     return;
@@ -48,9 +37,6 @@ static void token_set_static_value(Token *token, const char *literal) {
   token->is_interned = 1;
 }
 
-/* Static, nul-terminated one-character strings for every byte value, so a
- * single-character operator token can borrow a stable spelling instead of
- * allocating a 2-byte buffer per token. Index by (unsigned char)c. */
 static const char g_single_char_strings[256][2] = {
 #define SCS1(n) {(char)(n), '\0'}
 #define SCS4(n) SCS1(n), SCS1((n) + 1), SCS1((n) + 2), SCS1((n) + 3)
@@ -106,10 +92,6 @@ static size_t string_intern_hash_ptr(const void *ptr) {
   return (size_t)value;
 }
 
-/* Double both bucket arrays and rehash every entry into the new buckets. Keeps
- * average chain length ~constant as the number of interned strings grows. On
- * allocation failure the existing (smaller) tables are left intact and lookups
- * remain correct, just slower. */
 static void string_intern_maybe_grow(void) {
   if (g_string_intern_entry_count <= (g_string_intern_bucket_count * 3) / 4) {
     return;
@@ -122,11 +104,9 @@ static void string_intern_maybe_grow(void) {
   if (!new_content || !new_ptr) {
     free(new_content);
     free(new_ptr);
-    return; /* keep the old tables; correctness is unaffected */
+    return;
   }
 
-  /* Rehash via the content-bucket chains, which reach every entry exactly
-   * once, fixing up both the content (next) and pointer (ptr_next) links. */
   for (size_t i = 0; i < g_string_intern_bucket_count; i++) {
     StringInternEntry *entry = g_string_intern_buckets[i];
     while (entry) {
@@ -256,8 +236,6 @@ Lexer *lexer_create(const char *source) {
 
   lexer->source = source;
   lexer->position = 0;
-  /* Skip a UTF-8 BOM (EF BB BF) at the very start of the input; Windows
-     editors (Notepad, PowerShell Set-Content -Encoding utf8) emit one. */
   if ((unsigned char)source[0] == 0xEF && (unsigned char)source[1] == 0xBB &&
       (unsigned char)source[2] == 0xBF) {
     lexer->position = 3;
@@ -460,8 +438,6 @@ static Token lexer_lex_number(Lexer *lexer) {
   } else {
     while (lexer->position < lexer->length &&
            (isdigit(lexer->source[lexer->position]) ||
-            // A '.' is a decimal point only when it is not the start of a `..`
-            // range operator, so `1..5` lexes as 1, .., 5 rather than `1.`.
             (lexer->source[lexer->position] == '.' &&
              !(lexer->position + 1 < lexer->length &&
                lexer->source[lexer->position + 1] == '.')))) {
@@ -469,10 +445,6 @@ static Token lexer_lex_number(Lexer *lexer) {
       lexer->column++;
     }
 
-    // Scientific notation: 'e' or 'E', an optional sign, then at least one
-    // digit. The lookahead has to confirm a digit before anything is consumed,
-    // so a trailing 'e' that is not an exponent (`1.e` or an identifier butted
-    // against a number) is left for the following token.
     if (lexer->position < lexer->length &&
         (lexer->source[lexer->position] == 'e' ||
          lexer->source[lexer->position] == 'E')) {
@@ -504,10 +476,6 @@ static Token lexer_lex_number(Lexer *lexer) {
     lexer_set_error(lexer, token.value);
     return token;
   }
-  /* memcpy, not strncpy: the span is exactly `length` bytes of source text with
-   * the terminator written below, so strncpy's scan-for-NUL and tail padding are
-   * both wasted -- and its byte-at-a-time loop showed up at 2.7% of total
-   * compile time on a numeral-heavy input. */
   memcpy(token.value, &lexer->source[start], length);
   token.value[length] = '\0';
   token_set_lexeme(&token, &lexer->source[start], length);
@@ -516,31 +484,11 @@ static Token lexer_lex_number(Lexer *lexer) {
 
 #define LEX_WORD_MAXLEN 10
 
-/* Keyword lookup.
- *
- * Every identifier used to walk a chain of 94 strcmp/strcasecmp calls, and an
- * identifier that is not a keyword -- much the commonest case -- paid the whole
- * chain. Replacing it cut the parse phase roughly in half on a 200k-line input
- * (326ms to 177ms).
- *
- * The words are grouped by length, so a lookup only ever compares candidates
- * that could match, and sorted within each group, so a binary search settles it
- * in a few comparisons. The two groups stay separate and are consulted in the
- * original order: language keywords match exactly, inline-assembly mnemonics and
- * register names match case-insensitively.
- *
- * Both tables are const, so there is no initialization step and no shared
- * mutable state. The sort order and the _span arrays are what make the search
- * work, and getting them wrong just makes a keyword stop being recognised, so
- * they are maintained by tools/gen_lexer_keywords.py: add an entry anywhere and
- * re-run it. `--check` verifies without writing.
- */
 typedef struct {
   char word[LEX_WORD_MAXLEN + 1];
-  int type; /* TokenType */
+  int type;
 } LexWord;
 
-/* parsed 45 exact, 49 case-insensitive; max length 10 */
 static const LexWord g_lex_keywords[] = {
     {"fn", TOKEN_FN},
     {"if", TOKEN_IF},
@@ -642,9 +590,6 @@ static const LexWord g_lex_asm_words[] = {
 };
 static const unsigned char g_lex_asm_words_span[] = {0, 0, 0, 5, 44, 48, 48, 48, 49, 49, 49, 49};
 
-/* Compare `len` bytes, folding the input to lower case when `fold` is set. The
- * table entries are already lower case, so a folded comparison keeps the same
- * byte ordering the tables are sorted by. */
 static int lex_word_cmp(const char *input, const char *entry, size_t len,
                         int fold) {
   for (size_t i = 0; i < len; i++) {
@@ -660,7 +605,6 @@ static int lex_word_cmp(const char *input, const char *entry, size_t len,
   return 0;
 }
 
-/* Token type for `text` in one of the tables above, or TOKEN_IDENTIFIER. */
 static TokenType lex_lookup_word(const LexWord *table,
                                  const unsigned char *span, const char *text,
                                  size_t len, int fold) {
@@ -706,10 +650,10 @@ static Token lexer_lex_identifier_or_keyword(Lexer *lexer) {
   token_set_lexeme(&token, &lexer->source[start], length);
 
   token.type = lex_lookup_word(g_lex_keywords, g_lex_keywords_span,
-                               token.value, length, /*fold=*/0);
+                               token.value, length, 0);
   if (token.type == TOKEN_IDENTIFIER) {
     token.type = lex_lookup_word(g_lex_asm_words, g_lex_asm_words_span,
-                                 token.value, length, /*fold=*/1);
+                                 token.value, length, 1);
   }
 
   return token;
@@ -831,9 +775,6 @@ static Token lexer_lex_string_literal(Lexer *lexer) {
   }
 
   if (bad_escape != 0) {
-    /* Step past the closing quote so the next token is whatever follows the
-     * string: leaving the cursor on it re-lexes the body and reports a second,
-     * invented "unterminated string literal". */
     lexer->position++;
     lexer->column++;
     free(buffer);
@@ -934,7 +875,6 @@ static Token lexer_scan_token(Lexer *lexer) {
     return lexer_skip_block_comment(lexer);
   }
 
-  // Single character tokens
   switch (current) {
   case ':':
     token.type = TOKEN_COLON;
@@ -1145,7 +1085,6 @@ static Token lexer_scan_token(Lexer *lexer) {
     token.type = TOKEN_TILDE;
     break;
   case '/':
-    // Note: comments (//, /* */) are already handled above before this switch
     if (lexer->position + 1 < lexer->length &&
         lexer->source[lexer->position + 1] == '=') {
       token.type = TOKEN_SLASH_EQUALS;
@@ -1193,7 +1132,6 @@ static Token lexer_scan_token(Lexer *lexer) {
     return token;
   }
 
-  // Handle arrow operator
   if (current == '-' && lexer->position + 1 < lexer->length &&
       lexer->source[lexer->position + 1] == '>') {
     token.type = TOKEN_ARROW;
@@ -1214,7 +1152,6 @@ static Token lexer_scan_token(Lexer *lexer) {
     return token;
   }
 
-  // Compound minus assignment
   if (current == '-' && lexer->position + 1 < lexer->length &&
       lexer->source[lexer->position + 1] == '=') {
     token.type = TOKEN_MINUS_EQUALS;
@@ -1255,7 +1192,6 @@ static Token lexer_scan_token(Lexer *lexer) {
     return lexer_lex_string_literal(lexer);
   }
 
-  // Unknown character
   token.type = TOKEN_ERROR;
   token.value = malloc(32);
   if (token.value) {
@@ -1345,7 +1281,6 @@ Token token_clone(const Token *token) {
   return clone;
 }
 
-// Error reporting functions
 void lexer_set_error(Lexer *lexer, const char *message) {
   if (!lexer)
     return;
@@ -1357,7 +1292,7 @@ void lexer_set_error(Lexer *lexer, const char *message) {
   if (message) {
     size_t msg_len = strlen(message);
     lexer->error_message =
-        malloc(msg_len + 100); // Extra space for location info
+        malloc(msg_len + 100);
     if (lexer->error_message) {
       snprintf(lexer->error_message, msg_len + 100,
                "Lexer error at line %lu, column %lu: %s",

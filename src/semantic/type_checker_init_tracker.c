@@ -1,4 +1,3 @@
-// Type checker: definite-assignment (initialization) tracking.
 #include "type_checker_internal.h"
 
 void type_checker_init_tracker_reset(TypeChecker *checker) {

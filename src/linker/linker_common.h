@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* COFF AMD64 relocation types */
 #define COFF_RELOC_AMD64_ADDR64   1
 #define COFF_RELOC_AMD64_ADDR32   2
 #define COFF_RELOC_AMD64_ADDR32NB 3

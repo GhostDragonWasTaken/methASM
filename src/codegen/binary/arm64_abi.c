@@ -12,7 +12,6 @@ static const Arm64Reg GP_CALLEE_SAVED[] = {
     ARM64_X19, ARM64_X20, ARM64_X21, ARM64_X22, ARM64_X23,
     ARM64_X24, ARM64_X25, ARM64_X26, ARM64_X27, ARM64_X28};
 
-
 static const Arm64Reg GP_TEMPS[] = {
     ARM64_X9,  ARM64_X10, ARM64_X11, ARM64_X12,
     ARM64_X13, ARM64_X14, ARM64_X15};
@@ -26,18 +25,18 @@ static const Arm64Reg VEC_CALLEE_SAVED[] = {8, 9, 10, 11, 12, 13, 14, 15};
 static const Arm64Abi AAPCS64 = {
     GP_ARG_REGS,        COUNT(GP_ARG_REGS),
     VEC_ARG_REGS,       COUNT(VEC_ARG_REGS),
-    ARM64_X8,           /* indirect result location register (XR) */
-    8,                  /* stack slot bytes */
+    ARM64_X8,
+    8,
     GP_CALLEE_SAVED,    COUNT(GP_CALLEE_SAVED),
     GP_TEMPS,           COUNT(GP_TEMPS),
     VEC_VOLATILE,       COUNT(VEC_VOLATILE),
     VEC_CALLEE_SAVED,   COUNT(VEC_CALLEE_SAVED),
-    ARM64_X29,          /* fp */
-    ARM64_X30,          /* lr */
-    ARM64_SP,           /* sp (== 31) */
-    ARM64_X16,          /* scratch0 / IP0 */
-    ARM64_X17,          /* scratch1 / IP1 */
-    ARM64_X18,          /* platform (reserved) */
+    ARM64_X29,
+    ARM64_X30,
+    ARM64_SP,
+    ARM64_X16,
+    ARM64_X17,
+    ARM64_X18,
 };
 
 static Arm64Reg g_gp_args[8] = {ARM64_X0, ARM64_X1, ARM64_X2, ARM64_X3,

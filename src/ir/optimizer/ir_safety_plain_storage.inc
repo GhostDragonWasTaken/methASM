@@ -1,11 +1,3 @@
-/* An unexported array whose address never escapes and whose stores carry no
- * origin needs no shadow bytes. Solve all arrays together: a numeric map can
- * read another such array, while a pointer cast stored anywhere rejects the
- * destination and then every array which copies from it.
- *
- * This runs after origins have been made explicit. It reasons about identity
- * values, never guesses from an integer type that its bits are not a pointer.
- */
 typedef struct {
   const IRModuleSymbol *symbol;
   const IRFunction *scope;
@@ -19,8 +11,6 @@ typedef struct {
   size_t count;
 } SafetyPlainStorage;
 
-/* Follow only names with one definition. A second write prevents a join from
- * hiding another array behind the same name. */
 static const IRInstruction *safety_plain_definition(const IRFunction *fn,
                                                    const IROperand *value) {
   const IRInstruction *found = NULL;
@@ -93,9 +83,6 @@ static SafetyPlainArray *safety_plain_root(SafetyPlainStorage *state,
   return NULL;
 }
 
-/* Reading a pointer's value, rather than what it points at. A comparison and a
- * branch on one settle a question about the address; the provenance pass gives
- * their result no origin of its own, so neither can put one into the array. */
 static int safety_plain_reads_value_only(const IRInstruction *in) {
   if (in->op == IR_OP_BRANCH_ZERO || in->op == IR_OP_BRANCH_EQ) return 1;
   return in->op == IR_OP_BINARY && in->text &&
@@ -105,14 +92,6 @@ static int safety_plain_reads_value_only(const IRInstruction *in) {
        !strcmp(in->text, "&&") || !strcmp(in->text, "||"));
 }
 
-/* Whether this function pairs `name` with a bulk byte move into the same
- * array. A byte move carries no origins itself: the metadata travels in the
- * separate call the lifetime pass emits beside it, and that call is what the
- * fixpoint below reads. Without the pair the move would take pointer bytes
- * somewhere their origins never followed, so the array keeps its bookkeeping.
- *
- * Matched by destination rather than by position, so a pass that moved the two
- * apart cannot turn this into a use the analysis waves through. */
 static int safety_plain_metadata_pairs(SafetyPlainStorage *state,
     const IRFunction *fn, SafetyPlainArray *array, const char *name,
     size_t arity) {
@@ -125,11 +104,6 @@ static int safety_plain_metadata_pairs(SafetyPlainStorage *state,
   return 0;
 }
 
-/* Whether a region a metadata copy reads from can hold an origin at all.
- *
- * The characters of a string literal cannot: they are a read-only image with
- * no relocation in it, and the only pointer a literal string owns lives in its
- * record, which is a different object from the bytes a copy reads. */
 static int safety_plain_literal_bytes(SafetyPlainStorage *state,
     const IRFunction *fn, const IROperand *value, int depth) {
   if (!value || depth > 32) return 0;
@@ -139,9 +113,6 @@ static int safety_plain_literal_bytes(SafetyPlainStorage *state,
   if (in->op == IR_OP_ASSIGN || in->op == IR_OP_CAST ||
       (in->op == IR_OP_BINARY && in->text && !strcmp(in->text, "+")))
     return safety_plain_literal_bytes(state, fn, &in->lhs, depth + 1);
-  /* The data pointer loaded out of a string record whose only value is a
-   * literal. A name written anywhere, here or in another function, could hold
-   * a different string by the time this runs. */
   if (in->op != IR_OP_LOAD || in->rhs.kind != IR_OPERAND_INT ||
       in->rhs.int_value != 8 || in->lhs.kind != IR_OPERAND_SYMBOL) return 0;
   const IRInstruction *source = safety_plain_definition(fn, &in->lhs);
@@ -194,16 +165,9 @@ static int safety_plain_allowed_use(SafetyPlainStorage *state,
     parameter.name = callee->parameter_names[position - 3];
     return safety_plain_root(state, callee, &parameter, 0) == array;
   }
-  /* Pure checks and metadata clears take an array without adding an origin:
-   * a check reads nothing back, and a clear can only remove one. */
   if (!strcmp(in->text, "mettle_safety_buffer_check") ||
       !strcmp(in->text, "mettle_safety_value_clear")) return 1;
-  /* A metadata copy reads origins out of one region and writes them into
-   * another. Reading is free; whether the write costs this array its
-   * bookkeeping depends on what the other side holds, which the fixpoint below
-   * settles once every array has a verdict. */
   if (!strcmp(in->text, "mettle_safety_value_copy")) return 1;
-  /* A byte move, only where its metadata call moves with it. */
   if (!strcmp(in->text, "memcpy") || !strcmp(in->text, "memmove")) {
     return position != 3 ||
         safety_plain_metadata_pairs(state, fn, array, "mettle_safety_value_copy", 3);
@@ -226,9 +190,6 @@ static int safety_plain_allowed_use(SafetyPlainStorage *state,
          !strcmp(in->text, "mettle_safety_span_identity");
 }
 
-/* Reachability of a nonzero origin through the shadow copy graph. A cycle
- * adds no origin of its own. Every incoming edge still gets visited, and
- * unknown definitions and depth limits conservatively keep the bookkeeping. */
 static int safety_plain_tainted(SafetyPlainStorage *state,
     const IRFunction *fn, const IROperand *value,
     const IROperand **path, int depth) {
@@ -284,11 +245,6 @@ static int safety_plain_value_used(const IRFunction *fn, const IROperand *value)
   return 0;
 }
 
-/* The runtime defines a merge of an origin with nothing, and with itself, as
- * that origin unchanged, and a subtraction of two of the same origin as an
- * ordinary integer distance. Those three cases are settled here rather than
- * asked at run time, which matters because a pointer walked by arithmetic asks
- * one of them on every turn of the loop that walks it. */
 static int safety_fold_identity_arithmetic(IRFunction *fn) {
   int folded = 0;
   for (size_t i = 0; i < fn->instruction_count; i++) {
@@ -372,7 +328,6 @@ static int safety_simplify_plain_storage(IRProgram *program) {
     const IRFunction *fn = program->functions[f];
     for (size_t i = 0; i < fn->instruction_count; i++) {
       const IRInstruction *in = &fn->instructions[i];
-      /* Assembly can name any module symbol without an IR operand. */
       if (in->op == IR_OP_INLINE_ASM) {
         safety_trace("plain storage analysis keeps origins around assembly", in->location.line);
         free(state.arrays);
@@ -397,7 +352,6 @@ static int safety_simplify_plain_storage(IRProgram *program) {
       }
     }
   }
-  /* An initializer can publish an address without an ADDRESS_OF instruction. */
   for (size_t s = 0; s < program->module_symbol_count; s++) {
     const IRModuleSymbol *symbol = &program->module_symbols[s];
     for (size_t a = 0; a < state.count; a++) {
@@ -494,8 +448,6 @@ static int safety_simplify_plain_storage(IRProgram *program) {
       return 0;
     }
 
-    /* Remove now unused shadow copies and reads. These exact runtime reads
-     * have no effects; registration and lifetime calls always stay. */
     do {
       changed = 0;
       for (size_t i = 0; i < fn->instruction_count; i++) {

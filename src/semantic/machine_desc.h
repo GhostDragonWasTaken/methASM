@@ -1,23 +1,6 @@
 #ifndef METTLE_MACHINE_DESC_H
 #define METTLE_MACHINE_DESC_H
 
-/* A machine described as data.
- *
- * A `const` of `std/machine`'s `MachineInsn` is an instruction set: one row
- * per instruction, carrying its mnemonic, its encoding, which registers it
- * reads and writes, and the name of the Mettle function that says what it
- * does. This reads that const straight out of the AST, the same way a target
- * description is read, and checks it before anything believes it.
- *
- * What the description buys is the whole of `mettle emulate`: a program is
- * assembled into the described encoding, decoded back out of the bytes, and
- * run by calling each instruction's own semantics function in the compile
- * time interpreter. The assemble and decode halves are separate code paths
- * over the same description, so a description that cannot round-trip is a
- * build that says so rather than a machine that quietly disagrees with
- * itself.
- */
-
 #include "parser/ast.h"
 
 #define MACHINE_MAX_INSNS 128

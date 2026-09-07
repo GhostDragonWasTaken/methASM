@@ -13,17 +13,12 @@
 
 #define INITIAL_ERROR_CAPACITY 16
 #define MAX_ERRORS_DEFAULT 100
-/* Maximum source-line width in the snippet before truncation with "..." */
 #define SNIPPET_MAX_COLS 120
 
-/* All diagnostic output goes to stderr so it doesn't pollute stdout pipelines */
 #define DIAG_STREAM stderr
 
-/* The code a diagnostic reports under: its own, when an analysis stamped a
-   finer one (the memory/range checks' M0101..M0119), otherwise its type's. */
 static const char *error_report_code(const ErrorReport *error);
 
-/* Return the short error-code string for an ErrorType */
 static const char *error_type_code(ErrorType type) {
   switch (type) {
   case ERROR_LEXICAL:  return ERROR_CODE_LEXICAL;
@@ -249,9 +244,6 @@ void error_reporter_add_error_with_suggestion(ErrorReporter *reporter,
                                                     message, suggestion);
 }
 
-/* A later diagnostic at the same spot is almost always a cascade of the
-   first (parser retries, re-checks after recovery). Suppress: exact
-   duplicates everywhere, and any second syntax error at one location. */
 static int error_reporter_is_cascade(ErrorReporter *reporter, ErrorSeverity severity,
                                      const SourceSpan *span, ErrorType type,
                                      const char *filename, const char *message) {
@@ -321,9 +313,6 @@ static void error_reporter_add_report(ErrorReporter *reporter,
 
   reporter->count++;
 
-  /* Attribute the diagnostic to the expansion that produced it, now, while the
-     chain that produced it is still live. Notes are emitted outermost first so
-     the reader walks in from the code they wrote. */
   if (reporter->note_frame_count > 0 && !reporter->emitting_note_frames &&
       (severity == DIAG_SEVERITY_ERROR || severity == DIAG_SEVERITY_WARNING)) {
     reporter->emitting_note_frames = 1;
@@ -339,9 +328,6 @@ static void error_reporter_add_report(ErrorReporter *reporter,
   }
 }
 
-/* The most recent diagnostic that is not one of its own attached notes. The
-   `_last` helpers below refine a diagnostic, so they have to skip past any
-   notes an expansion frame appended after it. */
 static ErrorReport *error_reporter_last_primary(ErrorReporter *reporter) {
   for (size_t i = reporter->count; i > 0; i--) {
     ErrorReport *candidate = &reporter->errors[i - 1];
@@ -516,7 +502,6 @@ void error_reporter_set_format_json(int enabled) {
 
 int error_reporter_format_json(void) { return g_error_format_json; }
 
-/* Emit a JSON string literal (with escaping) to the diagnostic stream. */
 static void diag_json_string(const char *s) {
   fputc('"', DIAG_STREAM);
   for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++) {
@@ -544,7 +529,6 @@ static const char *severity_json_name(ErrorSeverity s) {
   }
 }
 
-/* One diagnostic per line (NDJSON): easy for editors/CI to stream-parse. */
 static void error_reporter_print_errors_json(ErrorReporter *reporter) {
   for (size_t i = 0; i < reporter->count; i++) {
     const ErrorReport *e = &reporter->errors[i];
@@ -606,7 +590,6 @@ void error_reporter_add_warning_span_suggestion(ErrorReporter *reporter,
   error_reporter_add_report(reporter, DIAG_SEVERITY_WARNING, span, type,
                             message, suggestion);
 }
-
 
 static char *snippet_truncate(const char *line);
 
@@ -752,11 +735,6 @@ static void diag_render_section(ErrorReporter *reporter, const ErrorReport *e,
 
   size_t caret_len = (e->span.length > 0) ? e->span.length : 1;
   size_t caret_column = e->location.column;
-  /* Clamp the caret to the snippet, which was truncated at SNIPPET_MAX_COLS.
-   * A column past that point used to underflow `SNIPPET_MAX_COLS - lead`
-   * into a length near SIZE_MAX, which wrapped the caret line's size back
-   * down to something small and left the leading-spaces loop writing past
-   * it. An error 149 columns into a long line was enough. */
   if (caret_column > SNIPPET_MAX_COLS) {
     caret_column = SNIPPET_MAX_COLS + 1;
     caret_len = 1;
@@ -872,7 +850,6 @@ void error_reporter_print_errors(ErrorReporter *reporter) {
 
   for (size_t i = 0; i < reporter->count; i++) {
     const ErrorReport *e = &reporter->errors[i];
-    /* NOTE_OF entries are drawn inside their parent's frame, skip here */
     if (e->severity == DIAG_SEVERITY_NOTE_OF)
       continue;
 
@@ -912,7 +889,6 @@ void error_reporter_print_errors(ErrorReporter *reporter) {
     fprintf(DIAG_STREAM, "%*s%serror%s: %s\n", DIAG_MARGIN, "",
             diag_sgr_error(), reset, summary);
 
-    /* Point at the first error's code for the explain command */
     for (size_t i = 0; i < reporter->count; i++) {
       if (reporter->errors[i].severity == DIAG_SEVERITY_ERROR) {
         fprintf(DIAG_STREAM,
@@ -928,7 +904,6 @@ void error_reporter_print_errors(ErrorReporter *reporter) {
   diag_style_output_end();
 }
 
-/* The space a pointer type's spelling names, or "generic" when it names none. */
 static const char *type_name_device_space(const char *name) {
   static const char *const words[] = {"global", "shared", "constant", "local"};
   size_t i;
@@ -944,8 +919,6 @@ static const char *type_name_device_space(const char *name) {
   return "generic";
 }
 
-/* Truncate a source line for display if it exceeds SNIPPET_MAX_COLS.
-   Returns a heap-allocated string; caller must free. */
 static char *snippet_truncate(const char *line) {
   if (!line)
     return NULL;
@@ -957,8 +930,7 @@ static char *snippet_truncate(const char *line) {
     memcpy(copy, line, len + 1);
     return copy;
   }
-  /* Keep first SNIPPET_MAX_COLS chars and append UTF-8 ellipsis */
-  char *buf = malloc(SNIPPET_MAX_COLS + 4); /* 3 bytes for "..." + NUL */
+  char *buf = malloc(SNIPPET_MAX_COLS + 4);
   if (!buf)
     return NULL;
   memcpy(buf, line, SNIPPET_MAX_COLS);
@@ -1052,9 +1024,6 @@ char *error_reporter_create_caret_line(size_t column, size_t length) {
 
   size_t lead = column - 1;
   size_t marks = length > 0 ? length : 1;
-  /* A span reaching past the end of the address space is a bad span, not a
-   * caret line. Answering NULL beats wrapping the sum and allocating less
-   * than the loops below go on to write. */
   if (marks > SIZE_MAX - lead - 1) {
     return NULL;
   }
@@ -1111,9 +1080,6 @@ static char er_lower(char c) {
   return c;
 }
 
-/* Standard iterative Levenshtein distance (insert/delete/substitute = 1),
-   computed case-insensitively so "Print"/"print" count as distance 0.
-   Returns SIZE_MAX on allocation failure so callers treat it as "no match". */
 size_t error_reporter_edit_distance(const char *a, const char *b) {
   if (!a || !b)
     return (size_t)-1;
@@ -1125,7 +1091,6 @@ size_t error_reporter_edit_distance(const char *a, const char *b) {
   if (lb == 0)
     return la;
 
-  /* Single rolling row of size lb+1. */
   size_t *row = malloc((lb + 1) * sizeof(size_t));
   if (!row)
     return (size_t)-1;
@@ -1165,9 +1130,6 @@ char *error_reporter_closest_candidate(const char *name,
   if (name_len == 0)
     return NULL;
 
-  /* Tolerate roughly one third of the name being wrong, with a floor of 1
-     (catches single-character typos in short names like "i"/"j") and a cap
-     so unrelated long names don't get spuriously matched. */
   size_t threshold = name_len / 3;
   if (threshold < 1)
     threshold = 1;
@@ -1182,7 +1144,7 @@ char *error_reporter_closest_candidate(const char *name,
     if (!cand || cand[0] == '\0')
       continue;
     if (strcmp(cand, name) == 0)
-      continue; /* exact match isn't a useful "did you mean" */
+      continue;
 
     size_t d = error_reporter_edit_distance(name, cand);
     if (d <= threshold && d < best_distance) {
@@ -1194,19 +1156,11 @@ char *error_reporter_closest_candidate(const char *name,
   return best ? mettle_strdup(best) : NULL;
 }
 
-/* Returns a heap-allocated suggestion string the caller must free, or NULL. */
-/* ---- type-mismatch suggestions ---------------------------------------------
- * A message that names two types tells the reader what is wrong. The help
- * line has to tell them what to type instead. Mettle converts nothing
- * implicitly, so nearly every mismatch has a concrete answer: a cast, an `&`,
- * a `*`, a comparison. */
-
 static int type_name_is_pointer(const char *name) {
   size_t n = name ? strlen(name) : 0;
   return n > 0 && name[n - 1] == '*';
 }
 
-/* Name with one level of pointer removed: "int32*" -> "int32". */
 static void type_name_pointee(const char *name, char *out, size_t cap) {
   size_t n = strlen(name);
   if (n > 0 && name[n - 1] == '*') {

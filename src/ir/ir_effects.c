@@ -63,8 +63,6 @@ typedef struct {
   char **owned;
   size_t owned_count;
   size_t owned_capacity;
-  /* The bits of `Warp` and `Block`. A divergent call site does not receive
-     these from its caller, however they were provided. */
   Word *group_mask;
 } Ctx;
 
@@ -108,11 +106,6 @@ int ir_effects_name_is_known_clean(const char *name) {
   if (!name) {
     return 0;
   }
-  /* The compiler's own helpers: the traps a check branches to, the effect
-   * frames, the refinement re-checks, the shadow map behind `--safe`, and the
-   * lines `--record-trace` writes. It put them there and knows what they do,
-   * so a `@noalloc` proof does not have to fall over because a checked build
-   * added one. */
   if (strstr(name, "crash_trap") != NULL ||
       strncmp(name, "mettle_effects_", 15) == 0 ||
       strncmp(name, "mettle_refine_", 14) == 0 ||
@@ -465,8 +458,6 @@ int ir_instruction_writes_symbol(const IRInstruction *instruction);
 const char *ir_function_local_declared_type(const IRFunction *function,
                                             const char *name);
 
-/* An object named `*g` has no name in the program, so the pass owns the
- * string. One copy per distinct object, freed with the rest of the table. */
 static const char *intern_object(Ctx *ctx, const char *name) {
   for (size_t i = 0; i < ctx->global_count; i++) {
     if (strcmp(ctx->globals[i].name, name) == 0) {
@@ -551,12 +542,6 @@ static int symbol_is_global(const IRFunction *fn, const char *name) {
          !ir_function_local_declared_type(fn, name);
 }
 
-/* The global an address was computed from. A store through a pointer is a
- * write to whatever that pointer names, and the compiler can say what that is
- * exactly when the address came out of a global: `g_buf[i] = v` writes the
- * block `g_buf` points at, and `g_jobs[i] = v` writes `g_jobs` itself. Both
- * are objects two threads can share, and neither was visible while only the
- * symbol a write names was counted. */
 static const char *store_base_global(const IRProgram *program,
                                      const IRFunction *fn, size_t at) {
   IROperand address = fn->instructions[at].dest;
@@ -664,10 +649,6 @@ static int scan_function(Ctx *ctx, size_t index) {
     const IRInstruction *insn = &fn->instructions[i];
     switch (insn->op) {
     case IR_OP_BARRIER: {
-      /* A workgroup barrier is a block collective: a device helper holding one
-         needs Block wherever it is called from. A kernel already provides it,
-         and a barrier the work items of a block do not all reach is the
-         verifier's own refusal, which names the condition. */
       int block_bit = effect_bit(ctx, "Block");
       if (block_bit >= 0 && !fn->is_kernel) {
         bit_set(efn->requires, (size_t)block_bit);
@@ -791,9 +772,6 @@ static void propagate(Ctx *ctx) {
                         efn->fn->instructions[site].divergent_call;
         ctx->steps++;
         for (size_t w = 0; w < ctx->words; w++) {
-          /* Inside a branch the work items of a group do not all take, the
-             group effects the caller provides do not reach the call: the
-             group is not all here, so a collective there still needs one. */
           Word reaching = divergent ? (efn->provides[w] & ~ctx->group_mask[w])
                                     : efn->provides[w];
           gathered[w] |= callee_needs[w] & ~reaching;
@@ -847,9 +825,6 @@ static int trace_chain(Ctx *ctx, size_t start, size_t bit, int follow_needs,
       size_t next = efn->callees[c];
       EFn *callee = &ctx->fns[next];
       size_t call_site = efn->callee_sites ? efn->callee_sites[c] : NO_SITE;
-      /* A group effect does not reach a call under a condition no work item
-         agrees on, so the chain follows that edge even though the caller
-         provides it. That is the edge the message wants to name. */
       int divergent = call_site != NO_SITE &&
                       call_site < efn->fn->instruction_count &&
                       efn->fn->instructions[call_site].divergent_call &&
@@ -1103,9 +1078,6 @@ static int check_roots(Ctx *ctx) {
         return 0;
       }
       describe_chain(chain, sizeof(chain), ctx, hops, length);
-      /* A kernel provides both group effects, so a group effect that reached
-         the entry anyway was taken away by a branch or a loop the work items
-         do not all agree on. Saying which line that was is the diagnosis. */
       if (bit_test(ctx->group_mask, bit) && bit_test(efn->provides, bit)) {
         size_t line = 0;
         for (size_t h = 1; h < length; h++) {

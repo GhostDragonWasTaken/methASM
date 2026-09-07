@@ -1,49 +1,3 @@
-// Compile-time memory diagnostics: the analyses that catch the bugs people
-// otherwise find at 2am with a hex dump.
-//
-// Two phases share one walker:
-//
-// PHASE 1 (per function, during declaration checking, scope still live):
-//   M0101  use of a pointer after a direct free(p)              warning
-//   M0102  double free (both frees direct)                     warning
-//   M0103  returning the address of a stack local               ERROR
-//   M0104  storing the address of a stack local in a global     warning
-//   M0105  constant array index out of bounds (backstop)        ERROR
-//   M0106  constant-size memory op overflowing a stack array    ERROR
-//
-// PHASE 2 (whole program, after every declaration type-checks):
-//   Ownership summaries are INFERRED per function and iterated to fixpoint
-//   over the call graph (imports are flattened, so the compiler sees the
-//   whole program): which parameters a function definitely frees, which it
-//   keeps a reference to, and whether its return value is a fresh
-//   allocation the caller owns. The walker then re-runs with summaries:
-//
-//   M0108  use after a CALL freed the pointer (`consume(p); p[0]`) warning
-//   M0109  double free where a call did one of the frees          warning
-//   M0107  leak: an allocation that never escapes and is never
-//          freed -- now seen THROUGH borrowing helpers, and fed by
-//          wrapper allocators (`make() -> malloc(...)`)           warning
-//
-// The borrow-lifetime and constant-fault findings share the walker:
-//   M0110  borrowed interior pointer outlives its scope           warning
-//   M0111  borrow invalidated by realloc                          warning
-//   M0112  borrow invalidated by free                             warning
-//   M0113  dereference of a provably null pointer                 warning
-//   M0114  dereference of an unmapped constant address            warning
-//   M0115  shift count at or past the operand width               warning
-//   M0116  division or modulo by a constant zero                   ERROR
-//   M0117  loop index runs past the end of the array               ERROR
-//   M0121  a task is handed a pointer into the frame that spawns it ERROR
-//   M0122  a message written after it was handed to a task          ERROR
-//
-// Every finding reports under its own code, not the generic E0003, so
-// `mettle explain M0107` works on the diagnostic the reader is looking at.
-//
-// The analysis is deliberately conservative: definite-bug states are only
-// set on the function's straight-line spine, anything inside a branch or
-// loop demotes to "maybe" and stays silent, and only DEFINITE summaries
-// propagate across calls. A diagnostic from this file is meant to be
-// trusted, so the false-positive budget is zero.
 
 #include "type_checker_internal.h"
 #include "../ir/ir_explain_memory.h"
@@ -57,84 +11,73 @@
 
 typedef enum {
   MEM_FREED_NO = 0,
-  MEM_FREED_DEFINITE = 1, /* freed on the spine: later use IS a bug */
-  MEM_FREED_MAYBE = 2     /* freed inside a branch/loop: stay silent */
+  MEM_FREED_DEFINITE = 1,
+  MEM_FREED_MAYBE = 2
 } MemFreedState;
 
-/* Why a borrow's referent is gone, set on the spine and reported at the next
- * use of the borrowing pointer (the borrow-lifetime checker). */
 typedef enum {
   BORROW_OK = 0,
-  BORROW_SCOPE,   /* the stack referent's lexical block exited        M0110 */
-  BORROW_REALLOC, /* the heap buffer was realloc'd (may have moved)   M0111 */
-  BORROW_FREE     /* the heap buffer was freed (interior pointer)     M0112 */
+  BORROW_SCOPE,
+  BORROW_REALLOC,
+  BORROW_FREE
 } BorrowKill;
 
 typedef enum {
-  MEM_MODE_LOCAL = 0,  /* phase 1: direct facts only; any call escapes */
-  MEM_MODE_SUMMARY,    /* phase 2a: collect a function's summary, no reports */
-  MEM_MODE_INTERPROC   /* phase 2b: report summary-dependent diagnostics */
+  MEM_MODE_LOCAL = 0,
+  MEM_MODE_SUMMARY,
+  MEM_MODE_INTERPROC
 } MemMode;
 
-/* Inferred ownership facts about one function. Bit i refers to parameter i
- * (parameters past MEM_MAX_PARAMS are treated as stored). */
 typedef struct {
   const char *name;
-  FunctionDeclaration *fn; /* NULL for seeded externs (malloc, free, ...) */
-  unsigned frees_definite; /* unconditionally frees param i (spine) */
-  unsigned frees_maybe;    /* may free param i (branch, or maybe-callee) */
-  unsigned stores;         /* keeps a reference to param i */
-  int returns_fresh;       /* every returned value is a fresh allocation */
+  FunctionDeclaration *fn;
+  unsigned frees_definite;
+  unsigned frees_maybe;
+  unsigned stores;
+  int returns_fresh;
 } MemFnSummary;
 
 typedef struct {
   MemFnSummary *items;
   size_t count;
-  /* Open-addressing index (slot+1; 0 = empty) over items, keyed by name.
-   * Consulted per call expression across every function walk: a linear scan
-   * here is O(calls x functions) on large programs. Sized once at table
-   * construction (the item set is fixed after seeding). */
   size_t *buckets;
   size_t bucket_count;
 } MemSummaryTable;
 
 typedef struct {
-  const char *name;      /* AST-owned */
-  const char *type_name; /* AST-owned */
+  const char *name;
+  const char *type_name;
   SourceLocation decl_loc;
-  int param_index; /* -1 for locals */
-  int is_stack;   /* array/struct/scalar local: its address dies with the frame */
-  int is_pointer; /* trailing '*', cstring, or string (which carries a pointer) */
-  int reassigned; /* a parameter overwritten since entry (summary collection) */
+  int param_index;
+  int is_stack;
+  int is_pointer;
+  int reassigned;
   MemFreedState freed;
   SourceLocation freed_loc;
-  const char *freed_via; /* callee whose summary freed it; NULL = direct free */
-  int holds_alloc; /* assigned from an allocator on the spine */
+  const char *freed_via;
+  int holds_alloc;
   SourceLocation alloc_loc;
-  const char *alloc_via; /* wrapper allocator name; NULL = malloc/calloc/new */
-  int escaped;     /* returned, stored, kept by a callee, or address taken */
-  int ever_freed;  /* a free of this pointer appears ANYWHERE (defers count) */
-  const char *points_to_stack; /* stack local whose address it holds, or NULL */
-  size_t points_to_slot; /* that local's index plus one; 0 when unrecorded */
-  int out_of_scope; /* its lexical block has exited; a later `&name` is not it */
-  int scope_level; /* lexical block depth where this local was declared */
-  const char *borrows_heap;    /* heap-pointer local this points into via
-                                  `&buf[i]`; NULL when not a heap borrow */
-  BorrowKill borrow_dangling;  /* referent gone; report on the next use */
-  SourceLocation borrow_killed_loc; /* where the referent's lifetime ended */
-  const char *borrow_killed_via;    /* referent/buffer name for the message */
-  int alias_group; /* >0: shares a heap block with same-group locals (`q = p`);
-                      0 = singleton. Freeing/realloc'ing one invalidates all. */
-  const char *freed_alias; /* the aliasing name through which the shared block
-                              was freed; NULL = this name was freed directly */
-  int is_null;     /* pointer assigned a null constant on the spine */
+  const char *alloc_via;
+  int escaped;
+  int ever_freed;
+  const char *points_to_stack;
+  size_t points_to_slot;
+  int out_of_scope;
+  int scope_level;
+  const char *borrows_heap;
+  BorrowKill borrow_dangling;
+  SourceLocation borrow_killed_loc;
+  const char *borrow_killed_via;
+  int alias_group;
+  const char *freed_alias;
+  int is_null;
   SourceLocation null_loc;
-  int is_wild;     /* pointer assigned a small constant address (never mappable) */
+  int is_wild;
   long long wild_value;
   SourceLocation wild_loc;
-  long long points_to_offset; /* element offset into points_to_stack; -1 unknown */
-  int has_const_value;    /* integer local with a known spine value */
-  long long const_value;  /* (drives the loop-bound analysis) */
+  long long points_to_offset;
+  int has_const_value;
+  long long const_value;
   int handed_over;
   SourceLocation handover_loc;
   const char *handover_via;
@@ -145,29 +88,20 @@ typedef struct {
   FunctionDeclaration *fn;
   SourceLocation fn_loc;
   MemMode mode;
-  const MemSummaryTable *summaries; /* NULL in MEM_MODE_LOCAL */
-  MemFnSummary *collect;            /* MEM_MODE_SUMMARY output */
+  const MemSummaryTable *summaries;
+  MemFnSummary *collect;
   size_t local_count;
-  int depth;      /* 0 = the function's straight-line spine */
-  int scope_level; /* lexical block nesting (0 = function body); independent of
-                      `depth`, which tracks branch conditionality */
-  int next_alias_group; /* monotone id source for pointer alias groups */
-  int in_defer;   /* defers run at scope exit: record facts, never report */
-  int in_condition; /* inside an if/while/for condition: a mentioned pointer
-                       counts as guarded, ending definite-null knowledge */
+  int depth;
+  int scope_level;
+  int next_alias_group;
+  int in_defer;
+  int in_condition;
   int fn_returns_pointer;
   int saw_value_return;
   int returns_all_fresh;
   int had_error;
-  /* Kept LAST so mem_ctx_init can zero only the fields above it. This is 256
-   * entries of a large struct -- around 50KB -- and mem_add_local zeroes each
-   * slot as it hands it out, so clearing the whole array once per function was
-   * pure waste: 2.5% of total compile time on a 13k-function input. Every read
-   * of a slot is bounded by local_count, so untouched slots are never seen. */
   MemLocal locals[MEM_MAX_LOCALS];
 } MemCtx;
-
-/* ---- small type helpers ----------------------------------------------------- */
 
 static int mem_type_is_pointer(const char *type_name) {
   size_t len = type_name ? strlen(type_name) : 0;
@@ -211,8 +145,6 @@ static long long mem_scalar_size(MemCtx *ctx, const char *type_name) {
   return type && type->size > 0 ? (long long)type->size : 0;
 }
 
-/* Parse `Elem[N]` out of a declared type. Returns 1 with the element count
- * and byte size on success. Multi-dimensional arrays are left alone. */
 static int mem_array_extent(MemCtx *ctx, const char *type_name,
                             long long *count_out, long long *elem_size_out) {
   const char *bracket = type_name ? strchr(type_name, '[') : NULL;
@@ -240,8 +172,6 @@ static int mem_array_extent(MemCtx *ctx, const char *type_name,
   return 1;
 }
 
-/* ---- summary table ------------------------------------------------------------ */
-
 static MemFnSummary *mem_summary_find(const MemSummaryTable *table,
                                       const char *name) {
   if (!table || !name) {
@@ -266,7 +196,6 @@ static MemFnSummary *mem_summary_find(const MemSummaryTable *table,
   return NULL;
 }
 
-/* Register items[slot] in the name index (no-op when the index is absent). */
 static void mem_summary_index_put(MemSummaryTable *table, size_t slot) {
   if (!table->bucket_count) {
     return;
@@ -278,8 +207,6 @@ static void mem_summary_index_put(MemSummaryTable *table, size_t slot) {
   }
   table->buckets[b] = slot + 1;
 }
-
-/* ---- local table ------------------------------------------------------------- */
 
 static MemLocal *mem_referent(MemCtx *ctx, MemLocal *borrow);
 
@@ -331,12 +258,6 @@ static MemLocal *mem_add_local(MemCtx *ctx, const char *name,
   return local;
 }
 
-/* ---- diagnostics -------------------------------------------------------------- */
-
-/* Every finding here reports under its own M-code rather than the generic
- * E0003 its ErrorType implies, so the reader can run `mettle explain M0107`
- * on the diagnostic in front of them. The code travels to three places at
- * once: the diagnostic, the --explain memory section, and the JSON sidecar. */
 static void mem_warn(MemCtx *ctx, const char *code, SourceLocation loc,
                      const char *fmt, ...) {
   char message[512];
@@ -416,8 +337,6 @@ static void mem_error_late(MemCtx *ctx, const char *code, SourceLocation loc,
   ctx->had_error = 1;
 }
 
-/* ---- expression classification ----------------------------------------------- */
-
 static ASTNode *mem_unwrap_cast(ASTNode *node) {
   int guard = 0;
   while (node && node->type == AST_CAST_EXPRESSION && guard++ < 8) {
@@ -427,12 +346,6 @@ static ASTNode *mem_unwrap_cast(ASTNode *node) {
   return node;
 }
 
-/* The stack local at the root of `&expr` (e.g. `&buf`, `&buf[i]`,
- * `&point.x`), or NULL when the expression is not an address of frame
- * memory. A dereference anywhere in the chain breaks it: `&p[i]` where p is
- * a pointer addresses the pointee. When `offset_out` is non-NULL it receives
- * the ELEMENT offset for the two exactly-understood shapes (`&arr` is 0,
- * `&arr[const]` is the constant) and -1 for everything else. */
 static MemLocal *mem_addr_of_stack_at(MemCtx *ctx, ASTNode *expr,
                                       long long *offset_out) {
   if (offset_out) {
@@ -447,7 +360,6 @@ static MemLocal *mem_addr_of_stack_at(MemCtx *ctx, ASTNode *expr,
     return NULL;
   }
 
-  /* the two offset-tracked shapes first */
   ASTNode *direct = mem_unwrap_cast(unary->operand);
   if (offset_out && direct && direct->type == AST_IDENTIFIER) {
     Identifier *id = (Identifier *)direct->data;
@@ -508,11 +420,6 @@ static MemLocal *mem_addr_of_stack(MemCtx *ctx, ASTNode *expr) {
   return mem_addr_of_stack_at(ctx, expr, NULL);
 }
 
-/* The heap-pointer local at the root of `&buf[i]` (an interior pointer into
- * the block `buf` points to), or NULL when the expression is not the address
- * of an element of a pointer local. The stack analogue lives in
- * `mem_addr_of_stack_at`; the discriminator is `is_pointer` vs `is_stack`, so
- * the two never both match the same `&...`. */
 static MemLocal *mem_addr_of_heap_at(MemCtx *ctx, ASTNode *expr,
                                      long long *offset_out) {
   if (offset_out) {
@@ -550,9 +457,6 @@ static MemLocal *mem_addr_of_heap_at(MemCtx *ctx, ASTNode *expr,
   return local;
 }
 
-/* Fresh-allocation classification. Direct allocators always count; in the
- * summary/interproc modes a call to a function whose every return is fresh
- * counts too (the wrapper-allocator case). `via_out` names the wrapper. */
 static int mem_is_allocation(MemCtx *ctx, ASTNode *expr, const char **via_out) {
   *via_out = NULL;
   expr = mem_unwrap_cast(expr);
@@ -629,17 +533,8 @@ static MemLocal *mem_addr_root_local(MemCtx *ctx, ASTNode *expr) {
   return NULL;
 }
 
-/* ---- the expression walk -------------------------------------------------------
- * One pass per expression: flags use-after-free on every read of a freed
- * pointer, bounds-checks constant indexes into stack arrays, classifies
- * free()/realloc() and summary-freeing calls, marks escapes, and checks
- * constant-size memory ops against their destination's capacity. */
-
 static void mem_walk_expr(MemCtx *ctx, ASTNode *expr);
 
-/* A dereference of a pointer the spine proved null: `var p: T* = 0;` with no
- * reassignment and no guard between. The runtime null trap would catch it;
- * the compiler can say it now. */
 static void mem_check_null_deref(MemCtx *ctx, ASTNode *pointer_expr,
                                  SourceLocation loc) {
   if (ctx->mode != MEM_MODE_LOCAL || ctx->in_defer) {
@@ -664,7 +559,7 @@ static void mem_check_null_deref(MemCtx *ctx, ASTNode *pointer_expr,
                      "`%s` is null here (assigned at line %zu and never "
                      "reassigned); this dereference will trap at runtime",
                      local->name, local->null_loc.line);
-    local->is_null = 0; /* one report per null assignment */
+    local->is_null = 0;
     return;
   }
   if (local->is_wild) {
@@ -677,10 +572,6 @@ static void mem_check_null_deref(MemCtx *ctx, ASTNode *pointer_expr,
   }
 }
 
-/* The borrow-lifetime checker: a pointer whose referent's lifetime ended on
- * the spine is reported the first time it is used. Like the direct-free and
- * null-deref diagnostics, these are phase-1 facts, so they only speak in
- * MEM_MODE_LOCAL and only once per borrow. */
 static void mem_check_borrow_use(MemCtx *ctx, MemLocal *local,
                                  SourceLocation loc) {
   if (!local || ctx->in_defer || ctx->mode != MEM_MODE_LOCAL ||
@@ -690,7 +581,7 @@ static void mem_check_borrow_use(MemCtx *ctx, MemLocal *local,
   BorrowKill why = local->borrow_dangling;
   const char *via = local->borrow_killed_via ? local->borrow_killed_via : "it";
   size_t at = local->borrow_killed_loc.line;
-  local->borrow_dangling = BORROW_OK; /* one report per borrow */
+  local->borrow_dangling = BORROW_OK;
   if (why == BORROW_SCOPE) {
     char suggestion[200];
     snprintf(suggestion, sizeof(suggestion),
@@ -711,7 +602,7 @@ static void mem_check_borrow_use(MemCtx *ctx, MemLocal *local,
                      "`realloc` may move the block, so this pointer is "
                      "dangling",
                      local->name, via, at);
-  } else { /* BORROW_FREE */
+  } else {
     char suggestion[200];
     snprintf(suggestion, sizeof(suggestion),
              "Take the borrow after the last `free`, or copy the value out "
@@ -725,9 +616,6 @@ static void mem_check_borrow_use(MemCtx *ctx, MemLocal *local,
   }
 }
 
-/* When `buf` is freed or realloc'd, every interior pointer borrowed from it
- * (`p = &buf[i]`) becomes dangling. Spine-only, definite by the C standard
- * (post-free/post-realloc interior pointers are indeterminate). */
 static void mem_invalidate_heap_borrows(MemCtx *ctx, const char *buf_name,
                                         BorrowKill why, SourceLocation loc) {
   if (!buf_name || ctx->mode != MEM_MODE_LOCAL || ctx->depth != 0 ||
@@ -744,10 +632,6 @@ static void mem_invalidate_heap_borrows(MemCtx *ctx, const char *buf_name,
   }
 }
 
-/* `q = p` makes two names for one allocation. Put both pointers in one alias
- * group so that freeing or reallocating either invalidates the other. This is
- * the ownership/move discipline Rust enforces through the type system, applied
- * to raw pointers where Rust offers no checking at all. */
 static void mem_alias_join(MemCtx *ctx, MemLocal *a, MemLocal *b) {
   if (!a || !b || a == b || !a->is_pointer || !b->is_pointer) {
     return;
@@ -764,7 +648,7 @@ static void mem_alias_join(MemCtx *ctx, MemLocal *a, MemLocal *b) {
     a->alias_group = group;
     return;
   }
-  int old = a->alias_group; /* both already grouped: merge into b's group */
+  int old = a->alias_group;
   for (size_t i = 0; i < ctx->local_count; i++) {
     if (ctx->locals[i].alias_group == old) {
       ctx->locals[i].alias_group = group;
@@ -772,10 +656,6 @@ static void mem_alias_join(MemCtx *ctx, MemLocal *a, MemLocal *b) {
   }
 }
 
-/* A free()/realloc() of `victim` invalidates every OTHER pointer that aliases
- * the same block. Definite by C semantics (a freed block is gone; a realloc'd
- * block may have moved, leaving the old pointer indeterminate), spine-only, so
- * it holds the zero-false-positive budget. Reported at the alias's next use. */
 static void mem_alias_invalidate(MemCtx *ctx, MemLocal *victim, BorrowKill why,
                                  SourceLocation loc) {
   if (!victim || victim->alias_group == 0 || ctx->in_defer ||
@@ -808,8 +688,6 @@ static void mem_check_use(MemCtx *ctx, MemLocal *local, SourceLocation loc) {
   if (!local || ctx->in_defer || local->freed != MEM_FREED_DEFINITE) {
     return;
   }
-  /* Phase split: direct-free bugs are phase 1's; bugs where a CALL did the
-   * free are phase 2's (phase 1 cannot see them). */
   if (ctx->mode == MEM_MODE_LOCAL && local->freed_via == NULL) {
     if (local->freed_alias) {
       char suggestion[200];
@@ -828,7 +706,7 @@ static void mem_check_use(MemCtx *ctx, MemLocal *local, SourceLocation loc) {
                "use-after-free",
                local->name, local->freed_loc.line);
     }
-    local->freed = MEM_FREED_MAYBE; /* one report per free site */
+    local->freed = MEM_FREED_MAYBE;
   } else if (ctx->mode == MEM_MODE_INTERPROC && local->freed_via != NULL) {
     mem_warn(ctx, "M0108", loc,
              "Use of `%s` after the call to `%s` at line %zu freed it; this "
@@ -838,20 +716,12 @@ static void mem_check_use(MemCtx *ctx, MemLocal *local, SourceLocation loc) {
   }
 }
 
-/* A free event for `local`: a direct free()/realloc(), or (phase 2) a call
- * whose summary says the parameter is unconditionally freed. */
 static void mem_free_event(MemCtx *ctx, MemLocal *local, SourceLocation loc,
                            const char *via) {
   if (!local || !local->is_pointer) {
     return;
   }
   local->ever_freed = 1;
-  /* Summary: a free of an un-reassigned parameter is part of what this
-   * function does to its caller's pointer. A `defer free(p)` counts -- it
-   * runs unconditionally at scope exit -- so the `in_defer` flag does not
-   * suppress summary recording (it only suppresses intra-function flow
-   * events below). A spine free/defer is definite; a free inside a branch
-   * is a maybe. */
   if (ctx->mode == MEM_MODE_SUMMARY && local->param_index >= 0 &&
       local->param_index < MEM_MAX_PARAMS && !local->reassigned &&
       ctx->collect) {
@@ -862,11 +732,9 @@ static void mem_free_event(MemCtx *ctx, MemLocal *local, SourceLocation loc,
     }
   }
   if (ctx->in_defer) {
-    return; /* defers run at scope exit; their free is not a flow event */
+    return;
   }
   if (local->freed == MEM_FREED_DEFINITE) {
-    /* Double free. Phase 1 owns the both-direct case; phase 2 owns every
-     * case where a call performed at least one of the frees. */
     int involves_call = local->freed_via != NULL || via != NULL;
     if (ctx->mode == MEM_MODE_LOCAL && !involves_call) {
       if (local->freed_alias) {
@@ -903,7 +771,6 @@ static void mem_free_event(MemCtx *ctx, MemLocal *local, SourceLocation loc,
   local->freed_via = via;
 }
 
-/* Constant-size memory ops: { name, dest arg, size arg }. */
 static const struct {
   const char *name;
   int dest_index;
@@ -914,10 +781,6 @@ static const struct {
     {"mem_fill", 0, 2},
 };
 
-/* Capacity in bytes of the destination when it is frame memory the analysis
- * understands: `&arr[k]` with constant k, `&arr`, or a pointer local that
- * was assigned `&arr...` (offset unknown: full capacity, which still
- * catches sizes larger than the whole array). Returns 0 when unknown. */
 static long long mem_dest_capacity(MemCtx *ctx, ASTNode *dest,
                                    const char **array_name_out) {
   dest = mem_unwrap_cast(dest);
@@ -979,7 +842,7 @@ static long long mem_dest_capacity(MemCtx *ctx, ASTNode *dest,
 static void mem_check_mem_op(MemCtx *ctx, CallExpression *call,
                              SourceLocation loc) {
   if (ctx->mode != MEM_MODE_LOCAL) {
-    return; /* phase 1 owns this diagnostic (function scope is live there) */
+    return;
   }
   for (size_t i = 0; i < sizeof(MEM_OPS) / sizeof(MEM_OPS[0]); i++) {
     if (strcmp(call->function_name, MEM_OPS[i].name) != 0) {
@@ -1011,7 +874,7 @@ static void mem_check_mem_op(MemCtx *ctx, CallExpression *call,
 
 static void mem_check_const_index(MemCtx *ctx, ASTNode *expr) {
   if (ctx->mode != MEM_MODE_LOCAL) {
-    return; /* needs the live function scope for const locals */
+    return;
   }
   ArrayIndexExpression *index = (ArrayIndexExpression *)expr->data;
   ASTNode *array = index ? mem_unwrap_cast(index->array) : NULL;
@@ -1039,9 +902,6 @@ static void mem_check_const_index(MemCtx *ctx, ASTNode *expr) {
     return;
   }
 
-  /* Through a pointer alias with a known target and offset:
-   * `var p = &a[2]; p[6]` lands at a[8]. Requires the pointee and element
-   * types to match (no reinterpreting casts). */
   if (local->is_pointer && local->points_to_stack &&
       local->points_to_offset >= 0) {
     MemLocal *target = mem_referent(ctx, local);
@@ -1090,9 +950,6 @@ static void mem_collect_param_maybe_free(MemCtx *ctx, MemLocal *local) {
   }
 }
 
-/* The ownership effect of passing `local` as argument `arg_index` of a call
- * to `callee`. With no summary (externs, indirect calls, methods, phase 1)
- * the pointer conservatively escapes. */
 static void mem_apply_call_arg(MemCtx *ctx, MemLocal *local,
                                const char *callee, size_t arg_index,
                                SourceLocation loc) {
@@ -1113,7 +970,6 @@ static void mem_apply_call_arg(MemCtx *ctx, MemLocal *local,
     return;
   }
   if (summary->frees_maybe & bit) {
-    /* might free: silence both the leak and any later use */
     local->ever_freed = 1;
     local->escaped = 1;
     mem_collect_param_maybe_free(ctx, local);
@@ -1124,7 +980,6 @@ static void mem_apply_call_arg(MemCtx *ctx, MemLocal *local,
     mem_collect_param_store(ctx, local);
     return;
   }
-  /* pure borrow: the callee looked at it and gave it back; keep tracking */
 }
 
 static const char *mem_named_function(MemCtx *ctx, ASTNode *expr) {
@@ -1266,9 +1121,6 @@ static void mem_check_handover_write(MemCtx *ctx, ASTNode *target,
   root->handed_over = 0;
 }
 
-/* Constant arithmetic that traps or surprises: division/modulo by a constant
- * zero (a guaranteed runtime trap) and shifts wider than the value (x86
- * masks the count, so `x << 32` on an int32 is `x`, which nobody means). */
 static void mem_check_const_arithmetic(MemCtx *ctx, BinaryExpression *binary,
                                        SourceLocation loc) {
   if (ctx->mode != MEM_MODE_LOCAL || !binary->operator) {
@@ -1313,16 +1165,6 @@ static void mem_check_const_arithmetic(MemCtx *ctx, BinaryExpression *binary,
   }
 }
 
-/* ---- loop-bound bounds analysis ---------------------------------------------
- * The classic off-by-one: `var a: T[8]; while (i <= 8) { a[i] = ...; }`.
- * Proven only when the loop shape is airtight:
- *   - the condition is `iv < bound` or `iv <= bound` with a constant bound
- *   - the induction variable has a known constant start >= 0
- *   - the body modifies it exactly once, as `iv = iv + 1`
- *   - nothing can leave early (no break/continue/return anywhere inside)
- * Under those rules the final iteration provably happens, so an `a[iv]`
- * whose maximum reaches the array length is a hard error. */
-
 static int mem_ast_contains_exit(ASTNode *node) {
   if (!node) {
     return 0;
@@ -1332,7 +1174,6 @@ static int mem_ast_contains_exit(ASTNode *node) {
       node->type == AST_RETURN_STATEMENT) {
     return 1;
   }
-  /* statement-bearing payloads the generic child walk does not reach */
   switch (node->type) {
   case AST_IF_STATEMENT: {
     IfStatement *if_stmt = (IfStatement *)node->data;
@@ -1367,7 +1208,7 @@ static int mem_ast_contains_exit(ASTNode *node) {
   case AST_MATCH_STATEMENT:
   case AST_DEFER_STATEMENT:
   case AST_ERRDEFER_STATEMENT:
-    return 1; /* switch breaks are scoped, but stay conservative */
+    return 1;
   default:
     break;
   }
@@ -1379,7 +1220,6 @@ static int mem_ast_contains_exit(ASTNode *node) {
   return 0;
 }
 
-/* `expr` is exactly `iv + 1` (either operand order). */
 static int mem_expr_is_increment_of(ASTNode *expr, const char *iv) {
   expr = mem_unwrap_cast(expr);
   if (!expr || expr->type != AST_BINARY_EXPRESSION) {
@@ -1408,8 +1248,6 @@ static int mem_expr_is_increment_of(ASTNode *expr, const char *iv) {
          strcmp(id->name, iv) == 0;
 }
 
-/* Count assignments to `iv` under `node`; sets *clean_increment when every
- * one is the `iv = iv + 1` shape. Declarations shadowing `iv` poison it. */
 static void mem_count_iv_writes(ASTNode *node, const char *iv, int *count,
                                 int *clean_increment) {
   if (!node) {
@@ -1427,7 +1265,7 @@ static void mem_count_iv_writes(ASTNode *node, const char *iv, int *count,
   } else if (node->type == AST_VAR_DECLARATION) {
     VarDeclaration *decl = (VarDeclaration *)node->data;
     if (decl && decl->name && strcmp(decl->name, iv) == 0) {
-      *clean_increment = 0; /* shadowed: a different variable now */
+      *clean_increment = 0;
     }
   } else if (node->type == AST_IF_STATEMENT) {
     IfStatement *if_stmt = (IfStatement *)node->data;
@@ -1457,8 +1295,6 @@ static void mem_count_iv_writes(ASTNode *node, const char *iv, int *count,
   }
 }
 
-/* Find `array[iv]` accesses under `node` and report the ones whose maximum
- * index provably reaches past the array. One report per loop. */
 static void mem_find_oob_iv_indexes(MemCtx *ctx, ASTNode *node, const char *iv,
                                     long long max_iv, int *reported) {
   if (!node || *reported) {
@@ -1578,9 +1414,6 @@ static void mem_find_oob_iv_indexes(MemCtx *ctx, ASTNode *node, const char *iv,
   }
 }
 
-/* Analyze one counted loop for a provable final-iteration overrun.
- * `increment` is the for-statement increment, or NULL for while loops
- * (whose increment must then live in the body). */
 static void mem_check_loop_bounds(MemCtx *ctx, ASTNode *condition,
                                   ASTNode *body, ASTNode *increment) {
   if (ctx->mode != MEM_MODE_LOCAL || !condition || !body) {
@@ -1611,16 +1444,12 @@ static void mem_check_loop_bounds(MemCtx *ctx, ASTNode *condition,
   }
   long long max_iv = strcmp(cmp->operator, "<=") == 0 ? bound : bound - 1;
 
-  /* The induction variable needs a known non-negative start. (Scalar locals
-   * classify as is_stack -- frame memory -- so only pointers are excluded.) */
   MemLocal *iv_local = mem_find_local(ctx, iv);
   if (!iv_local || iv_local->is_pointer || !iv_local->has_const_value ||
       iv_local->const_value < 0 || iv_local->const_value > max_iv) {
     return;
   }
 
-  /* Nothing may leave the loop early, and the only write to the induction
-   * variable must be a single `iv = iv + 1`. */
   if (mem_ast_contains_exit(body)) {
     return;
   }
@@ -1648,8 +1477,6 @@ static void mem_walk_expr(MemCtx *ctx, ASTNode *expr) {
     MemLocal *local = id ? mem_find_local(ctx, id->name) : NULL;
     mem_check_use(ctx, local, expr->location);
     if (local && local->is_pointer && ctx->in_condition) {
-      /* mentioned in a condition: the code is (presumably) checking it, so
-       * definite-null/wild knowledge ends here */
       local->is_null = 0;
       local->is_wild = 0;
     }
@@ -1666,12 +1493,10 @@ static void mem_walk_expr(MemCtx *ctx, ASTNode *expr) {
       return;
     }
     if (unary->operator && strcmp(unary->operator, "&") == 0) {
-      /* &p makes the pointer reachable elsewhere: it may be freed, kept, or
-       * written through the alias, so all definite knowledge ends here. */
       MemLocal *local = mem_expr_as_local(ctx, unary->operand);
       if (local) {
         local->escaped = 1;
-        local->ever_freed = 1; /* could be freed through the alias */
+        local->ever_freed = 1;
         local->is_null = 0;
         local->is_wild = 0;
         return;
@@ -1730,7 +1555,6 @@ static void mem_walk_expr(MemCtx *ctx, ASTNode *expr) {
         (strcmp(call->function_name, "free") == 0 ||
          strcmp(call->function_name, "realloc") == 0) &&
         call->argument_count >= 1) {
-      /* The pointer argument is CONSUMED, not used; both invalidate it. */
       int is_realloc = strcmp(call->function_name, "realloc") == 0;
       BorrowKill why = is_realloc ? BORROW_REALLOC : BORROW_FREE;
       MemLocal *consumed = mem_expr_as_local(ctx, call->arguments[0]);
@@ -1739,8 +1563,6 @@ static void mem_walk_expr(MemCtx *ctx, ASTNode *expr) {
         consumed->freed = MEM_FREED_MAYBE;
       }
       if (consumed) {
-        /* interior pointers borrowed from it (`&buf[i]`) become dangling, and
-         * so does every whole-pointer alias of it (`q = buf`) */
         mem_invalidate_heap_borrows(ctx, consumed->name, why, expr->location);
         mem_alias_invalidate(ctx, consumed, why, expr->location);
       }
@@ -1752,11 +1574,6 @@ static void mem_walk_expr(MemCtx *ctx, ASTNode *expr) {
     if (call->function_name && !call->object) {
       mem_check_mem_op(ctx, call, expr->location);
     }
-    /* Every argument is evaluated BEFORE the call runs, so check all the uses
-     * first and only then apply the call's ownership effects (free / store).
-     * Interleaving would make a pointer passed twice -- `f(p, p)` where the
-     * callee frees the first parameter -- look like a use-after-free on the
-     * second read, which actually happens before the callee runs. */
     for (size_t i = 0; i < call->argument_count; i++) {
       mem_walk_expr(ctx, call->arguments[i]);
     }
@@ -1793,9 +1610,6 @@ static void mem_walk_expr(MemCtx *ctx, ASTNode *expr) {
   }
 }
 
-/* ---- assignments and declarations -------------------------------------------- */
-
-/* Apply `name = value` to the tracked state. */
 static void mem_apply_assignment(MemCtx *ctx, const char *name, ASTNode *value,
                                  SourceLocation loc) {
   MemLocal *local = mem_find_local(ctx, name);
@@ -1814,8 +1628,8 @@ static void mem_apply_assignment(MemCtx *ctx, const char *name, ASTNode *value,
       local->points_to_slot = 0;
       local->points_to_offset = -1;
       local->borrows_heap = NULL;
-      local->borrow_dangling = BORROW_OK; /* re-derivation clears a stale borrow */
-      local->alias_group = 0; /* re-pointing leaves any alias group */
+      local->borrow_dangling = BORROW_OK;
+      local->alias_group = 0;
       local->is_null = 0;
       local->is_wild = 0;
       if (!ctx->in_defer && ctx->depth == 0 &&
@@ -1823,8 +1637,6 @@ static void mem_apply_assignment(MemCtx *ctx, const char *name, ASTNode *value,
         local->is_null = 1;
         local->null_loc = loc;
       } else if (!ctx->in_defer && ctx->depth == 0) {
-        /* a small constant cast to a pointer can never be valid memory
-         * (the low 64K is never mapped on Windows or Linux) */
         long long constant = 0;
         if (type_checker_eval_integer_constant_with_checker(
                 ctx->checker, mem_unwrap_cast(value), &constant) &&
@@ -1846,24 +1658,16 @@ static void mem_apply_assignment(MemCtx *ctx, const char *name, ASTNode *value,
       long long stack_offset = -1;
       MemLocal *stack_target = mem_addr_of_stack_at(ctx, value, &stack_offset);
       if (stack_target && ctx->depth == 0 && !ctx->in_defer) {
-        /* spine only: a branch assignment may not have happened, so alias
-         * knowledge from it would make false bounds claims */
         local->points_to_stack = stack_target->name;
         local->points_to_slot = (size_t)(stack_target - ctx->locals) + 1;
         local->points_to_offset = stack_offset;
       }
       MemLocal *heap_target = mem_addr_of_heap_at(ctx, value, NULL);
       if (heap_target && ctx->depth == 0 && !ctx->in_defer) {
-        /* an interior pointer into a heap buffer: a later free/realloc of
-         * that buffer leaves this borrow dangling */
         local->borrows_heap = heap_target->name;
       }
       MemLocal *source = mem_expr_as_local(ctx, value);
       if (source && source->is_pointer) {
-        /* aliasing: the allocation now has two names. The leak analysis can no
-         * longer pin a single owner (escaped), but the ownership analysis
-         * joins them into an alias group so a free/realloc of either is seen
-         * to invalidate both. */
         source->escaped = 1;
         if (ctx->depth == 0 && !ctx->in_defer) {
           local->points_to_stack = source->points_to_stack;
@@ -1873,9 +1677,6 @@ static void mem_apply_assignment(MemCtx *ctx, const char *name, ASTNode *value,
         }
       }
     } else {
-      /* integer constant tracking (the loop-bound analysis needs the
-       * induction variable's start): a spine assignment of a constant is
-       * known, anything else (or a branch assignment) ends the knowledge */
       local->has_const_value = 0;
       long long value_const = 0;
       if (!ctx->in_defer && ctx->depth == 0 &&
@@ -1888,8 +1689,6 @@ static void mem_apply_assignment(MemCtx *ctx, const char *name, ASTNode *value,
     return;
   }
 
-  /* Not a local or parameter: a global. A stack address stored there
-   * outlives the frame it points into. */
   MemLocal *stack_target = mem_addr_of_stack(ctx, value);
   if (stack_target && ctx->mode == MEM_MODE_LOCAL) {
     mem_warn(ctx, "M0104", loc,
@@ -1907,8 +1706,6 @@ static void mem_apply_assignment(MemCtx *ctx, const char *name, ASTNode *value,
   }
 }
 
-/* ---- the statement walk --------------------------------------------------------- */
-
 static void mem_walk_statement(MemCtx *ctx, ASTNode *statement);
 
 static void mem_walk_block(MemCtx *ctx, ASTNode *block) {
@@ -1924,9 +1721,6 @@ static void mem_walk_block(MemCtx *ctx, ASTNode *block) {
   mem_walk_statement(ctx, block);
 }
 
-/* Run when the lexical block at `level` exits: a borrow whose pointer outlives
- * the block (`scope_level < level`) but whose stack referent was declared in it
- * (`scope_level >= level`) is now dangling. Reported at the borrow's next use. */
 static void mem_scope_exit_check(MemCtx *ctx, int level) {
   for (size_t i = 0; i < ctx->local_count; i++) {
     MemLocal *p = &ctx->locals[i];
@@ -1946,22 +1740,6 @@ static void mem_scope_exit_check(MemCtx *ctx, int level) {
     }
   }
 }
-
-/* ---- paths ------------------------------------------------------------------
- *
- * A fact used to be definite only on the function's straight-line spine, so
- * everything a branch or a loop body did was demoted to "maybe" and went
- * unreported. That left the code most programs are actually made of invisible.
- *
- * A path is walked with its facts definite, because within one execution of
- * that block the statements do run in order: `if (c) { free(p); p[0] = 1; }`
- * is a use-after-free whenever the branch is taken, and saying so proves
- * something about every execution of it. What the paths disagree about stays
- * conservative: the state after an `if` is the state both arms agreed on, and
- * a loop merges its body against not running at all.
- *
- * Only the facts that drive a report are merged. The rest of a local -- its
- * name, type, declaration site, scope -- is the same on every path. */
 
 typedef struct {
   MemLocal *locals;
@@ -1995,11 +1773,8 @@ static void mem_path_restore(MemCtx *ctx, const MemPath *path) {
   }
 }
 
-/* What both paths agree on, written over `into`. */
 static void mem_local_join(MemLocal *into, const MemLocal *a,
                            const MemLocal *b) {
-  /* An "ever" fact is a fact about the whole function, so it survives either
-     path having established it. */
   into->ever_freed = a->ever_freed || b->ever_freed;
   into->escaped = a->escaped || b->escaped;
   into->reassigned = a->reassigned || b->reassigned;
@@ -2099,8 +1874,6 @@ static void mem_path_join(MemCtx *ctx, const MemPath *a, const MemPath *b) {
   }
 }
 
-/* One arm of a branch, or one iteration of a loop body: walked with its own
- * facts definite, then handed back for the join. */
 static int mem_walk_path(MemCtx *ctx, ASTNode *body, const MemPath *entry,
                          MemPath *out) {
   int level;
@@ -2112,10 +1885,6 @@ static int mem_walk_path(MemCtx *ctx, ASTNode *body, const MemPath *entry,
   return mem_path_save(ctx, out);
 }
 
-/* Walk each arm from the same entry state and keep what they all agree on.
- * `arms` may hold NULL entries, which are arms the program did not write; the
- * path where none of them ran is the entry state itself, and it is included
- * unless `exhaustive` says one arm always runs. */
 static void mem_walk_arms(MemCtx *ctx, ASTNode **arms, size_t arm_count,
                           int exhaustive) {
   MemPath entry = {NULL, 0};
@@ -2125,8 +1894,6 @@ static void mem_walk_arms(MemCtx *ctx, ASTNode **arms, size_t arm_count,
   int have_merged = 0;
 
   if (ctx->depth > 0 || !mem_path_save(ctx, &entry)) {
-    /* Already inside a path that is being joined, or out of memory: walk the
-       arms the way they were always walked, conservatively. */
     for (i = 0; i < arm_count; i++) {
       if (!arms[i]) {
         continue;
@@ -2201,10 +1968,6 @@ static void mem_walk_return(MemCtx *ctx, ASTNode *statement) {
   mem_walk_expr(ctx, ret->value);
   if (ret->value) {
     ctx->saw_value_return = 1;
-    /* Fresh if the value is an allocation expression, or a local that
-     * holds one exclusively (the `var p = malloc(n); ...; return p;`
-     * wrapper shape). A copy kept elsewhere disqualifies it: the caller
-     * would not be the sole owner. */
     const char *via = NULL;
     MemLocal *returned_local = mem_expr_as_local(ctx, ret->value);
     int fresh = mem_is_allocation(ctx, ret->value, &via) ||
@@ -2294,7 +2057,6 @@ static void mem_walk_statement(MemCtx *ctx, ASTNode *statement) {
     }
     mem_walk_expr(ctx, assign->value);
     if (assign->target) {
-      /* store through a field/index/deref: the value escapes */
       mem_walk_expr(ctx, assign->target);
       mem_check_handover_write(ctx, assign->target, statement->location);
       MemLocal *source = mem_expr_as_local(ctx, assign->value);
@@ -2350,8 +2112,6 @@ static void mem_walk_statement(MemCtx *ctx, ASTNode *statement) {
     if (if_stmt->else_branch) {
       arms[arm_count - 1] = if_stmt->else_branch;
     }
-    /* An `else` makes one arm certain to run; without one, not running any of
-       them is a path of its own. */
     mem_walk_arms(ctx, arms, arm_count, if_stmt->else_branch != NULL);
     free(arms);
     return;
@@ -2365,8 +2125,6 @@ static void mem_walk_statement(MemCtx *ctx, ASTNode *statement) {
     ctx->in_condition++;
     mem_walk_expr(ctx, while_stmt->condition);
     ctx->in_condition--;
-    /* The body is one path and not running it is another, so what survives the
-       loop is what holds either way. */
     mem_walk_branch(ctx, while_stmt->body);
     return;
   }
@@ -2449,7 +2207,6 @@ static void mem_walk_statement(MemCtx *ctx, ASTNode *statement) {
     for (i = 0; i < match->arm_count; i++) {
       arms[i] = match->arms[i].body;
     }
-    /* A match names every variant or ends with a default, so one arm runs. */
     mem_walk_arms(ctx, arms, match->arm_count, 1);
     free(arms);
     return;
@@ -2467,8 +2224,6 @@ static void mem_walk_statement(MemCtx *ctx, ASTNode *statement) {
     return;
   }
   case AST_PROGRAM: {
-    /* a bare `{ ... }` block: a new lexical scope, but still on the spine
-     * (unconditional), so borrows recorded inside are definite */
     int block_level = ++ctx->scope_level;
     mem_walk_block(ctx, statement);
     mem_scope_exit_check(ctx, block_level);
@@ -2488,14 +2243,10 @@ static void mem_walk_statement(MemCtx *ctx, ASTNode *statement) {
   }
 }
 
-/* ---- shared walk setup ------------------------------------------------------------ */
-
 static void mem_ctx_init(MemCtx *ctx, TypeChecker *checker, ASTNode *decl,
                          FunctionDeclaration *fn, MemMode mode,
                          const MemSummaryTable *summaries,
                          MemFnSummary *collect) {
-  /* Everything except the trailing locals array; see the note on its
-   * declaration for why that one is left alone. */
   memset(ctx, 0, offsetof(MemCtx, locals));
   ctx->checker = checker;
   ctx->fn = fn;
@@ -2512,8 +2263,6 @@ static void mem_ctx_init(MemCtx *ctx, TypeChecker *checker, ASTNode *decl,
                   decl->location, (int)i);
   }
 }
-
-/* ---- phase 1 entry point ------------------------------------------------------------ */
 
 int type_checker_check_function_memory(TypeChecker *checker,
                                        ASTNode *declaration) {
@@ -2532,8 +2281,6 @@ int type_checker_check_function_memory(TypeChecker *checker,
   return ctx.had_error ? 0 : 1;
 }
 
-/* ---- phase 2: whole-program ownership inference ------------------------------------- */
-
 static int mem_decl_is_analyzable(ASTNode *decl) {
   if (!decl || decl->type != AST_FUNCTION_DECLARATION) {
     return 0;
@@ -2543,8 +2290,6 @@ static int mem_decl_is_analyzable(ASTNode *decl) {
          fn->name;
 }
 
-/* One summary-collection walk of `decl`; returns 1 when the recorded facts
- * changed (drives the fixpoint). */
 static int mem_collect_summary(TypeChecker *checker, ASTNode *decl,
                                MemSummaryTable *table, MemFnSummary *summary) {
   FunctionDeclaration *fn = (FunctionDeclaration *)decl->data;
@@ -2554,11 +2299,9 @@ static int mem_collect_summary(TypeChecker *checker, ASTNode *decl,
   mem_ctx_init(&ctx, checker, decl, fn, MEM_MODE_SUMMARY, table, summary);
   mem_walk_block(&ctx, fn->body);
 
-  /* returns_fresh: a pointer-returning function whose every value-return is
-   * a fresh allocation behaves like malloc for its callers. */
   int fresh = ctx.fn_returns_pointer && ctx.saw_value_return &&
               ctx.returns_all_fresh;
-  summary->returns_fresh |= fresh; /* monotone: only ever turns on */
+  summary->returns_fresh |= fresh;
 
   return summary->frees_definite != before.frees_definite ||
          summary->frees_maybe != before.frees_maybe ||
@@ -2576,8 +2319,6 @@ int type_checker_check_program_memory(TypeChecker *checker, ASTNode *program) {
     return 1;
   }
 
-  /* Seed the table with the C allocator externs, then one slot per
-   * analyzable function. */
   size_t capacity = prog->declaration_count + 4;
   MemFnSummary *items = calloc(capacity, sizeof(MemFnSummary));
   ASTNode **decls = calloc(capacity, sizeof(ASTNode *));
@@ -2613,7 +2354,7 @@ int type_checker_check_program_memory(TypeChecker *checker, ASTNode *program) {
     FunctionDeclaration *fn =
         (FunctionDeclaration *)prog->declarations[i]->data;
     if (mem_summary_find(&table, fn->name)) {
-      continue; /* duplicate name: first definition wins */
+      continue;
     }
     decls[table.count] = prog->declarations[i];
     items[table.count] = (MemFnSummary){fn->name, fn, 0, 0, 0, 0};
@@ -2621,8 +2362,6 @@ int type_checker_check_program_memory(TypeChecker *checker, ASTNode *program) {
     table.count++;
   }
 
-  /* Fixpoint: facts are monotone (bits only get set), so this terminates;
-   * the iteration cap is belt-and-braces. */
   for (int iteration = 0; iteration < MEM_SUMMARY_MAX_ITER; iteration++) {
     int changed = 0;
     for (size_t i = 0; i < table.count; i++) {
@@ -2635,9 +2374,6 @@ int type_checker_check_program_memory(TypeChecker *checker, ASTNode *program) {
     }
   }
 
-  /* The facts outlive this pass. IR lowering asks whether a callee gives a
-   * pointer back, which is the same question `stores` answers, and the answer
-   * is what lets a string built for one call be freed after it. */
   if (checker->borrow_facts) {
     free(checker->borrow_facts);
   }
@@ -2656,7 +2392,6 @@ int type_checker_check_program_memory(TypeChecker *checker, ASTNode *program) {
     }
   }
 
-  /* Reporting pass: summary-aware leaks and cross-call use-after-free. */
   for (size_t i = 0; i < table.count; i++) {
     if (!decls[i]) {
       continue;
@@ -2667,10 +2402,6 @@ int type_checker_check_program_memory(TypeChecker *checker, ASTNode *program) {
                  NULL);
     mem_walk_block(&ctx, fn->body);
 
-    /* Leaks: a spine allocation that was never freed (not even in a defer)
-     * and never left the function has no owner when the function returns.
-     * `main` is exempt: process exit reclaims everything, and warning
-     * about it would train people to ignore this diagnostic. */
     if (strcmp(fn->name, "main") != 0) {
       for (size_t j = 0; j < ctx.local_count; j++) {
         MemLocal *local = &ctx.locals[j];

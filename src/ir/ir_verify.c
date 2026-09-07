@@ -1,5 +1,3 @@
-/* --verify: per-pass translation validation over the reference interpreter.
- * See ir_verify.h for the contract. */
 #include "ir_verify.h"
 #include "ir_interp.h"
 #include "../common.h"
@@ -27,8 +25,6 @@
 #define IRV_MAX_QUARANTINE 256
 #define IRV_MAX_SKIP_NOTES 12
 
-/* ---------------- state ---------------- */
-
 typedef struct {
   char *function_name;
   char *pass_name;
@@ -43,9 +39,6 @@ static int g_enabled = 0;
 static IRProgram *g_program = NULL;
 static int g_active = 0;
 
-/* METTLE_VERIFY_STATS=1: accumulate where validation time goes and print a
- * breakdown with the summary. The cheap way to see whether snapshot copies,
- * before-runs, or after-runs dominate a slow --verify build. */
 static int irv_stats_enabled(void) {
   static int cached = -1;
   if (cached < 0) {
@@ -80,9 +73,6 @@ int ir_verify_divergence_count(void) { return (int)g_divergences; }
 
 int ir_verify_input_run_count(void) { return IRV_INPUT_RUNS; }
 
-/* How many input sets the most recent standalone check actually ran. The fixed
- * table plus however many boundary values were harvested, which varies per
- * function, so a caller reporting a verdict has to ask rather than assume. */
 static int g_last_input_runs = IRV_INPUT_RUNS;
 
 int ir_verify_last_input_run_count(void) { return g_last_input_runs; }
@@ -127,7 +117,7 @@ static void irv_note_skip(const IRFunction *function, const char *reason) {
   }
   for (size_t i = 0; i < g_skip_note_count; i++) {
     if (strcmp(g_skip_notes[i].function_name, function->name) == 0) {
-      return; /* one note per function */
+      return;
     }
   }
   if (g_skip_note_count >= IRV_MAX_SKIP_NOTES) {
@@ -175,21 +165,15 @@ static void irv_quarantine_add(const IRFunction *function,
   }
 }
 
-/* ---------------- snapshot / restore ---------------- */
-
 struct IRVerifySnapshot {
   IRInstruction *instructions;
   size_t instruction_count;
-  /* Owned by the take-cache below, not the caller: snapshot_free is a no-op
-   * for these; the cache frees them on replacement or program end. */
   int cache_owned;
 };
 
 static int irv_instruction_deep_copy(IRInstruction *dst,
                                      const IRInstruction *src) {
   *dst = *src;
-  /* Detach the aliased tensor block the shallow copy brought over, then take our
-   * own: this snapshot is freed independently of the instruction it copies. */
   dst->tensor = NULL;
   if (!ir_instruction_tensor_copy(dst, src)) {
     return 0;
@@ -239,13 +223,6 @@ static void irv_instructions_free(IRInstruction *instructions, size_t count) {
 
 static IRVerifySnapshot *irv_snapshot_capture_inner(IRFunction *function);
 
-/* Take-cache: the pass driver snapshots a function before EVERY pass it
- * runs, but the vast majority of pass applications change nothing, so the
- * function's IR still matches the last snapshot exactly. Reusing it saves
- * the deep copy (thousands of small mallocs) and the matching frees. The
- * validity check is a full content comparison against the live IR - no
- * invalidation protocol to get wrong, and mutations that bypass the driver
- * (the inliner, ml-opt) are caught by the comparison itself. */
 static struct {
   const IRFunction *fn;
   IRVerifySnapshot *snap;
@@ -394,14 +371,12 @@ static IRVerifySnapshot *irv_snapshot_capture_inner(IRFunction *function) {
 
 void ir_verify_snapshot_free(IRVerifySnapshot *snapshot) {
   if (!snapshot || snapshot->cache_owned) {
-    return; /* the take-cache owns it; freed on replacement / program end */
+    return;
   }
   irv_instructions_free(snapshot->instructions, snapshot->instruction_count);
   free(snapshot);
 }
 
-/* Replace the function's instruction stream with a deep copy of the
- * snapshot's. */
 static int irv_restore(IRFunction *function, const IRVerifySnapshot *snapshot) {
   IRInstruction *copy = (IRInstruction *)calloc(snapshot->instruction_count,
                                                 sizeof(IRInstruction));
@@ -433,8 +408,6 @@ int ir_verify_snapshot_restore(IRFunction *function,
   return irv_restore(function, snapshot);
 }
 
-/* ---------------- input generation ---------------- */
-
 typedef enum {
   IRV_PARAM_INT,
   IRV_PARAM_FLOAT,
@@ -448,8 +421,8 @@ typedef enum {
 
 typedef struct {
   IRVParamKind kind;
-  int elem_size;   /* buffers: pointee element size */
-  int elem_float;  /* buffers: pointee is float */
+  int elem_size;
+  int elem_float;
   const char *type_name;
 } IRVParamInfo;
 
@@ -520,24 +493,18 @@ static IRVParamInfo irv_classify_param(const IRProgram *program,
       info.elem_float = 0;
       return info;
     }
-    return info; /* pointer to pointer: unsupported */
+    return info;
   }
   if (strcmp(type, "float32") == 0 || strcmp(type, "float64") == 0) {
     info.kind = IRV_PARAM_FLOAT;
     return info;
   }
   if (strcmp(type, "string") == 0) {
-    /* A string arrives as the address of its 16-byte {chars, length} record,
-     * which is what the lowering emits and what `*@s [8]` / `*(@s+8) [8]`
-     * read. Both the record and the bytes it points at are registered
-     * buffers, so a rewrite that disturbs either one diverges. */
     info.kind = IRV_PARAM_STRING;
     info.elem_size = 1;
     return info;
   }
   if (strcmp(type, "cstring") == 0 || strcmp(type, "rawptr") == 0) {
-    /* A rawptr addresses bytes it does not name; the harness generates and
-     * compares the same byte buffer it does for a cstring. */
     info.kind = IRV_PARAM_CSTRING;
     info.elem_size = 1;
     return info;
@@ -558,12 +525,6 @@ static unsigned int irv_lcg_next(unsigned int *state) {
   return *state;
 }
 
-/* Per-run buffer element counts and integer argument tables. Small ints keep
- * length-like parameters within buffer bounds; run 2 probes negatives; runs
- * 3-5 probe index-pair relationships ((0, N-1) spans, mid-range pairs, large
- * magnitudes) so loops whose trip count depends on how two arguments relate
- * (sift_down(start, end)-shaped code) actually execute their bodies. Run 3
- * caught a real escape the first three runs validated. */
 static const long long IRV_BUFFER_ELEMS[IRV_INPUT_RUNS] = {33, 7, 16,
                                                            33, 32, 24};
 static long long irv_int_arg(int run, size_t param_index) {
@@ -587,8 +548,6 @@ static double irv_float_arg(int run, size_t param_index) {
   }
 }
 
-/* Build one machine for the run, registering identical buffers and argument
- * values. Returns 0 on setup failure. */
 static int irv_render_signature(char *out, size_t cap, const char *const *params,
                                 size_t param_count, const char *ret) {
   size_t off = 0;
@@ -680,9 +639,6 @@ static int irv_setup_machine(IRInterpMachine *machine, IRFunction *shape,
   for (size_t p = 0; p < param_count; p++) {
     switch (params[p].kind) {
     case IRV_PARAM_INT:
-      /* On a harvested run every integer parameter carries the boundary
-       * value: which parameter the comparison reads is not recorded, so
-       * setting all of them is what reaches it. */
       args[p].i = harvested_values ? harvested_values[p] : irv_int_arg(run, p);
       args[p].f = 0;
       args[p].is_float = 0;
@@ -696,7 +652,6 @@ static int irv_setup_machine(IRInterpMachine *machine, IRFunction *shape,
       args[p].is_float = 1;
       break;
     case IRV_PARAM_CSTRING: {
-      /* Deterministic printable text with a hard NUL terminator. */
       long long len = 9 + (long long)run * 4 + (long long)p;
       unsigned char *text = (unsigned char *)malloc((size_t)len + 1);
       if (!text) {
@@ -765,12 +720,6 @@ static int irv_setup_machine(IRInterpMachine *machine, IRFunction *shape,
       }
       unsigned int seed = 0x2545F491u ^ (unsigned int)(p * 7919u) ^
                           (unsigned int)(run * 104729u);
-      /* Most runs keep every field small, so a field used as a length or an
-       * index stays inside the buffers beside it and the run stays usable. The
-       * last two spend that and set the high bits instead: a narrow signed
-       * field only reads differently from an unsigned one once bit 7 or bit 15
-       * is set, and while every run stayed under 24 no seeded input could tell
-       * sign extension from zero extension. */
       int wide = run >= IRV_INPUT_RUNS - 2;
       for (long long b = 0; b < bytes; b++) {
         init[b] = wide ? (unsigned char)(irv_lcg_next(&seed) >> 13)
@@ -828,8 +777,6 @@ static int irv_setup_machine(IRInterpMachine *machine, IRFunction *shape,
   return 1;
 }
 
-/* ---------------- observation comparison ---------------- */
-
 static int irv_float_close(double a, double b) {
   if (a == b) {
     return 1;
@@ -841,17 +788,6 @@ static int irv_float_close(double a, double b) {
   return fabs(a - b) <= 1e-9 + 1e-6 * mag;
 }
 
-/* A pass whose result is deliberately not bit-identical. The vectorized SiLU
- * and exp kernels compute in float32 lanes where the scalar loop carried a
- * float64 intermediate, so the last mantissa bit can differ; demanding an
- * exact match quarantined them on every function that used them, which
- * silently dropped an optimization the programmer asked for with `@simd`.
- * Such a pass declares the element type it writes, and its buffers are then
- * compared as numbers, with the same tolerance scalar observations already
- * use. Nothing else relaxes: a buffer whose element type is not declared here
- * stays byte-exact, and a real miscompile in one of these kernels (applying
- * the function twice, the bug the tail test was written for, is a ~57%%
- * error) is orders of magnitude outside the tolerance. */
 typedef struct {
   const char *pass;
   int elem_bytes;
@@ -875,8 +811,6 @@ static int irv_pass_elem_bytes(const char *pass_name) {
   return 0;
 }
 
-/* Every float32 lane within tolerance. On failure `at` names the byte offset
- * of the first lane that is not, so the report reads like the byte one. */
 static int irv_buffers_close_f32(const unsigned char *a, const unsigned char *b,
                                  long long size, long long *at) {
   if (size % 4 != 0) {
@@ -936,10 +870,6 @@ static int irv_pointees_agree(IRInterpMachine *before, IRInterpMachine *after,
   return memcmp(wa, wb, (size_t)na) == 0;
 }
 
-/* Every input buffer, byte for byte. A run that hands one back to the OS
- * (munmap, VirtualFree) releases the bytes with it, so a released buffer reads
- * as absent: two runs that both released it agree, and only one of them doing
- * so is the divergence. */
 static int irv_input_buffers_agree(IRInterpMachine *before,
                                    IRInterpMachine *after,
                                    size_t input_buffer_count, int elem_bytes,
@@ -991,8 +921,6 @@ static int irv_input_buffers_agree(IRInterpMachine *before,
   return 1;
 }
 
-/* Compare all observations of two completed runs. On mismatch, writes a
- * one-line description into `why` and returns 0. */
 static int irv_compare_observations(IRInterpMachine *before,
                                     IRInterpMachine *after,
                                     const IRInterpValue *ret_before,
@@ -1017,12 +945,9 @@ static int irv_compare_observations(IRInterpMachine *before,
     return 0;
   }
 
-
-  /* Extern-call trace: deletion, duplication, or reordering is a divergence. */
   size_t trace_a = ir_interp_extern_trace_count(before);
   size_t trace_b = ir_interp_extern_trace_count(after);
   if (trace_a != trace_b) {
-    /* Name the first call present in one trace but not the other. */
     size_t common = trace_a < trace_b ? trace_a : trace_b;
     size_t at = 0;
     while (at < common &&
@@ -1053,12 +978,6 @@ static int irv_compare_observations(IRInterpMachine *before,
       return 0;
     }
     for (size_t j = 0; j < a->arg_count; j++) {
-      /* An address is not an observation. A pass that changes how many
-       * objects a function builds moves every later allocation, so the
-       * pointer an extern receives differs while everything it can read
-       * through that pointer is identical -- which the byte comparison below
-       * is what actually checks. Comparing the numbers too reported SROA as a
-       * miscompile for splitting an unrelated struct. */
       if (!a->arg_is_pointer[j] && !b->arg_is_pointer[j] &&
           !irv_value_equal(&a->args[j], &b->args[j])) {
         snprintf(why, why_capacity, "extern call %zu (%s) argument %zu differs",
@@ -1071,8 +990,6 @@ static int irv_compare_observations(IRInterpMachine *before,
                  j, a->arg_is_pointer[j] ? "stopped being" : "became");
         return 0;
       }
-      /* Pointer arguments: the extern reads memory, so the bytes the pointer
-       * addressed at call time are part of the observation. */
       if (a->arg_mem_len[j] != b->arg_mem_len[j]) {
         snprintf(why, why_capacity,
                  "extern call %zu (%s) argument %zu addresses %u bytes, now %u",
@@ -1096,7 +1013,6 @@ static int irv_compare_observations(IRInterpMachine *before,
     }
   }
 
-  /* Globals: union of names; a missing entry reads as untouched zero. */
   size_t global_capacity = ir_interp_global_count(before);
   for (size_t i = 0; i < global_capacity; i++) {
     const char *name = ir_interp_global_name(before, i);
@@ -1128,8 +1044,6 @@ static int irv_compare_observations(IRInterpMachine *before,
   return 1;
 }
 
-/* ---------------- sabotage self-test ---------------- */
-
 void ir_verify_maybe_sabotage(IRFunction *function, const char *pass_name,
                               int *changed) {
   if (!g_active || g_sabotage_fired || !function || !pass_name) {
@@ -1157,8 +1071,6 @@ void ir_verify_maybe_sabotage(IRFunction *function, const char *pass_name,
   if (strcmp(pass_part, pass_name) != 0) {
     return;
   }
-  /* Corrupt the first additive BINARY constant we can find: `x = a + 7`
-   * becomes `x = a + 8` - exactly the shape of a real constant-folding bug. */
   for (size_t i = 0; i < function->instruction_count; i++) {
     IRInstruction *insn = &function->instructions[i];
     if (insn->op == IR_OP_BINARY && insn->text && !insn->is_float &&
@@ -1175,17 +1087,12 @@ void ir_verify_maybe_sabotage(IRFunction *function, const char *pass_name,
   }
 }
 
-/* ---------------- the check ---------------- */
-
 typedef enum {
   IRV_RUN_OK,
-  IRV_RUN_GUARD_TRAP,  /* clean runtime-guard abort (mettle_crash_trap*) */
-  IRV_RUN_TRAP,        /* semantic trap: divide by zero, use after free */
-  IRV_RUN_RESOURCE,    /* the interpreter ran out, not the program: step fuel
-                          or call depth. A pass that inlines a call or peels
-                          an iteration moves both, so the two sides disagreeing
-                          says nothing about the program. */
-  IRV_RUN_UNVERIFIABLE /* unsupported construct: give up on the function */
+  IRV_RUN_GUARD_TRAP,
+  IRV_RUN_TRAP,
+  IRV_RUN_RESOURCE,
+  IRV_RUN_UNVERIFIABLE
 } IRVRunOutcome;
 
 static IRVRunOutcome irv_run_one(IRInterpMachine *machine, IRFunction *fn,
@@ -1213,7 +1120,6 @@ static IRVRunOutcome irv_run_one(IRInterpMachine *machine, IRFunction *fn,
   }
 }
 
-/* Format the diverging call as `fn(5, 8, <buf:33 elems>)`. */
 static void irv_format_call(const IRFunction *function,
                             const IRVParamInfo *params,
                             const IRInterpValue *args, size_t arg_count,
@@ -1257,24 +1163,12 @@ typedef enum {
 } IRVCheckOutcome;
 
 typedef struct {
-  char why[192];         /* DIVERGED: divergence description */
-  char cex[288];         /* DIVERGED: formatted counterexample call */
-  char skip_reason[160]; /* UNVERIFIABLE / NO_INPUT: what blocked the check */
-  int run;               /* DIVERGED: diverging input set */
+  char why[192];
+  char cex[288];
+  char skip_reason[160];
+  int run;
 } IRVCheckResult;
 
-/* The policy-free differential check: run `function` (after) against the
- * snapshot's instructions (before) on generated inputs and compare every
- * observation. No counters, no quarantine, no restore, no printing - both
- * the --verify pass driver and the --ml-opt rewrite gate wrap this. */
-/* Extra input runs built from the constants a function actually compares
- * against. The fixed table probes shapes (buffer spans, index pairs, negative
- * values); it does not know that a function branches at 100, so an off-by-one
- * at that boundary survives every run. Harvesting the constants and testing on
- * either side of each one closes the gap the table structurally cannot.
- *
- * Bounded on purpose: this is differential testing, and its cost is paid on
- * every check that uses it. */
 #define IRV_MAX_HARVESTED 6
 #define IRV_MAX_HARVEST_VALUES 48
 
@@ -1370,9 +1264,6 @@ static void irv_harvest_stream(const IRInstruction *instructions, size_t count,
                                IRVHarvest *h, int *distinct) {
   for (size_t i = 0; i < count && *distinct < IRV_MAX_HARVESTED; i++) {
     const IRInstruction *in = &instructions[i];
-    /* Only comparisons and branches: a constant a function is *tested*
-     * against is a boundary. Constants it merely computes with are not, and
-     * harvesting those would spend runs without probing anything. */
     if (in->op != IR_OP_BINARY && in->op != IR_OP_BRANCH_ZERO &&
         in->op != IR_OP_BRANCH_EQ) {
       continue;
@@ -1383,15 +1274,11 @@ static void irv_harvest_stream(const IRInstruction *instructions, size_t count,
         continue;
       }
       long long c = sides[s]->int_value;
-      /* 0 and 1 are already covered by the fixed table; spending harvested
-       * runs on them buys nothing. */
       if (c == 0 || c == 1) {
         continue;
       }
       int before = h->count;
       irv_harvest_push(h, c);
-      /* The value itself and one past it: an off-by-one at a boundary shows
-       * as a disagreement between exactly these two. */
       irv_harvest_push(h, c + 1);
       if (h->count != before) {
         (*distinct)++;
@@ -1456,7 +1343,6 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
     *guard_hits = 0;
   }
 
-  /* Classify parameters; bail early on unverifiable signatures. */
   size_t param_count = function->parameter_count;
   IRVParamInfo params[IRV_MAX_PARAMS];
   if (param_count > IRV_MAX_PARAMS) {
@@ -1478,7 +1364,6 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
     }
   }
 
-  /* Rebuild a callable BEFORE function around the snapshot's instructions. */
   IRFunction before_fn;
   memset(&before_fn, 0, sizeof(before_fn));
   before_fn.name = function->name;
@@ -1506,8 +1391,6 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
 
     IRInterpValue args_before[IRV_MAX_PARAMS] = {{0}};
     IRInterpValue args_after[IRV_MAX_PARAMS] = {{0}};
-    /* Runs past the fixed table carry a harvested boundary value; the buffer
-     * shape stays on the table's cycle so lengths remain in range. */
     long long boundary_values[IRV_MAX_PARAMS];
     const long long *boundary = NULL;
     int probe_ordinal = -1;
@@ -1570,9 +1453,6 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
       return IRV_CHECK_UNVERIFIABLE;
     }
 
-    /* A program that cleanly guard-traps on both sides is equivalent: the
-     * exact crash point of a runtime check may shift under optimization,
-     * like any debug-checks build. */
     if (outcome_before == IRV_RUN_GUARD_TRAP &&
         outcome_after == IRV_RUN_GUARD_TRAP) {
       usable_inputs++;
@@ -1580,8 +1460,6 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
       ir_interp_destroy(machine_after);
       continue;
     }
-    /* Exactly one side guard-trapped while the other finished: the pass
-     * made a working program crash (or a crashing program succeed). */
     if ((outcome_before == IRV_RUN_GUARD_TRAP && outcome_after == IRV_RUN_OK) ||
         (outcome_before == IRV_RUN_OK && outcome_after == IRV_RUN_GUARD_TRAP)) {
       snprintf(result->why, sizeof(result->why), "%s (%s)",
@@ -1594,12 +1472,6 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
     }
 
     if (outcome_before != IRV_RUN_OK || outcome_after != IRV_RUN_OK) {
-      /* One side trapped or ran out. Same fate on both sides means the input
-       * is unusable; a trap on one side only is itself a divergence (a pass
-       * must not add or remove traps). Running the interpreter out of fuel or
-       * call depth is not a fate the program chose, so it never counts.
-       * Neither does an out-of-bounds access: the generated inputs put those
-       * there, and which side notices first is not the pass's doing. */
       int trap_before = outcome_before == IRV_RUN_TRAP &&
                         strstr(detail_before, "out of bounds") == NULL;
       int trap_after = outcome_after == IRV_RUN_TRAP &&
@@ -1690,7 +1562,7 @@ int ir_verify_check_pass(IRFunction *function, IRVerifySnapshot *snapshot,
     return 1;
   }
   if (!changed || !*changed) {
-    return 1; /* nothing to validate */
+    return 1;
   }
 
   g_apps_checked++;
@@ -1764,11 +1636,6 @@ IRVerifyRewriteVerdict ir_verify_check_rewrite_probed(
     return IR_VERIFY_REWRITE_UNVERIFIABLE;
   }
 
-  /* The standalone gate compares two different functions, where a boundary
-   * one of them moved is exactly the interesting case. The per-pass --verify
-   * path deliberately does not harvest: it compares one function across a
-   * transformation, its table is tuned for that, and every build pays its
-   * cost. */
   IRVHarvest harvest;
   memset(&harvest, 0, sizeof(harvest));
   int distinct = 0;

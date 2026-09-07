@@ -1,41 +1,12 @@
-/* IR -> SPIR-V binary emitter (OpenCL 2.0 environment). See spirv_emitter.h.
- *
- * SPIR-V sibling of ptx_emitter.c. Two things make SPIR-V different from PTX:
- *
- *  1. It is a *binary* word stream (little-endian 32-bit words), laid out in a
- *     fixed section order (capabilities, ext-imports, memory model, entry
- *     points, decorations, types+constants+globals, then function bodies). We
- *     buffer each section separately and concatenate at the end, so emission
- *     order need not match layout order.
- *
- *  2. Control flow maps DIRECTLY: the IR's label/branch stream is cut into
- *     basic blocks and each becomes one SPIR-V block -- IR_OP_JUMP is OpBranch,
- *     IR_OP_BRANCH_ZERO/_EQ are OpBranchConditional, IR_OP_RETURN is OpReturn.
- *     SPIR-V's structured-control-flow rules (OpSelectionMerge/OpLoopMerge)
- *     are mandated only by the Shader capability; Kernel (OpenCL) modules may
- *     branch freely, exactly like PTX `bra` -- spirv-val --target-env opencl2.0
- *     accepts arbitrary unstructured branches and back-edges. Every IR value
- *     lives in a Function-storage variable (reg2mem) so there are never
- *     cross-block SSA references (no OpPhi); a driver's SPIR-V consumer
- *     promotes them back to registers.
- *
- * Pointers follow the PTX model: a kernel pointer parameter keeps its neutral
- * global/workgroup address space, is immediately OpConvertPtrToU'd to a 64-bit
- * integer that all arithmetic runs on, then OpConvertUToPtr'd back to the same
- * typed storage-class pointer at each access. Legacy/generic kernel pointers
- * use CrossWorkgroup in the current OpenCL 2.0 ABI. This needs the Addresses capability
- * and matches the IR, whose address arithmetic is already integer ops. */
 #include "spirv_emitter.h"
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- SPIR-V constants (from the core spec / OpenCL env) ---- */
 #define SPV_MAGIC 0x07230203u
 #define SPV_VERSION_1_0 0x00010000u
 
-/* opcodes */
 enum {
   Op_Extension = 10,
   Op_ExtInstImport = 11,
@@ -140,7 +111,6 @@ enum {
   Op_ReturnValue = 254
 };
 
-/* capabilities */
 enum {
   Cap_Addresses = 4,
   Cap_Kernel = 6,
@@ -155,7 +125,6 @@ enum {
   Cap_SubgroupVoteKHR = 4431
 };
 
-/* storage classes */
 enum {
   SC_UniformConstant = 0,
   SC_Input = 1,
@@ -165,7 +134,6 @@ enum {
   SC_Function = 7
 };
 
-/* misc enums */
 enum { AddrModel_Physical64 = 2, MemModel_OpenCL = 2, ExecModel_Kernel = 6 };
 enum { Decoration_BuiltIn = 11 };
 enum { MemAccess_Aligned = 2 };
@@ -176,7 +144,6 @@ enum {
   Scope_Subgroup = 3,
   Scope_Invocation = 4
 };
-/* SequentiallyConsistent(0x10) | WorkgroupMemory(0x100) */
 enum {
   Sem_None = 0,
   Sem_Acquire = 0x2,
@@ -189,7 +156,6 @@ enum {
   Sem_WorkgroupBarrier = 0x110
 };
 
-/* BuiltIn ids */
 enum {
   BI_NumWorkgroups = 24,
   BI_WorkgroupSize = 25,
@@ -199,7 +165,6 @@ enum {
   BI_SubgroupLocalInvocationId = 41
 };
 
-/* OpenCL.std extended instruction numbers */
 enum {
   CL_cos = 14,
   CL_exp = 19,
@@ -210,7 +175,6 @@ enum {
   CL_sqrt = 61
 };
 
-/* ---- growable word buffer ---- */
 typedef struct {
   uint32_t *data;
   size_t len, cap;
@@ -230,7 +194,7 @@ static void wb_free(Wb *w) {
 }
 static void wb_str(Wb *w, const char *s) {
   size_t len = strlen(s);
-  size_t nwords = len / 4 + 1; /* room for the terminating NUL + zero pad */
+  size_t nwords = len / 4 + 1;
   for (size_t i = 0; i < nwords; i++) {
     uint32_t word = 0;
     for (int b = 0; b < 4; b++) {
@@ -241,14 +205,12 @@ static void wb_str(Wb *w, const char *s) {
     wb_push(w, word);
   }
 }
-/* emit an instruction whose operands are already in `ops` */
 static void emit_ops(Wb *sec, uint16_t opcode, const Wb *ops) {
   wb_push(sec, ((uint32_t)(ops->len + 1) << 16) | opcode);
   for (size_t i = 0; i < ops->len; i++) {
     wb_push(sec, ops->data[i]);
   }
 }
-/* emit an instruction with up to 16 fixed operands passed as unsigned ints */
 static void emitv(Wb *sec, uint16_t opcode, size_t nops, ...) {
   uint32_t tmp[16];
   va_list ap;
@@ -263,7 +225,6 @@ static void emitv(Wb *sec, uint16_t opcode, size_t nops, ...) {
   }
 }
 
-/* ---- interning cache ---- */
 typedef struct {
   char *key;
   uint32_t id;
@@ -273,14 +234,14 @@ typedef struct {
   Wb caps, extimports, memmodel, entrypoints, execmodes, decorations,
       typesconsts, functions;
   uint32_t next_id;
-  CacheEnt *cache; /* types + constants + pointer types, keyed by string */
+  CacheEnt *cache;
   size_t ncache, capcache;
   uint32_t opencl_ext;
-  uint32_t builtin_var[64]; /* BuiltIn id -> Input variable id (0 = none yet) */
+  uint32_t builtin_var[64];
   int use_int8, use_int16, use_float16, use_float64, use_atomics64;
   int use_subgroups, use_subgroup_ballot, use_subgroup_vote;
   IRProgram *program;
-  uint32_t *device_function_ids; /* indexed like program->functions */
+  uint32_t *device_function_ids;
   uint64_t *function_builtin_masks;
   char *error;
 } SpvMod;
@@ -317,7 +278,6 @@ static void cache_put(SpvMod *m, const char *key, uint32_t id) {
   m->ncache++;
 }
 
-/* ---- types ---- */
 static uint32_t type_void(SpvMod *m) {
   uint32_t id = cache_get(m, "void");
   if (id) return id;
@@ -334,8 +294,6 @@ static uint32_t type_int(SpvMod *m, int width) {
   if (width == 8) m->use_int8 = 1;
   if (width == 16) m->use_int16 = 1;
   id = new_id(m);
-  /* OpenCL environment: OpTypeInt signedness must be 0 (signed vs unsigned is
-   * expressed by the operations, e.g. OpSDiv vs OpUDiv). */
   emitv(&m->typesconsts, Op_TypeInt, 3, id, (unsigned)width, 0u);
   cache_put(m, key, id);
   return id;
@@ -389,7 +347,6 @@ static uint32_t type_vec4_uint(SpvMod *m) {
   return id;
 }
 
-/* map an MtlcTypeKind to (width, is-float) */
 static int kind_is_float(MtlcTypeKind k) {
   return k == MTLC_TYPE_FLOAT32 || k == MTLC_TYPE_FLOAT64;
 }
@@ -423,7 +380,7 @@ static int kind_bits(MtlcTypeKind k) {
   case MTLC_TYPE_FLOAT32:
     return 32;
   default:
-    return 64; /* int64/uint64/float64/pointer/array/string/funcptr */
+    return 64;
   }
 }
 static uint32_t kind_type(SpvMod *m, MtlcTypeKind k) {
@@ -447,7 +404,6 @@ static uint32_t kind_type(SpvMod *m, MtlcTypeKind k) {
   }
 }
 
-/* ---- constants ---- */
 static uint32_t const_u32(SpvMod *m, uint32_t v) {
   char key[32];
   snprintf(key, sizeof(key), "cu32:%u", v);
@@ -480,9 +436,6 @@ static uint32_t const_scalar_int(SpvMod *m, MtlcTypeKind k, long long v) {
   id = new_id(m);
   if (bits <= 32) {
     uint32_t literal = (uint32_t)v;
-    /* OpenCL integer types use Signedness=0 even for language-signed values.
-     * SPIR-V therefore requires unused high bits of 8/16-bit literals to be
-     * zero; arithmetic instructions supply signed interpretation later. */
     if (bits < 32) literal &= (1u << bits) - 1u;
     emitv(&m->typesconsts, Op_Constant, 3, t, id, (unsigned)literal);
   } else {
@@ -530,7 +483,6 @@ static uint32_t const_float(SpvMod *m, MtlcTypeKind k, double v) {
   }
 }
 
-/* ---- BuiltIn Input variables ---- */
 static int builtin_is_subgroup_scalar(int builtin) {
   return builtin == BI_SubgroupSize ||
          builtin == BI_SubgroupLocalInvocationId;
@@ -552,9 +504,6 @@ static uint32_t builtin_var(SpvMod *m, int builtin) {
   return id;
 }
 
-/* ============================ value model ============================ */
-/* A value descriptor, mirroring the PTX PtxVal (class/ptr/elem). Pointers are
- * carried as 64-bit integers; is_ptr/elem remember the pointee for load/store. */
 typedef struct {
   MtlcTypeKind kind;
   int is_unsigned;
@@ -566,9 +515,7 @@ typedef struct {
 typedef struct {
   char *name;
   SpvDesc d;
-  uint32_t var_id; /* OpVariable (Function ptr to kind_type(d.kind)) */
-  /* Non-zero for a record local: `var_id` holds the address of a separate
-   * byte-array OpVariable of this size rather than a scalar value. */
+  uint32_t var_id;
   uint32_t record_bytes;
   uint32_t record_storage;
 } SpvBind;
@@ -603,8 +550,6 @@ static SpvBind *add_bind(SpvFn *fn, const char *name, SpvDesc d) {
     fn->binds = realloc(fn->binds, fn->capbinds * sizeof(SpvBind));
   }
   b = &fn->binds[fn->nbinds++];
-  /* realloc hands back uninitialized bytes, so every field is written here.
-   * A stale record size would conjure storage for a scalar. */
   memset(b, 0, sizeof(*b));
   b->name = strdup(name);
   b->d = d;
@@ -622,7 +567,6 @@ static void track_builtin(SpvFn *fn, int builtin, uint32_t var) {
   }
 }
 
-/* ---- type-name parsing (no symbol table), same rules as the PTX backend ---- */
 static MtlcTypeKind base_kind_from_name(const char *s, int *is_unsigned) {
   *is_unsigned = (strstr(s, "uint") != NULL || strstr(s, "bool") != NULL);
   if (strstr(s, "float32") || strstr(s, "f32")) return MTLC_TYPE_FLOAT32;
@@ -687,8 +631,6 @@ static SpvDesc desc_from_type(const MtlcType *type) {
   return v;
 }
 
-/* A record has no scalar form here either: it lives in a Function-storage byte
- * array and every access goes through its address. */
 static int spv_type_is_aggregate(const MtlcType *type) {
   return type && (type->kind == MTLC_TYPE_STRUCT ||
                   type->kind == MTLC_TYPE_ARRAY ||
@@ -710,14 +652,9 @@ static int spv_storage_class(MtlcAddressSpace address_space) {
   case MTLC_ADDRESS_SPACE_DEFAULT:
   case MTLC_ADDRESS_SPACE_GENERIC:
   case MTLC_ADDRESS_SPACE_GLOBAL:
-    /* The current ABI conservatively represents generic and legacy kernel
-     * pointers as global pointers instead of requiring GenericPointer. */
     return SC_CrossWorkgroup;
   case MTLC_ADDRESS_SPACE_WORKGROUP: return SC_Workgroup;
   case MTLC_ADDRESS_SPACE_CONSTANT: return SC_UniformConstant;
-  /* Mettle `private` storage is per invocation and has function lifetime.
-   * SPIR-V's Private storage class is module scope; using it for a local array
-   * is invalid in the OpenCL environment. */
   case MTLC_ADDRESS_SPACE_PRIVATE: return SC_Function;
   }
   return -1;
@@ -741,7 +678,6 @@ static SpvDesc operand_desc(SpvFn *fn, const IROperand *op) {
   return v;
 }
 
-/* ---- intrinsics classification (shared by pre-pass and body) ---- */
 static int sreg_component(MtlcIntrinsic intrinsic, int *builtin) {
   switch (intrinsic) {
   case MTLC_INTRINSIC_GPU_LOCAL_ID_X: *builtin = BI_LocalInvocationId; return 0;
@@ -974,7 +910,6 @@ static int is_compare_op(const char *t) {
          !strcmp(t, ">=") || !strcmp(t, "==") || !strcmp(t, "!=");
 }
 
-/* dominant result kind of a binary op (mirrors PTX emit_binary result class) */
 static SpvDesc binary_result_desc(SpvFn *fn, const IRInstruction *in) {
   const char *t = in->text ? in->text : "+";
   SpvDesc la = operand_desc(fn, &in->lhs), ra = operand_desc(fn, &in->rhs);
@@ -1006,7 +941,6 @@ static SpvDesc binary_result_desc(SpvFn *fn, const IRInstruction *in) {
   return dv;
 }
 
-/* result descriptor of any instruction that defines dest.name */
 static SpvDesc result_desc(SpvFn *fn, const IRInstruction *in) {
   switch (in->op) {
   case IR_OP_BINARY:
@@ -1056,9 +990,6 @@ static SpvDesc result_desc(SpvFn *fn, const IRInstruction *in) {
   }
 }
 
-/* ---- conversions ---- */
-/* convert value `id` of kind `from` to kind `to`; returns a new id (or the same
- * id when the representation is identical, e.g. int32 vs uint32). */
 static uint32_t convert(SpvFn *fn, uint32_t id, MtlcTypeKind from, int from_uns,
                         MtlcTypeKind to) {
   SpvMod *m = fn->m;
@@ -1083,8 +1014,6 @@ static uint32_t convert(SpvFn *fn, uint32_t id, MtlcTypeKind from, int from_uns,
   return r;
 }
 
-/* Resolve an operand to a value id of kind `want`, materializing immediates and
- * inserting conversions (loads named values from their variables). */
 static uint32_t materialize(SpvFn *fn, const IROperand *op, MtlcTypeKind want) {
   SpvMod *m = fn->m;
   if (op->kind == IR_OPERAND_INT) {
@@ -1115,7 +1044,6 @@ static void store_name(SpvFn *fn, const char *name, uint32_t value) {
   emitv(&fn->m->functions, Op_Store, 2, b->var_id, value);
 }
 
-/* ---- load/store through a computed pointer (carried as int64) ---- */
 static MtlcTypeKind load_store_elem(SpvFn *fn, const IROperand *addr,
                                     const IRInstruction *in) {
   SpvDesc a = operand_desc(fn, addr);
@@ -1201,7 +1129,6 @@ static void emit_async_copy(SpvFn *fn, const IRInstruction *in) {
   }
 }
 
-/* ============================ op lowering ============================ */
 static void emit_binary(SpvFn *fn, const IRInstruction *in) {
   SpvMod *m = fn->m;
   const char *t = in->text ? in->text : "+";
@@ -1241,7 +1168,6 @@ static void emit_binary(SpvFn *fn, const IRInstruction *in) {
     uint32_t bt = type_bool(m);
     uint32_t cond = new_id(m);
     emitv(&m->functions, op, 4, bt, cond, a, b);
-    /* materialize the boolean as a 0/1 int32 result (matches PTX selp) */
     uint32_t i32 = type_int(m, 32);
     uint32_t one = const_scalar_int(m, MTLC_TYPE_INT32, 1);
     uint32_t zero = const_scalar_int(m, MTLC_TYPE_INT32, 0);
@@ -1430,8 +1356,6 @@ static void emit_call(SpvFn *fn, const IRInstruction *in) {
     emitv(&m->functions, Op_SubgroupBallotKHR, 3,
           v4u32, ballot, predicate);
     emitv(&m->functions, Op_ULessThan, 4, bt, valid, word, four);
-    /* Vector extraction is undefined for an out-of-range index. Select zero
-     * before extraction and then zero the observable result for word >= 4. */
     emitv(&m->functions, Op_Select, 5, u32, safe_word, valid, word, zero);
     emitv(&m->functions, Op_VectorExtractDynamic, 4,
           u32, extracted, ballot, safe_word);
@@ -1504,8 +1428,6 @@ static void emit_call(SpvFn *fn, const IRInstruction *in) {
     uint32_t result = new_id(m);
     uint32_t scope = const_u32(m, Scope_Subgroup);
     m->use_subgroups = 1;
-    /* GroupOperation is a literal: Reduce=0, InclusiveScan=1,
-     * ExclusiveScan=2. */
     emitv(&m->functions, opcode, 5, result_type, result, scope,
           group_operation, value);
     if (in->dest.name) store_name(fn, in->dest.name, result);
@@ -1518,8 +1440,6 @@ static void emit_call(SpvFn *fn, const IRInstruction *in) {
   }
   if (intrinsic == MTLC_INTRINSIC_GPU_F16_BITS_TO_F32 &&
       in->argument_count >= 1) {
-    /* reinterpret a uint16 fp16 bit-pattern (arrives zero-extended in an int)
-     * as float32: truncate to 16 bits, bitcast to half, convert to float. */
     uint32_t a = materialize(fn, &in->arguments[0], MTLC_TYPE_UINT32);
     uint32_t i16 = type_int(m, 16);
     uint32_t h = type_float(m, 16);
@@ -1569,9 +1489,6 @@ static void emit_call(SpvFn *fn, const IRInstruction *in) {
   if ((intrinsic == MTLC_INTRINSIC_GPU_DP4A_U32 ||
        intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32) &&
       in->argument_count >= 3) {
-    /* No portable SPIR-V 1.0/OpenCL dot-product capability: replay the exact
-     * semantics as four byte extractions, multiplies, and adds. Unsigned bytes
-     * mask; signed bytes sign-extend via shift-left + arithmetic shift-right. */
     int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32;
     MtlcTypeKind kind = is_signed ? MTLC_TYPE_INT32 : MTLC_TYPE_UINT32;
     uint32_t a = materialize(fn, &in->arguments[0], kind);
@@ -1618,8 +1535,6 @@ static void emit_call(SpvFn *fn, const IRInstruction *in) {
        intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
        intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32) &&
       in->argument_count >= 3) {
-    /* No portable SPIR-V mixed-width dot product: replay the exact semantics.
-     * Two 16-bit halves of a against the low or high byte pair of b. */
     int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_S32 ||
                     intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32;
     int is_high = intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
@@ -1675,9 +1590,6 @@ static void emit_call(SpvFn *fn, const IRInstruction *in) {
        intrinsic == MTLC_INTRINSIC_GPU_HMUL2 ||
        intrinsic == MTLC_INTRINSIC_GPU_HFMA2) &&
       in->argument_count >= 2) {
-    /* SPIR-V 1.0 OpenCL has no packed-half arithmetic type, so each lane is
-     * converted, computed in f16, and repacked. Same values, one lane at a
-     * time; the packed instruction is a PTX-side win only. */
     int is_fma = intrinsic == MTLC_INTRINSIC_GPU_HFMA2;
     uint32_t a = materialize(fn, &in->arguments[0], MTLC_TYPE_UINT32);
     uint32_t b = materialize(fn, &in->arguments[1], MTLC_TYPE_UINT32);
@@ -1808,17 +1720,12 @@ static void emit_call(SpvFn *fn, const IRInstruction *in) {
     return;
   }
   if (intrinsic == MTLC_INTRINSIC_GPU_PRMT_B32 && in->argument_count >= 3) {
-    /* prmt gathers four bytes out of {b:a} by selector nibbles. Replayed as
-     * four selects; the portable profile has no byte-permute instruction.
-     * Only the plain (non-replicate) selector mode is modeled, which is the
-     * mode the sign-extension variants are not. */
     uint32_t a = materialize(fn, &in->arguments[0], MTLC_TYPE_UINT32);
     uint32_t b = materialize(fn, &in->arguments[1], MTLC_TYPE_UINT32);
     uint32_t selector = materialize(fn, &in->arguments[2], MTLC_TYPE_UINT32);
     uint32_t i32 = type_int(m, 32);
     uint32_t result = const_u32(m, 0);
     for (unsigned lane = 0; lane < 4; lane++) {
-      /* index = (selector >> (lane*4)) & 7; source = index < 4 ? a : b */
       uint32_t nibble_shift = const_u32(m, lane * 4u);
       uint32_t shifted_selector = new_id(m);
       emitv(&m->functions, Op_ShiftRightLogical, 4, i32, shifted_selector,
@@ -1861,9 +1768,6 @@ static void emit_call(SpvFn *fn, const IRInstruction *in) {
        intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32 ||
        intrinsic == MTLC_INTRINSIC_GPU_STORE4_U32) &&
       in->argument_count >= 2) {
-    /* The portable profile moves the same four elements as four scalar
-     * accesses: same values, same order, without the 128-bit transaction PTX
-     * gets. Vectorizing this needs a device profile with vector loads. */
     int is_load = intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
                   intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32;
     MtlcTypeKind elem = (intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
@@ -1984,7 +1888,6 @@ static void emit_call(SpvFn *fn, const IRInstruction *in) {
       r = new_id(m);
       uint32_t desired = materialize(fn, &in->arguments[3], vk);
       uint32_t failure_sem = const_u32(m, failure_semantics_value);
-      /* SPIR-V orders these operands as desired value, then comparator. */
       emitv(&m->functions, Op_AtomicCompareExchange, 8, vt, r, p, sc, sem,
             failure_sem, desired, val);
     } else {
@@ -2078,7 +1981,6 @@ static void emit_call(SpvFn *fn, const IRInstruction *in) {
   mod_error(m, "SPIR-V: unsupported call '%s'", callee ? callee : "?");
 }
 
-/* emit one non-terminator body instruction */
 static void emit_body_instr(SpvFn *fn, const IRInstruction *in) {
   if (fn->m->error) return;
   switch (in->op) {
@@ -2086,7 +1988,7 @@ static void emit_body_instr(SpvFn *fn, const IRInstruction *in) {
   case IR_OP_LABEL:
   case IR_OP_ADDRESS_SPACE_ALLOC:
   case IR_OP_DECLARE_LOCAL:
-    break; /* declarations handled in the pre-pass */
+    break;
   case IR_OP_BARRIER:
     if (in->memory_scope != MTLC_MEMORY_SCOPE_WORKGROUP) {
       mod_error(fn->m, "SPIR-V: unsupported execution scope on barrier");
@@ -2095,9 +1997,6 @@ static void emit_body_instr(SpvFn *fn, const IRInstruction *in) {
     emit_workgroup_barrier(fn, in->memory_order, in->memory_regions);
     break;
   case IR_OP_ASYNC_COPY:
-    /* OpenCL 2.0 has no enabled device-side async-copy capability in this
-     * profile. Replay synchronously; commit/wait below are consequently
-     * completion no-ops with identical observable semantics. */
     emit_async_copy(fn, in);
     break;
   case IR_OP_ASYNC_COMMIT:
@@ -2120,12 +2019,8 @@ static void emit_body_instr(SpvFn *fn, const IRInstruction *in) {
               "SPIR-V OpenCL 2.0 profile has no multidimensional workgroup-transfer lowering; select a backend profile with exact tensor-transfer or cooperative-replay support");
     break;
   case IR_OP_TENSOR_COMMIT:
-    /* The current profile rejects the corresponding tensor operations above.
-     * A future cooperative-matrix backend may replay each MMA and keep this
-     * neutral residency marker as a no-op. */
     break;
   case IR_OP_ASSIGN: {
-    /* store lhs into dest, coerced to dest's declared kind */
     SpvBind *db = find_bind(fn, in->dest.name);
     MtlcTypeKind dk = db ? db->d.kind : operand_desc(fn, &in->lhs).kind;
     uint32_t v = materialize(fn, &in->lhs, dk);
@@ -2161,12 +2056,9 @@ static void emit_body_instr(SpvFn *fn, const IRInstruction *in) {
       break;
     }
     if (home->record_bytes) {
-      /* A record binding already holds its own address. */
       store_name(fn, in->dest.name, materialize(fn, &in->lhs, MTLC_TYPE_UINT64));
       break;
     }
-    /* A scalar local is its own Function-storage variable, so its address is
-     * that variable read as an integer, and writes through it alias the name. */
     uint32_t as_integer = new_id(fn->m);
     emitv(&fn->m->functions, Op_ConvertPtrToU, 3, type_int(fn->m, 64),
           as_integer, home->var_id);
@@ -2180,10 +2072,9 @@ static void emit_body_instr(SpvFn *fn, const IRInstruction *in) {
   }
 }
 
-/* ============================ CFG emission ============================ */
 typedef struct {
-  size_t lo, hi;             /* instruction range [lo, hi) */
-  const char *label;         /* leading label name, or NULL */
+  size_t lo, hi;
+  const char *label;
   const IRInstruction *term; /* terminator instruction, or NULL (fallthrough) */
 } SpvBlock;
 
@@ -2192,7 +2083,6 @@ static int is_terminator(IROpcode op) {
          op == IR_OP_RETURN;
 }
 
-/* find the block index whose leading label matches `name` */
 static long block_of_label(SpvBlock *blocks, size_t n, const char *name) {
   if (!name) return -1;
   for (size_t i = 0; i < n; i++) {
@@ -2203,8 +2093,6 @@ static long block_of_label(SpvBlock *blocks, size_t n, const char *name) {
   return -1;
 }
 
-/* compute the branch condition of a conditional block as a scalar bool id.
- * BRANCH_ZERO: (cond != 0). BRANCH_EQ: (lhs == rhs). */
 static uint32_t branch_cond_bool(SpvFn *fn, const IRInstruction *term) {
   SpvMod *m = fn->m;
   uint32_t bt = type_bool(m);
@@ -2221,7 +2109,7 @@ static uint32_t branch_cond_bool(SpvFn *fn, const IRInstruction *term) {
       uint32_t z = const_scalar_int(m, k, 0);
       emitv(&m->functions, Op_INotEqual, 4, bt, cond, v, z);
     }
-  } else { /* BRANCH_EQ */
+  } else {
     SpvDesc la = operand_desc(fn, &term->lhs), ra = operand_desc(fn, &term->rhs);
     int is_float = kind_is_float(la.kind) || kind_is_float(ra.kind);
     MtlcTypeKind k =
@@ -2238,7 +2126,6 @@ static uint32_t branch_cond_bool(SpvFn *fn, const IRInstruction *term) {
   return cond;
 }
 
-/* ---- pre-pass: register a descriptor for every named value ---- */
 static void register_values(SpvFn *fn, IRFunction *func) {
   const IRModuleSymbol *function_symbol =
       fn->m->program ? ir_program_lookup_symbol(fn->m->program, func->name) : NULL;
@@ -2304,8 +2191,6 @@ static void register_values(SpvFn *fn, IRFunction *func) {
   }
 }
 
-/* Emit one reachable GPU function. Kernels retain the OpenCL entry ABI;
- * ordinary reachable functions use the same neutral scalar IR ABI internally. */
 static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
                                      size_t function_index) {
   SpvFn fn = {0};
@@ -2351,7 +2236,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
     }
   }
 
-  /* ---- build basic blocks from the label/branch stream ---- */
   size_t count = func->instruction_count;
   size_t *starts = calloc(count + 1, sizeof(size_t));
   size_t nstarts = 0;
@@ -2385,10 +2269,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
 
   register_values(&fn, func);
 
-  /* OpenCL represents launch-sized local memory as a Workgroup pointer kernel
-   * argument. Select the most strictly aligned dynamic view as the hidden ABI
-   * pointee type; every view is then materialized from that same pointer-sized
-   * value, preserving the IR's intentional aliasing contract. */
   const IRInstruction *dynamic_workgroup_abi_view = NULL;
   size_t dynamic_workgroup_alignment = 0;
   for (size_t i = 0; i < func->instruction_count && !m->error; i++) {
@@ -2415,7 +2295,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
     }
   }
 
-  /* ---- ids: entry, one label per IR block, a shared fall-off-the-end exit ---- */
   uint32_t func_id = m->device_function_ids[function_index];
   uint32_t entry_id = new_id(m);
   uint32_t exit_id = new_id(m);
@@ -2423,7 +2302,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
   uint32_t *block_id = calloc(nblocks ? nblocks : 1, sizeof(uint32_t));
   for (size_t i = 0; i < nblocks; i++) block_id[i] = new_id(m);
 
-  /* ---- parameter + function types ---- */
   uint32_t voidt = type_void(m);
   uint32_t function_return_type =
       fn.returns_void ? voidt : kind_type(m, fn.return_desc.kind);
@@ -2468,7 +2346,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
   wb_push(&ftops, function_return_type);
   for (size_t p = 0; p < total_parameter_count; p++)
     wb_push(&ftops, ptypes[p]);
-  /* intern the function type by structural key */
   char ftkey[256];
   int kn = snprintf(ftkey, sizeof(ftkey), "fn:%u", function_return_type);
   for (size_t p = 0;
@@ -2489,14 +2366,12 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
   }
   wb_free(&ftops);
 
-  /* ---- OpFunction + parameters ---- */
   emitv(&m->functions, Op_Function, 4, function_return_type, func_id, 0u,
         functype);
   for (size_t p = 0; p < total_parameter_count; p++) {
     emitv(&m->functions, Op_FunctionParameter, 2, ptypes[p], pids[p]);
   }
 
-  /* ---- entry block: declare variables, shadow params ---- */
   emitv(&m->functions, Op_Label, 1, entry_id);
   for (size_t i = 0; i < fn.nbinds; i++) {
     SpvBind *b = &fn.binds[i];
@@ -2505,9 +2380,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
     b->var_id = new_id(m);
     emitv(&m->functions, Op_Variable, 3, pt, b->var_id, (unsigned)SC_Function);
   }
-  /* Record locals need storage as well as a home for its address. Both are
-   * Function-storage variables, so both must precede any executable
-   * instruction in the entry block. */
   for (size_t i = 0; i < fn.nbinds; i++) {
     SpvBind *b = &fn.binds[i];
     if (!b->record_bytes) continue;
@@ -2519,11 +2391,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
           (unsigned)SC_Function);
     b->record_storage = storage;
   }
-  /* Declare every static allocation before emitting entry-block executable
-   * instructions. Workgroup variables live at module scope; private variables
-   * use Function storage and must be the first instructions in the entry
-   * block. Keep their ids by IR instruction so the materialization pass below
-   * can convert them into the neutral pointer-sized value model. */
   uint32_t *allocation_variables =
       calloc(func->instruction_count ? func->instruction_count : 1,
              sizeof(uint32_t));
@@ -2565,10 +2432,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
           (unsigned)storage_class);
     allocation_variables[i] = variable;
   }
-  /* Materialize neutral allocations. Dynamic workgroup views all receive the
-   * same hidden Workgroup parameter. Pointers remain 64-bit values in the IR
-   * value model, just like explicit kernel pointer parameters; typed accesses
-   * convert them back with the exact storage class in their descriptor. */
   for (size_t i = 0; i < func->instruction_count && !m->error; i++) {
     const IRInstruction *in = &func->instructions[i];
     if (in->op != IR_OP_ADDRESS_SPACE_ALLOC) continue;
@@ -2605,7 +2468,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
           b->record_storage);
     emitv(&m->functions, Op_Store, 2, b->var_id, as_integer);
   }
-  /* store incoming parameters into their shadow variables */
   for (size_t p = 0; p < func->parameter_count; p++) {
     if (!func->parameter_names || !func->parameter_names[p]) continue;
     SpvBind *b = find_bind(&fn, func->parameter_names[p]);
@@ -2628,13 +2490,12 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
               func->name ? func->name : "?");
   }
 
-  /* ---- one SPIR-V block per IR block, branches mapped directly ---- */
   for (size_t i = 0; i < nblocks && !m->error; i++) {
     SpvBlock *bl = &blocks[i];
     emitv(&m->functions, Op_Label, 1, block_id[i]);
     for (size_t j = bl->lo; j < bl->hi && !m->error; j++) {
       const IRInstruction *in = &func->instructions[j];
-      if (in == bl->term) break; /* terminator handled below */
+      if (in == bl->term) break;
       emit_body_instr(&fn, in);
     }
     const IRInstruction *term = bl->term;
@@ -2686,8 +2547,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
       }
       uint32_t taken_id = block_id[taken];
       uint32_t cond = branch_cond_bool(&fn, term);
-      /* BRANCH_ZERO's condition is (value != 0): take the target when FALSE.
-       * BRANCH_EQ's condition is (lhs == rhs):   take the target when TRUE. */
       uint32_t t_true = (term->op == IR_OP_BRANCH_ZERO) ? fall_id : taken_id;
       uint32_t t_false = (term->op == IR_OP_BRANCH_ZERO) ? taken_id : fall_id;
       emitv(&m->functions, Op_BranchConditional, 3, cond, t_true, t_false);
@@ -2714,7 +2573,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
 
   m->function_builtin_masks[function_index] = fn.builtin_mask;
 
-  /* ---- entry point (with the BuiltIn Input vars this kernel touched) ---- */
   if (!m->error && func->is_kernel) {
     Wb ep = {0};
     wb_push(&ep, (uint32_t)ExecModel_Kernel);
@@ -2733,11 +2591,8 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
     emit_ops(&m->entrypoints, Op_EntryPoint, &ep);
     wb_free(&ep);
     if (func->kernel_block[0] > 0) {
-      /* `kernel(block = ...)`: the required launch shape as the LocalSize
-       * (reqd_work_group_size) execution mode, so an OpenCL consumer rejects
-       * a mismatched enqueue. */
       emitv(&m->execmodes, Op_ExecutionMode, 5, func_id,
-            17u /* LocalSize */, (uint32_t)func->kernel_block[0],
+            17u , (uint32_t)func->kernel_block[0],
             (uint32_t)(func->kernel_block[1] > 0 ? func->kernel_block[1] : 1),
             (uint32_t)(func->kernel_block[2] > 0 ? func->kernel_block[2] : 1));
     }
@@ -2754,7 +2609,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
   return m->error ? 0 : func_id;
 }
 
-/* ============================ driver ============================ */
 static void write_word_le(FILE *out, uint32_t w) {
   fputc((int)(w & 0xff), out);
   fputc((int)((w >> 8) & 0xff), out);
@@ -2802,15 +2656,10 @@ int spirv_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
     free(m.function_builtin_masks);
     return 0;
   }
-  /* Assign every reachable function id before emitting bodies. This keeps the
-   * call representation independent of definition order, while the shared
-   * postorder still emits callees first for deterministic modules. */
   for (size_t oi = 0; oi < graph.count; oi++) {
     m.device_function_ids[graph.order[oi]] = new_id(&m);
   }
 
-  /* OpenCL.std extended instruction set (imported once, used by the f32 math
-   * intrinsics; harmless if unused). */
   m.opencl_ext = new_id(&m);
   {
     Wb ei = {0};
@@ -2831,7 +2680,6 @@ int spirv_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
     goto cleanup;
   }
 
-  /* capabilities depend on which widths/features the module actually used */
   emitv(&m.caps, Op_Capability, 1, (unsigned)Cap_Addresses);
   emitv(&m.caps, Op_Capability, 1, (unsigned)Cap_Kernel);
   emitv(&m.caps, Op_Capability, 1, (unsigned)Cap_Int64);
@@ -2862,12 +2710,11 @@ int spirv_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
   emitv(&m.memmodel, Op_MemoryModel, 2, (unsigned)AddrModel_Physical64,
         (unsigned)MemModel_OpenCL);
 
-  /* ---- assemble the module in mandated layout order ---- */
   write_word_le(out, SPV_MAGIC);
   write_word_le(out, SPV_VERSION_1_0);
-  write_word_le(out, 0u);         /* generator magic (0 = none) */
-  write_word_le(out, m.next_id);  /* id bound */
-  write_word_le(out, 0u);         /* schema */
+  write_word_le(out, 0u);
+  write_word_le(out, m.next_id);
+  write_word_le(out, 0u);
   write_section(out, &m.caps);
   write_section(out, &m.extimports);
   write_section(out, &m.memmodel);

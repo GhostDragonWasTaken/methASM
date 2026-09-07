@@ -1,13 +1,8 @@
-// Type checker: expression type inference and checking.
 #include "type_checker_internal.h"
 #include "codegen/target.h"
 #include "monomorphize.h"
 #include "string_intern.h"
 
-/* The largest power of two that divides an integer expression, as far as the
-   source says. 1 means nothing is known. This is what an alignment claim is
-   proven from: `&a[i * 4]` on a 4-byte element is 16-byte aligned when `a` is,
-   because the offset is a multiple of 16 whatever `i` holds. */
 size_t type_checker_expression_multiple_of(TypeChecker *checker,
                                            ASTNode *expression, int depth) {
   long long folded = 0;
@@ -23,9 +18,6 @@ size_t type_checker_expression_multiple_of(TypeChecker *checker,
     }
     return (size_t)(magnitude & (~magnitude + 1));
   }
-  /* A declared type may say it: `type Quad = int32 where value % 4 == 0;` is
-     a divisor the checker reads off the type rather than off the arithmetic,
-     which is how an offset held in a local still carries its proof. */
   if (expression->resolved_type && expression->resolved_type->refinement) {
     ASTNode *predicate = expression->resolved_type->refinement;
     if (predicate->type == AST_BINARY_EXPRESSION) {
@@ -92,9 +84,6 @@ size_t type_checker_expression_multiple_of(TypeChecker *checker,
   return 1;
 }
 
-/* The alignment an address expression is known to have. An `align(N)` claim is
-   accepted only where this reaches N; the number it did reach is what the
-   refusal reports. */
 static size_t type_checker_unary_alignment(TypeChecker *checker,
                                            ASTNode *expression,
                                            int depth) {
@@ -114,14 +103,10 @@ static size_t type_checker_unary_alignment(TypeChecker *checker,
       base_align = base->declared_align;
     } else if (type_checker_lvalue_device_space(checker, index->array) ==
                DEVICE_SPACE_SHARED) {
-      /* A workgroup tile is emitted 32-byte aligned, which is what makes a
-         swizzled tile's vector accesses legal. */
       base_align = 32;
     } else if (base->kind == TYPE_ARRAY) {
       base_align = base->alignment ? base->alignment : element->size;
     } else if (base->kind == TYPE_POINTER || base->kind == TYPE_SLICE) {
-      /* Nothing was declared, so all that is known is that the elements are
-         where their own type puts them. */
       base_align = element->alignment ? element->alignment : element->size;
     }
     if (!base_align) {
@@ -176,10 +161,6 @@ size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
   return 0;
 }
 
-/* Is an index into a view whose extents are in its type inside that extent?
-   The routes are the ones the declared-type prover already uses: a constant, a
-   declared type's range, a dominating test, or the launch's own block shape
-   where the index is a work-item index. */
 int type_checker_static_view_index_is_bounded(TypeChecker *checker,
                                               ASTNode *index, size_t extent) {
   long long constant = 0;
@@ -226,8 +207,6 @@ int type_checker_static_view_index_is_bounded(TypeChecker *checker,
   return 0;
 }
 
-/* Does the module being checked declare a kernel? A device helper only makes
-   sense where one could reach it. */
 int type_checker_module_has_kernel(TypeChecker *checker) {
   ASTNode *module = checker ? checker->module_program : NULL;
   Program *program = module && module->data ? (Program *)module->data : NULL;
@@ -247,8 +226,6 @@ int type_checker_module_has_kernel(TypeChecker *checker) {
   return 0;
 }
 
-/* The word a device space is written with, with the leading space the type
-   spelling needs: ` global`, ` shared`, ` constant`, ` local`. */
 const char *type_checker_device_space_word(unsigned char space) {
   switch (space) {
   case DEVICE_SPACE_GLOBAL:
@@ -282,9 +259,6 @@ static unsigned char type_checker_space_from_mtlc(MtlcAddressSpace space) {
   }
 }
 
-/* Where the storage an lvalue names lives. Taking an address inside a `shared`
-   tile yields a shared pointer, and indexing a `T global*` yields a global
-   one, so `&a[i]` keeps the fact the declaration stated. */
 unsigned char type_checker_lvalue_device_space(TypeChecker *checker,
                                                ASTNode *node) {
   int depth = 0;
@@ -335,11 +309,6 @@ unsigned char type_checker_lvalue_device_space(TypeChecker *checker,
   }
   return DEVICE_SPACE_NONE;
 }
-
-/* `p->m()` and `(*p).m()` both parse to a method call whose object is a deref of
- * a pointer-to-struct. That spelling selects the lifted method that takes the
- * receiver as a pointer, so the call passes `p` itself and the method can write
- * through it. Returns the pointer expression, or NULL for a value receiver. */
 
 static ASTNode *type_checker_pointer_receiver(TypeChecker *checker,
                                               ASTNode *object) {
@@ -403,9 +372,6 @@ int type_checker_desugar_struct_method_call(TypeChecker *checker,
     return 0;
   }
 
-  /* A pointer receiver resolves to the pointer-taking form of the method, so
-   * that writes to `this` reach the caller's struct. Falling back to the value
-   * form keeps a hand-written `S_m(s: S)` free function callable as `p->m()`. */
   pointer_receiver = type_checker_pointer_receiver(checker, call->object);
   if (pointer_receiver) {
     name_len = strlen(struct_type->name) + 1 + strlen(call->function_name) +
@@ -420,9 +386,6 @@ int type_checker_desugar_struct_method_call(TypeChecker *checker,
     snprintf(mangled_name, name_len, "%s_%s%s", struct_type->name,
              call->function_name, MONO_PTR_RECEIVER_SUFFIX);
     if (symbol_table_lookup(checker->symbol_table, mangled_name)) {
-      /* Drop the deref that the parser wrapped around the pointer, leaving the
-       * pointer itself as the receiver. The deref owned it as a child, so the
-       * call node adopts it before the now-empty deref is freed. */
       ASTNode *deref = call->object;
       UnaryExpression *unary = (UnaryExpression *)deref->data;
       for (size_t i = 0; i < expression->child_count; i++) {
@@ -456,11 +419,6 @@ int type_checker_desugar_struct_method_call(TypeChecker *checker,
   }
 
   if (!symbol_table_lookup(checker->symbol_table, mangled_name)) {
-    /* No method by this name. If the receiver struct has a function-pointer or
-     * closure FIELD of this name, `obj.field(args)` is a call THROUGH that
-     * field: rewrite the node into a function-pointer call on `obj.field`,
-     * which handles both thin pointers and closures (the call site loads the
-     * code pointer and, for a closure, threads the environment). */
     Type *field_type = type_get_field_type(struct_type, call->function_name);
     if (field_type && field_type->kind == TYPE_FUNCTION_POINTER) {
       free(mangled_name);
@@ -486,9 +444,6 @@ int type_checker_desugar_struct_method_call(TypeChecker *checker,
       fp->arguments = args;
       fp->argument_count = argc;
       fp->effect_signature = NULL;
-      /* The argument array is reused; `obj` now belongs to `member`. The old
-       * CallExpression payload is intentionally left unfreed - a small bounded
-       * compile-time allocation - to avoid any ownership mismatch. */
       expression->child_count = 0;
       expression->type = AST_FUNC_PTR_CALL;
       expression->data = fp;
@@ -533,10 +488,6 @@ int type_checker_desugar_struct_method_call(TypeChecker *checker,
   return 1;
 }
 
-/* Parser-recognized thread/block index member access. The parser preserves a
- * marker so a host function explicitly declaring an extern named gpu_tid_x is
- * not accidentally captured as language syntax. IR lowering maps the neutral
- * semantic alias to MtlcIntrinsic; no backend opcode enters this layer. */
 static Type *type_checker_gpu_index_builtin(TypeChecker *checker,
                                             ASTNode *expression,
                                             CallExpression *call,
@@ -563,9 +514,6 @@ static Type *type_checker_gpu_index_builtin(TypeChecker *checker,
   return checker->builtin_int32;
 }
 
-/* `layout_copy(destination, source)`: the one way elements move between two
-   layouts. It is a statement rather than a coercion, because reordering a tile
-   is a copy and the program should say where that copy happens. */
 static Type *type_checker_layout_copy_builtin(TypeChecker *checker,
                                               ASTNode *expression,
                                               CallExpression *call,
@@ -620,9 +568,6 @@ static Type *type_checker_layout_copy_builtin(TypeChecker *checker,
   return checker->builtin_void;
 }
 
-/* Reference-frontend syntax for the target-neutral subgroup intrinsic family.
- * The selected IR identity is type-specific, but no PTX/SPIR-V concept enters
- * semantic analysis. Other frontends construct the same identities directly. */
 static Type *type_checker_subgroup_builtin(TypeChecker *checker,
                                            ASTNode *expression,
                                            CallExpression *call,
@@ -661,10 +606,6 @@ static Type *type_checker_subgroup_builtin(TypeChecker *checker,
               checker->current_function_decl->type == AST_FUNCTION_DECLARATION
           ? (FunctionDeclaration *)checker->current_function_decl->data
           : NULL;
-  /* A subgroup collective may sit in an ordinary device function, which is
-     what lets one be written once in std/gpu carrying `requires Warp`. What
-     keeps it device-only is the module: a file with no kernel in it has
-     nothing that could reach one. */
   if (!owner || !type_checker_module_has_kernel(checker)) {
     type_checker_set_error_at_location(
         checker, expression->location,
@@ -849,10 +790,6 @@ static int type_checker_atomic_failure_valid(MtlcMemoryOrder success,
   }
 }
 
-/* Native reference-frontend surface for the neutral atomic load/store/RMW/CAS
- * family.
- * The syntax is type-directed (uint32/uint64), while the AST records the exact
- * address-space/order/scope contract consumed by neutral IR lowering. */
 static Type *type_checker_atomic_builtin(TypeChecker *checker,
                                          ASTNode *expression,
                                          CallExpression *call,
@@ -1124,10 +1061,6 @@ static Type *type_checker_atomic_builtin(TypeChecker *checker,
   return is_store ? checker->builtin_void : value_type;
 }
 
-/* Neutral per-work-item staging surface. The copy span is expressed as a
- * compile-time element count so frontends retain element typing while a
- * backend may divide the byte span into native transactions. Commit/wait are
- * explicit because completion is not implied by an ordinary barrier. */
 static Type *type_checker_async_copy_builtin(TypeChecker *checker,
                                              ASTNode *expression,
                                              CallExpression *call,
@@ -1470,9 +1403,6 @@ static int type_checker_tensor_option_u64(TypeChecker *checker, ASTNode *node,
   return 1;
 }
 
-/* A rank-aware transfer is deliberately described in ordinary tensor
- * geometry. `view` is an optional provider-prepared acceleration handle; the
- * raw pointer/extents/strides remain complete semantics for portable replay. */
 static Type *type_checker_tensor_transfer_builtin(TypeChecker *checker,
                                                   ASTNode *expression,
                                                   CallExpression *call,
@@ -2183,13 +2113,6 @@ Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression) {
   return type;
 }
 
-/* A bare constructor name belongs to whichever enum declared it first. When
- * the value is flowing into a declared destination that is a different tagged
- * enum carrying the same variant, the destination wins: the name is rewritten
- * to that enum's qualified constructor so the checker and the lowering agree
- * on which instantiation was meant. The rewrite touches only the name, so a
- * destination that lacks the variant leaves the first-declared reading in
- * place and the ordinary mismatch diagnostic follows. */
 static Symbol *type_checker_retarget_constructor(TypeChecker *checker,
                                                  Symbol *ctor, Type *target,
                                                  const char *variant,
@@ -2234,11 +2157,8 @@ static Type *type_checker_infer_literal(TypeChecker *checker,
   case AST_NUMBER_LITERAL: {
     NumberLiteral *literal = (NumberLiteral *)expression->data;
     if (literal->is_float) {
-      // Floating literals default to float64
       return checker->builtin_float64;
     }
-    /* `'a'` is a character, not the number 97. It still widens into every
-     * integer silently, so `var code: int32 = 'a';` needs no cast. */
     if (literal->is_char) {
       return checker->builtin_char;
     }
@@ -2247,13 +2167,9 @@ static Type *type_checker_infer_literal(TypeChecker *checker,
   }
 
   case AST_STRING_LITERAL:
-    // String literals are string type
     return checker->builtin_string;
 
   case AST_AGGREGATE_LITERAL: {
-    /* The literal takes the type of what it initializes; whoever knows that
-     * type parked it on the checker just before this call. Consume it so a
-     * nested inference cannot pick up a stale target. */
     Type *target = checker->aggregate_target_type;
     int requires_constant = checker->aggregate_requires_constant;
     checker->aggregate_target_type = NULL;
@@ -2303,9 +2219,6 @@ static Type *type_checker_infer_identifier(TypeChecker *checker,
       }
       return type_checker_type_value(checker, symbol->type, expression);
     }
-    /* A `comptime for` binding over a table of plain values is that value.
-       The binding leaves scope with its expansion, so the value is baked into
-       the node here, where it is still known. */
     if (symbol->is_comptime_binding &&
         (symbol->comptime_value.kind == COMPTIME_INT ||
          symbol->comptime_value.kind == COMPTIME_FLOAT ||
@@ -2318,12 +2231,6 @@ static Type *type_checker_infer_identifier(TypeChecker *checker,
       }
       return declared ? declared : folded;
     }
-    /* A bare function name is the function, so it types as a pointer to it --
-     * which is what makes `run(mix)` work and what makes `i < wm_count` (the
-     * call written without its parentheses) the type error it always was. A
-     * function symbol carries its RETURN type in `symbol->type`, so handing
-     * that back let a missing `()` sail through the checker and lower to a
-     * comparison against nothing. */
     if (symbol->kind == SYMBOL_FUNCTION) {
       Type *fn_return = symbol->data.function.return_type
                             ? symbol->data.function.return_type
@@ -2375,11 +2282,6 @@ static Type *type_checker_infer_lambda(TypeChecker *checker,
   *handled = 1;
   switch (expression->type) {
   case AST_LAMBDA_EXPRESSION: {
-    /* Closure conversion lifted the lambda body and recorded the symbol its
-     * value derives from. A non-capturing lambda is the address of its lifted
-     * function (a thin function pointer, like `&func`). A capturing lambda has
-     * the user-facing type fn(params)->R tagged with its environment struct so
-     * call sites know to dispatch through the captured environment. */
     FunctionDeclaration *lam = (FunctionDeclaration *)expression->data;
     if (!lam || !lam->name) {
       type_checker_set_error_at_location(checker, expression->location,
@@ -2389,9 +2291,6 @@ static Type *type_checker_infer_lambda(TypeChecker *checker,
 
     type_checker_mark_captures_used(checker, lam);
 
-    /* The lambda value is an 8-byte function pointer (thin) or closure pointer.
-     * Name its type with its canonical signature `fn(a,b)->R` (no spaces) so an
-     * inferred `var f = <lambda>` local is sized as a pointer by the backend. */
     char sig[1024];
     {
       size_t off = 0;
@@ -2409,12 +2308,6 @@ static Type *type_checker_infer_lambda(TypeChecker *checker,
                  lam->return_type ? lam->return_type : "void");
     }
 
-    /* A capture becomes a field of the environment struct and the constructor
-     * takes it by value. An array does not travel that way here: it decays to
-     * a pointer at every by-value boundary, so the field received an address
-     * and the body then read that address as elements. `arr[0]` came back as a
-     * fragment of the pointer, with no diagnostic at all. A struct of any size
-     * and a string both copy whole and are unaffected. */
     for (size_t i = 0; i < lam->captured_count; i++) {
       Type *captured = (lam->captured_types && lam->captured_types[i])
                            ? type_checker_get_type_by_name(
@@ -2467,7 +2360,6 @@ static Type *type_checker_infer_lambda(TypeChecker *checker,
                                            "Failed to create closure type");
         return NULL;
       }
-      /* The closure_env tag, not the name, drives call dispatch. */
       closure_type->name = (char *)string_intern(sig);
       closure_type->closure_env =
           type_checker_get_type_by_name(checker, lam->env_struct_name);
@@ -2516,10 +2408,6 @@ static Type *type_checker_infer_closure(TypeChecker *checker,
   }
 
   case AST_CLOSURE_ADAPT_EXPRESSION: {
-    /* The closure-adapt pass wrapped a thin function value (`&func`, or a
-     * non-capturing lambda) that flowed into an `Fn(...)` boundary. The wrapper
-     * calls a generated adapter constructor at IR-lowering time; here it simply
-     * types as the closure signature it was synthesized for. */
     ClosureAdapt *adapt = (ClosureAdapt *)expression->data;
     if (!adapt || !adapt->ctor_name || !adapt->inner) {
       type_checker_set_error_at_location(
@@ -2585,7 +2473,6 @@ static Type *type_checker_infer_closure(TypeChecker *checker,
     return closure_type;
   }
 
-
   default:
     *handled = 0;
     break;
@@ -2607,13 +2494,11 @@ static Type *type_checker_infer_unary(TypeChecker *checker,
     }
 
     if (strcmp(unop->operator, "&") == 0) {
-      // Check if operand is an identifier that refers to a function
       if (unop->operand->type == AST_IDENTIFIER) {
         Identifier *id = (Identifier *)unop->operand->data;
         if (id && id->name) {
           Symbol *sym = type_checker_resolve_identifier(checker, id);
           if (sym && sym->kind == SYMBOL_FUNCTION) {
-            // Taking address of a function - create function pointer type
             Type **param_types = sym->data.function.parameter_types;
             size_t param_count = sym->data.function.parameter_count;
             Type *return_type = sym->data.function.return_type;
@@ -2633,7 +2518,6 @@ static Type *type_checker_infer_unary(TypeChecker *checker,
         }
       }
 
-      // Not a function reference - treat as regular address-of
       if (!type_checker_is_lvalue_expression(unop->operand)) {
         type_checker_set_error_at_location(
             checker, unop->operand->location,
@@ -2671,9 +2555,6 @@ static Type *type_checker_infer_unary(TypeChecker *checker,
       Type *pointer_type = type_checker_get_type_by_name(checker, pointer_name);
       free(pointer_name);
       if (!pointer_type) {
-        /* The spelling is not a registered name, which is ordinary for a
-         * function-pointer or other structural operand. Build the pointer
-         * from the type instead of from its spelling. */
         pointer_type = type_checker_device_pointer_to(
             checker, operand_type, operand_space, 0, space_word);
       }
@@ -2753,10 +2634,6 @@ static Type *type_checker_infer_unary(TypeChecker *checker,
                                           operand_type->name);
         return NULL;
       }
-      /* A logical operator answers a question, and the type of an answer is
-       * `bool`. `<` and `&&` already said so; `!` handed back an int32, so
-       * `{flag}` printed `true` while `{!flag}` printed `0` and the docs had
-       * to teach a detour through a named bool to print one. */
       return checker->builtin_bool;
     }
 
@@ -2894,10 +2771,6 @@ static Type *type_checker_interp_builtin(TypeChecker *checker,
   case TYPE_BFLOAT16:
   case TYPE_STRING:
     return checker->builtin_string;
-  /* The C-facing surface hands back `cstring`, so this is the first thing
-   * anybody interpolates after calling into C. It is a pointer type with a
-   * name rather than a kind of its own, and only that one name interpolates:
-   * any other pointer has no length to read. */
   case TYPE_POINTER:
     if (value_type->name && strcmp(value_type->name, "cstring") == 0) {
       return checker->builtin_string;
@@ -2955,10 +2828,6 @@ static Type *type_checker_infer_named_builtin(TypeChecker *checker,
     return checker->builtin_int64;
   }
 
-  /* `textof(x)` is the compile-time spelling of a constant. It answers a
-     string, and it answers one only where the value is known while compiling:
-     a wire tag built from a table is the same tag at both ends because it was
-     built once, here. */
   if (strcmp(call->function_name, "textof") == 0) {
     ComptimeValue folded = comptime_none();
     if (call->argument_count != 1 || !call->arguments[0] ||
@@ -2997,9 +2866,6 @@ static Type *type_checker_infer_named_builtin(TypeChecker *checker,
                : NULL;
   }
 
-  /* String interpolation conversion, synthesized by the parser for each
-   * "{expr}" part. It types as string for every value the runtime can
-   * render; IR lowering picks the mettle_string_from_* helper. */
   if (strcmp(call->function_name, "__mtl_interp") == 0) {
     return type_checker_interp_builtin(checker, call, expression, handled);
   }
@@ -3014,7 +2880,6 @@ static Type *type_checker_infer_fn_pointer_call(TypeChecker *checker,
                                                 Symbol *func_symbol,
                                                 int *handled) {
   *handled = 1;
-/* Variable with function pointer type can be called like a function */
 if ((func_symbol->kind == SYMBOL_VARIABLE ||
      func_symbol->kind == SYMBOL_PARAMETER) &&
     func_symbol->type &&
@@ -3060,10 +2925,6 @@ if ((func_symbol->kind == SYMBOL_VARIABLE ||
   return NULL;
 }
 
-/* A call to a function whose last parameter gathers. The fixed parameters are
- * checked the way any parameter is; everything after them has to be the
- * element type, unless a single argument is already the slice, which is how
- * one variadic call forwards to another. */
 static int type_checker_check_gathered_arguments(TypeChecker *checker,
                                                  ASTNode *expression,
                                                  CallExpression *call,
@@ -3104,9 +2965,6 @@ static int type_checker_check_gathered_arguments(TypeChecker *checker,
     }
   }
 
-  /* One argument that is already the whole run is the whole run: a slice of
-     the element type, or an array of it. That is how a variadic call forwards
-     what it was handed, in one piece. */
   if (call->argument_count == fixed + 1) {
     Type *only = type_checker_infer_type(checker, call->arguments[fixed]);
     if (!only) {
@@ -3135,18 +2993,12 @@ static int type_checker_check_gathered_arguments(TypeChecker *checker,
     }
   }
 
-  /* Gather them here, into the array literal the call would have had to write
-     out by hand. From this point nothing downstream can tell the two apart:
-     the argument is an array of the element type, and it becomes a slice the
-     way any array does. */
   {
     size_t gathered_count = call->argument_count - fixed;
     ASTNode **elements = NULL;
     ASTNode *gathered_literal = NULL;
     ASTNode **new_arguments = NULL;
 
-    /* No arguments to gather is an empty slice: no data and no length, which
-       is exactly what the callee's loop reads. */
     if (gathered_count == 0) {
       ASTNode **empty_arguments = malloc((fixed + 1) * sizeof(ASTNode *));
       ASTNode *empty = ast_create_aggregate_literal(1, NULL, NULL, 0, NULL,
@@ -3200,8 +3052,6 @@ static int type_checker_check_gathered_arguments(TypeChecker *checker,
           call->function_name);
       return 0;
     }
-    /* The gathered expressions stay children of the call, which is what owns
-       them. The literal holds them only to fold and lower them. */
     ast_release_children(gathered_literal);
     ast_add_child(expression, gathered_literal);
 
@@ -3231,7 +3081,6 @@ if (func_symbol->data.function.is_variadic &&
   return type_checker_check_gathered_arguments(checker, expression, call,
                                                func_symbol);
 }
-// Check argument count
 if (call->argument_count != func_symbol->data.function.parameter_count) {
   char error_msg[512];
   snprintf(error_msg, sizeof(error_msg),
@@ -3245,7 +3094,6 @@ if (call->argument_count != func_symbol->data.function.parameter_count) {
   if (checker->error_reporter) {
     SourceSpan span = source_span_from_location(
         expression->location, strlen(call->function_name));
-    /* The call node's location points at '('; walk back onto the name. */
     if (span.column > strlen(call->function_name))
       span.column -= strlen(call->function_name);
     span = error_reporter_span_snap_to_token(checker->error_reporter, span,
@@ -3263,16 +3111,12 @@ if (call->argument_count != func_symbol->data.function.parameter_count) {
   return 0;
 }
 
-// Check each argument type
 for (size_t i = 0; i < call->argument_count; i++) {
-  /* An aggregate literal takes the type of what it initializes, and at a call
-     that is the parameter. Park it the way a `var` does. */
   checker->aggregate_target_type =
       func_symbol->data.function.parameter_types[i];
   Type *arg_type = type_checker_infer_type(checker, call->arguments[i]);
   checker->aggregate_target_type = NULL;
   if (!arg_type) {
-    // Error already set by type inference
     return 0;
   }
   if (type_checker_reject_comptime_escape(
@@ -3315,17 +3159,10 @@ static Type *type_checker_infer_user_call(TypeChecker *checker,
                                           ASTNode *expression,
                                           CallExpression *call,
                                           Type *call_target) {
-  // Method calls on threading types:
-  // Thread.join(), Mutex.new(), mutex.lock(), guard (unlock via drop),
-  // Atomic.new(), atomic.load/store/fetch_add/fetch_sub/cas(),
-  // channel(), tx.send(), rx.recv()
   if (call && call->object) {
     if (!type_checker_desugar_struct_method_call(checker, expression, call)) {
       return NULL;
     }
-    /* The desugar may have rewritten a closure/fn-pointer field call
-     * (`obj.field(args)`) into a function-pointer call; re-dispatch on the new
-     * node kind, since the CallExpression `call` is no longer valid. */
     if (expression->type != AST_FUNCTION_CALL) {
       return type_checker_infer_type_internal(checker, expression);
     }
@@ -3430,9 +3267,6 @@ static Type *type_checker_infer_user_call(TypeChecker *checker,
     }
   }
 
-  // assert/assert_eq are `mettle test` builtins: they exist only in the
-  // compile-time interpreter, so reject them outside @test functions
-  // (where they would survive into codegen and fail at link).
   if (func_symbol->is_builtin &&
       (strcmp(call->function_name, "assert") == 0 ||
        strcmp(call->function_name, "assert_eq") == 0)) {
@@ -3545,11 +3379,6 @@ static Type *type_checker_infer_call(TypeChecker *checker,
       if (handled) return subgroup_type;
     }
 
-    /* Qualified tagged-enum constructor `EnumName.Variant(args)`: the parser
-     * shapes this as a method call whose receiver is the enum-name identifier.
-     * Strip the receiver so downstream code treats it as a direct constructor
-     * call on `Variant`, the variant constructor symbol already exists in the
-     * global scope (registered at enum-decl time). */
     if (call && call->object && call->object->type == AST_IDENTIFIER &&
         call->function_name) {
       Identifier *recv_id = (Identifier *)call->object->data;
@@ -3608,8 +3437,6 @@ static Type *type_checker_infer_indirect_call(TypeChecker *checker,
       return NULL;
     }
 
-    /* If expression is identifier resolving to a function, synthesize function
-     * pointer type */
     if (func_type->kind != TYPE_FUNCTION_POINTER &&
         fp_call->function->type == AST_IDENTIFIER) {
       Identifier *id = (Identifier *)fp_call->function->data;
@@ -3639,7 +3466,6 @@ static Type *type_checker_infer_indirect_call(TypeChecker *checker,
     }
     fp_call->effect_signature = func_type->fn_effect_signature;
 
-    // Check argument count
     if (fp_call->argument_count != func_type->fn_param_count) {
       char error_msg[512];
       snprintf(error_msg, sizeof(error_msg),
@@ -3651,7 +3477,6 @@ static Type *type_checker_infer_indirect_call(TypeChecker *checker,
       return NULL;
     }
 
-    // Check each argument type
     for (size_t i = 0; i < fp_call->argument_count; i++) {
       Type *arg_type = type_checker_infer_type(checker, fp_call->arguments[i]);
       if (!arg_type) {
@@ -3672,7 +3497,6 @@ static Type *type_checker_infer_indirect_call(TypeChecker *checker,
       }
     }
 
-    // Return the function pointer's return type
     return func_type->fn_return_type;
   }
 
@@ -3688,15 +3512,6 @@ static Type *type_checker_infer_enum_member(TypeChecker *checker,
                                             MemberAccess *member,
                                             int *handled) {
   *handled = 1;
-  /* Qualified enum access: `EnumName.Variant`.
-   *  - Plain enum:  yields the variant's integer value, typed as the enum.
-   *  - Tagged enum, nullary variant: yields a tagged-enum value.
-   *  - Tagged enum, payloadful variant: only valid as the callee of a
-   *    CallExpression (handled by the call type-checker, which sees the
-   *    member-access and looks up the constructor symbol). Here we still
-   *    return the enum type so downstream code keeps making progress; the
-   *    constructor arity is enforced at call-check time.
-   * The object must be an identifier naming an ENUM symbol. */
   if (member->object && member->object->type == AST_IDENTIFIER) {
     Identifier *obj_id = (Identifier *)member->object->data;
     if (obj_id && obj_id->name) {
@@ -3704,18 +3519,12 @@ static Type *type_checker_infer_enum_member(TypeChecker *checker,
       if (enum_sym && enum_sym->kind == SYMBOL_ENUM && enum_sym->type) {
         Type *enum_ty = enum_sym->type;
         if (enum_ty->kind == TYPE_ENUM) {
-          /* The type table records every plain enum's members, so resolve
-           * against that first. A user enum also publishes its variants as
-           * bare globals and is found either way; `Kind` deliberately
-           * publishes none, and is only reachable through here. */
           for (size_t i = 0; i < enum_ty->enum_member_count; i++) {
             if (enum_ty->enum_member_names[i] &&
                 strcmp(enum_ty->enum_member_names[i], member->member) == 0) {
               return enum_ty;
             }
           }
-          /* Fall back to the bare global for enums declared before the
-           * member table was populated. */
           Symbol *variant_sym =
               symbol_table_lookup(checker->symbol_table, member->member);
           if (variant_sym && variant_sym->kind == SYMBOL_CONSTANT &&
@@ -3772,8 +3581,6 @@ static Type *type_checker_infer_type_query(TypeChecker *checker,
           "field access on 'Type' refers to an unknown type");
       return NULL;
     }
-    /* A declared field wins over a query of the same name: reflection must
-     * never shadow what the program itself wrote. */
     int field_index = type_get_field_index(referred, member->member);
     if (field_index >= 0) {
       return type_checker_field_value(checker, referred,
@@ -3824,8 +3631,6 @@ static Type *type_checker_infer_member(TypeChecker *checker,
     }
 
     Type *object_type = type_checker_infer_type(checker, member->object);
-    /* Member access through a pointer-to-struct auto-dereferences (like C's
-     * `->`), matching what IR lowering already does. */
     if (object_type && object_type->kind == TYPE_POINTER &&
         object_type->base_type) {
       object_type = object_type->base_type;
@@ -3850,8 +3655,6 @@ static Type *type_checker_infer_member(TypeChecker *checker,
       return type_checker_comptime_result(checker, answered, expression);
     }
     if (object_type && object_type == checker->builtin_row) {
-      /* A table row answers to its own columns, so what exists depends on the
-         table rather than on a fixed set of queries. */
       ComptimeValue row = comptime_none();
       ComptimeValue answered = comptime_none();
       if (!type_checker_eval_comptime(checker, member->object, &row) ||
@@ -3905,12 +3708,10 @@ static Type *type_checker_infer_member(TypeChecker *checker,
     if (object_type && (object_type->kind == TYPE_STRUCT ||
                         object_type->kind == TYPE_STRING ||
                         object_type->kind == TYPE_SLICE)) {
-      // Look up the field type in the struct
       Type *field_type = type_get_field_type(object_type, member->member);
       if (field_type) {
         return field_type;
       } else {
-        // Field not found in struct - this is an error
         SourceLocation location = expression->location;
         char error_msg[512];
         snprintf(error_msg, sizeof(error_msg),
@@ -3920,7 +3721,6 @@ static Type *type_checker_infer_member(TypeChecker *checker,
         return NULL;
       }
     } else if (object_type) {
-      // Trying to access member on non-struct type
       SourceLocation location = expression->location;
       char error_msg[512];
       snprintf(error_msg, sizeof(error_msg),
@@ -3957,9 +3757,6 @@ static Type *type_checker_infer_index(TypeChecker *checker,
       return NULL;
     }
 
-    /* `typeof(T).fields[i]` is answered here, not loaded: a sequence has no
-     * storage, and the subscript has to be a compile-time constant because
-     * there is nothing to index at run time. */
     if (array_type->kind == TYPE_SEQUENCE) {
       ComptimeValue element = comptime_none();
       if (!type_checker_eval_comptime(checker, expression, &element)) {
@@ -3988,17 +3785,12 @@ static Type *type_checker_infer_index(TypeChecker *checker,
       return NULL;
     }
 
-    /* `s[i]` on a slice reads through its data pointer. The extent travels
-       with the value, so this is the one indexing the compiler can check
-       against a length it actually has. */
     if (array_type->kind == TYPE_SLICE) {
       if (!array_type->base_type) {
         type_checker_set_error_at_location(checker, expression->location,
                                            "Indexed type has no element type");
         return NULL;
       }
-      /* A view whose extents are in its type is bounded by the declaration, so
-         every index into one is proven here rather than tested at run time. */
       if (array_type->view_extents[0] > 0) {
         size_t rank = type_view_rank(array_type);
         size_t depth = 0;
@@ -4073,9 +3865,6 @@ static Type *type_checker_infer_index(TypeChecker *checker,
       return array_type->base_type;
     }
 
-    /* `s[i]` is the i'th character. A string is a borrowed view of bytes, so
-     * this reads one and answers a `char`; writing through it is not offered,
-     * because the view may point at a literal in rodata. */
     if (array_type->kind == TYPE_STRING) {
       return checker->builtin_char;
     }
@@ -4114,10 +3903,6 @@ static Type *type_checker_infer_allocation(TypeChecker *checker,
       return NULL;
     }
 
-    /* `new T[n]` allocates n of them and answers a slice, so the length is
-       part of the value from the moment it exists. The element may be any
-       type with a size, which is what makes it the dynamically sized array
-       the language otherwise has no spelling for. */
     if (new_expr->count) {
       Type *element =
           type_checker_get_type_by_name(checker, new_expr->type_name);
@@ -4164,7 +3949,6 @@ static Type *type_checker_infer_allocation(TypeChecker *checker,
       return type_checker_slice_of(checker, element);
     }
 
-    // Look up the type by name
     Symbol *type_symbol =
         symbol_table_lookup(checker->symbol_table, new_expr->type_name);
     if (!type_symbol || type_symbol->kind != SYMBOL_STRUCT) {
@@ -4231,7 +4015,7 @@ static Type *type_checker_infer_cast(TypeChecker *checker,
 
     Type *operand_type = type_checker_infer_type(checker, cast_expr->operand);
     if (!operand_type) {
-      return NULL; // Error already reported
+      return NULL;
     }
     if (type_checker_reject_comptime_escape(checker, cast_expr->operand->location,
                                             operand_type)) {
@@ -4248,9 +4032,6 @@ static Type *type_checker_infer_cast(TypeChecker *checker,
       return NULL;
     }
 
-    /* A cast may claim a space nobody stated, and `mettle test` re-checks the
-       claim when it runs the grid. It may not rename one space to another: no
-       arithmetic turns a shared address into a global one. */
     if (operand_type->kind == TYPE_POINTER && target_type->kind == TYPE_POINTER &&
         operand_type->device_space != DEVICE_SPACE_NONE &&
         operand_type->device_space != DEVICE_SPACE_GENERIC &&
@@ -4266,9 +4047,6 @@ static Type *type_checker_infer_cast(TypeChecker *checker,
       return NULL;
     }
 
-    /* An alignment is a fact about an address, so a cast may only restate one
-       the compiler can already see. Claiming a stronger one is refused with
-       the alignment the expression actually reached. */
     if (target_type->declared_align &&
         target_type->declared_align >
             type_checker_address_alignment(checker, cast_expr->operand, 0)) {
@@ -4365,7 +4143,6 @@ int type_checker_check_expression(TypeChecker *checker, ASTNode *expression) {
   if (!checker || !expression)
     return 0;
 
-  // Use type inference to validate the expression
   Type *expr_type = type_checker_infer_type(checker, expression);
   if (!expr_type) {
     return 0;
@@ -4377,11 +4154,6 @@ int type_checker_check_expression(TypeChecker *checker, ASTNode *expression) {
   return 1;
 }
 
-// Enhanced binary expression type checking
-/* `while (i < wm_count)` where wm_count is a function: the name alone is a
- * pointer to the function, so the comparison is against an address rather than
- * against the value the author meant. Naming the missing parentheses beats
- * whatever the operator rules say about pointers a line later. */
 static int type_checker_report_call_without_parens(TypeChecker *checker,
                                                    ASTNode *operand) {
   if (!operand || operand->type != AST_IDENTIFIER || !operand->data) {
@@ -4405,9 +4177,6 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
   if (!checker || !binop)
     return NULL;
 
-  /* Equality is left alone: `if (handler == on_event)` compares two function
-   * addresses and means exactly what it says. Every other operator on a
-   * function is the missing-parentheses mistake. */
   if (binop->operator && strcmp(binop->operator, "==") != 0 &&
       strcmp(binop->operator, "!=") != 0 &&
       (type_checker_report_call_without_parens(checker, binop->left) ||
@@ -4419,7 +4188,7 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
   Type *right_type = type_checker_infer_type(checker, binop->right);
 
   if (!left_type || !right_type) {
-    return NULL; // Error already reported
+    return NULL;
   }
   if (type_checker_reject_comptime_escape(checker, binop->left->location,
                                           left_type) ||
@@ -4442,7 +4211,6 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
     return NULL;
   }
 
-  // String concatenation
   if (strcmp(op, "+") == 0) {
     if (left_type == checker->builtin_string &&
         right_type == checker->builtin_string) {
@@ -4450,7 +4218,6 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
     }
   }
 
-  // Pointer arithmetic: allow pointer +/- integer and pointer - pointer.
   if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0) {
     int left_is_pointer = left_type->kind == TYPE_POINTER;
     int right_is_pointer = right_type->kind == TYPE_POINTER;
@@ -4471,7 +4238,7 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
         if (right_is_pointer && left_is_integer) {
           return right_type;
         }
-      } else { // "-"
+      } else {
         if (left_is_pointer && right_is_integer) {
           return left_type;
         }
@@ -4489,7 +4256,6 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
     }
   }
 
-  // Arithmetic operators require numeric types
   if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0 || strcmp(op, "*") == 0 ||
       strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
 
@@ -4505,7 +4271,6 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
       return NULL;
     }
 
-    // Modulo operator requires integer types
     if (strcmp(op, "%") == 0) {
       if (!type_checker_is_integer_type(left_type)) {
         type_checker_report_type_mismatch(checker, binop->left->location,
@@ -4523,7 +4288,6 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
     return type_checker_promote_types(checker, left_type, right_type, op);
   }
 
-  // Bitwise operators
   if (strcmp(op, "&") == 0 || strcmp(op, "|") == 0 || strcmp(op, "^") == 0 ||
       strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
     if (!type_checker_is_integer_type(left_type)) {
@@ -4539,12 +4303,9 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
     return type_checker_promote_types(checker, left_type, right_type, op);
   }
 
-  // Comparison operators
   if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 || strcmp(op, "<") == 0 ||
       strcmp(op, "<=") == 0 || strcmp(op, ">") == 0 || strcmp(op, ">=") == 0) {
     int is_equality = (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0);
-    /* Function pointers compare like any other pointer, which is how code
-     * checks whether an entry point was resolved: `if (handler == 0)`. */
     int left_is_pointer = type_checker_type_accepts_null_pointer(left_type);
     int right_is_pointer = type_checker_type_accepts_null_pointer(right_type);
 
@@ -4558,9 +4319,6 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
 
       int left_is_null = type_checker_is_null_pointer_constant(binop->left);
       int right_is_null = type_checker_is_null_pointer_constant(binop->right);
-      /* A rawptr names no element type, so it compares against a pointer of
-       * any element type for the same reason it converts to one: both sides
-       * are an address. `if (memcpy(dst, src, n) != dst)` is the shape. */
       int rawptr_pair = left_is_pointer && right_is_pointer &&
                         (type_checker_is_rawptr_type(left_type) ||
                          type_checker_is_rawptr_type(right_type));
@@ -4580,7 +4338,6 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
       return checker->builtin_bool;
     }
 
-    // Both operands should be comparable (same type or compatible)
     if (!type_checker_are_compatible(left_type, right_type)) {
       char error_msg[512];
       snprintf(error_msg, sizeof(error_msg), "Cannot compare '%s' with '%s'",
@@ -4592,9 +4349,7 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
     return checker->builtin_bool;
   }
 
-  // Logical operators
   if (strcmp(op, "&&") == 0 || strcmp(op, "||") == 0) {
-    // Both operands should be bool or any integer (treated as boolean)
     int left_ok = type_checker_is_numeric_type(left_type) ||
                   left_type->kind == TYPE_BOOL;
     int right_ok = type_checker_is_numeric_type(right_type) ||
@@ -4612,7 +4367,6 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
     return checker->builtin_bool;
   }
 
-  // Unknown operator
   char error_msg[512];
   snprintf(error_msg, sizeof(error_msg), "Unknown binary operator '%s'", op);
   type_checker_set_error_at_location(checker, location, error_msg);

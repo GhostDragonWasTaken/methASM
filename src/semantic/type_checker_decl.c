@@ -1,4 +1,3 @@
-// Type checker: struct / enum / declaration processing.
 #include "type_checker_internal.h"
 #include "codegen/target.h"
 
@@ -29,11 +28,6 @@ static Type *type_checker_narrow_to_target_word(TypeChecker *checker,
   }
 }
 
-
-/* The kernel ABI is intentionally explicit: a parameter is a POD scalar, a
- * pointer, or a record built from those. Rejecting strings, closures, and
- * function pointers here produces a source diagnostic instead of a late
- * target-emitter failure or, worse, an ABI mismatch. */
 static int gpu_kernel_scalar_type(const Type *type) {
   if (!type) {
     return 0;
@@ -83,25 +77,14 @@ static Symbol *find_enclosing_parameter(TypeChecker *checker,
   return NULL;
 }
 
-/* Can this expression become bytes in the object file's data section?
- *
- * A global has no initializer to run: its value is laid out at compile time, so
- * the initializer must be one of the shapes module lowering can fold. This
- * mirrors eval_numeric in src/frontend/mtlc_lower_module.c structurally (it does
- * not evaluate - folding still happens there, and a shape accepted here that
- * turns out not to fold is still caught downstream). Keep the two in step: a
- * shape added to eval_numeric belongs here too, or it gets rejected with a
- * misleading diagnostic. */
 static int layoutable_global_initializer(TypeChecker *checker,
                                          const Type *declared,
                                          const ASTNode *expression,
                                          int top_level) {
   if (!expression) {
-    return 1; /* no initializer: nothing to lay out */
+    return 1;
   }
 
-  /* A string global stores a pointer to one string literal's storage. There is
-   * nowhere to run a concatenation, so nothing else qualifies. */
   if (declared && declared->kind == TYPE_STRING) {
     return expression->type == AST_STRING_LITERAL;
   }
@@ -110,9 +93,6 @@ static int layoutable_global_initializer(TypeChecker *checker,
   case AST_NUMBER_LITERAL:
   case AST_STRING_LITERAL:
     return 1;
-  /* Another global's folded value, a global const, or an enum member. An
-   * extern's storage lives in another object file, so its value is not ours to
-   * read at layout time. */
   case AST_IDENTIFIER: {
     const Identifier *identifier = (const Identifier *)expression->data;
     const Symbol *symbol =
@@ -126,8 +106,6 @@ static int layoutable_global_initializer(TypeChecker *checker,
     if (!unary || !unary->operator|| !unary->operand) {
       return 0;
     }
-    /* `&name` becomes a relocation filling the whole slot, so it is the entire
-     * initializer or nothing: there is no addend for `&name + 1`. */
     if (strcmp(unary->operator, "&") == 0) {
       return top_level && unary->operand->type == AST_IDENTIFIER;
     }
@@ -150,9 +128,6 @@ static int layoutable_global_initializer(TypeChecker *checker,
     return cast && cast->operand &&
            layoutable_global_initializer(checker, declared, cast->operand, 0);
   }
-  /* `sizeof(T)` is a compile-time integer. A call to a function this program
-     defines is one too: the interpreter runs it while compiling and the answer
-     is what gets laid out. Everything else needs the program to be running. */
   case AST_FUNCTION_CALL: {
     const CallExpression *call = (const CallExpression *)expression->data;
     const Symbol *callee;
@@ -175,11 +150,6 @@ static int layoutable_global_initializer(TypeChecker *checker,
 
 static int gpu_kernel_value_type(const Type *type, int depth);
 
-/* A record crosses the launch boundary as its own bytes, so every field has to
- * mean the same thing on the device as it does on the host. Scalars, fixed
- * arrays, pointers, and nested records do; a string, a closure, or a function
- * pointer is a host address with no device meaning. The depth bound keeps a
- * self-referential type from walking forever. */
 int type_checker_gpu_abi_type(const Type *type) {
   return gpu_kernel_value_type(type, 0);
 }
@@ -216,8 +186,6 @@ static int gpu_kernel_value_type(const Type *type, int depth) {
 static int gpu_kernel_parameter_type(const Type *type) {
   return gpu_kernel_value_type(type, 0);
 }
-
-// Struct type processing functions
 
 static int type_checker_claim_struct_placeholder(TypeChecker *checker,
                                                  const Type *type) {
@@ -303,7 +271,6 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
     return 0;
   }
 
-  // Check if struct already exists
   Symbol *existing =
       symbol_table_lookup_current_scope(checker->symbol_table, decl->name);
   Type *placeholder = NULL;
@@ -317,12 +284,6 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
     }
   }
 
-  /* Self-referential structs (e.g. `next: Foo*` inside `struct Foo`) need
-   * `Foo` resolvable as a base type while its own fields are being processed.
-   * Register an empty placeholder struct type + symbol first; the pointer-type
-   * parser only requires the base Type pointer to exist, not for its fields
-   * to be populated. We fill in the field information in place once the
-   * field types have all resolved. */
   Type *struct_type = placeholder;
   if (!struct_type) {
     Symbol *struct_symbol;
@@ -341,7 +302,6 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
     }
   }
 
-  // Resolve field types now that the placeholder is visible.
   Type **field_types = malloc(decl->field_count * sizeof(Type *));
   if (!field_types) {
     return 0;
@@ -364,11 +324,6 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
       free(field_types);
       return 0;
     }
-    /* The placeholder registered above is what makes `next: Foo*` work, and it
-     * also makes `a: Foo` resolve, to a type whose size is still 0. Layout then
-     * gave the field no storage: `struct S { a: S; }` reached the backend at
-     * size 0 as an internal compiler error, and `struct S { a: S; v: int64; }`
-     * compiled with `a` silently overlapping `v`. */
     const Type *field_base = field_types[i];
     while (field_base && field_base->kind == TYPE_ARRAY) {
       field_base = field_base->base_type;
@@ -386,8 +341,6 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
     }
   }
 
-  /* Populate the placeholder in place so pointers captured during field
-   * resolution stay valid. Layout is computed here, in the frontend. */
   if (!type_alloc_fields(struct_type, decl->field_count)) {
     free(field_types);
     return 0;
@@ -406,10 +359,6 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
         "Failed to compute layout for struct '%s'", decl->name);
     return 0;
   }
-  /* Each field can sit within the single-object bound while the struct does
-   * not. The backend keeps frame offsets and local storage in `int`, so three
-   * 800 MB arrays in one struct arrived as a negative size and were reported
-   * as an internal compiler error. */
   if (struct_type->size > (size_t)INT_MAX) {
     free(field_types);
     type_checker_set_error_at_location(
@@ -425,15 +374,6 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
   return 1;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: build a concrete TYPE_TAGGED_ENUM type and register its constructors.
-// Called for plain (non-generic) tagged enum declarations and from the
-// generic-instantiation path when we monomorphize "Option<int32>" on demand.
-//
-// The memory layout is:
-//   offset 0              : int32 _tag  (4 bytes)
-//   offset data_offset    : payload union (largest payload, alignment-padded)
-// ---------------------------------------------------------------------------
 static int type_checker_payload_is_self_pointer(const char *payload_type,
                                                 const char *type_name) {
   size_t base_length;
@@ -454,7 +394,6 @@ Type *type_checker_build_tagged_enum_type(TypeChecker *checker,
   if (!checker || !type_name || !enum_decl)
     return NULL;
 
-  // Determine the max payload size and alignment
   size_t max_payload_size = 0;
   size_t max_payload_align = 1;
   for (size_t i = 0; i < enum_decl->variant_count; i++) {
@@ -477,15 +416,12 @@ Type *type_checker_build_tagged_enum_type(TypeChecker *checker,
       max_payload_align = payload_ty->alignment;
   }
 
-  // data starts at first offset >= 4 that satisfies alignment of payload
   size_t data_align = max_payload_align < 4 ? 4 : max_payload_align;
-  // align_up(4, data_align) - tag is 4 bytes, then pad to data_align
   size_t data_offset = (4 + data_align - 1) & ~(data_align - 1);
   size_t total_size = max_payload_size > 0 ? data_offset + max_payload_size
                                            : data_offset;
-  // Round up total to alignment
   total_size = (total_size + data_align - 1) & ~(data_align - 1);
-  if (total_size < 8) total_size = 8; // at least 8 bytes
+  if (total_size < 8) total_size = 8;
 
   Type *te = type_create(TYPE_TAGGED_ENUM, type_name);
   if (!te)
@@ -590,11 +526,6 @@ static Symbol *type_checker_make_variant_constructor(Type *te,
   return ctor;
 }
 
-/* Every variant gets two constructor symbols. `Enum__Variant` is unique to
- * its enum and is what a qualified `Enum.Variant(...)` resolves to. The bare
- * `Variant` is a convenience that belongs to whichever enum declared it
- * first, so a second enum reusing the name keeps its own qualified symbol and
- * leaves the bare one alone. */
 int type_checker_register_variant_constructor(TypeChecker *checker, Type *te,
                                               const char *enum_name,
                                               const char *variant_name,
@@ -786,7 +717,6 @@ Type *type_checker_instantiate_generic_enum(TypeChecker *checker,
     return NULL;
   }
 
-  // Register type + constructors in symbol table
   Symbol *enum_sym = symbol_create(mangled, SYMBOL_ENUM, te);
   free(mangled);
   if (!enum_sym) {
@@ -806,9 +736,6 @@ Type *type_checker_instantiate_generic_enum(TypeChecker *checker,
   return te;
 }
 
-/* Is the predicate exactly `uniform(<binding>)`? That is the one predicate the
-   interval prover cannot speak about, so it is recognised here and discharged
-   by the dependence analysis instead. */
 int type_checker_predicate_is_uniform(ASTNode *predicate,
                                       const char *binding) {
   CallExpression *call;
@@ -828,8 +755,6 @@ int type_checker_predicate_is_uniform(ASTNode *predicate,
          strcmp(argument->name, binding) == 0;
 }
 
-/* A template is registered by name and instantiated where it is used. The
-   table is small: a program declares a handful of these. */
 static ASTNode *g_declared_type_templates[64];
 static size_t g_declared_type_template_count = 0;
 
@@ -908,10 +833,6 @@ int type_checker_process_type_declaration(TypeChecker *checker,
   refined->view_rank = base->view_rank;
   refined->is_volatile = base->is_volatile;
   refined->refined_base = base;
-  /* A refined struct or array is the same layout under a new name, so the
-     fields come with it: `s.hi` on an `Ordered` reads what it reads on a
-     `Span`, and the predicate that speaks about `value.lo` has something to
-     speak about. */
   refined->field_names = base->field_names;
   refined->field_types = base->field_types;
   refined->field_offsets = base->field_offsets;
@@ -941,10 +862,6 @@ int type_checker_process_type_declaration(TypeChecker *checker,
   return 1;
 }
 
-/* `Uniform<int32>`: substitute the argument for the parameter in the base
-   spelling, resolve that, and build the refined type the ordinary form would
-   have built. The predicate is shared with the template, which is what makes
-   every instance carry the same rule. */
 Type *type_checker_instantiate_declared_type(TypeChecker *checker,
                                              const char *base_name,
                                              const char *argument_text) {
@@ -1017,9 +934,6 @@ Type *type_checker_instantiate_declared_type(TypeChecker *checker,
   return refined;
 }
 
-/* An identifier in the predicate that is neither the binding nor anything the
- * declaration's own scope knows. There is nothing wrong with it: it is the
- * relation, and it resolves where the type is used. */
 static int predicate_free_name(TypeChecker *checker, ASTNode *node,
                                const char *binding, const char **out_name) {
   if (!node) {
@@ -1071,9 +985,6 @@ int type_checker_check_type_predicate(TypeChecker *checker,
     return 1;
   }
   base = refined->refined_base;
-  /* `uniform(value)` speaks about the work items a value is read in rather
-     than about the value's range, so the interval machinery has nothing to say
-     about it and does not try. */
   if (type_checker_predicate_is_uniform(decl->predicate,
                                         refined->refine_binding)) {
     refined->refine_uniform = 1;
@@ -1136,8 +1047,6 @@ int type_checker_process_enum_declaration(TypeChecker *checker,
     return 0;
   }
 
-  // If this enum has type parameters it's a generic template , store the AST
-  // node for later monomorphization and do not register a concrete type now.
   if (enum_decl->type_param_count > 0) {
     ASTNode **new_tmpl = realloc(
         checker->generic_enum_templates,
@@ -1150,7 +1059,6 @@ int type_checker_process_enum_declaration(TypeChecker *checker,
     return 1;
   }
 
-  // Check whether any variant carries a payload , if so, it's a tagged enum.
   int is_tagged = 0;
   for (size_t i = 0; i < enum_decl->variant_count; i++) {
     if (enum_decl->variants[i].payload_type) {
@@ -1159,7 +1067,6 @@ int type_checker_process_enum_declaration(TypeChecker *checker,
     }
   }
 
-  // Check for duplicate type declaration
   if (type_checker_get_type_by_name(checker, enum_decl->name)) {
     type_checker_set_error_at_location(checker, enum_decl_node->location,
                                        "Type '%s' already declared",
@@ -1171,7 +1078,6 @@ int type_checker_process_enum_declaration(TypeChecker *checker,
     return type_checker_process_tagged_enum(checker, enum_decl_node);
   }
 
-  // Plain (integer-valued) enum.
   Type *new_enum_type = type_create(TYPE_ENUM, enum_decl->name);
   if (!new_enum_type) {
     type_checker_set_error_at_location(checker, enum_decl_node->location,
@@ -1322,9 +1228,6 @@ static int type_checker_check_declared_address_space(
   int is_static_storage =
       var_type && var_type->kind == TYPE_ARRAY && var_type->base_type &&
       var_type->array_size > 0 && var_type->array_size <= UINT32_MAX;
-  /* A view whose extents are in its type is static storage of the same
-     shape: the element count is the product of the extents, and the layout
-     says where each element sits inside it. */
   int is_static_view = var_type && var_type->kind == TYPE_SLICE &&
                        var_type->base_type && var_type->view_extents[0] > 0;
   type_checker_note_device_type_in(
@@ -1391,26 +1294,16 @@ static int type_checker_check_variable_initializer(
     VarDeclaration *var_decl, Scope *current_scope, Type **var_type_io,
     int *poisoned_io) {
   Type *var_type = *var_type_io;
-  // If there's an initializer, validate it. When validation fails but the
-  // declared type is known, the variable is still registered with that type
-  // ("poisoned") so later uses don't cascade into bogus undefined-variable
-  // errors; the declaration itself still fails.
   int poisoned = *poisoned_io;
   if (var_decl->initializer) {
     size_t reports_before =
         checker->error_reporter ? checker->error_reporter->count : 0;
-    /* An aggregate literal has no type of its own, so hand it the declared
-     * type. Without one there is nothing to check it against, and the
-     * literal reports that itself. */
     checker->aggregate_target_type =
         var_decl->initializer->type == AST_AGGREGATE_LITERAL ||
                 var_decl->initializer->type == AST_FUNCTION_CALL ||
                 var_decl->initializer->type == AST_IDENTIFIER
             ? var_type
             : NULL;
-    /* A `const` and a module-scope `var` are laid out in the object file, so
-       an element of theirs has to be known while compiling. A local is
-       initialized by code, which can compute one. */
     checker->aggregate_requires_constant =
         var_decl->is_const ||
         (current_scope && current_scope->type == SCOPE_GLOBAL);
@@ -1434,8 +1327,6 @@ static int type_checker_check_variable_initializer(
       poisoned = 1;
     }
     if (!poisoned && var_type) {
-      /* A capturing closure carries a heap environment and cannot be stored in
-       * a plain function-pointer type; it needs a closure type `Fn(...)`. */
       if (init_type && init_type->kind == TYPE_FUNCTION_POINTER &&
           init_type->closure_env &&
           !(var_type->kind == TYPE_FUNCTION_POINTER && var_type->closure_env)) {
@@ -1446,7 +1337,6 @@ static int type_checker_check_variable_initializer(
             var_type->name, var_decl->name);
         poisoned = 1;
       }
-      // Type specified: validate assignment compatibility
       else if (type_is_comptime_only(init_type) &&
                !type_is_comptime_only(var_type)) {
         type_checker_reject_comptime_escape(
@@ -1462,14 +1352,9 @@ static int type_checker_check_variable_initializer(
         poisoned = 1;
       }
     } else if (poisoned) {
-      /* Initializer failed but declared type is known: register anyway. */
     } else if (var_decl->structural_type ||
                (var_decl->is_const &&
                 (!current_scope || current_scope->type == SCOPE_GLOBAL))) {
-      // Exempt: a compiler-synthesized binding whose type is structural (e.g.
-      // a range-`for` counter), or a global `const` (integer-only and folded
-      // at each use, so its type is exactly its literal value's type). Take
-      // the initializer type.
       var_type = init_type;
       if (var_decl->structural_type) {
         Type *narrowed = type_checker_narrow_to_target_word(checker, var_type);
@@ -1488,8 +1373,6 @@ static int type_checker_check_variable_initializer(
         }
       }
     } else {
-      // Mettle requires an explicit type on every user `var` and local
-      // `const` binding; nothing is inferred from an arbitrary initializer.
       type_checker_set_error_at_location(
           checker, declaration->location,
           "%s '%s' requires an explicit type: write '%s %s: <type> = ...' "
@@ -1574,11 +1457,6 @@ static int type_checker_declare_comptime_const(
   return 1;
 }
 
-/* A `const string` whose initializer the compile-time evaluator can fold
- * becomes the literal it folds to, right here. Everything after this point --
- * layout, lowering, `mettle expand` -- sees one ordinary string literal, which
- * is the whole trick: a tag built while compiling is a tag written down, and
- * both ends of a wire format read the same one. */
 static int type_checker_fold_const_string(TypeChecker *checker,
                                           VarDeclaration *var_decl,
                                           ASTNode *declaration,
@@ -1615,15 +1493,6 @@ static int type_checker_check_global_initializer(
     int *poisoned_io) {
   int poisoned = *poisoned_io;
   type_checker_fold_const_string(checker, var_decl, declaration, var_type);
-  /* A global's storage is laid out in the object file, so its value has to be
-   * known at compile time. For an aggregate that means an aggregate literal
-   * and nothing else -- a call or any other run-time expression has no image
-   * to lay out, and there is no module initializer to run one in. Caught here
-   * rather than in codegen so the report carries a source location. */
-  /* A call to a function the program wrote is the other shape a global
-   * aggregate can take: the interpreter runs it while compiling and the answer
-   * becomes the bytes in the object file. Everything else about it is
-   * unchanged, including that a value it cannot compute stops the build. */
   if (!poisoned && var_decl->initializer && !var_decl->is_extern && var_type &&
       (var_type->kind == TYPE_STRUCT || var_type->kind == TYPE_ARRAY) &&
       var_decl->initializer->type != AST_AGGREGATE_LITERAL &&
@@ -1637,25 +1506,13 @@ static int type_checker_check_global_initializer(
         var_type->kind == TYPE_STRUCT ? "'{ field: value, ... }'"
                                       : "'[ value, ... ]'",
         var_decl->name, var_type->name ? var_type->name : "?");
-    /* Register the binding anyway so later uses do not pile on with
-     * "undefined variable"; the declaration itself has already failed. */
     checker->has_error = 1;
     poisoned = 1;
   }
 
-  /* The same rule for a scalar global. Its initializer is folded to bytes in
-   * the object file, so it has to be one of the shapes the module lowering
-   * can fold (see eval_numeric in mtlc_lower_module.c): a numeric constant
-   * expression, `sizeof(T)`, `&name`, or a string literal. Anything else -- a
-   * call, `new`, an index or member access, string concatenation -- is a
-   * run-time value with nothing to lay out. Rejected here so the report
-   * carries a source location instead of failing as an internal compiler
-   * error in codegen. */
   if (!poisoned && var_decl->initializer && !var_decl->is_extern && var_type &&
       var_type->kind != TYPE_STRUCT && var_type->kind != TYPE_ARRAY &&
       (!current_scope || current_scope->type == SCOPE_GLOBAL) &&
-      /* An integer `const` gets the more specific diagnostic from its own
-       * fold below; everything else lands here. */
        !(var_decl->is_const && type_checker_is_numeric_type(var_type)) &&
       !layoutable_global_initializer(checker, var_type, var_decl->initializer,
                                     1)) {
@@ -1681,11 +1538,6 @@ static int type_checker_fold_const_value(
   int folded_is_float = *folded_is_float_io;
   long long folded_integer_value = *folded_integer_value_io;
   double folded_float_value = *folded_float_value_io;
-// A `const` declaration binds an immutable value and must be initialized.
-// Numeric consts must fold at compile time. Integer globals use the
-// storage free symbol form. Other numeric consts keep normal storage when
-// the backend needs an address, but carry the folded value for later const
-// expressions.
 if (var_decl->is_const) {
   if (!var_decl->initializer) {
     type_checker_set_error_at_location(
@@ -1744,9 +1596,7 @@ if (var_decl->is_const) {
       }
       return 2;
     }
-    // Local numeric consts and global float consts use normal storage.
   }
-  // Non numeric consts use normal storage and the immutable flag below.
 }
   *folded_is_float_io = folded_is_float;
   *folded_integer_value_io = folded_integer_value;
@@ -1818,7 +1668,6 @@ static int type_checker_declare_variable(
     }
   }
 
-  // Check for duplicate declaration in current scope.
   Symbol *existing = symbol_table_lookup_current_scope(checker->symbol_table,
                                                        var_decl->name);
   if (existing) {
@@ -1859,7 +1708,6 @@ static int type_checker_declare_variable(
     return 1;
   }
 
-  // Create and declare the symbol
   Symbol *var_symbol =
       symbol_create(var_decl->name, SYMBOL_VARIABLE, var_type);
   if (var_symbol) {
@@ -1876,14 +1724,10 @@ static int type_checker_declare_variable(
 
   var_symbol->is_extern = var_decl->is_extern;
   var_symbol->is_immutable = var_decl->is_const;
-  /* A `const` written as an aggregate literal is a table a `comptime for` can
-     read the rows of, so the literal is kept where the name can reach it. */
   if (var_decl->is_const && var_decl->initializer &&
       var_decl->initializer->type == AST_AGGREGATE_LITERAL) {
     var_symbol->constant_initializer = var_decl->initializer;
   }
-  /* A `const string` carries its text as a compile-time value, so a later
-     constant can be built from it and a directive can read it. */
   if (var_decl->is_const && var_decl->initializer &&
       var_decl->initializer->type == AST_STRING_LITERAL &&
       var_decl->initializer->data) {
@@ -1995,7 +1839,6 @@ static int type_checker_process_variable(TypeChecker *checker,
 
     Type *var_type = NULL;
 
-    // If type is explicitly specified, resolve it
     if (var_decl->type_name) {
       var_type = type_checker_get_type_by_name(checker, var_decl->type_name);
       if (!var_type) {
@@ -2042,7 +1885,6 @@ static int type_checker_process_variable(TypeChecker *checker,
 static Symbol *type_checker_build_function_symbol(
     TypeChecker *checker, ASTNode *declaration,
     FunctionDeclaration *func_decl, Type *return_type) {
-  // Resolve parameter types and check for duplicate parameter names
   Type **param_types = NULL;
   if (func_decl->parameter_count > 0) {
     param_types = malloc(func_decl->parameter_count * sizeof(Type *));
@@ -2053,7 +1895,6 @@ static Symbol *type_checker_build_function_symbol(
       return 0;
     }
 
-    // Check for duplicate parameter names
     for (size_t i = 0; i < func_decl->parameter_count; i++) {
       for (size_t j = i + 1; j < func_decl->parameter_count; j++) {
         if (strcmp(func_decl->parameter_names[i],
@@ -2066,9 +1907,6 @@ static Symbol *type_checker_build_function_symbol(
       }
     }
 
-    /* `T[..]` gathers whatever a call passes after the fixed parameters. Only
-       the last parameter can, because everything after it would have nothing
-       left to take. */
     type_checker_note_gathered_parameter(func_decl);
     for (size_t i = 0; i + 1 < func_decl->parameter_count; i++) {
       const char *written = func_decl->parameter_types[i];
@@ -2114,7 +1952,6 @@ static Symbol *type_checker_build_function_symbol(
     }
   }
 
-  // Copy parameter names so function symbols own their metadata.
   char **param_names_copy = NULL;
   if (func_decl->parameter_count > 0) {
     param_names_copy = malloc(func_decl->parameter_count * sizeof(char *));
@@ -2143,7 +1980,6 @@ static Symbol *type_checker_build_function_symbol(
     }
   }
 
-  // Create function symbol
   Symbol *func_symbol =
       symbol_create(func_decl->name, SYMBOL_FUNCTION, return_type);
   if (!func_symbol) {
@@ -2161,7 +1997,6 @@ static Symbol *type_checker_build_function_symbol(
     return 0;
   }
 
-  // Set function-specific data
   func_symbol->data.function.parameter_count = func_decl->parameter_count;
   func_symbol->data.function.parameter_names = param_names_copy;
   func_symbol->data.function.parameter_types = param_types;
@@ -2193,7 +2028,6 @@ static int type_checker_check_function_body(
     TypeChecker *checker, ASTNode *declaration,
     FunctionDeclaration *func_decl, Symbol *func_symbol,
     Type *return_type) {
-  // Add parameters to the new scope
   Type **active_param_types =
       checker->current_function->data.function.parameter_types;
   if (func_decl->parameter_count > 0) {
@@ -2212,9 +2046,6 @@ static int type_checker_check_function_body(
           active_param_types[i] &&
           active_param_types[i]->kind == TYPE_POINTER) {
         unsigned char declared = active_param_types[i]->device_space;
-        /* A launch hands a kernel addresses it allocated on the device. It
-         * has no shared tile and no work-item private frame to hand over, so
-         * a parameter claiming one is a claim nothing can satisfy. */
         if (declared == DEVICE_SPACE_SHARED ||
             declared == DEVICE_SPACE_LOCAL) {
           type_checker_set_error_at_location(
@@ -2274,18 +2105,13 @@ static int type_checker_check_function_body(
     }
   }
 
-  // Process the function body
   if (func_decl->body &&
       !type_checker_check_statement(checker, func_decl->body)) {
-    // Error already reported
     type_checker_init_tracker_reset(checker);
     symbol_table_exit_scope(checker->symbol_table);
     return 0;
   }
 
-  // Memory diagnostics (use-after-free, dangling stack addresses,
-  // constant out-of-bounds accesses, leaks). The scope is still live, so
-  // `const` locals resolve for constant-index evaluation.
   if (func_decl->body &&
       !type_checker_check_function_memory(checker, declaration)) {
     type_checker_init_tracker_reset(checker);
@@ -2293,14 +2119,6 @@ static int type_checker_check_function_body(
     return 0;
   }
 
-  // A function with a non-void return type must contain at least one
-  // return statement. This is a simple body-walk (a missing return on
-  // some paths is not yet diagnosed); a function with no return at all
-  // would otherwise compile and return garbage from RAX/XMM0. `main` is
-  // exempt: the entry point falls through to an implicit `return 0`.
-  /* A `@naked` function has no frame and no compiled epilogue: its asm block
-   * loads the return register and returns itself, so there is no `return`
-   * statement to find and no garbage to warn about. */
   if (func_decl->body && return_type &&
       return_type->kind != TYPE_VOID && !func_decl->is_naked &&
       strcmp(func_decl->name, "main") != 0 &&
@@ -2321,13 +2139,10 @@ static int type_checker_check_function_body(
 static Type *type_checker_function_return_type(
     TypeChecker *checker, ASTNode *declaration,
     FunctionDeclaration *func_decl) {
-  // Resolve return type
   Type *return_type = NULL;
   if (func_decl->return_type_count > 0 &&
       !type_checker_ensure_multi_return_type(checker, func_decl,
                                              declaration->location)) {
-    /* Only speak in generalities when nothing more specific was said: the
-     * builder names the offending return value when it can. */
     if (!checker->has_error) {
       type_checker_set_error_at_location(
           checker, declaration->location,
@@ -2403,7 +2218,6 @@ static int type_checker_bind_function_symbol(
     }
   }
 
-  // Forward declaration: no body
   if (!func_decl->body) {
     func_symbol->is_initialized = 0;
     if (!symbol_table_declare_forward(checker->symbol_table, func_symbol)) {
@@ -2479,10 +2293,6 @@ static int type_checker_process_function(TypeChecker *checker,
           "GPU kernel '%s' must be declared at top level", func_decl->name);
       return 0;
     }
-    /* `extern kernel name(params);` is the host-side declaration of a kernel
-     * defined in a separately compiled device module. It carries the signature
-     * so `dispatch` can check its arguments, and it never has a body. A
-     * non-extern `kernel` is a definition and must. */
     if (func_decl->is_kernel && !func_decl->is_extern && !func_decl->body) {
       type_checker_set_error_at_location(
           checker, declaration->location,
@@ -2531,14 +2341,13 @@ static int type_checker_process_function(TypeChecker *checker,
 
     if (is_resolving_forward) {
       checker->current_function = existing_before;
-      symbol_destroy(func_symbol); // not inserted, existing symbol was updated
+      symbol_destroy(func_symbol);
       func_symbol = existing_before;
     } else {
       checker->current_function = func_symbol;
     }
     checker->current_function_decl = declaration;
 
-    // Enter a new scope for the function body
     if (!symbol_table_enter_scope(checker->symbol_table, SCOPE_FUNCTION)) {
       type_checker_set_error_at_location(
           checker, declaration->location,
@@ -2565,10 +2374,8 @@ static int type_checker_process_function(TypeChecker *checker,
     type_checker_init_tracker_exit_scope(checker);
     type_checker_init_tracker_reset(checker);
 
-    // Exit the function's scope
     symbol_table_exit_scope(checker->symbol_table);
 
-    // Reset the current function in the type checker
     checker->current_function = NULL;
     checker->current_function_decl = NULL;
 
@@ -2588,12 +2395,9 @@ static int type_checker_process_member(TypeChecker *checker,
   *handled = 1;
   switch (declaration->type) {
   case AST_METHOD_DECLARATION:
-    // Method declarations are handled within struct processing
-    // This case shouldn't normally be reached during standalone processing
     return 1;
 
   case AST_INLINE_ASM:
-    // Top-level inline assembly is permitted.
     return 1;
 
   case AST_EFFECT_DECLARATION:
@@ -2678,7 +2482,6 @@ static int type_checker_check_member_assignment(
   if (!object_type) {
     return 0;
   }
-  /* Assigning through a pointer-to-struct auto-dereferences (like `->`). */
   if (object_type->kind == TYPE_POINTER && object_type->base_type) {
     object_type = object_type->base_type;
   }
@@ -2740,7 +2543,6 @@ static int type_checker_check_target_assignment(
     TypeChecker *checker, ASTNode *declaration,
     Assignment *assignment, int *handled) {
   *handled = 1;
-  // Complex assignment target: obj.field = value or arr[i] = value
   if (assignment->target) {
     if (assignment->target->type == AST_MEMBER_ACCESS) {
       MemberAccess *member = (MemberAccess *)assignment->target->data;
@@ -2761,10 +2563,6 @@ static int type_checker_check_target_assignment(
       if (!target_array_type) {
         return 0;
       }
-      /* `s[i]` reads a character; it is not a place to put one. A string
-       * is a borrowed view, and the bytes it points at are as likely to be
-       * a literal in read-only memory as a buffer the program owns. Reach
-       * the bytes through `s.chars` when they are genuinely writable. */
       if (target_array_type->kind == TYPE_STRING) {
         type_checker_set_error_at_location(
             checker, assignment->target->location,
@@ -2905,14 +2703,12 @@ static int type_checker_process_assignment(TypeChecker *checker,
       }
     }
 
-    // Simple variable assignment: name = value
     if (!assignment->variable_name) {
       type_checker_set_error_at_location(checker, declaration->location,
                                          "Invalid assignment statement");
       return 0;
     }
 
-    // Look up the variable
     Symbol *var_symbol =
         symbol_table_lookup(checker->symbol_table, assignment->variable_name);
     if (!var_symbol) {
@@ -2954,7 +2750,6 @@ static int type_checker_process_assignment(TypeChecker *checker,
       return 0;
     }
 
-    // Infer the type of the assignment value
     checker->aggregate_target_type = var_symbol->type;
     Type *value_type = type_checker_infer_type(checker, assignment->value);
     checker->aggregate_target_type = NULL;
@@ -2971,7 +2766,6 @@ static int type_checker_process_assignment(TypeChecker *checker,
       return 0;
     }
 
-    // Validate assignment compatibility
     if (!(type_checker_type_accepts_null_pointer(var_symbol->type) &&
           type_checker_is_null_pointer_constant(assignment->value)) &&
         !type_checker_is_assignable_from(checker, var_symbol->type, value_type,
@@ -3014,8 +2808,6 @@ static int type_checker_process_assignment(TypeChecker *checker,
 
 static int type_checker_reject_file_scope(TypeChecker *checker,
                                           ASTNode *declaration) {
-    /* An expression or statement reached file scope, where only declarations
-       live. Name what it is so the reader can see which line to move. */
     const char *shape = "statement";
     switch (declaration->type) {
     case AST_ASSIGNMENT:

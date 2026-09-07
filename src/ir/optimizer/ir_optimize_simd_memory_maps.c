@@ -52,7 +52,6 @@ int ir_find_while_loop_bounds(IRFunction *function, size_t header_index,
   }
 
   return out->jump_index != (size_t)-1 &&
-         /* threaded exit: the nop-install would delete the exit edge */
          ir_fused_loop_exit_is_adjacent(function, out->jump_index,
                                         out->exit_label);
 }
@@ -61,10 +60,6 @@ int ir_symbol_contains(const char *symbol, const char *needle) {
   return symbol && needle && strstr(symbol, needle) != NULL;
 }
 
-/* The base a walking pointer was initialized from. The fused kernels replay
- * the walk from base[0], so the init must be the pointer's ONLY write before
- * the loop: with multiple writes (a reassignment, a previous loop's advance,
- * an if/else init) the entering value is not provably the base. */
 const char *ir_find_ptr_init_base(const IRFunction *function, size_t before,
                                          const char *ptr_symbol) {
   const char *base = NULL;
@@ -98,12 +93,6 @@ int ir_find_ptr_loop_len_operand(const IRFunction *function,
   for (i = 0; i < header_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     int anchored = 0;
-    /* end = base + (n << 2): anchored to the SAME base the walk starts from,
-     * so the kernel's n iterations equal the scalar walk's (end-base)/4. An
-     * end computed off a different/offset pointer would make `n` a lie. The
-     * add's lhs is the base directly, or the end pointer itself when the IR
-     * staged it as `end <- base; end = end + t` -- then the staging assign
-     * must be the only prior write and must read the base. */
     if (ins->op != IR_OP_BINARY || !ins->text || strcmp(ins->text, "+") != 0 ||
         !ir_operand_is_symbol_named(&ins->dest, end_ptr) ||
         ins->rhs.kind != IR_OPERAND_TEMP || !ins->rhs.name) {
@@ -193,9 +182,6 @@ int ir_symbol_is_i32_ptr_param(const IRFunction *function,
     }
     return type && strcmp(type, "int32*") == 0;
   }
-  /* A local nothing reassigns holds one value for the whole function, which
-   * is all a walking base needs. The `_param_` name checks this replaces were
-   * the inliner-era spelling of the same property. */
   if (ir_symbol_is_settled_local(function, symbol_name, "int32*")) {
     return 1;
   }
@@ -405,12 +391,6 @@ static int ir_try_vectorize_simd_scale_i32_at(IRFunction *function,
   }
 
   compare = &function->instructions[bounds.compare_index];
-  /* Pointer induction names its walkers `__ptr_<hdr>_<base>_p` against
-   * `__ptr_<hdr>_<base>_end`. The base tag carries the source's parameter
-   * NAME, so matching on `_src_p` only fired when the parameter was literally
-   * called `src`; every semantic property (loads only through src_p, stores
-   * only through dst_p, both stepped by 4, resolvable init bases) is checked
-   * below, so the names only need to prove induction created the pair. */
   if (!ir_symbol_contains(compare->lhs.name, "__ptr_") ||
       !ir_symbol_contains(compare->rhs.name, "__ptr_") ||
       !ir_symbol_contains(compare->rhs.name, "_end")) {
@@ -418,8 +398,6 @@ static int ir_try_vectorize_simd_scale_i32_at(IRFunction *function,
   }
   src_p = compare->lhs.name;
 
-  /* Exactly two pointers step by 4 in the body: the source, and the walker
-   * that must be the destination. */
   for (size_t i = bounds.branch_index + 1; i < bounds.jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
@@ -589,8 +567,6 @@ static int ir_try_vectorize_simd_reverse_copy_i32_at(IRFunction *function,
     if (!iv_symbol) {
       return 1;
     }
-    /* The kernel reads src[len-1-iv] for iv = 0..len-1: the counter must
-     * provably start at 0 or the reversed indexes are shifted. */
     if (!ir_iv_zero_at_header(function, header_index, iv_symbol)) {
       return 1;
     }
@@ -825,8 +801,6 @@ static int ir_try_vectorize_simd_clamp_i32_at(IRFunction *function,
           &function->instructions[increment_index], iv_symbol)) {
     return 1;
   }
-  /* The kernel clamps src[0..len) into dst[0..len): the loop must provably
-   * start at iv == 0. */
   if (!ir_iv_zero_at_header(function, header_index, iv_symbol)) {
     return 1;
   }
@@ -1001,9 +975,6 @@ static int ir_try_vectorize_simd_clamp_ptr_at(IRFunction *function,
       !ir_symbol_is_i32_ptr_param(function, dst_base)) {
     return 1;
   }
-  /* No unanchored fallback here: a `<<2` of some bound param floating before
-   * the loop proves nothing about (end - base)/4, which is the kernel's
-   * actual trip count. */
   if (!ir_find_ptr_loop_len_operand(function, bounds.compare_index,
                                     compare->rhs.name, src_base, &len)) {
     return 1;

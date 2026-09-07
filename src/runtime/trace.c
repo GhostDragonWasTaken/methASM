@@ -1,4 +1,3 @@
-/* Runtime half of `--record-trace`. See trace.h for what it is for. */
 
 #include "trace.h"
 
@@ -55,9 +54,6 @@ static void trace_put(const char *text, size_t length) {
 }
 
 static void trace_put_text(const char *text) {
-  /* A field is one column of a line, so a separator or a newline inside one
-   * would make the line say something else. Both are dropped rather than
-   * escaped: a name or a path carrying either is not one this reads back. */
   size_t at = 0;
   char clean[512];
   size_t length = 0;

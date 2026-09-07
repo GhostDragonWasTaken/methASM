@@ -1,8 +1,4 @@
-// AST->IR lowering: runtime checks and control-flow (break/continue) frames.
 #include "ir_lowering_internal.h"
-
-/* Local name bindings. See IRLocalBinding for why a redeclaration at a
- * different type needs a name of its own. */
 
 void ir_local_scope_enter(IRLoweringContext *context) {
   if (context) {
@@ -67,12 +63,6 @@ static const char *ir_local_bind_impl(IRLoweringContext *context,
       continue;
     }
     seen = 1;
-    /* A binding whose scope has ended can lend its slot: two `var x: int32` in
-     * sibling blocks are never live at once, so sharing costs nothing and the
-     * emitted IR is unchanged. One that is still active cannot. A `var x`
-     * nested inside another `var x`'s scope is a second variable, and sharing
-     * the slot made the inner one write through -- the outer read 5 back from
-     * an inner block that set 5, and a loop body's `var x` survived the loop. */
     if (b->active) {
       active = 1;
       continue;
@@ -84,12 +74,6 @@ static const char *ir_local_bind_impl(IRLoweringContext *context,
   if (!active) {
     ir_name = reusable;
   }
-  /* A local shadowing a module-level global needs a name of its own for the
-   * same reason a local shadowing a local does: every backend keys its slot,
-   * float, string and declared-type tables on the name, so the local and the
-   * global shared one storage symbol. `var s: int64` at module scope with a
-   * `var s: P` inside a function read the global's bytes through the local's
-   * fields. */
   int shadows_global = 0;
   if (allow_rename && context->symbol_table) {
     const Symbol *global = symbol_table_lookup(context->symbol_table, name);
@@ -105,13 +89,8 @@ static const char *ir_local_bind_impl(IRLoweringContext *context,
       size_t len = strlen(name) + 24;
       char *renamed = (char *)malloc(len);
       if (!renamed) {
-        /* Out of memory: keep the source name. The declaration still lowers;
-         * it just shares a slot the way it did before, as no rename happened. */
         return name;
       }
-      /* `$$`, not `$`: SROA names a split field `<member>$<offset>`, so a
-       * single `$` could collide with the scalars of a same-named struct in
-       * the same function. Source identifiers cannot contain either. */
       snprintf(renamed, len, "%s$$%d", name, ++context->local_rename_serial);
       ir_name = renamed;
       owns = 1;
@@ -149,12 +128,6 @@ const char *ir_local_bind(IRLoweringContext *context, const char *name,
   return ir_local_bind_impl(context, name, type_text, 1);
 }
 
-/* A parameter is recorded so its declared type can be read back from the
- * binding, and it keeps the source name: the backends home an incoming
- * argument into the slot named by function->parameter_names, so renaming one
- * here would leave every use looking for a slot the prologue never filled.
- * Without the binding, a parameter shadowing a global resolved to the global's
- * type, which is how a global named `s` broke std/io's `cstr(s: string)`. */
 const char *ir_local_bind_parameter(IRLoweringContext *context,
                                     const char *name, const char *type_text) {
   return ir_local_bind_impl(context, name, type_text, 0);
@@ -350,11 +323,6 @@ static int ir_emit_refinement_side(IRLoweringContext *context,
   return 1;
 }
 
-/* The whole predicate, run at the site the proof was made, with the binding
- * standing for the value that was proven. A relational type has no interval to
- * compare against, so this is what "re-checked at run time like every other
- * proof" means for one. Nothing here trusts the prover: it evaluates the same
- * condition the program wrote and traps when it does not hold. */
 int ir_emit_refinement_predicate(IRLoweringContext *context,
                                  IRFunction *function, SourceLocation location,
                                  const IROperand *value, const Type *refined,
@@ -453,7 +421,6 @@ int ir_emit_refinement_predicate(IRLoweringContext *context,
   return 1;
 }
 
-
 size_t g_ir_overflow_emitted;
 size_t g_ir_overflow_proved;
 
@@ -466,8 +433,6 @@ void ir_lowering_overflow_totals(size_t *emitted, size_t *proved) {
   }
 }
 
-/* Trap when `holds` is zero. The compare that produced it is the caller's,
- * because the three overflow shapes compute it differently. */
 static int ir_emit_overflow_trap(IRLoweringContext *context,
                                  IRFunction *function, SourceLocation location,
                                  const IROperand *holds, const char *message) {
@@ -510,10 +475,6 @@ static int ir_emit_overflow_trap(IRLoweringContext *context,
   return emitted;
 }
 
-/* A narrow signed result: the truncation the language already applies is the
- * check. `wide` is what the arithmetic produced at register width and
- * `narrow` is that value in its declared type, so the two differing is
- * exactly the definition of the result not fitting. */
 int ir_emit_overflow_check_narrow(IRLoweringContext *context,
                                   IRFunction *function, SourceLocation location,
                                   const IROperand *wide,
@@ -546,11 +507,6 @@ int ir_emit_overflow_check_narrow(IRLoweringContext *context,
   }
 }
 
-/* A 64-bit signed result has nothing wider to be compared against, so the
- * question is asked of the operands' signs instead: an add overflows when
- * both operands differ in sign from the result, a subtract when the operands
- * differ from each other and the result differs from the left one, and a
- * multiply when dividing the result back does not return what went in. */
 int ir_emit_overflow_check_wide(IRLoweringContext *context,
                                 IRFunction *function, SourceLocation location,
                                 const IROperand *result, const IROperand *left,
@@ -576,7 +532,6 @@ int ir_emit_overflow_check_wide(IRLoweringContext *context,
     return 0;
   }
   if (multiply) {
-    /* left == 0 || result / left == right */
     one.op = IR_OP_BINARY;
     one.location = location;
     one.dest = a;
@@ -758,9 +713,6 @@ int ir_emit_bounds_check(IRLoweringContext *context,
   return 1;
 }
 
-/* The bounds check a pointer could never have. A slice carries its length
- * beside its data, so the extent is loaded from the value itself, and a
- * negative index fails the same check as an oversized one. */
 int ir_small_float_local(IRLoweringContext *context, IRFunction *function,
                          const char *source_name, const char *ir_name,
                          Type *type) {
@@ -1057,9 +1009,6 @@ int ir_emit_safety_check(IRLoweringContext *context, IRFunction *function,
   if (!context->emit_safety_checks) {
     return 1;
   }
-  /* A zero-width access reads nothing, and an object of unknown element size
-   * gives the check no range to test. Neither can fail, so neither is worth a
-   * check. */
   if (access_size <= 0) {
     return 1;
   }
@@ -1227,12 +1176,6 @@ const char *ir_find_labeled_continue(IRLoweringContext *context,
   return NULL;
 }
 
-/* The label lookups above answer where the jump goes. These answer which
-   frame owns it, which is what the deferred statements between here and there
-   are measured against. The search rules match one for one: a bare `break`
-   takes the innermost frame, a bare `continue` the innermost frame that has a
-   continue label (a switch has none), and a labeled form the frame carrying
-   that name. */
 const IRControlFrame *ir_break_target_frame(IRLoweringContext *context,
                                             const char *user_label) {
   if (!context || context->control_count == 0) {
@@ -1270,9 +1213,6 @@ const IRControlFrame *ir_continue_target_frame(IRLoweringContext *context,
   return NULL;
 }
 
-/* Every branch emitted since `from` decides the same way in every work item of
-   the group. A GPU backend takes the uniform form; every other backend reads
-   an ordinary branch. */
 void ir_mark_branches_uniform(IRFunction *function, size_t from) {
   if (!function) {
     return;
@@ -1286,8 +1226,6 @@ void ir_mark_branches_uniform(IRFunction *function, size_t from) {
   }
 }
 
-/* Every call and collective emitted since `from` sits under a condition the
-   work items of a group do not all decide the same way. */
 void ir_mark_calls_divergent(IRFunction *function, size_t from) {
   if (!function) {
     return;

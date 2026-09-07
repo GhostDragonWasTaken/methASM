@@ -1,4 +1,3 @@
-// AST->IR lowering: type / float-width / string-coercion utilities.
 #include "ir_lowering_internal.h"
 #include <limits.h>
 
@@ -7,8 +6,6 @@ int ir_type_is_cstring(Type *type) {
          strcmp(type->name, "cstring") == 0;
 }
 
-/* A string flowing to an untyped address wants the same `.chars` load a
- * cstring destination gets: the record itself is not the address. */
 int ir_type_is_rawptr(Type *type) {
   return type && type->kind == TYPE_POINTER && type->name &&
          strcmp(type->name, "rawptr") == 0;
@@ -27,16 +24,6 @@ int ir_should_coerce_string_to_cstring(IRLoweringContext *context,
          ir_expression_is_string(context, value_expression);
 }
 
-/* An array flowing into a pointer is its base address. The type checker decays
- * `T[N]` into a `T*` parameter or binding, but a bare array name lowers to the
- * symbol naming the storage, so the consumer read the array's first eight
- * bytes and used them as the pointer: `fgets(buf, 64, get_stdin())` wrote
- * through whatever those bytes spelled, and a zeroed buffer spells null, which
- * reads as the call silently doing nothing.
- *
- * The test is on the DESTINATION. A bare array name anywhere else still means
- * the storage: the right side of `var b: T[N] = a;` copies bytes, and the GPU
- * emitters reject an address-of on a device local. */
 int ir_should_decay_array_to_address(Type *target_type,
                                      ASTNode *value_expression) {
   return target_type && target_type->kind == TYPE_POINTER &&
@@ -44,10 +31,6 @@ int ir_should_decay_array_to_address(Type *target_type,
          value_expression->resolved_type->kind == TYPE_ARRAY;
 }
 
-/* An array flowing into a slice keeps its extent: the value becomes the pair
- * `{ &a[0], N }`, which is the whole difference between a slice and a pointer.
- * The length is the one the array's type carried, so nothing has to be trusted
- * about it afterwards. */
 int ir_should_build_slice_from_array(Type *target_type,
                                      ASTNode *value_expression) {
   return target_type && target_type->kind == TYPE_SLICE &&
@@ -177,9 +160,6 @@ int ir_build_slice_operand_from_array(IRLoweringContext *context,
   return value->name != NULL;
 }
 
-/* A device storage binding already holds the address of its storage: the
-   allocation produced a pointer, and there is no separate object to take the
-   address of. Decaying it is therefore the identity. */
 static int ir_symbol_is_address_space_allocation(const IRFunction *function,
                                                  const char *name) {
   if (!function || !name) {
@@ -246,7 +226,6 @@ int ir_coerce_string_operand_to_cstring(IRLoweringContext *context,
   return 1;
 }
 
-/* Resolve a named type via the type_checker (works even after scope pop). */
 Type *ir_resolve_named_type(IRLoweringContext *context,
                                    const char *name) {
   if (!context || !context->type_checker || !name) {
@@ -255,8 +234,6 @@ Type *ir_resolve_named_type(IRLoweringContext *context,
   return type_checker_get_type_by_name(context->type_checker, name);
 }
 
-/* Look up a symbol's type from the symbol's name; falls back to NULL once the
- * scope is gone. Callers must handle NULL. */
 Type *ir_lookup_symbol_type(IRLoweringContext *context,
                                    const char *name) {
   if (!context || !context->symbol_table || !name) {
@@ -265,7 +242,6 @@ Type *ir_lookup_symbol_type(IRLoweringContext *context,
   Symbol *sym = symbol_table_lookup(context->symbol_table, name);
   return sym ? sym->type : NULL;
 }
-
 
 int ir_expression_is_floating(IRLoweringContext *context,
                                      ASTNode *expression) {
@@ -282,16 +258,10 @@ int ir_expression_is_floating(IRLoweringContext *context,
          type->kind == TYPE_FLOAT16 || type->kind == TYPE_BFLOAT16;
 }
 
-/* True only for a true 8-byte float64. The backend's "known float64" path
- * reinterprets the loaded 64 bits via `movq xmm, r64`; that is correct for
- * float64 but wrong for float32 or integer-width types, so gate strictly. */
 int ir_type_is_float64(Type *type) {
   return type && type->kind == TYPE_FLOAT64 && type->size == 8;
 }
 
-/* IEEE-754 width for a floating type: 32 for float32, otherwise 64. Callers
- * must already know the type is floating (use ir_type_is_float* / the type
- * checker). Returns 64 for NULL so non-float contexts get the safe default. */
 int ir_type_float_bits(Type *type) {
   if (type && (type->kind == TYPE_FLOAT32 || type->kind == TYPE_FLOAT16 ||
                type->kind == TYPE_BFLOAT16)) {
@@ -300,8 +270,6 @@ int ir_type_float_bits(Type *type) {
   return 64;
 }
 
-/* Float width for a named type (e.g. a declared variable / parameter type).
- * Returns 0 when the name does not resolve to a floating type, else 32/64. */
 int ir_named_type_float_bits(IRLoweringContext *context,
                                     const char *type_name) {
   Type *type = NULL;
@@ -316,10 +284,6 @@ int ir_named_type_float_bits(IRLoweringContext *context,
   return ir_type_float_bits(type);
 }
 
-/* Stamp a freshly produced float operand with the requested IEEE-754 width.
- * No-op for non-float operands or when bits is 0. When narrowing a float64
- * literal to float32, round the constant through float so the stored bits are
- * the true single-precision value, not a truncated double pattern. */
 void ir_operand_apply_float_bits(IROperand *operand, int bits) {
   if (!operand || operand->kind != IR_OPERAND_FLOAT ||
       (bits != 32 && bits != 64)) {
@@ -331,7 +295,6 @@ void ir_operand_apply_float_bits(IROperand *operand, int bits) {
   operand->float_bits = bits;
 }
 
-/* Float width of a declared symbol (variable/parameter). 0 if not floating. */
 int ir_symbol_float_bits(IRLoweringContext *context, const char *name) {
   Symbol *symbol = NULL;
   if (!context || !context->symbol_table || !name) {
@@ -348,11 +311,6 @@ int ir_symbol_float_bits(IRLoweringContext *context, const char *name) {
   return ir_type_float_bits(symbol->type);
 }
 
-/* Recover a local's declared float width (0/32/64) from the DECLARE_LOCAL the
- * lowering already emitted for it. The function-body symbol-table scope is
- * usually popped by lowering time, so symbol_table_lookup misses locals; the
- * emitted IR is the reliable record of a local's declared type name. Caller
- * should gate this on a floating RHS to avoid an O(n) scan on every assign. */
 int ir_local_declared_float_bits(IRLoweringContext *context,
                                         const IRFunction *function,
                                         const char *name) {
@@ -370,13 +328,6 @@ int ir_local_declared_float_bits(IRLoweringContext *context,
   return 0;
 }
 
-/* Record, on an ASSIGN/STORE, the TARGET float precision (bits = 32/64) of the
- * destination. instruction->float_bits is the destination width; the source
- * value operand keeps its own width so the backend can detect a precision
- * mismatch (e.g. a float64 expression assigned to a float32 variable) and
- * emit the cvtsd2ss / cvtss2sd it needs. A bare float literal has no runtime
- * width, so re-round it to the target precision in place, no conversion is
- * required for it. No-op when bits is 0 (target is not floating). */
 void ir_assign_apply_float_bits(IRInstruction *instruction,
                                        IROperand *value, int bits) {
   if (!instruction || bits == 0) {
@@ -388,22 +339,10 @@ void ir_assign_apply_float_bits(IRInstruction *instruction,
     ir_operand_apply_float_bits(value, instruction->float_bits);
     instruction->lhs.float_bits = value->float_bits;
   } else if (value) {
-    /* Preserve the value's own width; the backend converts if it differs
-     * from instruction->float_bits. */
     instruction->lhs.float_bits = value->float_bits;
   }
 }
 
-/* Mark a LOAD instruction (and its destination temp) as floating when the
- * loaded type is float32/float64, recording the width. Backends key off this
- * to pick movss/cvtss* vs movsd/cvtsd* and 4- vs 8-byte memory access. */
-/* Record WHICH class of value a load or store moves, alongside the float and
- * unsigned flags that only say how wide it is and how to extend it. The
- * whole-program alias analysis reads this to tell a slot holding a pointer
- * from a slot holding an integer of the same width, which no size can tell
- * apart. It goes in its own field: value_type feeds ABI classification and the
- * GPU emitters, which read it as the instruction's result type, and a load's
- * pointee type is a different thing. */
 void ir_access_apply_alias_class(IRInstruction *access, Type *accessed_type) {
   if (!access || !accessed_type) {
     return;
@@ -447,8 +386,6 @@ void ir_access_apply_alias_class(IRInstruction *access, Type *accessed_type) {
     access->alias_class = IR_ALIAS_CLASS_BF16;
     break;
   default:
-    /* Aggregates carry their members' storage; a whole-aggregate move is not
-     * a typed scalar access and never disambiguates. */
     access->alias_class = IR_ALIAS_CLASS_NONE;
     break;
   }
@@ -467,20 +404,10 @@ void ir_load_apply_float_type(IRInstruction *load, Type *loaded_type) {
   load->dest.float_bits = load->float_bits;
 }
 
-/* Record that a load reads an UNSIGNED integer, so the backend zero-extends it
- * (instead of the default sign-extension for a 4-byte load into a temp). Without
- * this a uint32 loaded from a uint32* lands in the register sign-extended, and
- * later 64-bit ops (compare/divide/(int64) widening) read the wrong value. */
 void ir_load_apply_unsigned(IRInstruction *load, Type *loaded_type) {
   if (!load || !loaded_type) {
     return;
   }
-  /* `char` and `bool` are unsigned bytes, so they belong here too. Leaving
-   * char out sign-extended every byte from 0x80 up, but only when the load fed
-   * an expression directly: `var c: char = s[1]` went through the declared
-   * local and zero-extended, while `s[1] == 195` and `(int32)s[1]` answered
-   * -61. Every non-ASCII byte of a UTF-8 string read the wrong way round
-   * depending on whether it was assigned first. */
   if (loaded_type->kind == TYPE_UINT8 || loaded_type->kind == TYPE_UINT16 ||
       loaded_type->kind == TYPE_UINT32 || loaded_type->kind == TYPE_UINT64 ||
       loaded_type->kind == TYPE_CHAR || loaded_type->kind == TYPE_BOOL) {
@@ -488,8 +415,6 @@ void ir_load_apply_unsigned(IRInstruction *load, Type *loaded_type) {
   }
 }
 
-/* Resolve the float width of an expression via the type checker. Returns 0
- * when the expression is not floating, else 32 or 64. */
 int ir_expression_float_bits(IRLoweringContext *context,
                                     ASTNode *expression) {
   Type *type = NULL;
@@ -548,9 +473,6 @@ int ir_type_storage_size(Type *type) {
   return 8;
 }
 
-/* Memory stride between consecutive elements in an array, must match
- * laid-out sizeof(element), including structs > 8 bytes. Prefer this over
- * ir_type_storage_size() for base + index * stride address math only. */
 int ir_type_array_element_stride(Type *element_type) {
   if (!element_type || element_type->size == 0 ||
       element_type->size > (size_t)INT_MAX) {
@@ -559,9 +481,6 @@ int ir_type_array_element_stride(Type *element_type) {
   return (int)element_type->size;
 }
 
-/* An unsigned integer type: `/`, `%`, `>>`, and the four orderings mean
- * something different on one than the signed evaluation the optimizer's
- * constant folder performs. */
 int ir_type_is_unsigned_integer(const Type *type) {
   if (!type) {
     return 0;
@@ -577,20 +496,6 @@ int ir_type_is_unsigned_integer(const Type *type) {
   }
 }
 
-/* The type name a narrow integer result has to be brought back to, or NULL
- * when the value is already canonical. Only these operators can leave a
- * 64-bit register holding something outside the declared width: the rest
- * either cannot leave it (`/`, `%`, `>>`, `&`, `|`, `^`, the comparisons) or
- * do not produce an integer at all. The unary forms of `~` and `-` are here
- * for the same reason: complementing a uint8 in a 64-bit register sets 56 bits
- * the type does not have, and negating int8 -128 gives 128, which is not an
- * int8 either. */
-/* Bit width of a narrow integer type, or 0 for anything else. A shift on one
- * of these runs in a 64-bit register, where the hardware masks the count to 6
- * bits and not to the type's own width. int64 shifts already read that way,
- * and the M0115 warning describes it, so a narrow shift masks its count to the
- * width the type actually has. Without it `x >> 32` on an int32 answered 0
- * while the same shift on an int64 answered x. */
 int ir_narrow_integer_shift_bits(Type *type) {
   if (!type) {
     return 0;
@@ -610,9 +515,6 @@ int ir_narrow_integer_shift_bits(Type *type) {
   }
 }
 
-/* Does this unary applied to this constant land back inside `type_name`? Then
- * the value is already what the type says and no truncation is emitted, which
- * leaves a negative literal reading as the constant it is. */
 int ir_unary_constant_fits(const char *type_name, const char *op,
                            long long value) {
   long long folded;

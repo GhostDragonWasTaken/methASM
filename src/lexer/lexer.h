@@ -9,7 +9,6 @@ typedef enum {
   TOKEN_NUMBER,
   TOKEN_STRING,
 
-  // Enhanced syntax keywords
   TOKEN_IMPORT,
   TOKEN_IMPORT_STR,
   TOKEN_EXTERN,
@@ -46,7 +45,6 @@ typedef enum {
   TOKEN_PRIVATE,
   TOKEN_BARRIER,
 
-  // Type keywords
   TOKEN_INT8,
   TOKEN_INT16,
   TOKEN_INT32,
@@ -59,7 +57,6 @@ typedef enum {
   TOKEN_FLOAT64,
   TOKEN_STRING_TYPE,
 
-  // Operators and punctuation
   TOKEN_COLON,
   TOKEN_SEMICOLON,
   TOKEN_COMMA,
@@ -108,7 +105,6 @@ typedef enum {
   TOKEN_AT,
   TOKEN_NEWLINE,
 
-  // Common x86 mnemonics (for backward compatibility)
   TOKEN_MOV,
   TOKEN_ADD,
   TOKEN_SUB,
@@ -135,7 +131,6 @@ typedef enum {
   TOKEN_INT,
   TOKEN_SYSCALL,
 
-  // x86 registers
   TOKEN_EAX,
   TOKEN_EBX,
   TOKEN_ECX,
@@ -190,7 +185,6 @@ typedef struct {
   TokenType last_significant;
 } Lexer;
 
-// Function declarations
 Lexer *lexer_create(const char *source);
 void lexer_destroy(Lexer *lexer);
 Token lexer_next_token(Lexer *lexer);
@@ -198,7 +192,6 @@ Token lexer_peek_token(Lexer *lexer);
 void token_destroy(Token *token);
 Token token_clone(const Token *token);
 
-// Error reporting functions
 void lexer_set_error(Lexer *lexer, const char *message);
 
-#endif // LEXER_H
+#endif

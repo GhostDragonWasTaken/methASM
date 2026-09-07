@@ -475,7 +475,6 @@ static int ir_profile_instrument_function_blocks(IRFunction *function,
     return 1;
   }
 
-  /* Entry block. Use the first real instruction's location for line mapping. */
   if (function->instruction_count > 0) {
     location = function->instructions[0].location;
   }
@@ -484,9 +483,6 @@ static int ir_profile_instrument_function_blocks(IRFunction *function,
   }
   (*next_block_id)++;
 
-  /* Every label heads a basic block. Insert the counter just after the label
-   * so the label stays the branch target and the counter runs on block entry.
-   * The scan starts past the entry marker we just inserted at index 0. */
   for (size_t i = 1; i < function->instruction_count; i++) {
     if (function->instructions[i].op != IR_OP_LABEL) {
       continue;
@@ -497,7 +493,7 @@ static int ir_profile_instrument_function_blocks(IRFunction *function,
       return 0;
     }
     (*next_block_id)++;
-    i++; /* skip the marker we just inserted */
+    i++;
   }
 
   return 1;

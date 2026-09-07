@@ -1,5 +1,3 @@
-/* Allocation identities travel beside values as ordinary uint64 locals.
- * This pass runs before optimization, after allocation registration. */
 typedef struct {
   IROperand value;
   IROperand identity;
@@ -291,9 +289,6 @@ static int origin_instruction(SafetyOrigins *origins, IRInstruction *in,
     origins->return_prepared = 0;
   }
 
-  /* Call frames only surround compiled functions. Foreign functions keep their
-   * ABI and unknown results carry identity zero until an allocator registers
-   * them. Indirect calls also use a frame, claimed only by a matching callee. */
   int instrument_call = call && safety_classify_call(in) == SAFETY_ALLOC_NONE;
   if (instrument_call && in->op == IR_OP_CALL) {
     const IRModuleSymbol *symbol = ir_program_lookup_symbol(origins->program, in->text);
@@ -416,9 +411,6 @@ static int origin_instruction(SafetyOrigins *origins, IRInstruction *in,
   } else if (output && op == IR_OP_LOAD && rhs.kind == IR_OPERAND_INT &&
              rhs.int_value > 0 && rhs.int_value <= 8) {
     if (lhs.kind == IR_OPERAND_STRING && rhs.int_value == 8) {
-      /* The frontend obtains a cstring by loading the data pointer from its
-       * literal record. Passing the literal itself to a raw pointer runtime
-       * parameter would select the characters, not that record's address. */
       IROperand args[2] = {dest, ir_operand_int((long long)ir_operand_string_length(&lhs) + 1)};
       if (!origin_call(origins, location, "mettle_safety_literal_identity", args, 2,
                        &output->identity)) goto done;
@@ -437,8 +429,6 @@ static int origin_instruction(SafetyOrigins *origins, IRInstruction *in,
     IROperand args[4] = {dest, is_float ? zero : lhs, left, rhs};
     if (!origin_call(origins, location, "mettle_safety_value_store", args, 4, NULL)) goto done;
   }
-  /* A string destination is handled by the STRING assignment below, which
-     knows a literal source has no tags to copy yet and seeds them instead. */
   if (aggregate_size && op == IR_OP_ASSIGN &&
       !origin_value_is_string(origins, &dest)) {
     IROperand source = ir_operand_none(), destination = ir_operand_none();
@@ -451,10 +441,6 @@ static int origin_instruction(SafetyOrigins *origins, IRInstruction *in,
     if (!copied) goto done;
   }
   SafetyOrigin *stored = origin_find(origins, &dest);
-  /* These helpers take pointers, and a string operand is storage, so the
-     address is taken rather than left implicit: the two backends do not agree
-     about what a bare string operand means where a pointer is declared, and an
-     ADDRESS_OF says it once for both. */
   if (op == IR_OP_ASSIGN && stored && stored->type && stored->type->kind == MTLC_TYPE_STRING) {
     IROperand destination = ir_operand_none();
     if (!origin_address(origins, location, &dest, &destination)) goto done;
@@ -511,11 +497,6 @@ static int safety_origins_function(IRProgram *program, IRFunction *function) {
     for (size_t a = 0; a < in->argument_count; a++)
       if (!origin_add(&origins, &in->arguments[a])) goto done;
   }
-  /* Only values which can receive an origin need a shadow local. Solve the
-   * copy graph to a fixed point so loop carried aliases and branch joins keep
-   * their identity without adding work to ordinary integer counters. */
-  /* Aggregate temporaries need named storage for the byte metadata copy, just
-   * as a source level aggregate local does. Keep the value's existing type. */
   for (size_t o = 0; o < origins.count; o++) {
     SafetyOrigin *origin = &origins.items[o];
     if (origin->value.kind != IR_OPERAND_TEMP || !origin_aggregate_size(&origins, &origin->value)) continue;
@@ -542,19 +523,6 @@ static int safety_origins_function(IRProgram *program, IRFunction *function) {
       goto done;
     }
   }
-  /* A string literal handed to a `string` parameter needs storage of its own.
-   *
-   * The backend does not intern literals: two occurrences of the same text are
-   * two records over two copies of the characters. So describing the record
-   * written beside the call and passing the record written in the call
-   * describes and passes different bytes, and the callee's read lands outside
-   * the region the caller described. A literal has no address to hold either.
-   * Copy it into a local once, describe that, and pass the local. This is the
-   * same reason the aggregate temporaries above are given named storage.
-   *
-   * The callee's declared parameter type is what says a literal is bound to a
-   * `string`; the same literal bound to a `cstring` is a different value and
-   * must be left alone. */
   {
     MtlcType *string_type = ir_program_lookup_type(program, "string");
     for (size_t i = 0; string_type && i < function->instruction_count; i++) {
@@ -576,8 +544,6 @@ static int safety_origins_function(IRProgram *program, IRFunction *function) {
             callee->param_types[a]->kind != MTLC_TYPE_STRING)
           continue;
 
-        /* Not a `.safe` name: those are the pass's own scaffolding and
-           origin_add skips them, and this local is a value to track. */
         snprintf(name, sizeof(name), ".strlit_%u", g_safety_next_id++);
         local = ir_operand_symbol(name);
         if (!local.name) goto done;
@@ -629,7 +595,7 @@ static int safety_origins_function(IRProgram *program, IRFunction *function) {
         origin = origin_find(&origins, &local);
         if (origin) origin->type = string_type;
         ir_operand_destroy(&in->arguments[a]);
-        in->arguments[a] = local; /* the call now passes the local */
+        in->arguments[a] = local;
       }
     }
   }
@@ -722,8 +688,6 @@ static int safety_origins_function(IRProgram *program, IRFunction *function) {
     if (!passed) goto done;
   }
   for (size_t i = 0; i < function->instruction_count; i++) {
-    /* Save return metadata while the local storage is still live. Stack
-     * retirement clears its byte tags before the actual machine return. */
     if (!origins.return_prepared) {
       size_t next = i;
       while (next + 1 < function->instruction_count) {
@@ -756,8 +720,6 @@ done:
   return ok;
 }
 
-/* Resolve aliases of the known runtime APIs before classifying their effects.
- * Otherwise `extern fn release(...) = "free"` bypasses retirement. */
 static int safety_normalize_external_calls(IRProgram *program) {
   for (size_t f = 0; f < program->function_count; f++) {
     IRFunction *function = program->functions[f];
@@ -852,8 +814,6 @@ static int safety_wrap_allocator_addresses(IRProgram *program) {
           !safety_wrap_allocator_address(program, &in->lhs.name)) return 0;
     }
   }
-  /* Adding a wrapper can grow module_symbols, so keep no element pointer
-   * across the call. The initializer's owned string stays valid. */
   size_t count = program->module_symbol_count;
   for (size_t i = 0; i < count; i++) {
     char *reference = program->module_symbols[i].init_symbol_ref;

@@ -1,8 +1,3 @@
-/* Reference interpreter for optimized IR: the semantic arbiter behind
- * --verify. See ir_interp.h for the model. Every opcode implementation here
- * encodes the DOCUMENTED semantics from ir.h; if a pass emits IR whose real
- * meaning differs from what it documents, the before/after comparison in
- * ir_verify.c diverges and the pass is caught. */
 #include "ir_interp.h"
 #include "ir_trace.h"
 #include "../runtime/mt_math.h"
@@ -15,19 +10,12 @@
 
 #define II_ADDR_BASE 0x0000200000000000ULL
 #define II_POISON_BYTE 0xA5
-#define II_ADDR_STRIDE 0x0000000001000000ULL /* 16 MiB per buffer slot */
+#define II_ADDR_STRIDE 0x0000000001000000ULL
 #define II_MAX_BUFFERS 65536
 #define II_MAX_DEPTH 256
-/* Storage grows on demand, so the cap only bounds a pathological run; fuel
- * bounds the entry count long before the memory matters. 512 made a test that
- * prints a thousand lines die with "extern trace overflow". */
 #define II_TRACE_CAP (1 << 20)
 #define II_MAX_BUFFER_SIZE (16LL * 1024 * 1024)
 
-/* Function-address tokens. Taking a function's address yields a deterministic
- * value in a region disjoint from buffer space; an indirect call maps it back.
- * Defined functions index program->functions, extern declarations index the
- * module symbol table. */
 #define II_FN_ADDR_BASE 0x0000100000000000ULL
 #define II_XFN_ADDR_BASE 0x0000180000000000ULL
 #define II_FN_ADDR_STRIDE 16ULL
@@ -37,61 +25,30 @@ typedef struct {
   unsigned char *data;
   long long size;
   int freed;
-  /* A frame local whose address the function returned (the aggregate-return
-   * convention: the value travels as an address). It outlives its frame until
-   * the aggregate assignment that consumes it copies it out. */
   int escaped_local;
-  size_t alloc_line; /* NEW/malloc source line; 0 for harness inputs */
-  /* One byte per data byte: nonzero once something has written it. Buffers
-     start known (zeroed or seeded); the sites that stamp the uninitialized
-     pattern clear it here too, so a read can tell an undefined byte from a
-     byte that genuinely holds 0xA5. */
+  size_t alloc_line;
   unsigned char *init_map;
-  /* Which device memory this buffer stands for while a kernel's grid runs on
-     the CPU: 0 is ordinary host memory, which is what a launch's arguments
-     are, and the workgroup and private spaces are the ones the interpreter
-     allocates itself. A pointer that claims a space it does not have is what
-     the re-check catches. */
   unsigned char device_space;
 } IIBuffer;
 
-/* A materialized string literal: the characters (NUL-terminated) and the
- * { chars, length } record a fat `string` value points at, both inside one
- * buffer, laid out the way the backend parks them in .rdata. */
 typedef struct {
-  const char *text; /* not owned; lives as long as the IR */
-  size_t length;    /* bytes, which is not strlen once a literal holds a NUL */
+  const char *text;
+  size_t length;
   unsigned long long chars;
   unsigned long long record;
 } IILiteral;
 
 typedef struct {
-  const char *key; /* not owned; lives as long as the IR */
+  const char *key;
   IRInterpValue value;
-  /* Slot-backed local: reads/writes go through memory at value.i. */
   int slotted;
   int slot_size;
   int slot_is_float;
   int slot_is_unsigned;
   int slot_alias;
-  /* Aggregate local or global: value.i is the base address of its storage and
-   * assignment through the name is a block copy of this many bytes. */
   long long agg_size;
-  /* Storage was allocated for this variable by a DECLARE_LOCAL (or a global
-   * materialization); a re-executed declaration re-poisons instead of
-   * allocating again, so a loop body's local costs one buffer, not one per
-   * iteration. */
   int has_local_storage;
-  /* Global whose initializer has been applied on first touch. */
   int global_inited;
-  /* Declared integer width of a register-resident local or parameter, in
-     bytes, and its signedness. A write is narrowed to it, so a narrow local
-     wraps here exactly as it wraps in a register: without this an int32 that
-     overflows keeps all 64 bits and the interpreter disagrees with the
-     machine -- which would make mettle test, trace, --pgo and the two
-     differential gates disagree with the program they are describing.
-     0 means unknown (a temp, a global first touched by a write), which keeps
-     the full width. */
   int value_size;
   int value_is_unsigned;
   unsigned long long string_record;
@@ -101,16 +58,9 @@ typedef struct {
 typedef struct {
   IIVar *vars;
   size_t count;
-  size_t capacity; /* power of two; 0 = empty */
+  size_t capacity;
 } IIEnv;
 
-/* --- the CPU twin of a kernel launch --------------------------------------
- *
- * `dispatch` inside a `@test` function runs here. The grid is walked block by
- * block and thread by thread; a block's workgroup storage is allocated once
- * and shared by its threads, a thread's private storage is fresh. What the
- * run is for is the re-checks: a device claim the compiler proved is checked
- * again by a machine that does nothing but execute. */
 #define II_GPU_MAX_SHARED 32
 #define II_GPU_MAX_BARRIERS 64
 #define II_GPU_MAX_UNIFORMS 64
@@ -118,30 +68,25 @@ typedef struct {
 #define II_GPU_SUBGROUP 32
 
 typedef struct {
-  const char *name;              /* the allocation's IR destination name */
+  const char *name;
   unsigned long long base;
   size_t buffer_index;
 } IIGpuShared;
 
 typedef struct {
-  size_t site;                   /* instruction index of the barrier */
-  long long arrivals;            /* threads of this block that reached it */
+  size_t site;
+  long long arrivals;
   size_t line;
 } IIGpuBarrier;
 
 typedef struct {
-  const char *name;   /* the value's IR name */
+  const char *name;
   size_t line;
-  IRInterpValue value; /* what the warp's first work item held */
-  long long lane;      /* which work item that was */
-  long long last_lane; /* the work item that most recently reached this site */
+  IRInterpValue value;
+  long long lane;
+  long long last_lane;
 } IIGpuUniform;
 
-/* One work item's saved execution, so a block's threads can run in the phases
-   its barriers cut it into: every live thread runs to the same barrier, then
-   they all go on. Without this a block's threads would run one after another
-   and a kernel that publishes through workgroup memory would read what nobody
-   had written yet. */
 typedef struct IIGpuThread {
   int started;
   int suspended;
@@ -149,8 +94,6 @@ typedef struct IIGpuThread {
   size_t pc;
   size_t barrier_site;
   size_t barrier_line;
-  /* The kernel entry frame this work item stopped in, an IIFrame the launch
-     owns. IIFrame is declared further down, so the launch allocates it. */
   void *frame;
 } IIGpuThread;
 
@@ -161,7 +104,7 @@ typedef struct {
   long long block[3];
   long long ctaid[3];
   long long tid[3];
-  long long lane;                /* linear thread index inside the block */
+  long long lane;
   long long threads_per_block;
   IIGpuShared shared[II_GPU_MAX_SHARED];
   size_t shared_count;
@@ -169,7 +112,6 @@ typedef struct {
   size_t barrier_count;
   IIGpuUniform uniforms[II_GPU_MAX_UNIFORMS];
   size_t uniform_count;
-  /* What the run found, reported once the grid is done. */
   long long threads_run;
 } IIGpuGrid;
 
@@ -178,18 +120,10 @@ struct IRInterpMachine {
   const char *override_name;
   IRFunction *override_fn;
 
-  /* Grown on demand (capped at II_MAX_BUFFERS / II_TRACE_CAP). Embedding the
-   * full-capacity arrays made the machine struct ~570 KB, and translation
-   * validation creates tens of thousands of machines per compile - the calloc
-   * zeroing alone dominated --verify wall time. Entries are fully initialized
-   * on write, so the grown storage is plain malloc. */
   IIBuffer *buffers;
   size_t buffer_count;
   size_t buffer_capacity;
 
-  /* Reclaimed frame-local slots, reused by later locals the way a native
-   * frame reuses stack. Heap frees never enter this list, so a freed heap
-   * buffer stays a tombstone and use-after-free keeps trapping. */
   size_t *free_slots;
   size_t free_slot_count;
   size_t free_slot_capacity;
@@ -209,11 +143,8 @@ struct IRInterpMachine {
   IRInterpStatus status;
   char detail[128];
 
-  /* Source location of the CALL currently dispatching to an extern; used to
-   * attribute assert failures and heap allocations to source lines. */
   SourceLocation current_call_loc;
 
-  /* assert()/assert_eq() failure details (mettle test). */
   int assert_failed;
   size_t assert_line;
   size_t assert_column;
@@ -221,7 +152,6 @@ struct IRInterpMachine {
   IRInterpValue assert_right;
   int assert_is_eq;
 
-  /* Value tracing (mettle trace). */
   IRInterpValueHook value_hook;
   void *value_hook_ctx;
   const IRFunction *value_hook_fn;
@@ -244,25 +174,14 @@ struct IRInterpMachine {
   size_t effect_frame_count;
   size_t effect_frame_capacity;
 
-  /* `@pure` re-checked while running: the depth of declared-pure frames on
-     the stack, and the name of the outermost one. */
   int pure_depth;
   const char *pure_fn;
   int pure_declared;
   int recheck_inferred_purity;
 
-  /* One kernel grid, running on the CPU under `mettle test`. The whole point
-     is to re-check what the device analyses claimed without trusting them: the
-     space a pointer says it is in, the alignment it says it has, the values a
-     type says are uniform across a warp, and the barriers a kernel says every
-     thread reaches. Threads run one after another, which is enough for every
-     one of those questions and is said to be enough in docs/gpu.md. */
   IIGpuGrid gpu;
-  /* The work item ii_exec_function is about to resume or start. Consumed on
-     entry, so a helper the kernel calls is an ordinary frame. */
   IIGpuThread *gpu_resume;
 
-  /* Execution counting (zero-run PGO). */
   int count_enabled;
   struct {
     const IRFunction *fn;
@@ -272,8 +191,6 @@ struct IRInterpMachine {
   size_t count_table_count;
   size_t count_table_capacity;
 };
-
-/* ---------------- environment ---------------- */
 
 static size_t ii_hash(const char *s) {
   size_t h = 1469598103934665603ull;
@@ -325,7 +242,6 @@ static int ii_env_grow(IIEnv *env) {
   return 1;
 }
 
-/* Find existing entry or NULL. */
 static IIVar *ii_env_find(IIEnv *env, const char *key) {
   if (!env->capacity) {
     return NULL;
@@ -334,7 +250,6 @@ static IIVar *ii_env_find(IIEnv *env, const char *key) {
   return slot->key ? slot : NULL;
 }
 
-/* Find or insert (zero value). Returns NULL only on OOM. */
 static IIVar *ii_env_upsert(IIEnv *env, const char *key) {
   if (env->capacity == 0 || env->count * 10 >= env->capacity * 7) {
     if (!ii_env_grow(env)) {
@@ -350,8 +265,6 @@ static IIVar *ii_env_upsert(IIEnv *env, const char *key) {
   }
   return slot;
 }
-
-/* ---------------- machine ---------------- */
 
 IRInterpMachine *ir_interp_create(IRProgram *program) {
   IRInterpMachine *machine = (IRInterpMachine *)calloc(1, sizeof(*machine));
@@ -479,8 +392,6 @@ static int ii_free_slot_push(IRInterpMachine *machine, size_t index) {
   return 1;
 }
 
-/* Give a frame local's slot back: the data is released and the slot becomes
- * reusable by a later local, the way returning frames reuse stack pages. */
 static void ii_reclaim_buffer(IRInterpMachine *machine, size_t index) {
   IIBuffer *buf = &machine->buffers[index];
   free(buf->data);
@@ -587,16 +498,6 @@ static IIBuffer *ii_addr_to_buffer(IRInterpMachine *machine,
   return buf;
 }
 
-/* Give a string literal real bytes, so a callee that reads them (`print`
- * loading msg.length, `strlen` scanning for the terminator) sees memory rather
- * than a made-up token. One buffer holds the characters, a NUL, and the
- * 16-byte { chars, length } record; the address handed to a call is the record
- * for a fat `string` parameter and the characters for a `cstring` one, exactly
- * as the backend chooses between them. Cached per literal so the same call in
- * a loop does not exhaust the buffer table. */
-/* `length` is the literal's byte count. It is passed rather than measured
- * because `\\0` is a legal escape: the bytes can run past an interior NUL, and
- * two literals that share a prefix up to one are different strings. */
 static int ii_string_literal(IRInterpMachine *machine, const char *text,
                              size_t length, unsigned long long *chars_out,
                              unsigned long long *record_out) {
@@ -648,10 +549,6 @@ static int ii_string_literal(IRInterpMachine *machine, const char *text,
   return 1;
 }
 
-/* A fresh heap string record, the shape the concat kernel and the
- * mettle_string_from_* conversions produce at runtime: bytes, a NUL the type
- * does not count, then the {chars, length} record. Returns the record address,
- * 0 on failure. */
 static unsigned long long ii_make_string(IRInterpMachine *machine,
                                          const char *bytes, size_t length) {
   size_t record_offset = (length + 1 + 7u) & ~(size_t)7u;
@@ -671,9 +568,6 @@ static unsigned long long ii_make_string(IRInterpMachine *machine,
   return addr + record_offset;
 }
 
-/* Resolve a string VALUE (the address of a {chars, length} record) to its
- * bytes. Returns 0 when either the record or the byte range is not interpreter
- * memory. */
 static int ii_read_string(IRInterpMachine *machine,
                           unsigned long long record_addr,
                           const unsigned char **bytes_out, size_t *length_out) {
@@ -704,8 +598,6 @@ static int ii_read_string(IRInterpMachine *machine,
   *length_out = (size_t)length;
   return 1;
 }
-
-/* ---------------- function-address tokens ---------------- */
 
 static unsigned long long ii_function_token(IRInterpMachine *machine,
                                             const char *name) {
@@ -749,7 +641,6 @@ unsigned long long ir_interp_function_address(IRInterpMachine *machine,
   return machine ? ii_function_token(machine, name) : 0;
 }
 
-/* Map a token back: a defined function to execute, or the extern's name. */
 static IRFunction *ii_token_function(IRInterpMachine *machine,
                                      unsigned long long token,
                                      const char **extern_name) {
@@ -785,15 +676,6 @@ static int ii_mem_read(IRInterpMachine *machine, unsigned long long addr,
   }
   unsigned long long value = 0;
   memcpy(&value, buf->data + offset, (size_t)size);
-  /* Every byte unwritten, not merely some: a struct copy legitimately reads
-     the padding between fields, and an enum reads a payload its tag says is
-     absent. Those carry real data alongside. A read where nothing at all was
-     written carries none, and its value is whatever the allocator or the
-     stack left there. */
-  /* Both signals, not either: the map says nothing wrote these bytes and the
-     bytes still carry the pattern. The map alone would accuse every write
-     path that reaches memory without going through here; the bytes alone
-     would accuse any program that legitimately stores 0xA5. */
   machine->last_read_undefined = 0;
   if (buf->init_map) {
     int undefined = 1;
@@ -822,7 +704,6 @@ static int ii_mem_write(IRInterpMachine *machine, unsigned long long addr,
   return 1;
 }
 
-/* Typed element helpers for the SIMD kernels. */
 static int ii_read_i32(IRInterpMachine *m, unsigned long long a, int *v) {
   unsigned long long raw;
   if (!ii_mem_read(m, a, 4, &raw)) return 0;
@@ -832,7 +713,6 @@ static int ii_read_i32(IRInterpMachine *m, unsigned long long a, int *v) {
 static int ii_write_i32(IRInterpMachine *m, unsigned long long a, int v) {
   return ii_mem_write(m, a, 4, (unsigned int)v);
 }
-/* A byte widened into an int32 lane, and the truncation back. */
 static int ii_read_byte_as_i32(IRInterpMachine *m, unsigned long long a,
                                int is_unsigned, int *v) {
   unsigned long long raw;
@@ -867,8 +747,6 @@ static int ii_write_f32(IRInterpMachine *m, unsigned long long a, float v) {
   return ii_mem_write(m, a, 4, bits);
 }
 
-/* ---------------- frames ---------------- */
-
 typedef struct {
   const char *label;
   size_t index;
@@ -879,8 +757,6 @@ typedef struct {
   IILabel *labels;
   size_t label_count;
   IRFunction *fn;
-  /* Buffer slots this frame's locals occupy, reclaimed on return the way a
-   * native frame's stack is. */
   size_t *owned;
   size_t owned_count;
   size_t owned_capacity;
@@ -909,9 +785,6 @@ static const IILabel *ii_find_label(const IIFrame *frame, const char *name) {
   return NULL;
 }
 
-/* Parse a DECLARE_LOCAL type string. Returns 1 on success with element size,
- * count (1 for scalars), float-ness, unsignedness; 0 for uninterpretable
- * types (structs, strings, closures). */
 static int ii_parse_local_type(const char *text, int *elem_size, long long *count,
                                int *is_float, int *is_unsigned) {
   static const struct {
@@ -931,14 +804,12 @@ static int ii_parse_local_type(const char *text, int *elem_size, long long *coun
   }
   size_t len = strlen(text);
   *count = 1;
-  /* Pointer-typed local: an 8-byte scalar value. */
   if (len > 0 && text[len - 1] == '*') {
     *elem_size = 8;
     *is_float = 0;
     *is_unsigned = 1;
     return 1;
   }
-  /* Function-pointer and closure locals are 8-byte code/record pointers. */
   if (strncmp(text, "fn(", 3) == 0 || strncmp(text, "Fn(", 3) == 0) {
     *elem_size = 8;
     *is_float = 0;
@@ -960,9 +831,6 @@ static int ii_parse_local_type(const char *text, int *elem_size, long long *coun
     }
     memcpy(base, text, base_len);
     base[base_len] = '\0';
-    /* Every dimension multiplies: `int32[3][4]` holds twelve elements, not
-     * three. Reading only the first sized a two-dimensional local at its outer
-     * count, and the first store past the opening row ran off the buffer. */
     long long n = 1;
     const char *scan = bracket;
     while (*scan == '[') {
@@ -1011,8 +879,6 @@ static int ii_parse_local_type(const char *text, int *elem_size, long long *coun
   return 0;
 }
 
-/* ---------------- value plumbing ---------------- */
-
 static long long ii_as_int(const IRInterpValue *value) {
   return value->is_float ? (long long)value->f : value->i;
 }
@@ -1039,11 +905,6 @@ static IRInterpValue ii_float_value(double v) {
   return value;
 }
 
-/* Uninitialized locals/temps read this instead of 0. Native code gives them
- * stack or register garbage, so a zero-defaulting interpreter would blind the
- * differential to a deleted initializing store (`@neg <- 0` in print_int was
- * exactly that). Deterministic, identical in both machines - only a transform
- * that changes WHETHER a read sees its initialization can diverge on it. */
 static IRInterpValue ii_poison_value(void) {
   IRInterpValue value;
   value.i = (long long)0xA5A5A5A5A5A5A5A5ULL;
@@ -1053,8 +914,6 @@ static IRInterpValue ii_poison_value(void) {
   return value;
 }
 
-/* Equality for assert_eq: exact for ints; floats compare as doubles (a test
- * author asserting float equality means bit-for-bit intent). */
 static int ii_value_matches(const IRInterpValue *a, const IRInterpValue *b) {
   if (a->is_float || b->is_float) {
     double x = a->is_float ? a->f : (double)a->i;
@@ -1068,7 +927,6 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
                             const IRInterpValue *args, size_t arg_count,
                             IRInterpValue *result);
 
-/* Read a variable, honoring slot-backed locals. */
 static int ii_var_read(IRInterpMachine *machine, IIVar *var,
                        IRInterpValue *out) {
   if (!var->slotted) {
@@ -1108,10 +966,6 @@ static int ii_var_read(IRInterpMachine *machine, IIVar *var,
   return 1;
 }
 
-/* An integer just read from memory, widened the way its element type reads:
- * signed sign-extends, unsigned zero-extends. Byte and half loads were pinned
- * to zero-extension while the backends widened them with movzx whatever the
- * type said. */
 static long long ii_widen_loaded_int(unsigned long long raw, int size,
                                      int is_unsigned) {
   if (is_unsigned) {
@@ -1125,8 +979,6 @@ static long long ii_widen_loaded_int(unsigned long long raw, int size,
   }
 }
 
-/* Narrow an integer to a declared width, the way a store to a narrow home
-   does. Signedness decides which extension refills the high bits. */
 static long long ii_narrow_int(long long v, int size, int is_unsigned) {
   switch (size) {
   case 1: return is_unsigned ? (long long)(unsigned char)v : (long long)(signed char)v;
@@ -1136,11 +988,6 @@ static long long ii_narrow_int(long long v, int size, int is_unsigned) {
   }
 }
 
-/* An aggregate that fits in a register travels as its BYTES, not as an
- * address: `s = arr[i]` on a two-int32 struct lowers to an 8-byte load feeding
- * an aggregate assign, and a by-value argument of one is passed the same way.
- * Fills `out` and answers 1 when the value is content rather than an address,
- * which is decided by asking whether it addresses a live buffer at all. */
 static int ii_aggregate_value_is_bytes(IRInterpMachine *machine,
                                        const IRInterpValue *value,
                                        long long size, unsigned char *out) {
@@ -1150,7 +997,7 @@ static int ii_aggregate_value_is_bytes(IRInterpMachine *machine,
   long long off = 0;
   if (ii_addr_to_buffer(machine, (unsigned long long)ii_as_int(value), size,
                         &off)) {
-    return 0; /* it really is an address */
+    return 0;
   }
   unsigned long long raw = (unsigned long long)value->i;
   for (long long i = 0; i < size; i++) {
@@ -1177,9 +1024,6 @@ static int ii_var_write(IRInterpMachine *machine, IIVar *var,
     }
   }
   if (var->agg_size > 0) {
-    /* Aggregate: assignment through the name is a block copy from the source
-     * address (a returned aggregate, another aggregate's storage, or a folded
-     * constant image). */
     unsigned long long src = (unsigned long long)ii_as_int(value);
     unsigned long long dst = (unsigned long long)var->value.i;
     long long src_off = 0, dst_off = 0;
@@ -1202,8 +1046,6 @@ static int ii_var_write(IRInterpMachine *machine, IIVar *var,
               (size_t)var->agg_size);
     }
     if (sbuf->escaped_local && sbuf != dbuf) {
-      /* The consumed aggregate return: its frame is gone and its bytes are
-       * copied out, so the slot goes back to the pool. */
       ii_reclaim_buffer(machine, (size_t)((sbuf->base - II_ADDR_BASE) /
                                           II_ADDR_STRIDE));
     }
@@ -1215,7 +1057,6 @@ static int ii_var_write(IRInterpMachine *machine, IIVar *var,
       var->value.i =
           ii_narrow_int(var->value.i, var->value_size, var->value_is_unsigned);
     }
-    /* value_size -4 marks a float32 home: round writes to single precision. */
     if (var->value.is_float && var->value_size == -4) {
       var->value.f = (double)(float)var->value.f;
     }
@@ -1249,8 +1090,6 @@ static int ii_var_write(IRInterpMachine *machine, IIVar *var,
                       var->slot_size, raw);
 }
 
-/* Scalar layout of an MtlcType, enums and pointers included. Returns 0 for
- * aggregates and unknowns. */
 static int ii_scalar_from_mtlc(const MtlcType *type, int *size, int *is_float,
                                int *is_unsigned) {
   if (!type) {
@@ -1296,13 +1135,6 @@ static const IRModuleSymbol *ii_symbol(IRInterpMachine *machine,
 static unsigned long long ii_global_storage(IRInterpMachine *machine,
                                             const char *name);
 
-/* First touch of a global by name: apply its initializer and record its
- * declared width so narrow globals wrap the way their .data image does.
- * Without this every global read 0 regardless of its initializer.
- *
- * Returns a fresh pointer into the globals table: recursion through another
- * global's storage can grow the table, so a pointer held across this call is
- * invalid by contract. */
 static IIVar *ii_global_touch(IRInterpMachine *machine, const char *name) {
   IIVar *var = ii_env_upsert(&machine->globals, name);
   if (!var || var->global_inited) {
@@ -1322,7 +1154,6 @@ static IIVar *ii_global_touch(IRInterpMachine *machine, const char *name) {
   }
   int size = 0, is_float = 0, is_unsigned = 0;
   if (sym->type && sym->type->kind == MTLC_TYPE_STRING) {
-    /* String global: the home holds the record address. */
     if (sym->init_string) {
       unsigned long long chars = 0, record = 0;
       if (ii_string_literal(machine, sym->init_string,
@@ -1338,8 +1169,6 @@ static IIVar *ii_global_touch(IRInterpMachine *machine, const char *name) {
   if (sym->type && (sym->type->kind == MTLC_TYPE_STRUCT ||
                     sym->type->kind == MTLC_TYPE_ARRAY ||
                     sym->type->kind == MTLC_TYPE_TAGGED_ENUM)) {
-    /* Aggregate global touched by name: place its storage now so the value
-     * is its address and assignment is a block copy. */
     ii_global_storage(machine, name);
     return ii_env_upsert(&machine->globals, name);
   }
@@ -1396,11 +1225,6 @@ static IIVar *ii_global_touch(IRInterpMachine *machine, const char *name) {
   return var;
 }
 
-/* Materialize a global's storage: its initializer image with relocation holes
- * filled (string literals, other globals, function addresses), the folded
- * scalar value, or bss zeros. Scalar globals become slot-backed so name
- * access and pointer access alias the same bytes. Returns the base address,
- * 0 when the symbol has no storage to give. */
 static unsigned long long ii_global_storage(IRInterpMachine *machine,
                                             const char *name) {
   IIVar *var = ii_env_upsert(&machine->globals, name);
@@ -1415,8 +1239,6 @@ static unsigned long long ii_global_storage(IRInterpMachine *machine,
     return 0;
   }
   if (sym->type && sym->type->kind == MTLC_TYPE_STRING) {
-    /* The string convention: address-of yields the record the value points
-     * at, so touch the value into existence and hand that back. */
     var = ii_global_touch(machine, name);
     return var ? (unsigned long long)var->value.i : 0;
   }
@@ -1438,8 +1260,6 @@ static unsigned long long ii_global_storage(IRInterpMachine *machine,
                                       &scalar_unsigned) &&
                   sym->kind == IR_MODSYM_VARIABLE;
   if (is_scalar) {
-    /* The value the global held before its address was taken (its
-     * initializer, or whatever name-writes left) becomes the home's bytes. */
     IRInterpValue seed;
     int seeded = 0;
     if (var->global_inited) {
@@ -1477,9 +1297,6 @@ static unsigned long long ii_global_storage(IRInterpMachine *machine,
                         ? size
                         : 0;
   }
-  /* Storage is marked placed above, so cyclic references resolve to this
-   * address instead of recursing forever. `var` is invalid past this point:
-   * recursive placements grow the table. */
   for (size_t r = 0; r < sym->init_reloc_count; r++) {
     const IRInitReloc *reloc = &sym->init_relocs[r];
     unsigned long long value = 0;
@@ -1523,9 +1340,6 @@ static unsigned long long ii_global_storage(IRInterpMachine *machine,
   return addr;
 }
 
-/* Resolve a TEMP/SYMBOL operand name to its variable: frame first, then
- * globals (creating there on first touch, matching "undeclared symbol is a
- * global" lowering). */
 static IIVar *ii_resolve(IRInterpMachine *machine, IIFrame *frame,
                          const IROperand *operand) {
   IIVar *var = ii_env_find(&frame->env, operand->name);
@@ -1533,11 +1347,6 @@ static IIVar *ii_resolve(IRInterpMachine *machine, IIFrame *frame,
     return var;
   }
   if (operand->kind == IR_OPERAND_TEMP) {
-    /* Temps are function-local by construction. A brand-new temp slot means a
-     * read before any def (possible only after a transform deleted the def):
-     * it reads POISON, not 0, because native code would see a stale register.
-     * A deterministic-but-nonzero value keeps the differential faithful and
-     * both machines identical. Globals stay zero (.bss is zeroed for real). */
     IIVar *fresh = ii_env_upsert(&frame->env, operand->name);
     if (fresh) {
       fresh->value = ii_poison_value();
@@ -1573,8 +1382,6 @@ static int ii_fetch(IRInterpMachine *machine, IIFrame *frame,
     return ii_var_read(machine, var, out);
   }
   case IR_OPERAND_STRING: {
-    /* A string literal used as a value IS the address of its fat record, the
-     * same thing the backend's operand load produces. */
     unsigned long long chars = 0, record = 0;
     if (!ii_string_literal(machine, operand->name,
                            ir_operand_string_length(operand), &chars,
@@ -1649,7 +1456,6 @@ static int ii_store_dest(IRInterpMachine *machine, IIFrame *frame,
   return ii_var_write(machine, var, value);
 }
 
-/* Fetch as address (integer). */
 static int ii_fetch_addr(IRInterpMachine *machine, IIFrame *frame,
                          const IROperand *operand, unsigned long long *out) {
   IRInterpValue value;
@@ -1670,15 +1476,11 @@ static int ii_fetch_int(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* ---------------- scalar ops ---------------- */
-
 static int ii_binary(IRInterpMachine *machine, const IRInstruction *insn,
                      const IRInterpValue *a, const IRInterpValue *b,
                      IRInterpValue *out) {
   const char *op = insn->text ? insn->text : "?";
 
-  /* String '+' concatenates contents, matching the backend's concat kernel.
-   * Without this the generic path summed the two record addresses. */
   if (insn->value_type && insn->value_type->kind == MTLC_TYPE_STRING &&
       strcmp(op, "+") == 0) {
     const unsigned char *left_bytes = NULL, *right_bytes = NULL;
@@ -1768,9 +1570,6 @@ static int ii_binary(IRInterpMachine *machine, const IRInstruction *insn,
       ii_fail(machine, IR_INTERP_TRAP, "integer divide trap");
       return 0;
     }
-    /* Dividing by -1 is a negation with no remainder, and the negation wraps
-     * INT64_MIN to itself. Spelled out because the host would call it
-     * undefined, and because it is what the compiled code now does. */
     if (!is_unsigned && sy == -1) {
       *out = ii_int_value(op[0] == '/'
                               ? (long long)(0ULL - (unsigned long long)sx)
@@ -1831,9 +1630,6 @@ static int ii_integer_cast_width(const char *type, int *size_out,
   return 0;
 }
 
-/* A declared type is a base type and a proof about it, so a cast into one is
- * named by the declared type and moves the base. The proof is checked where
- * the conversion is written; here the width is all that is wanted. */
 static int ii_mtlc_integer_width(const MtlcType *type, int *size,
                                  int *is_unsigned) {
   if (!type) {
@@ -1983,8 +1779,6 @@ static int ii_cast(IRInterpMachine *machine, const IRInstruction *insn,
   return 1;
 }
 
-/* ---------------- extern model ---------------- */
-
 static double ii_sqrt(double value) {
   if (value <= 0.0) {
     return value == 0.0 ? value : 0.0 / 0.0;
@@ -2128,8 +1922,6 @@ static int ii_extern_math(const char *name, const IRInterpValue *args,
   return 0;
 }
 
-
-
 long long ir_interp_pointee_window(IRInterpMachine *machine,
                                    unsigned long long value,
                                    unsigned char *out, size_t capacity) {
@@ -2223,9 +2015,6 @@ static void ii_trace_extern(IRInterpMachine *machine, const char *name,
     if (args[i].is_float) {
       continue;
     }
-    /* Pointer argument: capture the bytes it addresses right now, up to the
-     * cap or the end of its buffer. The extern observes memory at the moment
-     * of the call, so the trace must too. */
     long long take = ir_interp_pointee_window(
         machine, (unsigned long long)args[i].i, call->arg_mem[i],
         IR_INTERP_EXTERN_MEM_CAP);
@@ -2254,8 +2043,6 @@ static IRFunction *ii_find_function(IRInterpMachine *machine,
   return NULL;
 }
 
-/* Mirrors the backend's cstring test: a pointer named `cstring`, or a pointer
- * to bytes. Everything else takes a string literal as the fat record. */
 static int ii_type_is_cstring(const MtlcType *type) {
   if (!type || type->kind != MTLC_TYPE_POINTER) {
     return 0;
@@ -2278,9 +2065,6 @@ static int ii_callee_param_is_cstring(IRInterpMachine *machine,
   return ii_type_is_cstring(sym->param_types[index]);
 }
 
-/* By-value aggregate arguments travel INDIRECT: the caller passes the address
- * of a copy, so callee writes never reach the caller's aggregate. The copies
- * live in the caller's frame like the copy slots the backend reserves. */
 static int ii_copy_aggregate_args(IRInterpMachine *machine, IIFrame *frame,
                                   const char *callee, IRInterpValue *args,
                                   size_t arg_count) {
@@ -2352,8 +2136,6 @@ static long long ii_buffer_size_at(IRInterpMachine *machine,
   return buf->size;
 }
 
-/* Modeled externs return 1 and set *result; unknown externs are traced and
- * return 0 (meaning: use the pure default). Returns -1 on trap. */
 static char *ii_string_arg_copy(IRInterpMachine *machine, const char *callee,
                                 size_t index, const IRInterpValue *arg) {
   const unsigned char *bytes = NULL;
@@ -2547,9 +2329,6 @@ static int ii_extern_allocate(IRInterpMachine *machine, const char *name,
   if ((strcmp(name, "malloc") == 0 && arg_count == 1) ||
       (strcmp(name, "calloc") == 0 && arg_count == 2)) {
     long long size = ii_as_int(&args[0]);
-    /* An allocator call is an allocation, the same as `new`. A trace rule
-     * that counts them has to see both, or it means one thing here and
-     * another against a recorded run. */
     if (ir_trace_collecting()) {
       ir_trace_record("alloc", name, machine->current_call_loc.filename,
                       machine->current_call_loc.line,
@@ -2566,7 +2345,6 @@ static int ii_extern_allocate(IRInterpMachine *machine, const char *name,
       return -1;
     }
     if (strcmp(name, "malloc") == 0) {
-      /* Deterministic "uninitialized" pattern. */
       long long offset = 0;
       IIBuffer *buf = ii_addr_to_buffer(machine, addr, 0, &offset);
       if (buf) {
@@ -2722,11 +2500,6 @@ static int ii_extern_swap(IRInterpMachine *machine, const char *name,
 static int ii_extern_socket(IRInterpMachine *machine, const char *name,
                         const IRInterpValue *args, size_t arg_count,
                         IRInterpValue *result) {
-  /* A machine with sockets and no peers, which is what the compile host is
-     from the program's point of view. Creating and closing one succeeds;
-     anything needing a peer fails and reports why. No operating system is
-     involved: the handle is a counter and the failure is the only answer a
-     socket that was never connected can give. */
   if (strcmp(name, "socket") == 0 || strcmp(name, "WSASocketA") == 0) {
     machine->next_thread_handle++;
     *result = ii_int_value((long long)(machine->next_thread_handle + 2));
@@ -2750,7 +2523,7 @@ static int ii_extern_socket(IRInterpMachine *machine, const char *name,
 
   if (arg_count >= 2 && (strcmp(name, "send") == 0 ||
                          strcmp(name, "sendto") == 0)) {
-    machine->last_socket_error = 107; /* ENOTCONN */
+    machine->last_socket_error = 107;
     *result = ii_int_value(-1);
     return 1;
   }
@@ -2759,7 +2532,7 @@ static int ii_extern_socket(IRInterpMachine *machine, const char *name,
                          strcmp(name, "recvfrom") == 0 ||
                          strcmp(name, "accept") == 0 ||
                          strcmp(name, "connect") == 0)) {
-    machine->last_socket_error = 107; /* ENOTCONN */
+    machine->last_socket_error = 107;
     *result = ii_int_value(-1);
     return 1;
   }
@@ -2927,8 +2700,6 @@ static int ii_extern_handle(IRInterpMachine *machine, const char *name,
   return II_EXTERN_UNHANDLED;
 }
 
-
-
 static int ii_extern_memory(IRInterpMachine *machine, const char *name,
                         const IRInterpValue *args, size_t arg_count,
                         IRInterpValue *result) {
@@ -3058,7 +2829,6 @@ static int ii_extern_block(IRInterpMachine *machine, const char *name,
   return II_EXTERN_UNHANDLED;
 }
 
-
 static int ii_extern_byte_order(IRInterpMachine *machine, const char *name,
                         const IRInterpValue *args, size_t arg_count,
                         IRInterpValue *result) {
@@ -3143,7 +2913,7 @@ static int ii_extern_string(IRInterpMachine *machine, const char *name,
       n++;
     }
     if (offset + n >= buf->size) {
-      return -1; /* unterminated within the buffer: refuse to guess */
+      return -1;
     }
     *result = ii_int_value(n);
     return 1;
@@ -3163,7 +2933,7 @@ static int ii_extern_string(IRInterpMachine *machine, const char *name,
     int r = 0;
     while (limit < 0 || i < limit) {
       if (a_off + i >= abuf->size || b_off + i >= bbuf->size) {
-        return -1; /* ran off a buffer before the terminator */
+        return -1;
       }
       unsigned char ca = abuf->data[a_off + i];
       unsigned char cb = bbuf->data[b_off + i];
@@ -3197,7 +2967,7 @@ static int ii_extern_compare(IRInterpMachine *machine, const char *name,
     if (!dbuf || !sbuf || (arg_count == 3 && limit < 0)) {
       return -1;
     }
-    if (strcmp(name, "strcat") == 0) { /* append at dst's terminator */
+    if (strcmp(name, "strcat") == 0) {
       while (d_off < dbuf->size && dbuf->data[d_off] != 0) {
         d_off++;
       }
@@ -3211,7 +2981,7 @@ static int ii_extern_compare(IRInterpMachine *machine, const char *name,
         break;
       }
       if (s_off + i >= sbuf->size || d_off + i >= dbuf->size) {
-        return -1; /* overrun either side: refuse */
+        return -1;
       }
       unsigned char c = sbuf->data[s_off + i];
       dbuf->data[d_off + i] = c;
@@ -3221,7 +2991,7 @@ static int ii_extern_compare(IRInterpMachine *machine, const char *name,
       }
       i++;
     }
-    if (limit >= 0) { /* strncpy zero-fills to the limit */
+    if (limit >= 0) {
       while (i < limit && d_off + i < dbuf->size) {
         dbuf->data[d_off + i++] = 0;
       }
@@ -3231,7 +3001,6 @@ static int ii_extern_compare(IRInterpMachine *machine, const char *name,
   }
   return II_EXTERN_UNHANDLED;
 }
-
 
 static int ii_extern_scan(IRInterpMachine *machine, const char *name,
                         const IRInterpValue *args, size_t arg_count,
@@ -3282,12 +3051,10 @@ static int ii_extern_scan(IRInterpMachine *machine, const char *name,
   return II_EXTERN_UNHANDLED;
 }
 
-
 static int ii_extern_runtime_check(IRInterpMachine *machine, const char *name,
                         const IRInterpValue *args, size_t arg_count,
                         IRInterpValue *result) {
   if (strcmp(name, "mettle_heap_zeroed") == 0 && arg_count == 1) {
-    /* The lowered form of `new T`: zeroed heap storage. */
     long long size = ii_as_int(&args[0]);
     if (size < 0 || size > II_MAX_BUFFER_SIZE) {
       return -1;
@@ -3304,18 +3071,12 @@ static int ii_extern_runtime_check(IRInterpMachine *machine, const char *name,
     return ii_effects_call(machine, name, args, arg_count);
   }
 
-  /* The checks a build carries are the compiler's own, and the interpreter
-   * already enforces what they enforce: an access out of range traps here
-   * whether or not `--safe` put a call in front of it. Running one is
-   * therefore a no-op, and refusing to run one would mean a rule could not be
-   * checked in a build that asked for the checks. */
   if (strncmp(name, "mettle_safety_", 14) == 0 ||
       strncmp(name, "mettle_trace_", 13) == 0) {
     *result = ii_int_value(0);
     return 1;
   }
 
-  /* assert()/assert_eq() builtins: interpreted natively by `mettle test`. */
   if (strcmp(name, "assert_eq") == 0 && arg_count == 2) {
     if (!ii_value_matches(&args[0], &args[1])) {
       machine->assert_failed = 1;
@@ -3344,7 +3105,6 @@ static int ii_extern_runtime_check(IRInterpMachine *machine, const char *name,
     return 1;
   }
 
-  /* Runtime guard traps (null-check, bounds) abort the program. */
   if (strncmp(name, "mettle_crash_trap", 17) == 0) {
     const unsigned char *message = NULL;
     size_t message_length = 0;
@@ -3370,10 +3130,6 @@ static int ii_extern_runtime_check(IRInterpMachine *machine, const char *name,
 static int ii_extern_string_runtime(IRInterpMachine *machine, const char *name,
                         const IRInterpValue *args, size_t arg_count,
                         IRInterpValue *result) {
-  /* The string runtime, modeled so interpreted string programs mean what they
-   * mean natively. mettle_string_from_f64 mirrors the Mettle implementation in
-   * src/runtime/string.mettle operation for operation; a change there without
-   * one here shows up as an interp-vs-native output difference. */
   if (strcmp(name, "mettle_string_eq") == 0 && arg_count == 2) {
     const unsigned char *left_bytes = NULL, *right_bytes = NULL;
     size_t left_length = 0, right_length = 0;
@@ -3550,12 +3306,6 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     }
   }
 
-  /* Unknown extern: the call is traced so a pass that deletes or reorders it
-   * still diverges, and the answer is marked undefined. Zero is a value the
-   * program will branch on -- `dir_exists` answering 0 sends it down the
-   * directory-is-missing arm and every step after that is fiction. Marking it
-   * lets whoever consumes the run say it does not know, rather than report a
-   * number computed from a guess. */
   ii_trace_extern(machine, name, args, arg_count);
   result->undefined = 1;
   return machine->status == IR_INTERP_OK ? 0 : -1;
@@ -3596,20 +3346,13 @@ static double ii_outer_lane_uniform(const IRInstruction *insn, size_t prog,
   return in_float ? fv : (double)iv;
 }
 
-/* ---------------- SIMD kernel ops (documented scalar semantics) ---------- */
-
 static int ii_exec_memory(IRInterpMachine *machine, IIFrame *frame,
                       const IRInstruction *insn, int *handled) {
   *handled = 1;
   switch (insn->op) {
   case IR_OP_PREFETCH:
-    /* Advisory cache hint: no architectural effect, nothing to interpret. */
     return 1;
   case IR_OP_SAFETY_CHECK:
-    /* `--safe` puts this in front of an access the compiler could not prove
-     * in range. The interpreter already traps on an access out of range, so
-     * there is nothing here it is not doing anyway; a rule stays runnable in
-     * a build that asked for the checks. */
     return 1;
   case IR_OP_MEMCPY_INLINE: {
     unsigned long long dst, src;
@@ -3675,10 +3418,6 @@ static int ii_exec_slp_mac(IRInterpMachine *machine, IIFrame *frame,
   switch (insn->op) {
   case IR_OP_SIMD_SLP_MAC_I32:
   case IR_OP_SIMD_SLP_MAC_I8: {
-    /* K parallel int32 MAC reductions sharing a broadcast scalar:
-     * out[out_off+j] = sum_k a[a_off+k] * b[b_off + k*b_stride + j].
-     * The I8 variant reads bytes zero-extended, the way the kernel's
-     * movzx/vpmovzxbd widen them. */
     unsigned long long out_base, a_base, b_base;
     long long K, count, a_off, b_off, b_stride, out_off;
     if (insn->argument_count < 6 ||
@@ -3830,7 +3569,7 @@ static int ii_fill_indexed(IRInterpMachine *machine, IIFrame *frame,
     return 0;
   }
   for (long long i = start; i < bound; i++) {
-    int idx32 = (int)(offset + i); /* 32-bit index math, like the loop */
+    int idx32 = (int)(offset + i);
     unsigned long long addr =
         base + (unsigned long long)((long long)idx32 * elem_size);
     if (!ii_mem_write(machine, addr, (int)elem_size, fill_bits)) {
@@ -4038,10 +3777,6 @@ static int ii_exec_int_dot(IRInterpMachine *machine, IIFrame *frame,
   }
 
   case IR_OP_SIMD_DOT_I8: {
-    /* byte x byte -> int32 dot: each byte widens the way the source's loads
-     * did, which insn->is_unsigned records, accumulated with int32 wraparound
-     * into the dest sum. Widening every byte zero-extended read a negative
-     * int8 as its unsigned value. */
     unsigned long long a, b;
     long long n;
     IRInterpValue acc;
@@ -4074,8 +3809,6 @@ static int ii_exec_int_dot(IRInterpMachine *machine, IIFrame *frame,
   }
 
   case IR_OP_PREFIX_SUM_I32: {
-    /* Inclusive int32 prefix sum: dst[i] = sum(src[0..i]) wrapping at 32
-     * bits; dest accumulates the int64 running sum of the outputs. */
     unsigned long long src, dst;
     long long n;
     IRInterpValue acc;
@@ -4086,9 +3819,6 @@ static int ii_exec_int_dot(IRInterpMachine *machine, IIFrame *frame,
         !ii_fetch(machine, frame, &insn->dest, &acc)) {
       return 0;
     }
-    /* The kernel seeds the running sum from dest's prior value, adds each
-     * sign-extended src element into the 64-bit accumulator, and stores its
-     * low 32 bits per element; dest keeps the full 64-bit sum. */
     long long run = ii_as_int(&acc);
     for (long long i = 0; i < n; i++) {
       int v;
@@ -4185,9 +3915,6 @@ static int ii_exec_int_search(IRInterpMachine *machine, IIFrame *frame,
         !ii_fetch_int(machine, frame, &insn->dest, &lo0)) {
       return 0;
     }
-    /* dest is in/out: codegen seeds the running lo from dest's prior value
-     * (the recognizer guarantees the source loop starts it at 0). Reading 0
-     * here regardless would hide a transform that deletes the init. */
     long long lo = lo0, hi = n;
     while (lo < hi) {
       long long mid = lo + (hi - lo) / 2;
@@ -4440,17 +4167,17 @@ static int ii_exec_float_map(IRInterpMachine *machine, IIFrame *frame,
         long long code = insn->arguments[s].int_value;
         double k = insn->arguments[s + 1].float_value;
         switch (code) {
-        case 0: x = x * k; break; /* I2F_STEP_MUL */
-        case 1: x = x + k; break; /* I2F_STEP_ADD */
-        case 2: x = x - k; break; /* I2F_STEP_SUBR */
-        case 3: x = k - x; break; /* I2F_STEP_SUBL */
-        case 4: x = x / k; break; /* I2F_STEP_DIVR */
+        case 0: x = x * k; break;
+        case 1: x = x + k; break;
+        case 2: x = x - k; break;
+        case 3: x = k - x; break;
+        case 4: x = x / k; break;
         default:
           ii_fail(machine, IR_INTERP_UNSUPPORTED, "i2f step code");
           return 0;
         }
       }
-      sum += (long long)x; /* trunc toward zero; range proven by the pass */
+      sum += (long long)x;
     }
     machine->fuel -= trip;
     IRInterpValue out = ii_int_value(sum);
@@ -4599,14 +4326,6 @@ static int ii_exec_find(IRInterpMachine *machine, IIFrame *frame,
       !ii_fetch_int(machine, frame, &insn->arguments[4], &first)) {
     return 0;
   }
-  /* The kernel only moves the counter forward to where the scalar loop would
-   * have arrived, so with nothing to scan it must leave the counter where it
-   * started. Answering `n` unconditionally was right for the not-found case
-   * and wrong for an empty range: a negative length made this model hand back
-   * that negative number, the scalar loop then exited on the first test with
-   * it, and validation read a kernel that agrees with the source as a
-   * divergence. It quarantined simd_find on every counted search under
-   * --verify. */
   long long hit = n > first ? n : first;
   for (long long i = first; i < n; i++) {
     long long av, bv;
@@ -4732,7 +4451,7 @@ static int ii_vloop_node_i32(const IIVloopEnv *env, long long tag,
                              long long *out) {
   long long v = 0;
   switch (tag) {
-  case 0: { /* LOAD */
+  case 0: {
     int e;
     unsigned long long at;
     if (op0 < 0 || op0 >= env->n_arrays) {
@@ -4869,9 +4588,6 @@ static int ii_vloop_reduce(const IIVloopEnv *env, long long reduce_op,
     return 1;
   }
   if (reduce_op == 2 || reduce_op == 3) {
-    /* `if (v > acc) { acc = v; }`: the element only wins an ordered compare,
-     * so a NaN leaves the accumulator alone -- the same rule the kernel gets
-     * from MAXPS/MINPS returning src2 when unordered. */
     if (is_int) {
       long long v = (long long)(int)env->vals_i[root];
       long long a = (long long)(int)*acc_i;
@@ -4901,7 +4617,6 @@ static int ii_vloop_reduce(const IIVloopEnv *env, long long reduce_op,
     return ii_write_f64(env->machine, addr, env->vals_f[root]);
   }
 }
-
 
 static int ii_vloop_read_operands(IRInterpMachine *machine, IIFrame *frame,
                                   const IRInstruction *insn, long long n_arrays,
@@ -4946,7 +4661,6 @@ static int ii_exec_vloop(IRInterpMachine *machine, IIFrame *frame,
   switch (insn->op) {
   case IR_OP_SIMD_VLOOP_F64:
   case IR_OP_SIMD_VLOOP_I32: {
-    /* Replay the serialized straight-line DAG per element (see ir.h). */
     if (insn->argument_count < 7) {
       ii_fail(machine, IR_INTERP_UNSUPPORTED, "vloop header");
       return 0;
@@ -4966,7 +4680,6 @@ static int ii_exec_vloop(IRInterpMachine *machine, IIFrame *frame,
     }
     int is_int = insn->op == IR_OP_SIMD_VLOOP_I32;
     int is_f32 = !is_int && insn->float_bits == 32;
-    /* Byte elements with int32 lanes: only the memory traffic narrows. */
     int elem8 = is_int && insn->float_bits == 8;
     int elem8_unsigned = elem8 && insn->is_unsigned;
     long long elem_size = elem8 ? 1 : (is_int || is_f32 ? 4 : 8);
@@ -4989,8 +4702,6 @@ static int ii_exec_vloop(IRInterpMachine *machine, IIFrame *frame,
     }
     unsigned long long dest_base = 0;
     IRInterpValue acc;
-    /* 0 = map (dest is a base address), 1 = '+', 2 = max, 3 = min (dest is the
-     * accumulator's current value). */
     int is_acc = (reduce_op >= 1 && reduce_op <= 3);
     if (is_acc) {
       if (!ii_fetch(machine, frame, &insn->dest, &acc)) {
@@ -5071,13 +4782,8 @@ static int ii_exec_simd(IRInterpMachine *machine, IIFrame *frame,
   return 0;
 }
 
-/* ---------------- main execution loop ---------------- */
-
-/* `%d = c ? a : b`. Both arms are evaluated, so neither may trap. */
 static int ii_op_select(IRInterpMachine *machine, IIFrame *frame,
                          const IRInstruction *insn) {
-  /* Fused form (text != NULL): cond = (lhs <cmp> arguments[1]). Plain
-   * form: cond = (lhs != 0). Then dest = cond ? rhs : arguments[0]. */
   long long truth = 0;
   if (insn->text && insn->argument_count > 1) {
     IRInterpValue a, b;
@@ -5122,10 +4828,6 @@ static int ii_op_select(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* A direct call: an interpreted function, or one of the runtime and libc
- * entries the machine models. */
-/* The device index built-ins, answered from the thread the grid runner is
-   standing on. Returns 1 when the intrinsic was one of these. */
 static int ii_gpu_index_intrinsic(IRInterpMachine *machine,
                                   MtlcIntrinsic intrinsic,
                                   IRInterpValue *out) {
@@ -5154,9 +4856,6 @@ static int ii_gpu_index_intrinsic(IRInterpMachine *machine,
   }
 }
 
-/* The workgroup and private allocations a kernel declares. A workgroup one is
-   the block's, so every thread of the block gets the same address; a private
-   one belongs to the thread and is fresh each time. */
 static int ii_gpu_address_space_alloc(IRInterpMachine *machine, IIFrame *frame,
                                       const IRInstruction *insn) {
   IIGpuGrid *gpu = &machine->gpu;
@@ -5209,9 +4908,6 @@ static int ii_gpu_address_space_alloc(IRInterpMachine *machine, IIFrame *frame,
   return ii_store_dest(machine, frame, &insn->dest, &value);
 }
 
-/* Every live thread of a workgroup has to reach every barrier the workgroup
-   reaches. The count is per site and per block; what it catches is a barrier
-   some thread walked around. */
 static void ii_gpu_barrier_arrive(IRInterpMachine *machine, size_t site,
                                   size_t line) {
   IIGpuGrid *gpu = &machine->gpu;
@@ -5229,15 +4925,6 @@ static void ii_gpu_barrier_arrive(IRInterpMachine *machine, size_t site,
   }
 }
 
-/* The kernel a launch names. A typed dispatch resolves its handle through
-   `mtlc_gpu_kernel_handle("name")`, so the name is the string that call was
-   given, and it is in this same module because the grid runs the source it was
-   compiled from. */
-/* A value whose type says it is the same in every work item of the warp, asked
-   again. The first work item of a warp records it; the rest are compared
-   against that, and the message names the value and the two lanes. */
-/* The name a work item would recognise. A conversion's own destination is a
-   temporary; the binding it is stored into is what the program wrote. */
 static const char *ii_gpu_value_name(const IRFunction *fn, size_t index,
                                      const IRInstruction *insn) {
   const char *temp = insn->dest.name;
@@ -5271,8 +4958,6 @@ static int ii_gpu_check_uniform_value(IRInterpMachine *machine,
         slot->lane / II_GPU_SUBGROUP != warp) {
       continue;
     }
-    /* The same work item reaching the same site again is a loop, not another
-       lane. One reading per work item is what is compared. */
     if (slot->last_lane == gpu->lane) {
       return 1;
     }
@@ -5301,7 +4986,6 @@ static int ii_gpu_check_uniform_value(IRInterpMachine *machine,
   return 1;
 }
 
-/* The name a space is written with, for a message. */
 static const char *ii_gpu_space_word(unsigned char space) {
   switch (space) {
   case MTLC_ADDRESS_SPACE_GLOBAL: return "global";
@@ -5312,9 +4996,6 @@ static const char *ii_gpu_space_word(unsigned char space) {
   }
 }
 
-/* Re-check what a pointer type claims against the storage the value actually
-   addresses. The compiler proved both the space and the alignment; this asks
-   the question again with nothing but the running program to go on. */
 static int ii_gpu_check_pointer_claim(IRInterpMachine *machine,
                                       const MtlcType *type,
                                       const IRInterpValue *value, size_t line) {
@@ -5396,10 +5077,6 @@ static const char *ii_gpu_launch_kernel_name(IIFrame *frame,
   return NULL;
 }
 
-/* Run one block, one barrier phase at a time. Every live work item advances to
-   its next barrier; when they have all stopped, the phase ends and the next
-   one begins. A work item that finished while others stopped at a barrier is
-   the divergent barrier this catches, and the message names the site. */
 static int ii_gpu_run_block(IRInterpMachine *machine, IRFunction *kernel,
                             const IRInterpValue *args, size_t nargs) {
   IIGpuGrid *gpu = &machine->gpu;
@@ -5628,11 +5305,6 @@ static int ii_op_call(IRInterpMachine *machine, IIFrame *frame,
     int handled =
         ii_extern_call(machine, insn->text, call_args, call_arg_count,
                        &call_result);
-    /* Attribute any heap allocation the extern model made (malloc,
-     * calloc, realloc) to this call site for leak reporting. String
-     * runtime records stay unattributed: string storage has no free story
-     * yet, exactly like the concat records ii_binary makes, so reporting
-     * one and not the other would flag every interpolation as a leak. */
     if (strncmp(insn->text, "mettle_string_", 14) != 0) {
       for (size_t bi = buffers_before; bi < machine->buffer_count; bi++) {
         machine->buffers[bi].alloc_line = insn->location.line;
@@ -5652,7 +5324,6 @@ static int ii_op_call(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* Heap allocation, with the poison and bounds a later access checks against. */
 static int ii_op_new(IRInterpMachine *machine, IIFrame *frame,
                       const IRInstruction *insn) {
   long long size = 8;
@@ -5681,7 +5352,6 @@ static int ii_op_new(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* A call through a value: a function pointer or a closure. */
 static int ii_op_call_indirect(IRInterpMachine *machine, IIFrame *frame,
                                 const IRInstruction *insn) {
   IRInterpValue target;
@@ -5749,8 +5419,6 @@ static int ii_op_call_indirect(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* `*addr <- value [size]`, including the block-copy form for anything wider
- * than a machine word. */
 static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
                         const IRInstruction *insn) {
   unsigned long long addr;
@@ -5762,10 +5430,6 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
     return 0;
   }
   if (size != 1 && size != 2 && size != 4 && size != 8) {
-    /* Wider than a machine word: this is the block-copy form, where the
-     * value operand is the SOURCE ADDRESS rather than a value (whole-struct
-     * assignment, and the copy of an aggregate literal's constant image).
-     * Both regions are checked before either is touched. */
     unsigned long long source = (unsigned long long)ii_as_int(&value);
     long long dest_offset = 0;
     long long source_offset = 0;
@@ -5782,14 +5446,6 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
             source_buffer->data + source_offset, (size_t)size);
     return 1;
   }
-  /* An aggregate at or below 8 bytes is stored by a WORD-SIZED store, because
-   * the backend keeps its bytes in a register and the lvalue path declines the
-   * whole-struct memcpy at that size. The interpreter holds every aggregate as
-   * a buffer and hands out its ADDRESS, so both shapes wrote the low bytes of
-   * an address: `smalls[1] = one`, whose value operand is the aggregate symbol
-   * itself, and `smalls[2] = make_small(2, -2)`, whose value is the callee's
-   * buffer marked escaped_local. Only the interpreter's own bookkeeping can
-   * name either, so an ordinary pointer store is never taken for one. */
   if (!value.is_float && !insn->is_float && value.i != 0) {
     long long source_offset = 0;
     IIBuffer *source_buffer = NULL;
@@ -5814,7 +5470,6 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
       }
       memmove(dest_buffer->data + dest_offset,
               source_buffer->data + source_offset, (size_t)size);
-      /* A consumed aggregate return has no other reader; a named local does. */
       if (source_buffer->escaped_local && source_buffer != dest_buffer) {
         ii_reclaim_buffer(machine,
                           (size_t)((source_buffer->base - II_ADDR_BASE) /
@@ -5851,7 +5506,6 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
     } else {
       raw = (unsigned long long)ii_as_int(&value);
     }
-    /* An int value stored with an int-typed instruction keeps int bits. */
     if (!value.is_float && !insn->is_float) {
       raw = (unsigned long long)value.i;
     }
@@ -5865,7 +5519,6 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* Negation, complement and the not that yields 0 or 1. */
 static int ii_op_unary(IRInterpMachine *machine, IIFrame *frame,
                         const IRInstruction *insn) {
   IRInterpValue a, out;
@@ -5898,7 +5551,6 @@ static int ii_op_unary(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* `dest <- src` between a temp and a local, either way round. */
 static int ii_op_assign(IRInterpMachine *machine, IIFrame *frame,
                          const IRInstruction *insn) {
   IRInterpValue value;
@@ -5927,7 +5579,6 @@ static int ii_op_assign(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* `%t <- *addr [size]`, widened the way the element type reads. */
 static int ii_op_load(IRInterpMachine *machine, IIFrame *frame,
                        const IRInstruction *insn) {
   unsigned long long addr;
@@ -5974,19 +5625,6 @@ static int ii_op_load(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* `local @name : type`. The widest single opcode the interpreter has: it
- * decides between a slot-backed register home, real storage for anything whose
- * address is taken, and the string value convention, and it seeds each with
- * the poison a read-before-write has to be able to see. Its own function
- * because it was a third of ii_exec_function on its own.
- *
- * Returns 1 with the local established, 0 having failed the machine. The
- * caller advances pc either way it used to. */
-/* Storage for a local that needs a real address: an array, or a scalar whose
- * address is taken. Poisoned the way a stack slot is, in contrast to heap
- * `new`, which stays zeroed to match HEAP_ZERO_MEMORY in codegen. A
- * re-executed declaration (a loop body's local) reuses the storage it already
- * owns and poisons it again, the way a reused stack slot behaves. */
 static int ii_give_local_storage(IRInterpMachine *machine, IIFrame *frame,
                                  IIVar *var, long long count, int elem_size,
                                  int is_float, int is_unsigned) {
@@ -6020,17 +5658,13 @@ static int ii_give_local_storage(IRInterpMachine *machine, IIFrame *frame,
     var->has_local_storage = 1;
   }
   var->value = ii_int_value((long long)addr);
-  var->slotted = count == 1; /* arrays are accessed via &, not by name */
+  var->slotted = count == 1;
   var->slot_size = elem_size;
   var->slot_is_float = is_float;
   var->slot_is_unsigned = is_unsigned;
   return 1;
 }
 
-/* An aggregate local: storage of the type's size, reached through address-of,
- * with whole-value assignment a block copy. Poisoned so a read before the
- * first write is visible as one. A frame re-entering its own declaration
- * reuses the storage it already owns. */
 static int ii_declare_aggregate_local(IRInterpMachine *machine, IIFrame *frame,
                                       IIVar *var, long long agg_size) {
   if (var->has_local_storage && var->value.i) {
@@ -6064,18 +5698,6 @@ static int ii_declare_aggregate_local(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* The string value convention: the local's value IS the address of a
- * { chars, length } record, and address-of yields that value. Never
- * slot-backed.
- *
- * The record has to exist from the declaration on. `var s: string;`
- * followed by `s.chars = buf` stores through the local's value, and
- * leaving that value poisoned made the store land nowhere: read_line and
- * read_line_stdin -- which every program importing std/io carries -- trapped
- * on every generated input, and 250-odd files reported them as unvalidated.
- * A declaration with no initializer gives them a zeroed record, which is the
- * storage the compiled program gets. An initializer overwrites the value
- * with its own record's address on the next instruction, exactly as before. */
 static int ii_declare_string_local(IRInterpMachine *machine, IIFrame *frame,
                                    IIVar *var) {
   var->slotted = 0;
@@ -6225,8 +5847,6 @@ static int ii_op_declare_local(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* Every label in the function, so a jump resolves by name in one lookup
- * rather than a scan. Built once per frame. */
 static int ii_build_label_table(IRInterpMachine *machine, IIFrame *frame,
                                  IRFunction *fn) {
   size_t label_capacity = 8;
@@ -6256,15 +5876,8 @@ static int ii_build_label_table(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
-/* A parameter whose address is taken needs real storage, not a register
- * home: give it a slot and move the incoming value into it, so a write
- * through the pointer and a read by name see the same bytes. */
 static int ii_home_addressed_parameters(IRInterpMachine *machine, IIFrame *frame,
                                          IRFunction *fn) {
-  /* A scalar parameter whose address is taken gets a slot home now, so &p is
-   * a real address the way the backend homes it (before this, &p handed back
-   * the parameter's VALUE as an address). String and aggregate parameters
-   * stay register-resident: their values already ARE the addresses &p means. */
   for (size_t i = 0; i < fn->instruction_count; i++) {
     const IRInstruction *scan = &fn->instructions[i];
     if (scan->op != IR_OP_ADDRESS_OF || scan->lhs.kind != IR_OPERAND_SYMBOL ||
@@ -6273,7 +5886,7 @@ static int ii_home_addressed_parameters(IRInterpMachine *machine, IIFrame *frame
     }
     IIVar *var = ii_env_find(&frame->env, scan->lhs.name);
     if (!var || var->slotted) {
-      continue; /* only parameters live in the frame this early */
+      continue;
     }
     const char *ptype = NULL;
     for (size_t p = 0; p < fn->parameter_count; p++) {
@@ -6317,10 +5930,6 @@ static int ii_home_addressed_parameters(IRInterpMachine *machine, IIFrame *frame
   return 1;
 }
 
-/* Bind each parameter into the frame, narrowed to its declared width the way
- * the callee's home for it is. A parameter reassigned in the body wraps there
- * too. A string parameter gets its own copy of the 16-byte record, owned by
- * the frame, so a callee writing through it cannot reach the caller's. */
 static int ii_bind_parameters(IRInterpMachine *machine, IIFrame *frame,
                               IRFunction *fn, const IRInterpValue *args,
                               size_t arg_count) {
@@ -6341,19 +5950,11 @@ static int ii_bind_parameters(IRInterpMachine *machine, IIFrame *frame,
           var->value_size = psize;
           var->value_is_unsigned = punsigned;
         } else if (psize == 4) {
-          /* A float32 parameter's home is 4 bytes: round the incoming value
-           * to single precision the way the ABI transfer does. */
           var->value_size = -4;
         }
       }
     }
     var->value = args[i];
-    /* An aggregate parameter holds the ADDRESS of the caller's copy, the same
-     * as an aggregate local, so record its size. Without it a word-sized store
-     * of the parameter -- which is how a closure constructor writes a captured
-     * struct into its environment -- wrote the low bytes of that address
-     * instead of the struct. A closure capturing a two-int32 struct read back
-     * as pointer bits under `mettle test` while the backend had it right. */
     if (fn->parameter_types && fn->parameter_types[i] && machine->program) {
       const MtlcType *pt =
           ir_program_lookup_type(machine->program, fn->parameter_types[i]);
@@ -6506,8 +6107,6 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
 
   IIPureFrame pure = ii_enter_pure(machine, fn);
 
-  /* A work item resuming after a barrier brings its frame back with it; a
-     fresh call builds one. Everything below is the same loop either way. */
   IIGpuThread *resume = machine->gpu_resume;
   int resumed = resume && resume->started;
   machine->gpu_resume = NULL;
@@ -6626,12 +6225,8 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       IIVar *var = ii_env_find(&frame.env, insn->lhs.name);
       long long base = 0;
       if (var) {
-        /* Slot-backed local or array: value.i is the base address. A string
-         * or aggregate parameter's VALUE is the address &p means. */
         base = var->value.i;
       } else {
-        /* Function: a deterministic address token an indirect call maps
-         * back. Global: materialize its storage. */
         unsigned long long token =
             ii_function_token(machine, insn->lhs.name);
         if (!token) {
@@ -6693,7 +6288,6 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       break;
     }
     case IR_OP_ROTATE_ADD: {
-      /* next = a + b; a = b; b = next  (dest=next, lhs=a, rhs=b) */
       IRInterpValue a, b;
       if (!ii_fetch(machine, &frame, &insn->lhs, &a) ||
           !ii_fetch(machine, &frame, &insn->rhs, &b)) {
@@ -6718,8 +6312,6 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
         goto done;
       }
       out.undefined = a.undefined;
-      /* A cast that claims a device space or an alignment is a claim, and this
-         is the machine that does not trust it. */
       if (!ii_gpu_check_pointer_claim(machine, insn->value_type, &out,
                                       insn->location.line)) {
         goto done;
@@ -6855,21 +6447,15 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
     ii_report_value(machine, &frame, insn);
   }
 
-  /* Fell off the end: void return. */
   *result = ii_int_value(0);
   ok = 1;
 
 done:
   ii_leave_pure(machine, &pure);
-  /* A work item stopped at a barrier keeps everything: its locals are still
-     live, and the phase after the barrier reads them. */
   if (resume && resume->suspended) {
     machine->depth--;
     return ok;
   }
-  /* This frame's local storage dies with it, except a buffer the function
-   * returned the address of: an aggregate return travels that way and stays
-   * alive until the caller's aggregate assignment consumes it. */
   ii_close_frame(machine, &frame,
                  (ok && !result->is_float) ? (unsigned long long)result->i
                                            : 0);
@@ -6896,8 +6482,6 @@ IRInterpStatus ir_interp_run(IRInterpMachine *machine, IRFunction *function,
   }
   return machine->status == IR_INTERP_OK ? IR_INTERP_TRAP : machine->status;
 }
-
-/* ---------------- observation accessors ---------------- */
 
 size_t ir_interp_buffer_count(const IRInterpMachine *machine) {
   return machine ? machine->buffer_count : 0;

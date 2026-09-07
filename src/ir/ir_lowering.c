@@ -1,6 +1,5 @@
-// AST->IR lowering: driver, context lifecycle, emit primitives.
 #include "ir_lowering_internal.h"
-#include "frontend/mtlc_lower_module.h" // backend module table population
+#include "frontend/mtlc_lower_module.h"
 #include "string_intern.h"
 
 static void ir_lowering_free_control_stack(IRLoweringContext *context) {
@@ -14,9 +13,6 @@ static void ir_lowering_free_control_stack(IRLoweringContext *context) {
   context->control_count = 0;
 }
 
-// Tear down a partially-built program on any lowering failure and hand the
-// pending error to the caller (or free it if the caller does not want one).
-// Always returns NULL so callers can `return ir_lowering_fail(...)`.
 static IRProgram *ir_lowering_fail(IRProgram *ir_program,
                                    IRLoweringContext *context,
                                    char **error_message) {
@@ -153,8 +149,6 @@ IRProgram *ir_lower_program(ASTNode *program, TypeChecker *type_checker,
     return ir_program;
   }
 
-  /* Bake the backend-owned type registry + module symbol table so the code
-   * generators no longer consult the frontend TypeChecker/SymbolTable/AST. */
   mtlc_lower_populate_module(ir_program, program, type_checker, symbol_table);
   ir_mark_volatile_global_accesses(ir_program);
   if (context.emitted_task_check &&
@@ -215,8 +209,6 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
   function->is_naked = function_data->is_naked;
   function->is_interrupt = function_data->is_interrupt;
   function->is_exported = function_data->is_exported;
-  /* The swap redirects a call, so the call must still exist at run time. This
-   * is the cost the decorator buys, and it is why swappability is opt-in. */
   function->is_noinline = function_data->is_noinline ||
                           function_data->is_swappable ||
                           function_data->is_naked ||
@@ -246,10 +238,6 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
                           (const char *const *)function_data->effects_requires,
                           function_data->effects_requires_count);
   if (function_data->is_kernel) {
-    /* A launch starts every work item of a warp and of a block together, so a
-       kernel entry is where those groups exist. Writing it here rather than
-       asserting it in the analysis is what lets a checked build see the same
-       provision the analysis did. */
     const char *groups[8];
     size_t group_count = 0;
     for (size_t g = 0;
@@ -273,8 +261,6 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
   function->kernel_block[1] = function_data->kernel_block[1];
   function->kernel_block[2] = function_data->kernel_block[2];
   function->kernel_threads_per_item = function_data->kernel_threads_per_item;
-  /* A function-level `@simd` decorator becomes the default mode for every
-   * counted loop in the body that has no `@simd` of its own. */
   context->current_function_simd_default = function_data->simd_mode;
   ir_local_bindings_reset(context);
   if (!ir_function_set_parameters(function,
@@ -321,9 +307,6 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
     return NULL;
   }
 
-  /* A `@naked` body ends where its asm block ends: there is no frame, so
-   * there is nothing for a fall-off return or a defer to unwind, and the
-   * scaffolding would emit compiled code into a function that has none. */
   if (!function_data->is_naked &&
       (function->instruction_count == 0 ||
        function->instructions[function->instruction_count - 1].op !=
@@ -393,9 +376,6 @@ void ir_set_error(IRLoweringContext *context, const char *format, ...) {
   va_end(args);
 }
 
-/* Lowering names a temp for most expressions it walks, and snprintf's format
- * interpreter is a poor way to spell one integer. Writes the digits backwards
- * into the tail of `buffer` and returns where the text starts. */
 static char *ir_write_id(char *buffer, size_t size, int id) {
   char *at = buffer + size - 1;
 
@@ -413,10 +393,6 @@ static char *ir_write_id(char *buffer, size_t size, int id) {
 
 char *ir_new_temp_name(IRLoweringContext *context) {
   char buffer[64];
-  // The '.' prefix keeps temp names out of the user-identifier namespace.
-  // Several backend tables (the MIR name->vreg map, float-bits marking) key on
-  // the bare name, so a temp named "t2" would alias a user local named "t2" and
-  // share its storage - a silent miscompile.
   char *digits = ir_write_id(buffer, sizeof(buffer), context->next_temp_id++);
 
   *--digits = 't';
@@ -433,8 +409,6 @@ char *ir_new_label_name(IRLoweringContext *context, const char *prefix) {
 
 int ir_emit(IRLoweringContext *context, IRFunction *function,
                    const IRInstruction *instruction) {
-  /* Single funnel for every instruction lowering produces, so the expansion
-   * stamp cannot be forgotten at one of the call sites. */
   IRInstruction stamped;
   if (context && context->current_expansion_note && instruction &&
       !instruction->expansion_note) {
@@ -475,13 +449,6 @@ int ir_emit_label_instruction(IRLoweringContext *context,
   return ir_emit(context, function, &instruction);
 }
 
-// `@simd` loop markers. A marker is an IR_OP_NOP carrying a sentinel string in
-// `text`: "@@simd:B:<id>:<mode>" before a vectorization-requested loop and
-// "@@simd:E:<id>:0" after it. NOP is transparent to every recognizer (they skip
-// NOPs) and a no-op in every backend, so the marker never disturbs codegen; the
-// release-stage contract verifier (see ir_optimize) pairs B/E by id, checks
-// whether a SIMD intrinsic landed between them, then clears the markers.
-// `which` is 'B' or 'E'; `mode` is a SimdAttr.
 int ir_emit_simd_marker(IRLoweringContext *context, IRFunction *function,
                                char which, int id, int mode,
                                SourceLocation location) {
@@ -494,14 +461,10 @@ int ir_emit_simd_marker(IRLoweringContext *context, IRFunction *function,
   IRInstruction instruction = {0};
   instruction.op = IR_OP_NOP;
   instruction.location = location;
-  instruction.text = buffer; // ir_emit deep-copies text
+  instruction.text = buffer;
   return ir_emit(context, function, &instruction);
 }
 
-// `@unroll(n)` loop marker: one IR_OP_NOP carrying "@@unroll:<factor>" placed
-// immediately before the loop's header label. The annotated-unroll pass finds
-// the next label, unrolls that loop when its shape allows, and clears the
-// marker either way.
 int ir_emit_unroll_marker(IRLoweringContext *context, IRFunction *function,
                           int factor, SourceLocation location) {
   if (!context || !function) {
@@ -512,7 +475,7 @@ int ir_emit_unroll_marker(IRLoweringContext *context, IRFunction *function,
   IRInstruction instruction = {0};
   instruction.op = IR_OP_NOP;
   instruction.location = location;
-  instruction.text = buffer; // ir_emit deep-copies text
+  instruction.text = buffer;
   return ir_emit(context, function, &instruction);
 }
 

@@ -7,4 +7,4 @@ void mettle_compiler_ice_report(const char *reason, const char *detail);
 
 void mettle_compiler_ice(const char *reason);
 
-#endif /* COMPILER_CRASH_H */
+#endif

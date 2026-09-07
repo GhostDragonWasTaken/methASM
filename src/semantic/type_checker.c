@@ -1,4 +1,3 @@
-// Type checker: lifecycle, function-signature registration, program driver.
 #include "type_checker_internal.h"
 
 Symbol *type_checker_resolve_identifier(TypeChecker *checker,
@@ -8,19 +7,12 @@ Symbol *type_checker_resolve_identifier(TypeChecker *checker,
     return NULL;
   }
 
-  /* A generated module-scope declaration is checked with its `comptime for`
-   * binding in effect. A module has no scope to hold it in, so it is asked for
-   * first, and only while the declaration it belongs to is in flight. */
   Symbol *symbol =
       type_checker_lookup_expansion_binding(checker, identifier->name);
   if (symbol) {
     return symbol;
   }
   symbol = symbol_table_lookup(checker->symbol_table, identifier->name);
-  /* `Kind` is registered on first mention rather than at startup, so a program
-   * that never reflects allocates none of its type and interns none of its
-   * member names -- and --report-expansion can say so rather than ask you to
-   * assume it. */
   if (!symbol && strcmp(identifier->name, "Kind") == 0) {
     type_checker_register_kind_enum(checker);
     symbol = symbol_table_lookup(checker->symbol_table, identifier->name);
@@ -70,7 +62,6 @@ type_checker_create_with_error_reporter(SymbolTable *symbol_table,
   checker->struct_placeholder_count = 0;
   checker->struct_placeholder_capacity = 0;
 
-  // Initialize built-in type pointers to NULL
   checker->builtin_int8 = NULL;
   checker->builtin_int16 = NULL;
   checker->builtin_int32 = NULL;
@@ -112,14 +103,9 @@ type_checker_create_with_error_reporter(SymbolTable *symbol_table,
   checker->effect_obligation_count = 0;
   checker->effect_obligation_capacity = 0;
 
-  // Initialize built-in types
   type_checker_init_builtin_types(checker);
   type_checker_declare_builtin_effects(checker);
 
-  // Test builtins: assert(cond) / assert_eq(left, right). Registered always
-  // so @test bodies type-check in every build; calling them outside a @test
-  // function is rejected at the call site (they only execute under
-  // `mettle test`, where the interpreter implements them natively).
   type_checker_register_test_builtin(checker, "assert", 1);
   type_checker_register_test_builtin(checker, "assert_eq", 2);
 
@@ -180,7 +166,6 @@ void type_checker_destroy(TypeChecker *checker) {
     free(checker->proof_log);
     free(checker->borrow_facts);
     free(checker->loop_trips);
-    // Clean up built-in types
     type_destroy(checker->builtin_int8);
     type_destroy(checker->builtin_int16);
     type_destroy(checker->builtin_int32);
@@ -249,8 +234,6 @@ int type_checker_validate_rule_signature(TypeChecker *checker,
                                                 FunctionDeclaration *func_decl,
                                                 Type **param_types,
                                                 Type *return_type) {
-  /* Three images, one shape. Which one a rule asks for is its parameter type:
-     the checked program, the machine it became, or the trace it produced. */
   int subject_ok = func_decl->parameter_count == 1 && param_types &&
                    (type_checker_type_is_named(param_types[0],
                                                "std/rule.Program") ||
@@ -309,8 +292,6 @@ int type_checker_register_function_signature(TypeChecker *checker,
     return_type = checker->builtin_void;
   }
 
-  /* A last parameter written `T[..]` gathers, and this is the signature a call
-     earlier in the file resolves against, so it has to know that here. */
   type_checker_note_gathered_parameter(func_decl);
   if (!type_checker_validate_effect_clauses(checker, declaration, func_decl)) {
     return 0;
@@ -363,9 +344,6 @@ int type_checker_register_function_signature(TypeChecker *checker,
   func_symbol->data.function.parameter_types = param_types;
   func_symbol->data.function.return_type = return_type;
   func_symbol->data.function.is_variadic = func_decl->is_variadic;
-  /* Kernel identity travels with the signature: this pre-registration is the
-   * symbol a `dispatch` earlier in the file resolves against, so it has to
-   * know the declaration was a `kernel` and what block shape it declared. */
   func_symbol->is_kernel = func_decl->is_kernel;
   func_symbol->is_rule = func_decl->is_rule;
   func_symbol->kernel_block[0] = func_decl->kernel_block[0];
@@ -394,7 +372,6 @@ int type_checker_register_function_signature(TypeChecker *checker,
   return 1;
 }
 
-/* The name a declaration introduces, or NULL when it introduces none. */
 static const char *type_decl_name(const ASTNode *decl) {
   if (!decl) {
     return NULL;
@@ -414,8 +391,6 @@ static const char *type_decl_name(const ASTNode *decl) {
   return NULL;
 }
 
-/* Does this type text name `what` as a whole identifier? `Span`, `Span*`,
- * `Span[4]` and `Cell<Span>` all do; `Spanner` does not. */
 static int type_text_names(const char *text, const char *what) {
   size_t length;
   const char *at;
@@ -436,10 +411,6 @@ static int type_text_names(const char *text, const char *what) {
   return 0;
 }
 
-/* Does this type text name `what` somewhere a stored value of `what` has to
- * be there, rather than a pointer to one? `Span` and `Span[4]` do; `Span*` and
- * `Span*[4]` do not. A pointer needs the name to exist and nothing more, which
- * is what lets a cycle of pointers be registered at all. */
 static int type_text_names_by_value(const char *text, const char *what) {
   size_t length;
   const char *at;
@@ -480,7 +451,6 @@ static int type_text_names_by_value(const char *text, const char *what) {
   return 0;
 }
 
-/* Does `decl` store a value of `name`, so that its own size depends on it? */
 static int type_decl_holds_by_value(const ASTNode *decl, const char *name) {
   size_t i;
   if (!decl || !name) {
@@ -513,7 +483,6 @@ static int type_decl_holds_by_value(const ASTNode *decl, const char *name) {
   return 0;
 }
 
-/* Does `decl` refer to `name` in a field type or a variant payload? */
 static int type_decl_refers_to(const ASTNode *decl, const char *name) {
   size_t i;
   if (!decl || !name) {
@@ -549,18 +518,6 @@ static int type_decl_refers_to(const ASTNode *decl, const char *name) {
   return 0;
 }
 
-/* Struct and enum registration, over either the declarations the programmer
- * wrote or the ones expansion generated. Two sweeps rather than one because
- * expansion sits between them: a directive reflects on a type, so the written
- * types have to exist before it runs, and the types it generates only exist
- * after.
- *
- * Within a sweep the order is by dependency, not by where the declarations sit
- * in the file. A function can call one declared below it, and a type gets the
- * same courtesy: `enum Shape { Wide(Span) }` above `struct Span` used to be
- * "payload of unknown type 'Span'". A declaration waits while any type it names
- * is still pending; when a round settles nothing, the rest are processed in
- * source order so a genuine cycle or a genuinely unknown name reports itself. */
 static int type_checker_report_type_cycles(TypeChecker *checker,
                                            Program *prog, char *pending,
                                            size_t *remaining_out) {
@@ -568,11 +525,6 @@ static int type_checker_report_type_cycles(TypeChecker *checker,
   size_t i, j;
   int ok = 1;
 
-  /* Nothing moved, so what is left refers to itself in a circle. A circle
-   * of pointers is a shape a program is entitled to write, and it has no
-   * order that puts every name before its use, so the names are declared
-   * first and the fields filled in afterwards. A circle that stores values
-   * has no layout at all and is reported here, once, naming both ends. */
   for (i = 0; i < prog->declaration_count; i++) {
     const char *self;
     if (!pending[i]) {
@@ -662,8 +614,6 @@ static int type_checker_register_types(TypeChecker *checker, Program *prog,
           continue;
         }
         other = type_decl_name(prog->declarations[j]);
-        /* A name declared twice is a duplicate, reported when it is processed;
-         * waiting on the other one here would just stall the round. */
         if (other && (!self || strcmp(other, self) != 0) &&
             type_decl_refers_to(decl, other)) {
           waiting = 1;
@@ -742,8 +692,6 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
     return 0;
   checker->module_program = program;
 
-  // Pass 1: Register struct and enum types. On failure keep going so every
-  // bad declaration is reported in one compile, not one per rebuild.
   int ok = 1;
   if (!schedule_expand(program, checker->error_reporter,
                        &checker->schedule_stats)) {
@@ -756,13 +704,6 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
     ok = 0;
   }
 
-  /* Pass 1.5: expand every module-scope `comptime for` into the declarations it
-     generates. It runs after the types are registered, because a directive
-     reflects on one (`typeof(T).fields`), and before anything looks for a
-     function to check, because what it generates is exactly that. From here on
-     nothing downstream can tell a generated declaration from a written one,
-     which is the point: contracts, diagnostics and the borrow checker all hold
-     generated code to the standard hand-written code is held to. */
   if (!type_checker_expand_comptime_block(checker, program, 1)) {
     ok = 0;
   }
@@ -772,14 +713,10 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
   if (!ok)
     return 0;
 
-  /* Types the expansion generated, registered in their own sweep so a
-     generated struct can be referred to by a generated function declared
-     before it, the same way written ones can. */
   if (!type_checker_register_types(checker, prog, 1)) {
     ok = 0;
   }
 
-  // Pass 2: Register all function signatures so any function can call any other
   for (size_t i = 0; i < prog->declaration_count; i++) {
     ASTNode *decl = prog->declarations[i];
     if (decl && decl->type == AST_FUNCTION_DECLARATION) {
@@ -804,13 +741,6 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
   if (!ok)
     return 0;
 
-  /* Pass 3: process the remaining declarations, globals before function
-   * bodies. A function may call one declared below it, and a type may name one
-   * declared below it; a global was the odd one out, so a function reading a
-   * global written later in the file was "Undefined variable". Taking the
-   * globals first is what puts them on the same footing. Their initializers are
-   * compile-time constants, and any function or type they name is already
-   * registered by the passes above. */
   for (int functions_now = 0; functions_now <= 1; functions_now++) {
     for (size_t i = 0; i < prog->declaration_count; i++) {
       ASTNode *decl = prog->declarations[i];
@@ -834,10 +764,6 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
   if (!ok)
     return 0;
 
-  // Pass 4: whole-program memory diagnostics. Ownership summaries are
-  // inferred over the call graph, then cross-call use-after-free and leak
-  // analysis runs with them (type_checker_memory.c). Skipped when earlier
-  // passes failed: the AST is not fully typed.
   if (!getenv("METTLE_NO_MEM_INTERPROC") &&
       !type_checker_check_program_memory(checker, program)) {
     return 0;

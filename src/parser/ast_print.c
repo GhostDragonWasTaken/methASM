@@ -1,13 +1,3 @@
-/* AST -> Mettle source.
- *
- * This exists for `mettle expand`, which is the reason it prints source rather
- * than a debug dump: generated code that cannot be read cannot be reviewed or
- * diffed, and every bug inside it is a bug in a program nobody has seen. The
- * output is meant to be pasted back into a file and compiled.
- *
- * Where a node has no faithful source spelling, the printer says so inline
- * rather than guessing. A printer that silently misrepresents generated code is
- * worse than no printer, because it is believed. */
 #include "ast_print.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,9 +20,6 @@ static void print_indent(AstPrinter *printer) {
   }
 }
 
-/* Generated code says where it came from. Without this a reader sees a bare
- * block using a name that is declared nowhere in the output, because an
- * expansion's binding lives in a scope rather than in a node. */
 static void print_provenance(AstPrinter *printer, const ASTNode *block) {
   const char *note =
       printer->annotate ? printer->annotate(printer->context, block) : NULL;
@@ -43,7 +30,6 @@ static void print_provenance(AstPrinter *printer, const ASTNode *block) {
   fprintf(printer->out, "// %s\n", note);
 }
 
-/* Naming a gap costs one line and keeps the output honest. */
 static void print_unprintable(AstPrinter *printer, const char *what) {
   fprintf(printer->out, "/* <mettle expand: no source form for %s> */", what);
   printer->unprintable++;
@@ -112,9 +98,6 @@ static void print_expression(AstPrinter *printer, const ASTNode *node) {
       print_unprintable(printer, "binary expression");
       break;
     }
-    /* Fully parenthesized: the printer does not track precedence, and a
-     * wrong-but-plausible reassociation in generated code would be exactly the
-     * kind of silent misreport this file refuses to produce. */
     fputc('(', printer->out);
     print_expression(printer, binary->left);
     fprintf(printer->out, " %s ", binary->operator ? binary->operator : "?");
@@ -284,8 +267,6 @@ case AST_FOR_STATEMENT: {
 }
 
 case AST_COMPTIME_FOR: {
-  /* Only reachable when expansion did not run (a parse-only dump), since a
-   * successful expand replaces the directive with its iterations. */
   const ComptimeForStatement *directive =
       (const ComptimeForStatement *)node->data;
   print_indent(printer);
@@ -534,8 +515,6 @@ static void print_declaration(AstPrinter *printer, const ASTNode *node) {
     return;
   }
 
-  /* A module-scope expansion generates declarations rather than blocks, so the
-   * provenance line belongs here too, and reads the same either way. */
   print_provenance(printer, node);
 
   switch (node->type) {
@@ -606,17 +585,12 @@ static void print_declaration(AstPrinter *printer, const ASTNode *node) {
 
   case AST_IMPORT:
   case AST_IMPORT_STR:
-    /* Imports are resolved and inlined before expansion runs, so reprinting
-     * them would describe a program that no longer exists. */
     break;
 
   case AST_VAR_DECLARATION:
     print_statement(printer, node);
     break;
 
-  /* A call at module scope is `static_assert(...)`, which the statement
-   * printer already writes. Reaching the default here would report a
-   * declaration the programmer wrote as having no source form. */
   case AST_FUNCTION_CALL:
     print_statement(printer, node);
     break;

@@ -1,7 +1,6 @@
-// AST->IR lowering: expression and call lowering.
 #include "ir_lowering_internal.h"
 #include "ir_explain_ledger.h"
-#include "frontend/mtlc_frontend.h" // mtlc_type_from_frontend (value_type baking)
+#include "frontend/mtlc_frontend.h"
 
 int ir_lower_statement_or_expression(IRLoweringContext *context,
                                             IRFunction *function,
@@ -9,7 +8,6 @@ int ir_lower_statement_or_expression(IRLoweringContext *context,
   if (!node) {
     return 1;
   }
-  // Treat known statement nodes as statements, otherwise treat as expression.
   switch (node->type) {
   case AST_VAR_DECLARATION:
   case AST_ASSIGNMENT:
@@ -37,10 +35,6 @@ int ir_lower_statement_or_expression(IRLoweringContext *context,
   }
 }
 
-
-/* `layout_copy(destination, source)`: one loop over the tile, reading each
-   element where the source's layout puts it and writing it where the
-   destination's does. A change of layout is a copy, and this is the copy. */
 static int ir_lower_layout_copy(IRLoweringContext *context,
                                 IRFunction *function, ASTNode *expression,
                                 CallExpression *call) {
@@ -405,8 +399,6 @@ static void ir_declare_string_free_helper(IRLoweringContext *context) {
   entry.name = (char *)"mettle_string_free";
   entry.kind = IR_MODSYM_FUNCTION;
   entry.is_extern = 1;
-  /* The answer is discarded; a void return is not a shape every backend call
-     path takes, and this one has no reason to be the exception. */
   entry.type = mtlc_type_from_frontend(context->type_checker->builtin_int32);
   entry.return_type = entry.type;
   entry.param_types = params;
@@ -414,12 +406,6 @@ static void ir_declare_string_free_helper(IRLoweringContext *context) {
   ir_program_add_symbol(context->program, &entry);
 }
 
-/* True when lowering this expression produces a string whose bytes this
- * module allocated and nothing else can name: the buffer a `+` on strings
- * fills, or the buffer a value-to-string conversion fills for one `{expr}`.
- * A literal, a slice, a parameter, a variable and `{s}` on a string that
- * already existed are all views of storage someone else owns, so none of them
- * is one of these. */
 static int ir_string_temp_is_owned(IRLoweringContext *context, ASTNode *node) {
   Type *type = NULL;
   if (!context || !node || !context->type_checker) {
@@ -448,8 +434,6 @@ static int ir_string_temp_is_owned(IRLoweringContext *context, ASTNode *node) {
       return 0;
     }
     switch (type->kind) {
-    /* `{s}` on a string hands back the view it was given, and `{b}` on a bool
-     * hands back one of two literals. Neither allocated anything. */
     case TYPE_STRING:
     case TYPE_BOOL:
       return 0;
@@ -473,7 +457,6 @@ static int ir_string_temp_is_owned(IRLoweringContext *context, ASTNode *node) {
   }
 }
 
-/* Release a string this module built, once nothing can reach it again. */
 static int ir_emit_string_free(IRLoweringContext *context, IRFunction *function,
                                const IROperand *value, SourceLocation location) {
   IROperand argument[1];
@@ -575,19 +558,6 @@ static int ir_emit_task_capture_check(IRLoweringContext *context,
   return ok;
 }
 
-/* Whether a signed `+`, `-` or `*` needs its result checked.
- *
- * The answer comes from the operands, never from the result: asking the
- * interval prover about `a + b` gets back a range already clamped to the type
- * the sum lands in, which fits by construction and would prove every check
- * away including the ones that catch something. So the operands' intervals
- * are combined here, at a width the combination cannot itself overflow, and
- * the question is whether every value that pair can produce lands inside the
- * result's type.
- *
- * The intervals a declared type gives are what make this answer yes. That is
- * the payoff: a range earns the deletion of a check, which is what a range is
- * for. */
 #if defined(__SIZEOF_INT128__)
 typedef __int128 IROverflowWide;
 #define IR_OVERFLOW_WIDE 1
@@ -616,10 +586,6 @@ static int ir_overflow_check_wanted(IRLoweringContext *context,
   if (ir_type_is_unsigned_integer(type) || high > (unsigned long long)LLONG_MAX) {
     return 0;
   }
-  /* Unsigned arithmetic wraps on purpose, and an operation with an unsigned
-   * operand is unsigned arithmetic however wide the expression's own type
-   * came out. This is the same rule the emitted instruction uses, so the
-   * check and the code it guards agree about what the operation is. */
   if (ir_type_is_unsigned_integer(ir_infer_expression_type(context,
                                                            left_node)) ||
       ir_type_is_unsigned_integer(ir_infer_expression_type(context,
@@ -854,10 +820,6 @@ int ir_lower_call_expression(IRLoweringContext *context,
     return 1;
   }
 
-  /* String interpolation conversion. The parser wraps each "{expr}" in
-   * __mtl_interp(); rewrite it here to the runtime helper the value's type
-   * picks, the same injected-call scheme mettle_string_eq uses. A string value
-   * passes through untouched. */
   if (strcmp(call->function_name, "__mtl_interp") == 0) {
     return ir_lower_interpolation(context, function, expression, out_value);
   }
@@ -975,8 +937,6 @@ int ir_lower_call_expression(IRLoweringContext *context,
                               : NULL;
     }
     IRInstruction instruction = {0};
-    /* Stack block: ir_emit deep-copies it, and heap_owned == 0 means no destroy
-     * path can try to free stack memory. */
     IRTensorAux tensor;
     ir_instruction_tensor_attach(&instruction, &tensor);
     tensor.transfer = call->tensor_transfer_desc;
@@ -1227,9 +1187,6 @@ int ir_lower_call_expression(IRLoweringContext *context,
   int is_func_ptr_var = call->is_indirect_call;
 
   IROperand destination = ir_operand_none();
-  /* A void call has no SSA result. Keeping a synthetic destination used to be
-   * mostly harmless for the host backend, but it gives target-neutral device
-   * calls a false value and makes a frontend detail leak into both GPU ABIs. */
   int returns_void = expression->resolved_type &&
                      expression->resolved_type->kind == TYPE_VOID;
   if (!returns_void && !ir_make_temp_operand(context, &destination)) {
@@ -1247,9 +1204,6 @@ int ir_lower_call_expression(IRLoweringContext *context,
   }
 
   for (size_t i = 0; i < call->argument_count; i++) {
-    /* An aggregate literal has no value of its own to lower: it takes the type
-       of what it initializes, which here is the parameter. Give it a home and
-       pass that, so a struct or an array can be written at the call. */
     if (call->arguments[i] &&
         call->arguments[i]->type == AST_AGGREGATE_LITERAL &&
         call->arguments[i]->resolved_type) {
@@ -1293,18 +1247,12 @@ int ir_lower_call_expression(IRLoweringContext *context,
     }
   }
 
-  /* Give width-less float literal arguments the declared parameter precision
-   * so a float32 parameter receives a single-precision value, not a truncated
-   * double, and hand an array argument its address rather than its bytes. */
   Type **call_param_types = NULL;
   size_t call_param_count = 0;
   if (callee_symbol && callee_symbol->kind == SYMBOL_FUNCTION) {
     call_param_types = callee_symbol->data.function.parameter_types;
     call_param_count = callee_symbol->data.function.parameter_count;
   } else if (is_func_ptr_var) {
-    /* A call through a function-pointer variable names no callee symbol, so
-     * the signature comes from the variable's own type. A local's scope is
-     * gone by lowering time, so its declared spelling comes from the binding. */
     const IRLocalBinding *fp_binding =
         ir_local_binding_find(context, call->function_name);
     Type *fp_type = ir_lookup_symbol_type(context, call->function_name);
@@ -1404,10 +1352,6 @@ int ir_lower_call_expression(IRLoweringContext *context,
   }
 
   if (call->callee_closure_env) {
-    /* Closure call: the variable holds an 8-byte pointer to a heap record whose
-     * field 0 is the code pointer. Load the code pointer, then call it passing
-     * the record pointer (the environment) as a hidden leading argument that the
-     * lifted function receives as its first parameter. */
     size_t lead = 1;
     size_t at = 0;
     IROperand code = ir_operand_none();
@@ -1565,11 +1509,6 @@ int ir_lower_call_expression(IRLoweringContext *context,
   free(instruction.argument_types);
   instruction.argument_types = NULL;
 
-  /* A string built for this call and handed to a function that only reads it
-   * is unreachable the moment the call returns. Whether the callee only reads
-   * it is not a promise anyone wrote: it is what the memory analysis inferred
-   * about that parameter, and where there is no such function to ask about,
-   * an extern or a call through a pointer, nothing is released. */
   if (call->function_name && !call->is_indirect_call && !call->object) {
     for (size_t i = 0; i < call->argument_count; i++) {
       if (!ir_string_temp_is_owned(context, call->arguments[i]) ||
@@ -1636,8 +1575,6 @@ static int ir_lower_interpolation(IRLoweringContext *context,
     helper = "mettle_string_from_bool";
     widen_to = "int64";
     break;
-  /* The whole reason `char` is its own type: "{c}" writes the character,
-   * where the uint8 holding the same byte would write its number. */
   case TYPE_CHAR:
     helper = "mettle_string_from_char";
     widen_to = "int64";
@@ -1676,10 +1613,6 @@ static int ir_lower_interpolation(IRLoweringContext *context,
     source_is_float = 1;
     source_float_bits = 32;
     break;
-  /* Copied, not viewed: the pointer belongs to whoever handed it over, and a
-   * string that outlived its characters would be the same bug as returning
-   * the address of a local. `cstring` is a pointer type with a name, so the
-   * name is what selects this and no other pointer reaches it. */
   case TYPE_POINTER:
     if (!value_type->name || strcmp(value_type->name, "cstring") != 0) {
       ir_operand_destroy(&operand);
@@ -1722,9 +1655,6 @@ static int ir_lower_interpolation(IRLoweringContext *context,
     }
     operand = widened;
   }
-  /* mettle_string_from_f64 takes the value's raw bits in a GP register (the
-   * symbol-less call has no parameter types for float routing), so a float64
-   * operand passes through untagged. */
 
   ir_declare_interpolation_helper(context, helper);
 
@@ -1744,9 +1674,6 @@ static int ir_lower_interpolation(IRLoweringContext *context,
   convert.argument_count = 1;
   convert.value_type =
       mtlc_type_from_frontend(context->type_checker->builtin_string);
-  /* `{b}` on a bool answers with one of two literals and takes nothing, so a
-     ledger that counted it would report a leak that is not there and a
-     `@noalloc` function would be told it allocates. */
   convert.allocates = value_type->kind != TYPE_BOOL;
   int convert_ok = ir_emit(context, function, &convert);
   ir_operand_destroy(&operand);
@@ -1948,11 +1875,6 @@ static int ir_try_load_aggregate_by_value(IRLoweringContext *context,
   return 1;
 }
 
-  /* `==` / `!=` on strings compare contents. The generic binary path would
-   * compare the 16-byte record as a scalar, which answered no for two views
-   * of the same bytes and compiled without a word, so `if (input == "quit")`
-   * was a branch that never ran. Contents also match `+`, which already
-   * concatenates bytes rather than pointers. */
 static int ir_lower_string_compare(IRLoweringContext *context,
                        IRFunction *function, ASTNode *expression,
                        BinaryExpression *binary,
@@ -2006,8 +1928,6 @@ static int ir_lower_string_compare(IRLoweringContext *context,
         return 1;
       }
 
-      /* `!=` is the same answer inverted, and inverting it here keeps the
-       * runtime surface to one function. */
       IROperand negated = ir_operand_none();
       if (!ir_make_temp_operand(context, &negated)) {
         ir_operand_destroy(&equal);
@@ -2034,9 +1954,6 @@ static int ir_lower_string_compare(IRLoweringContext *context,
   return 1;
 }
 
-  // Keep string concatenation in AST form for codegen. The current IR binary
-  // fallback models '+' as integer arithmetic, which is invalid for string
-  // records.
 static int ir_lower_string_concat(IRLoweringContext *context,
                        IRFunction *function, ASTNode *expression,
                        BinaryExpression *binary,
@@ -2069,13 +1986,8 @@ static int ir_lower_string_concat(IRLoweringContext *context,
       instruction.rhs = right;
       instruction.text = binary->operator;
       instruction.ast_ref = expression;
-      /* Bake the result type onto the IR so codegen reads it instead of
-       * re-inferring from the AST (replaces code_generator_infer_expression_type;
-       * mirrors its primary path). */
       instruction.value_type = mtlc_type_from_frontend(
           type_checker_infer_type(context->type_checker, expression));
-      /* String '+' becomes a heap-allocating concat kernel in codegen; mark
-       * it so the `@noalloc` contract checker can see the allocation. */
       instruction.allocates = 1;
       ir_declare_string_concat_helper(context);
       if (!ir_emit(context, function, &instruction)) {
@@ -2085,10 +1997,6 @@ static int ir_lower_string_concat(IRLoweringContext *context,
         return 0;
       }
 
-      /* The pieces of a concatenation are dead the moment their bytes have
-       * been copied: a chain is built left to right, and each result is read
-       * exactly once by the next `+`. Releasing them here is what keeps an
-       * interpolated string to one allocation rather than one per piece. */
       if (ir_string_temp_is_owned(context, binary->left) &&
           !ir_emit_string_free(context, function, &left, expression->location)) {
         ir_operand_destroy(&right);
@@ -2396,12 +2304,6 @@ static int ir_lower_binary_expression(IRLoweringContext *context,
     return 0;
   }
 
-  /* A shift on a narrow type runs in a 64-bit register, where the hardware
-   * masks the count to 6 bits instead of the width the type has. int64
-   * shifts read that way already and M0115 says so, so the count is brought
-   * down to this type's own width: `x >> 32` on an int32 answered 0 while
-   * the same shift on an int64 answered x. A constant count folds here and
-   * leaves the shape every address recognizer reads. */
   {
     int shift_bits = ir_narrow_integer_shift_bits(
         ir_infer_expression_type(context, expression));
@@ -2451,14 +2353,6 @@ static int ir_lower_binary_expression(IRLoweringContext *context,
   instruction.lhs = left;
   instruction.rhs = right;
   instruction.text = binary->operator;
-  /* Record that this operation is unsigned so the optimizer's constant
-   * folder, which evaluates in signed long long, declines to fold a divide,
-   * remainder, right shift, or ordering that signed arithmetic would get
-   * wrong. Nothing else set this for a binary, so `var c: uint64 = 1e19; c /
-   * 2` folded with a signed divide under -O and produced a negative result
-   * while the unoptimized build divided correctly. Either operand being
-   * unsigned makes the operation unsigned, matching the usual arithmetic
-   * conversions the type checker already applied. */
   instruction.is_unsigned =
       ir_type_is_unsigned_integer(
           ir_infer_expression_type(context, binary->left)) ||
@@ -2482,12 +2376,6 @@ static int ir_lower_binary_expression(IRLoweringContext *context,
     return 0;
   }
 
-  /* A temp is 64 bits wide whatever the expression's type is, and the
-   * arithmetic that produced it ran at that width. `int32 + int32` overflows
-   * at 32 bits by the language's own rule, so the value has to come back to
-   * its declared width here: storing it into a narrow location truncated it,
-   * and nothing else did, so `big + big > 0` answered yes for two values
-   * whose int32 sum is negative. */
   {
     const struct Type *checked = NULL;
     int wants = ir_overflow_check_wanted(context, expression, binary->left,
@@ -2559,7 +2447,6 @@ static int ir_lower_unary_expression(IRLoweringContext *context,
     ir_set_error(context, "Malformed unary expression");
     return 0;
   }
-
 
   if (strcmp(unary->operator, "&") == 0) {
     Type *target_type = NULL;
@@ -2654,12 +2541,6 @@ static int ir_lower_unary_expression(IRLoweringContext *context,
 
   ir_operand_destroy(&operand);
 
-  /* Same rule as a binary: the temp is 64 bits and the arithmetic ran at
-   * that width, so a narrow result comes back to its declared width here.
-   * `~x` on a uint8 set 56 bits the type does not have. A constant operand
-   * is folded and range-checked instead, because `-90` is every negative
-   * literal in the language and a cast around one hides the constant from
-   * every recognizer that reads it. */
   {
     const char *narrow = ir_narrow_integer_result_type(
         instruction.is_float ? NULL
@@ -2697,9 +2578,6 @@ static int ir_lower_unary_expression(IRLoweringContext *context,
   return 1;
 }
 
-/* Closure value: func_ptr is the environment pointer. Load the code
- * pointer from field 0 and pass the environment as a hidden leading
- * argument. */
 static int ir_lower_closure_call(IRLoweringContext *context,
                                  IRFunction *function,
                                  ASTNode *expression,
@@ -2940,7 +2818,6 @@ static int ir_lower_func_ptr_call(IRLoweringContext *context,
   instruction.location = expression->location;
   instruction.dest = destination;
   instruction.effect_signature = fp_call->effect_signature;
-  // For indirect calls, we use lhs to hold the function pointer operand
   instruction.lhs = func_ptr;
   instruction.value_type =
       expression->resolved_type
@@ -3097,9 +2974,6 @@ static int ir_lower_lambda(IRLoweringContext *context, IRFunction *function,
       return 0;
     }
     if (lam->captured_count > 0) {
-      /* Capturing closure value: call the synthesized constructor with the
-       * current value of each captured variable; it allocates and populates the
-       * environment record and returns the 8-byte closure pointer. */
       IROperand dest = ir_operand_none();
       if (!ir_make_temp_operand(context, &dest)) {
         return 0;
@@ -3130,17 +3004,12 @@ static int ir_lower_lambda(IRLoweringContext *context, IRFunction *function,
       *out_value = dest;
       return 1;
     }
-    /* A non-capturing lambda is the address of its lifted top-level function. */
     return ir_emit_address_of_symbol(context, function, lam->name,
                                      expression->location, out_value);
 }
 
 static int ir_lower_closure_adapt(IRLoweringContext *context, IRFunction *function,
                                   ASTNode *expression, IROperand *out_value) {
-    /* A thin value (`&func` or a non-capturing lambda) wrapped by the
-     * closure-adapt pass to satisfy an `Fn(...)` boundary: lower the thin value,
-     * then call the generated adapter constructor with it as the sole argument
-     * to produce a real closure value. */
     ClosureAdapt *adapt = (ClosureAdapt *)expression->data;
     if (!adapt || !adapt->ctor_name || !adapt->inner) {
       ir_set_error(context, "Internal: closure adapter was not synthesized");
@@ -3195,9 +3064,6 @@ static int ir_lower_identifier_value(IRLoweringContext *context, IRFunction *fun
       return 1;
     }
 
-    /* A bare nullary tagged-enum variant (e.g. `var a: Option = None`) names
-     * a constructor symbol, not a runtime value. Construct an enum local with
-     * just the tag set; payloadful variants must use call syntax `Some(x)`. */
     if (symbol && symbol->kind == SYMBOL_TAGGED_ENUM_CONSTRUCTOR &&
         symbol->data.constructor.payload_type == NULL) {
       return ir_emit_tagged_enum_construct(context, function, symbol,
@@ -3205,16 +3071,6 @@ static int ir_lower_identifier_value(IRLoweringContext *context, IRFunction *fun
                                            out_value);
     }
 
-    /* A function's name in value position is its address, which is what the
-     * type checker read it as and what `&name` spells out. Falling through to
-     * the symbol read below named a local that was never declared, so
-     * `apply(twice, 7)` compiled and then jumped through whatever the slot
-     * happened to hold.
-     *
-     * The type the CHECKER settled on decides this, not the symbol table: by
-     * lowering time the local scopes are popped, so a local named after a
-     * function finds the function here. `var value: int32 = 3;` beside a
-     * `fn value()` would otherwise read the function's address. */
     if (symbol && symbol->kind == SYMBOL_FUNCTION &&
         expression->resolved_type &&
         expression->resolved_type->kind == TYPE_FUNCTION_POINTER) {
@@ -3245,8 +3101,6 @@ static int ir_lower_member_or_index(IRLoweringContext *context,
                                     IROperand *out_value) {
   if (expression->type == AST_MEMBER_ACCESS) {
     MemberAccess *m = (MemberAccess *)expression->data;
-    /* Qualified enum variant: `EnumName.Variant` lowers to either an integer
-     * constant (plain enum) or a tagged-enum construction (tagged enum). */
     if (m && m->object && m->object->type == AST_IDENTIFIER && m->member) {
       Identifier *obj_id = (Identifier *)m->object->data;
       if (obj_id && obj_id->name && context->symbol_table) {
@@ -3360,8 +3214,6 @@ static int ir_lower_expression_inner(IRLoweringContext *context,
 
   *out_value = ir_operand_none();
 
-  /* Type and Field are comptime-only. If one reached lowering, the type
-   * checker missed an escape; report it as a user diagnostic, never an ICE. */
   if (expression->resolved_type &&
       type_is_comptime_only(expression->resolved_type)) {
     if (context->type_checker) {
@@ -3377,9 +3229,6 @@ static int ir_lower_expression_inner(IRLoweringContext *context,
     return 0;
   }
 
-  /* A Field member read (`f.offset`) is folded to a literal by const eval, so
-   * one still shaped like a member access here means the fold was skipped and
-   * there is no storage to load from. Report it, never load garbage. */
   if (expression->type == AST_MEMBER_ACCESS) {
     MemberAccess *member = (MemberAccess *)expression->data;
     if (member && member->object && member->object->resolved_type &&
@@ -3475,9 +3324,6 @@ static int ir_lower_new_expression(IRLoweringContext *context,
     return 0;
   }
 
-  /* `new T[n]`: n elements' worth of zeroed heap, and the count stored
-     beside the pointer, so what comes back is a slice and every read
-     through it can be checked against a length that is really there. */
   if (new_expression->count) {
     Type *slice_type = expression->resolved_type;
     Type *element = slice_type ? slice_type->base_type : NULL;
@@ -3605,10 +3451,6 @@ static int ir_lower_new_expression(IRLoweringContext *context,
 
   Type *allocated_type = NULL;
   if (context->type_checker) {
-    /*
-     * Prefer the already-resolved expression type: `new T` infers to `T*`,
-     * and using that avoids scope-sensitive type-name lookups here.
-     */
     Type *new_expr_type =
         type_checker_infer_type(context->type_checker, expression);
     if (new_expr_type && new_expr_type->kind == TYPE_POINTER) {
@@ -3619,11 +3461,6 @@ static int ir_lower_new_expression(IRLoweringContext *context,
                                                      new_expression->type_name);
     }
   }
-  /*
-   * Allocation must use the full concrete type size.
-   * ir_type_storage_size() intentionally normalizes many operations to
-   * register-width storage, which is incorrect for `new` on structs/arrays.
-   */
   int allocation_size =
       (allocated_type && allocated_type->size > 0 &&
        allocated_type->size <= (size_t)INT_MAX)
@@ -3666,11 +3503,6 @@ static int ir_lower_cast_expression(IRLoweringContext *context,
                       cast_target->kind == TYPE_FUNCTION_POINTER);
   ASTNode *cast_operand = cast_expr->operand;
 
-  /* `(T*)((int64)p)` where p is already a pointer: the integer carries the
-   * same address with its provenance dropped. Lower the pointer instead, so
-   * the alias analysis, the borrow checker and --verify keep following the
-   * value the source laundered. The type checker reports M0120 on the same
-   * shape, so the spelling gets cleaned up as well. */
   if (target_is_pointer && cast_operand->type == AST_CAST_EXPRESSION &&
       cast_operand->data) {
     CastExpression *inner = (CastExpression *)cast_operand->data;
@@ -3691,9 +3523,6 @@ static int ir_lower_cast_expression(IRLoweringContext *context,
     return 0;
   }
 
-  /* Casting a `string` to a pointer or an integer means its characters, the
-   * same conversion a `cstring` binding gets implicitly. The record itself
-   * is not the address. */
   if (cast_target && ir_expression_is_string(context, cast_operand) &&
       (target_is_pointer || type_checker_is_integer_type(cast_target)) &&
       !ir_coerce_string_operand_to_cstring(context, function, &operand,
@@ -3714,41 +3543,24 @@ static int ir_lower_cast_expression(IRLoweringContext *context,
   instruction.dest = destination;
   instruction.lhs = operand;
   instruction.text = (char *)ir_backend_type_name(cast_expr->type_name);
-  /* A cast into a declared type is named by the declared type, and its width
-   * lives in what that type refines. Baking the resolved type here is what
-   * lets the compile-time interpreter run the same conversion, so a `@test`
-   * over an audio path built out of declared types is interpretable. */
   instruction.value_type = expression->resolved_type
                                ? mtlc_type_from_frontend(
                                      expression->resolved_type)
                                : NULL;
-  /* A conversion into a type that says the value is uniform is where the claim
-     is made, so it is where a checked build re-asks the question. */
   instruction.uniform_value =
       expression->resolved_type && expression->resolved_type->refine_uniform;
   instruction.is_float = ir_expression_is_floating(context, cast_operand);
-  /* is_unsigned on a CAST records that the SOURCE is an unsigned integer,
-   * the same way float_bits records the source's float width. x86-64 and
-   * AArch64 both convert a 64-bit integer to floating point as SIGNED
-   * unless told otherwise, so without this `(float64)(uint64)~0` answered
-   * -1.0. Only the backends that convert read it; the narrowing paths take
-   * their signedness from the target type in instruction->text. */
   instruction.is_unsigned =
       !instruction.is_float &&
       ir_type_is_unsigned_integer(
           ir_infer_expression_type(context, cast_operand));
   if (instruction.is_float) {
-    /* float_bits on a CAST records the SOURCE operand width so the backend
-     * can pick cvttss2si/cvtss2sd (f32) vs cvttsd2si (f64). The TARGET
-     * width is resolved separately from instruction->text. */
     instruction.float_bits = ir_expression_float_bits(context, cast_operand);
     if (instruction.float_bits == 0) {
       instruction.float_bits = 64;
     }
   }
   {
-    /* Tag the destination with the target float width so a value produced
-     * by e.g. (float32)x is recognized as float32 by later consumers. */
     int target_bits =
         ir_named_type_float_bits(context, cast_expr->type_name);
     if (target_bits) {

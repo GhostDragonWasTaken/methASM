@@ -1,9 +1,3 @@
-/* mtlc_api.c - implementation of the public libmtlc entry points (include/mtlc).
- *
- * Part of libmtlc. This translation unit is the seam between the stable public
- * API and the backend's internal IR/optimizer entry points. It is frontend-free:
- * it includes only backend headers (ir.h, ir_optimize.h, ml_opt.h) and the public
- * mtlc/ headers. */
 #include "mtlc/mtlc.h"
 
 #include "codegen/binary/arm64_ir.h"
@@ -26,11 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ version */
-
 const char *mtlc_version(void) { return "libmtlc 0.2.0"; }
-
-/* ------------------------------------------------------------------- target */
 
 MtlcObjectFormat mtlc_host_object_format(void) {
 #ifdef _WIN32
@@ -62,8 +52,6 @@ const char *mtlc_arch_name(MtlcArch arch) {
   return "?";
 }
 
-/* ------------------------------------------------------------------ context */
-
 struct MtlcContext {
   int opt_level;
   int ml_opt;
@@ -81,8 +69,6 @@ struct MtlcContext {
   int has_error;
 };
 
-/* --------------------------------------------------------------- diagnostics */
-
 const char *mtlc_diag_severity_name(MtlcDiagSeverity severity) {
   switch (severity) {
   case MTLC_DIAG_ERROR:
@@ -95,11 +81,6 @@ const char *mtlc_diag_severity_name(MtlcDiagSeverity severity) {
   return "diagnostic";
 }
 
-/* Report one diagnostic through `ctx`. A NULL context (the documented
- * conservative-defaults path) and a context with no installed handler both fall
- * back to the historical stderr behavior, so nothing an existing consumer sees
- * changes until it opts in. Errors are recorded for mtlc_context_last_error
- * regardless of where they are delivered. */
 static void mtlc_diag(MtlcContext *ctx, MtlcDiagSeverity severity,
                       const char *format, ...) {
   char message[512];
@@ -159,7 +140,7 @@ MtlcContext *mtlc_context_create(void) {
     ctx->ptx_isa_major = 8;
     ctx->ptx_isa_minor = 8;
   }
-  return ctx; /* zero-initialized: no opt, no ml, not whole-program */
+  return ctx;
 }
 
 void mtlc_context_destroy(MtlcContext *ctx) { free(ctx); }
@@ -266,10 +247,8 @@ int mtlc_context_ptx_tensor_tuple_budget(const MtlcContext *ctx) {
   return ctx ? ctx->ptx_tensor_tuple_budget : 0;
 }
 
-/* ------------------------------------------------------------------- module */
-
 struct MtlcModule {
-  IRProgram *ir; /* owned */
+  IRProgram *ir;
 };
 
 MtlcModule *mtlc_module_adopt_ir(void *ir_program) {
@@ -297,8 +276,6 @@ void mtlc_module_destroy(MtlcModule *module) {
   free(module);
 }
 
-/* ----------------------------------------------------------------- pipeline */
-
 static int mtlc_module_has_kernel(const MtlcModule *module) {
   if (!module || !module->ir) return 0;
   for (size_t i = 0; i < module->ir->function_count; i++) {
@@ -315,13 +292,10 @@ static int mtlc_optimize_policy(MtlcContext *ctx, MtlcModule *module,
     mtlc_diag(ctx, MTLC_DIAG_ERROR, "mtlc_optimize: a module is required");
     return 0;
   }
-  /* Honor the context's documented contract: opt level 0 = none. A NULL ctx
-   * keeps the historical conservative default (optimize on). */
   if (ctx && ctx->opt_level <= 0) {
     return 1;
   }
   IROptimizeOptions options;
-  /* Zero every field so future additions default off. */
   IROptimizeOptions zero = {0};
   options = zero;
   options.whole_program = ctx ? ctx->whole_program : 0;
@@ -363,7 +337,6 @@ int mtlc_optimize_for(MtlcContext *ctx, MtlcModule *module, MtlcArch arch) {
 
 int mtlc_apply_ml_opt(MtlcContext *ctx, MtlcModule *module,
                       MtlcMlOptStats *stats) {
-  /* The caller decides when to run the ML pass; ctx carries only diagnostics. */
   if (!module || !module->ir) {
     mtlc_diag(ctx, MTLC_DIAG_ERROR, "mtlc_apply_ml_opt: a module is required");
     return 0;
@@ -389,8 +362,6 @@ int mtlc_apply_ml_opt(MtlcContext *ctx, MtlcModule *module,
   }
   return ok;
 }
-
-/* ------------------------------------------------------------- codegen + link */
 
 int mtlc_emit_object(MtlcContext *ctx, MtlcModule *module, const char *path) {
   if (!module || !module->ir || !path) {
@@ -449,8 +420,6 @@ int mtlc_emit(MtlcContext *ctx, MtlcModule *module, MtlcArch arch,
     return mtlc_emit_object(ctx, module, path);
 
   case MTLC_ARCH_ARM64: {
-    /* Cross-host AArch64 relocatable object. The CLI's explicit --emit-arm64
-     * legacy smoke target remains a self-contained executable. */
     if (!ir_program_lower_gpu_launches(module->ir)) {
       mtlc_diag(ctx, MTLC_DIAG_ERROR, "GPU launch host lowering failed");
       return 0;
@@ -506,9 +475,6 @@ int mtlc_emit(MtlcContext *ctx, MtlcModule *module, MtlcArch arch,
   return 0;
 }
 
-/* Link `object_paths` + the C-runtime startup object into a PE executable using
- * libmtlc's internal linker. Imports are resolved by DLL name, so no Windows SDK
- * import libraries are needed. */
 static int link_pe_internal(MtlcContext *ctx, const char **object_paths,
                             const unsigned char *object_is_runtime_default,
                             size_t object_count, const char *output_path) {
@@ -569,7 +535,6 @@ int mtlc_build_executable(MtlcContext *ctx, MtlcModule *module,
     return 0;
   }
 
-  /* temp paths derived from the output path */
   size_t base_len = strlen(output_path);
   char *obj_path = (char *)malloc(base_len + 16);
   char *startup_path = (char *)malloc(base_len + 24);
@@ -620,7 +585,6 @@ int mtlc_build_executable(MtlcContext *ctx, MtlcModule *module,
 #ifdef _WIN32
   {
     const char *objects[3] = {startup_path, runtime_path, obj_path};
-    /* Only the freestanding runtime contributes overridable defaults. */
     static const unsigned char objects_are_default[3] = {0u, 1u, 0u};
     result = link_pe_internal(ctx, objects, objects_are_default, 3, output_path);
   }

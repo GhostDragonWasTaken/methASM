@@ -1,11 +1,3 @@
-/*
- * freestanding.c
- *
- * The required Mettle runtime. This file must compile without libc, a C
- * startup object, or compiler support libraries. It provides the small C ABI
- * surface that generated programs use and delegates only to the host kernel
- * or to documented operating system APIs.
- */
 
 #if defined(__GNUC__) || defined(__clang__)
 #define MT_NORETURN __attribute__((noreturn))
@@ -38,9 +30,6 @@ static void mt_open_write_track(struct MtFile *file);
 static void mt_open_write_forget(struct MtFile *file);
 static void mt_flush_open_streams(void);
 
-/* read_buffer is allocated on the first buffered read and only for a file
- * opened read-only, which is what lets fgets stop asking the kernel for one
- * byte at a time. See mt_stream_read. */
 typedef struct MtFile {
   mt_i64 handle;
   mt_u32 flags;
@@ -64,12 +53,6 @@ typedef struct MtFile {
 static MtFile mt_stdin_file = {0, MT_FILE_STANDARD | MT_FILE_READ, 0, 0, 0, 0, 0, 0, 0};
 static MtFile mt_stdout_file = {1, MT_FILE_STANDARD | MT_FILE_WRITE, 0, 0, 0, 0, 0, 0, 0};
 static MtFile mt_stderr_file = {2, MT_FILE_STANDARD | MT_FILE_WRITE, 0, 0, 0, 0, 0, 0, 0};
-/* A shared object reaches a thread-local at a fixed offset from the thread
- * pointer, which is a program's privilege: the offset a loaded library would
- * need is not known until the loader places it. The shared build of this
- * runtime therefore keeps errno per process. Its threads are the loading
- * program's, and a library that wants per-thread errno belongs in the
- * program. */
 #if defined(_WIN32) || defined(MT_SHARED_RUNTIME)
 static int mt_errno_value;
 #else
@@ -219,12 +202,6 @@ int memcmp(const void *left, const void *right, mt_size count) {
 }
 
 #if defined(MTLC_HOST_PREFIX_H)
-/*
- * As the host runtime the definitions above are renamed to mtlc_host_*, but a
- * compiler still lowers struct copies and zero-init to calls that name memcpy
- * and memset literally, and no macro can reach those. Export the plain names
- * as well, for the same reason ___chkstk_ms below is written in asm.
- */
 #undef memcpy
 #undef memset
 #undef memmove
@@ -624,19 +601,12 @@ __asm__(".text\n"
         "ret\n");
 #endif
 
-/* One slot per distinct NAME, not one shared buffer for every call: callers
- * routinely cache getenv's pointer (POSIX allows the value to be overwritten
- * by a later getenv, but every real CRT keeps it stable per name, and the
- * compiler's own pass-skip cache relied on that). The single shared buffer
- * this replaces meant any later getenv of ANY variable silently rewrote what
- * a cached pointer read -- METTLE_SKIP_PASS came back holding the value of
- * whichever variable was asked for last. */
 #define MT_ENV_SLOTS 64
 #define MT_ENV_NAME_MAX 128
 #define MT_ENV_VALUE_MAX 32768
 static struct {
   char name[MT_ENV_NAME_MAX];
-  char *value; /* heap; grows to MT_ENV_VALUE_MAX at most */
+  char *value;
 } mt_environment_slots[MT_ENV_SLOTS];
 static mt_size mt_environment_slot_count;
 
@@ -653,7 +623,7 @@ char *getenv(const char *name) {
   }
   if (slot == mt_environment_slot_count) {
     if (slot >= MT_ENV_SLOTS) {
-      return MT_NULL; /* more distinct names than any build ever asks for */
+      return MT_NULL;
     }
   }
   if (!mt_environment_slots[slot].value) {
@@ -691,18 +661,6 @@ int putenv(char *setting) {
   return SetEnvironmentVariableA(name, equals + 1) ? 0 : -1;
 }
 
-/* Mettle strings are bytes, and a string literal carries whatever bytes the
- * source file held, which is UTF-8. The Windows console decodes what it is
- * given using its output code page, and that still defaults to a regional
- * legacy page on most machines. So a program printing an accented letter wrote
- * the correct two bytes and the console drew two wrong characters, one per
- * byte. The bytes were never wrong; the console had been told to read them as
- * something else.
- *
- * Saying so at startup is the whole fix. A program that writes UTF-8 should
- * declare it rather than hope the user ran chcp first. This touches only the
- * console: redirected output is bytes either way, and the input code page is
- * left alone because nothing here reads console input as text. */
 void mettle_rt_startup(mt_i64 argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -1706,10 +1664,6 @@ int mettle_run_process(const char *program, const char *const *arguments) {
   return (int)status;
 }
 
-/* CreateProcessA does not consult PATH for its application-name argument, so
- * the shell has to be resolved to a real path before the child is asked for.
- * COMSPEC first, then a PATH search, so an unusual but working environment is
- * honoured before the conventional one. */
 static int mt_resolve_command_shell(char *buffer, mt_u32 size) {
   mt_u32 length = GetEnvironmentVariableA("COMSPEC", buffer, size);
   if (length > 0 && length < size) return 1;
@@ -1811,26 +1765,16 @@ static int mt_thread_pointer_installed(void);
 static void mt_raise_stack_limit(void);
 #endif
 
-/* The top of the stack this thread was given. A pointer into a live frame of
- * this thread is always below it, because a frame is only ever made downwards
- * from here, so this is what answers "is that address one of mine" exactly
- * rather than approximately. */
 static __thread void *mt_stack_high;
 
 void *mettle_thread_stack_high(void) { return mt_stack_high; }
 
 void mettle_rt_startup(mt_i64 argc, char **argv) {
-  /* The thread pointer has to exist before anything thread-local is touched.
-   * `_start` hands control over with no TLS block installed, so a store to a
-   * `__thread` here reaches through a null segment base and faults. Every
-   * thread-local write waits for the block. */
   if (!mt_initialize_initial_tls(argc, argv)) {
     _exit(127);
   }
   mt_environment = argv + argc + 1;
   if (mt_thread_pointer_installed()) {
-    /* argv points into the block the kernel laid out above the initial stack
-     * pointer, so every frame this process ever makes sits below it. */
     mt_stack_high = (void *)argv;
   }
 #if defined(MTLC_HOST_PREFIX_H)
@@ -2564,7 +2508,6 @@ char *realpath(const char *path, char *resolved) {
   return resolved;
 }
 
-
 char *mettle_realpath(const char *path, char *resolved) {
   return realpath(path, resolved);
 }
@@ -2590,34 +2533,6 @@ int mprotect(void *address, mt_size length, int protection) {
                                         length, protection, 0, 0, 0));
 }
 
-/* Size-classed heap over a few large mappings.
- *
- * Every allocation used to be its own mmap and every free its own munmap. That
- * is one syscall each way, a page fault on first touch, and a whole 4 KiB page
- * for a four-byte string. A compile that allocates three hundred thousand
- * times therefore spent most of its wall clock in the kernel: on this repo's
- * own 1500-line sample the Linux build took 1.5 s where the Windows build,
- * which reaches HeapAlloc, took 0.55 s.
- *
- * The header stays 16 bytes so the payload keeps its 16-byte alignment, and
- * base[0] still distinguishes the two shapes: a small block stores its class
- * plus one (1..MT_HEAP_CLASS_COUNT), a large one stores its mapping size,
- * which is always at least a page. Small blocks come off a per-class free list
- * or a bump pointer into the current chunk, and go back to the free list on
- * free; the chunk itself is never unmapped, which is what makes the common
- * allocate/free/allocate cycle syscall-free. Allocations above
- * MT_HEAP_LARGE_MIN keep the old one-mapping-each behaviour, so a program that
- * allocates and releases big buffers still returns that memory to the kernel.
- *
- * The classes are the powers of two from 16 to 16384, so a class index is one
- * shift away from a size and back, with no table to carry. A finer ladder would
- * waste less memory per block, but this file is linked into every Mettle binary
- * and the arithmetic to walk a finer ladder costs more bytes there than the
- * fragmentation is worth.
- *
- * Losing the one-mapping-per-allocation layout also loses the guard page that
- * made a heap overrun fault immediately. MTLC_POISON_FREED_OPERANDS and the
- * memory diagnostics cover that ground deliberately instead. */
 #define MT_HEAP_HEADER 16
 #define MT_HEAP_CLASS_COUNT 11
 #define MT_HEAP_LARGE_MIN 16384
@@ -2638,7 +2553,6 @@ static int mt_heap_class_of(mt_size size) {
   return 60 - __builtin_clzll((mt_u64)size - 1);
 }
 
-/* Out of line and cold: uncontended acquire is one exchange. */
 __attribute__((noinline)) static void mt_heap_lock_contended(void) {
   int spins = 0;
   while (__atomic_exchange_n(&mt_heap_lock, 1, __ATOMIC_ACQUIRE)) {
@@ -2659,16 +2573,12 @@ static void mt_heap_release(void) {
   __atomic_store_n(&mt_heap_lock, 0, __ATOMIC_RELEASE);
 }
 
-/* Out of line: this is the only place the mmap syscall sequence is written, and
- * both the large-allocation path and the chunk refill reach it. */
 __attribute__((noinline)) static void *mt_heap_map(mt_size bytes) {
   void *mapping = mmap(MT_NULL, bytes, MT_PROT_READ | MT_PROT_WRITE,
                        MT_MAP_PRIVATE | MT_MAP_ANONYMOUS, -1, 0);
   return mapping == (void *)-1 ? MT_NULL : mapping;
 }
 
-/* Cold: once per chunk, which is once per few thousand allocations. Caller
- * holds the heap lock. */
 __attribute__((noinline)) static int mt_heap_refill(void) {
   mt_size want = mt_heap_chunk_size ? mt_heap_chunk_size * 2
                                     : (mt_size)MT_HEAP_CHUNK_MIN;
@@ -2680,16 +2590,12 @@ __attribute__((noinline)) static int mt_heap_refill(void) {
   if (!chunk) {
     return 0;
   }
-  /* The tail of the old chunk is abandoned rather than tracked: it is at most
-   * one block, against a chunk of a quarter megabyte or more. */
   mt_heap_bump = chunk;
   mt_heap_bump_left = want;
   mt_heap_chunk_size = want;
   return 1;
 }
 
-/* One block off the size-class lists, header included. Out of line so malloc
- * stays a handful of instructions on the path that hits a free list. */
 __attribute__((noinline)) static mt_u64 *mt_heap_take(int class_index) {
   mt_u64 *base;
   mt_size block_bytes = MT_HEAP_CLASS_BYTES(class_index) + MT_HEAP_HEADER;
@@ -2740,8 +2646,6 @@ void *calloc(mt_size count, mt_size size) {
   }
   mt_size total = count * size;
   void *memory = malloc(total);
-  /* A recycled block carries whatever the last owner left in it, so unlike the
-   * one-mapping-each heap this cannot lean on mmap handing back zeroed pages. */
   if (memory && total) {
     memset(memory, 0, total);
   }
@@ -2774,8 +2678,6 @@ void *realloc(void *memory, mt_size size) {
   }
   mt_u64 *base = (mt_u64 *)memory - 2;
   mt_size old_size = base[1];
-  /* Growing inside the block it already occupies is the common case behind
-   * every doubling array in the compiler, and it costs nothing. */
   if (base[0] <= MT_HEAP_CLASS_COUNT &&
       size <= MT_HEAP_CLASS_BYTES(base[0] - 1)) {
     base[1] = size;
@@ -3224,8 +3126,6 @@ int mettle_mutex_close(mt_i64 handle) {
   return 1;
 }
 
-/* Source compatible POSIX thread names backed only by clone and futex. These
- * are ABI shims for std/thread_posix, not calls into a host thread library. */
 int pthread_create(mt_i64 *thread_out, const void *attributes,
                    MtPthreadStart start, void *argument) {
   (void)attributes;
@@ -3561,17 +3461,8 @@ int system(const char *command) {
 #endif
 }
 
-/* Every read above this goes straight to the kernel: the copy through the
- * buffer would cost more than the syscall it saves. */
 #define MT_FILE_BUFFER_BYPASS (MT_FILE_BUFFER_BYTES / 2)
 
-/* Reads through a per-file buffer when the file was opened read-only. fgets
- * used to ask the kernel for a single byte per character, which is fine on a
- * local disk and ruinous anywhere a syscall is expensive: reading one 46 MB
- * table under WSL took three and a third million read() calls and five
- * minutes. Standard streams and pipes stay unbuffered, so a program that
- * hands its descriptor to a child, or interleaves reads with writes, sees
- * exactly the bytes it did before. */
 static mt_ssize mt_stream_read(MtFile *file, void *buffer, mt_size bytes) {
   unsigned char *out = (unsigned char *)buffer;
   mt_size done = 0;
@@ -3731,8 +3622,6 @@ static void mt_flush_open_streams(void) {
   }
 }
 
-/* Bytes read ahead of what the caller has consumed. Seek and tell have to
- * account for them: the kernel's offset is that far past the stream's. */
 static mt_size mt_stream_pending(const MtFile *file) {
   return (mt_size)(file->read_fill - file->read_pos);
 }
@@ -3836,8 +3725,6 @@ int fseek(void *stream, long offset, int origin) {
     mt_errno_value = 22;
     return -1;
   }
-  /* A seek from the current position has to start from where the caller
-   * thinks it is, not from where the read-ahead left the descriptor. */
   mt_stream_flush(file);
   if (origin == 1) {
     offset -= (long)mt_stream_pending(file);
@@ -3856,11 +3743,6 @@ long ftell(void *stream) {
   return (long)position;
 }
 
-/* The 64-bit offset forms. `long` is 32 bits on Windows, so fseek/ftell above
- * cannot address past 2 GB -- and a GGUF model file is routinely larger than
- * that. The seek underneath has always been 64-bit (SetFilePointerEx takes an
- * mt_i64); these are the entry points that let a program reach it, under the
- * names the platform uses for them. */
 int _fseeki64(void *stream, mt_i64 offset, int origin) {
   MtFile *file = (MtFile *)stream;
   if (!stream || origin < 0 || origin > 2) {
@@ -4244,24 +4126,6 @@ mt_i64 _strtoi64(const char *text, char **end, int base) {
   return strtoll(text, end, base);
 }
 
-/* Decimal to binary conversion, correctly rounded on every path.
-
-   The previous conversion scaled the mantissa once per exponent step, and
-   each of those multiplies rounds: 3.141592653589793 landed five ulp away
-   from the double gcc produces for the same text. Every float literal in a
-   Mettle program flows through this one function (the parser binds atof to
-   it through the host redirect; comptime, the debugger, and linked programs
-   call it at run time), so one wrong bit here forks a program's arithmetic
-   from the same program built by any other toolchain.
-
-   Two paths, both exact. When the digits fit in 53 bits and the power of
-   ten is one a double holds exactly, a single multiply or divide performs
-   the only rounding (Clinger's fast case). Every other input converts on a
-   decimal digit array scaled by powers of two, where each step is exact and
-   the one rounding happens at the final 53-bit extraction; digits past the
-   array feed a sticky flag, which is all round-to-nearest-even needs from
-   them. */
-
 static const double MT_POW10_F64[23] = {
     1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
     1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
@@ -4287,7 +4151,7 @@ static const mt_u64 MT_POW10_U64[20] = {1ULL,
                                         1000000000000000000ULL,
                                         10000000000000000000ULL};
 
-#define MT_F64_EXACT_INT 9007199254740992ULL /* 2^53 */
+#define MT_F64_EXACT_INT 9007199254740992ULL
 #define MT_F64_INF_BITS 0x7FF0000000000000ULL
 
 static double mt_f64_from_bits(mt_u64 bits) {
@@ -4299,8 +4163,6 @@ static double mt_f64_from_bits(mt_u64 bits) {
   return pun.f;
 }
 
-/* mant * 10^exp when both convert exactly, so the one multiply or divide is
-   the only rounding. Returns 0 when that cannot be guaranteed. */
 static int mt_pow10_exact(mt_u64 mant, int exp, double *out) {
   if (mant > MT_F64_EXACT_INT) {
     return 0;
@@ -4326,14 +4188,11 @@ static int mt_pow10_exact(mt_u64 mant, int exp, double *out) {
   return 0;
 }
 
-/* Arbitrary-precision decimal: value = 0.d[0]d[1]... * 10^dp. 800 digits
-   covers the longest string that can distinguish two doubles (767); anything
-   dropped past the end only sets `truncated`. */
 #define MT_BIGDEC_DIGITS 800
 #define MT_BIGDEC_MAX_SHIFT 60
 
 typedef struct {
-  unsigned char d[MT_BIGDEC_DIGITS]; /* digit values 0..9 */
+  unsigned char d[MT_BIGDEC_DIGITS];
   int nd;
   int dp;
   int truncated;
@@ -4348,8 +4207,6 @@ static void mt_bigdec_trim(mt_bigdec *a) {
   }
 }
 
-/* Divide by 2^k, 0 < k <= 60. Digits stream left to right through a binary
-   accumulator, so every kept digit is exact. */
 static void mt_bigdec_right_shift(mt_bigdec *a, int k) {
   int r = 0;
   int w = 0;
@@ -4390,8 +4247,6 @@ static void mt_bigdec_right_shift(mt_bigdec *a, int k) {
   mt_bigdec_trim(a);
 }
 
-/* Multiplying by 2^k adds `delta` digits when the leading digits are at or
-   above the decimal expansion of 5^k, and delta-1 digits below it. */
 typedef struct {
   int delta;
   const char *cutoff;
@@ -4474,7 +4329,6 @@ static int mt_bigdec_prefix_less(const mt_bigdec *a, const char *s) {
   return 0;
 }
 
-/* Multiply by 2^k, 0 < k <= 60. Digits stream right to left. */
 static void mt_bigdec_left_shift(mt_bigdec *a, int k) {
   int delta = MT_BIGDEC_LSHIFT[k].delta;
   int r = a->nd - 1;
@@ -4538,8 +4392,6 @@ static void mt_bigdec_shift(mt_bigdec *a, int k) {
   }
 }
 
-/* Round-half-even at digit position nd. The sticky flag settles the case
-   where the stored digits alone read as exactly halfway. */
 static int mt_bigdec_round_up(const mt_bigdec *a, int nd) {
   if (nd < 0 || nd >= a->nd) {
     return 0;
@@ -4572,8 +4424,6 @@ static mt_u64 mt_bigdec_rounded_integer(const mt_bigdec *a) {
 }
 
 static double mt_bigdec_to_double(mt_bigdec *a) {
-  /* powtab[i]: the largest k with 2^k <= 10^i, so one shift never overshoots
-     the [0.5, 1) target. */
   static const int powtab[9] = {1, 3, 6, 9, 13, 16, 19, 23, 26};
   int exp2 = 0;
   mt_u64 mant;
@@ -4605,7 +4455,6 @@ static double mt_bigdec_to_double(mt_bigdec *a) {
       return 0.0;
     }
   }
-  /* Value is in [0.5, 1) times 2^exp2; renormalize to [1, 2). */
   exp2--;
 
   if (exp2 < -1022) {
@@ -4627,7 +4476,7 @@ static double mt_bigdec_to_double(mt_bigdec *a) {
     }
   }
   if ((mant & (1ULL << 52)) == 0) {
-    exp2 = -1023; /* subnormal: exponent field 0 */
+    exp2 = -1023;
   }
   bits = mant & ((1ULL << 52) - 1);
   bits |= (mt_u64)((exp2 + 1023) & 0x7FF) << 52;
@@ -5506,19 +5355,12 @@ int toupper(int character) {
 
 #include "mt_math.h"
 
-/* Program ABI: Mettle code binds these by name, e.g.
- * `extern fn expf(x: float32) -> float32 = "expf"`, and the float vectorizers
- * recognize a call to expf. */
 float sqrtf(float value) { return mt_sqrtf(value); }
 
 float expf(float value) { return (float)mt_exp((double)value); }
 
 float tanhf(float value) { return (float)mt_tanh((double)value); }
 
-/* The double forms of these live in std/math, written in Mettle; exporting
- * them here as well would make every program that imports std/math fail to
- * link on a duplicate symbol. The float forms have no Mettle counterpart, so
- * they belong here next to sqrtf and expf. */
 float logf(float value) { return (float)mt_log((double)value); }
 
 float powf(float base, float exponent) {
@@ -5530,12 +5372,6 @@ float sinf(float value) { return (float)mt_sin((double)value); }
 float cosf(float value) { return (float)mt_cos((double)value); }
 
 #if defined(MTLC_HOST_PREFIX_H)
-/*
- * Host-only. These back mtlc_host_fabs/exp/tanh for the compiler's own
- * optimizer and GNN. On the program side std/math implements fabs, exp and
- * tanh in Mettle, so exporting them here too would make every program that
- * imports std/math fail to link on a duplicate symbol.
- */
 double fabs(double value) { return value < 0.0 ? -value : value; }
 
 double exp(double value) { return mt_exp(value); }

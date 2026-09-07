@@ -368,7 +368,6 @@ void debug_info_add_runtime_trap_site_mapping(
     debug_info->runtime_trap_site_count++;
 }
 
-
 void debug_info_generate_dwarf(DebugInfo* debug_info, const char* output_filename) {
     if (!debug_info || !output_filename) return;
     
@@ -380,7 +379,6 @@ void debug_info_generate_dwarf(DebugInfo* debug_info, const char* output_filenam
             debug_info->source_filename ? debug_info->source_filename : "unknown",
             debug_info->assembly_filename ? debug_info->assembly_filename : "unknown");
     
-    // Generate compilation unit header
     fprintf(file, ".section .debug_info\n");
     fprintf(file, ".long .Ldebug_info_end - .Ldebug_info_start\n");
     fprintf(file, ".Ldebug_info_start:\n");
@@ -408,7 +406,6 @@ void debug_info_generate_dwarf(DebugInfo* debug_info, const char* output_filenam
     fprintf(file, ".byte 0  # End of compilation unit\n");
     fprintf(file, ".Ldebug_info_end:\n\n");
     
-    // Generate line number information
     fprintf(file, ".section .debug_line\n");
     fprintf(file, ".long .Ldebug_line_end - .Ldebug_line_start\n");
     fprintf(file, ".Ldebug_line_start:\n");
@@ -421,14 +418,12 @@ void debug_info_generate_dwarf(DebugInfo* debug_info, const char* output_filenam
     fprintf(file, ".byte 14  # Line range\n");
     fprintf(file, ".byte 13  # Opcode base\n");
     
-    // Standard opcode lengths
     for (int i = 1; i < 13; i++) {
         fprintf(file, ".byte %d\n", i == 1 ? 0 : 1);
     }
     
     fprintf(file, ".Ldebug_line_header_end:\n");
     
-    // Generate line number program
     for (size_t i = 0; i < debug_info->mapping_count; i++) {
         SourceLineMapping* mapping = &debug_info->line_mappings[i];
         fprintf(file, ".byte 0  # Extended opcode\n");
@@ -436,7 +431,7 @@ void debug_info_generate_dwarf(DebugInfo* debug_info, const char* output_filenam
         fprintf(file, ".byte 2  # DW_LNE_set_address\n");
         fprintf(file, ".quad .L%zu  # Assembly line %zu\n", mapping->assembly_line, mapping->assembly_line);
         fprintf(file, ".byte %zu  # Advance line to %zu\n", 
-                mapping->source_line + 5, mapping->source_line);  // +5 for line base
+                mapping->source_line + 5, mapping->source_line);
     }
     
     fprintf(file, ".byte 0  # Extended opcode\n");
@@ -458,25 +453,23 @@ void debug_info_generate_stabs(DebugInfo* debug_info, const char* output_filenam
             debug_info->source_filename ? debug_info->source_filename : "unknown",
             debug_info->assembly_filename ? debug_info->assembly_filename : "unknown");
     
-    // Source file information
     if (debug_info->source_filename) {
         fprintf(file, ".stabs \"%s\",100,0,0,.Ltext0\n", debug_info->source_filename);
     }
     
-    // Generate symbol information
     for (size_t i = 0; i < debug_info->symbol_count; i++) {
         DebugSymbol* symbol = &debug_info->symbols[i];
         
         const char* stab_type;
         switch (symbol->type) {
             case DEBUG_SYMBOL_VARIABLE:
-                stab_type = "128";  // N_LSYM (local symbol)
+                stab_type = "128";
                 break;
             case DEBUG_SYMBOL_FUNCTION:
-                stab_type = "36";   // N_FUN (function)
+                stab_type = "36";
                 break;
             case DEBUG_SYMBOL_PARAMETER:
-                stab_type = "160";  // N_PSYM (parameter)
+                stab_type = "160";
                 break;
             default:
                 stab_type = "128";

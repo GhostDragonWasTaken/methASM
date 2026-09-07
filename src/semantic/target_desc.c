@@ -301,7 +301,6 @@ static int read_field(const AggregateLiteral *literal, size_t i,
   return 1;
 }
 
-
 static int read_fields(const AggregateLiteral *literal,
                        MtlcTargetDescription *out, char *error,
                        size_t error_size) {

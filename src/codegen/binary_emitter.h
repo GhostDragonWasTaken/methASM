@@ -10,9 +10,6 @@ typedef enum {
   BINARY_TARGET_FORMAT_ELF_ARM64,
 } BinaryTargetFormat;
 
-/* The object/executable format the running compiler targets by default: COFF on
- * Windows, ELF on Linux/other ELF hosts. Cross-compilation can override the
- * format passed to binary_emitter_create directly. */
 BinaryTargetFormat binary_target_format_host_default(void);
 
 typedef enum {
@@ -35,15 +32,9 @@ typedef enum {
   BINARY_RELOCATION_REL32 = 0,
   BINARY_RELOCATION_ADDR64,
   BINARY_RELOCATION_ADDR32NB,
-  /* Real-mode 16-bit references. No object format here carries them, so they
-   * are resolved when the flat image is laid out and rejected everywhere
-   * else. */
   BINARY_RELOCATION_REL16,
   BINARY_RELOCATION_ADDR16,
   BINARY_RELOCATION_SECTION_REL32,
-  /* AArch64 ELF instruction relocations. These stay target-specific rather
-   * than overloading REL32: their relocated fields and addend rules are
-   * defined by AAELF64, not by the x86/COFF displacement convention. */
   BINARY_RELOCATION_ARM64_CALL26,
   BINARY_RELOCATION_ARM64_ADR_PREL_PG_HI21,
   BINARY_RELOCATION_ARM64_ADD_ABS_LO12_NC,
@@ -84,9 +75,6 @@ typedef struct {
   BinarySymbol *symbols;
   size_t symbol_count;
   size_t symbol_capacity;
-  /* Open-addressing hash index over `symbols`, keyed by name. Stores
-   * (symbol_index + 1); 0 marks an empty bucket. Kept in sync by
-   * binary_emitter_define_symbol so name lookups stay O(1). */
   size_t *symbol_index_buckets;
   size_t symbol_index_bucket_count;
   BinaryRelocation *relocations;
@@ -136,4 +124,4 @@ const char *binary_emitter_get_error(const BinaryEmitter *emitter);
 int binary_emitter_write_object_file(BinaryEmitter *emitter,
                                      const char *filename);
 
-#endif // BINARY_EMITTER_H
+#endif

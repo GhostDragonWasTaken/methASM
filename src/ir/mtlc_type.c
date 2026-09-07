@@ -1,13 +1,5 @@
-/* mtlc_type.c - queries over the backend-owned type descriptor (mtlc/type.h).
- *
- * Part of libmtlc. Deliberately frontend-free: it knows nothing about how a
- * frontend's types were translated into MtlcType, only how to answer the
- * classification questions the code generators ask. */
 #include "mtlc/type.h"
 
-/* Immortal canonical singletons for the scalar/primitive kinds. Fully static so
- * the pointers are valid for the process lifetime with no ownership concerns --
- * exactly what a frontend building IR through mtlc/build.h needs. */
 #define MTLC_SCALAR(k, nm, sz, al)                                             \
   {.kind = (k), .name = (nm), .size = (sz), .alignment = (al)}
 static const MtlcType k_scalar_int8 = MTLC_SCALAR(MTLC_TYPE_INT8, "int8", 1, 1);
@@ -60,21 +52,14 @@ const MtlcType *mtlc_type_scalar(MtlcTypeKind kind) {
   case MTLC_TYPE_VOID:
     return &k_scalar_void;
   default:
-    return NULL; /* aggregates/pointers need caller-supplied layout */
+    return NULL;
   }
 }
 
-/* Interned pointer types: pointer-to-X is created once and lives for the
- * process (same immortality contract as the scalar singletons -- the module
- * type registry stores MtlcType* by reference and never frees them). The
- * table is tiny in practice: one entry per distinct pointee. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Thread-local, upholding the backend's no-shared-mutable-global-state
- * invariant (see common.h): two frontends on separate threads each intern
- * their own (immutable, immortal) pointer descriptors. */
 #include "../common.h"
 static MTLC_THREAD_LOCAL const MtlcType **g_ptr_cache;
 static MTLC_THREAD_LOCAL size_t g_ptr_cache_count, g_ptr_cache_cap;
@@ -122,9 +107,6 @@ const MtlcType *mtlc_type_pointer_in(const MtlcType *base,
   p->alignment = 8;
   p->base_type = (MtlcType *)base;
   p->address_space = address_space;
-  /* Generic pointers retain the source-compatible "T*" spelling. Explicit
-   * spaces are part of the canonical name so a module can register global and
-   * workgroup pointers to the same element type without aliasing them. */
   {
     const char *bn = base->name ? base->name : mtlc_type_kind_name(base->kind);
     const char *asn = mtlc_address_space_name(address_space);
@@ -158,9 +140,6 @@ const MtlcType *mtlc_type_pointer_in(const MtlcType *base,
   return p;
 }
 
-/* Interned composite descriptors. Same immortality contract as the pointer
- * cache above: built once per distinct shape, never freed, thread-local so two
- * frontends on separate threads each intern their own. */
 static MTLC_THREAD_LOCAL const MtlcType **g_composite_cache;
 static MTLC_THREAD_LOCAL size_t g_composite_count, g_composite_cap;
 
@@ -223,7 +202,6 @@ const MtlcType *mtlc_type_array(const MtlcType *element, size_t count) {
   return a;
 }
 
-/* Does an already-interned struct describe exactly this field list? */
 static int struct_layout_matches(const MtlcType *s,
                                  const char *const *field_names,
                                  const MtlcType *const *field_types,
@@ -271,8 +249,6 @@ const MtlcType *mtlc_type_struct(const char *name,
       return NULL;
     }
   }
-  /* Interned by name: a repeat declaration of the same layout is the same
-   * type; a conflicting one is a frontend bug, not a second type. */
   for (size_t i = 0; i < g_composite_count; i++) {
     const MtlcType *c = g_composite_cache[i];
     if (c->kind == MTLC_TYPE_STRUCT && c->name && strcmp(c->name, name) == 0) {
@@ -297,8 +273,6 @@ const MtlcType *mtlc_type_struct(const char *name,
     return NULL;
   }
 
-  /* Standard C layout: pad each field up to its own alignment, then round the
-   * total up to the widest field alignment. */
   size_t offset = 0;
   size_t max_align = 1;
   for (size_t i = 0; i < field_count; i++) {
@@ -359,8 +333,6 @@ size_t mtlc_type_field_index(const MtlcType *t, const char *name) {
   return (size_t)-1;
 }
 
-/* The canonical spelling of a function-pointer type, used both as the cache
- * key and as the name codegen resolves: "ret(*)(p0,p1)". */
 static char *function_pointer_name(const MtlcType *return_type,
                                    const MtlcType *const *param_types,
                                    size_t param_count) {

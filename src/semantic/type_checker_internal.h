@@ -1,10 +1,6 @@
 #ifndef TYPE_CHECKER_INTERNAL_H
 #define TYPE_CHECKER_INTERNAL_H
 
-// Shared internals for the type checker, split across type_checker*.c modules.
-// Public API lives in type_checker.h; this header exposes the cross-module
-// helper prototypes and shared file-local types.
-
 #include "type_checker.h"
 #include "common.h"
 #include "error/error_reporter.h"
@@ -36,16 +32,9 @@ int type_checker_ensure_multi_return_type(TypeChecker *checker,
 
 Type *type_checker_pointer_to(TypeChecker *checker, Type *base);
 
-/* The slice type `T[]`: a pointer to T and a length, in one value. It is what
-   a `T[N]` becomes at a boundary that does not know N, and what `new T[n]`
-   produces. Canonical per element type. */
 Type *type_checker_slice_of(TypeChecker *checker, Type *element);
 Type *type_checker_view_of(TypeChecker *checker, Type *element, size_t rank);
 
-/* The same three constructors with a device address space and a claimed
-   alignment attached. `qualifiers` is the spelling those carried in the
-   source, ` global align(16)` and the like, so the built type's name reads
-   back the way it was written. */
 Type *type_checker_device_pointer_to(TypeChecker *checker, Type *base,
                                      unsigned char space, size_t align,
                                      const char *qualifiers);
@@ -72,8 +61,6 @@ size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
 size_t type_checker_expression_multiple_of(TypeChecker *checker,
                                            ASTNode *expression, int depth);
 
-/* Uniformity: a value is uniform when every work item of the group holds the
-   same one. `why` names the term that made the answer no. */
 int type_checker_expression_is_uniform(TypeChecker *checker,
                                        ASTNode *expression, const char **why);
 int type_checker_predicate_is_uniform(ASTNode *predicate, const char *binding);
@@ -114,19 +101,9 @@ int type_checker_eval_float_constant_with_checker(TypeChecker *checker,
                                                   ASTNode *expression,
                                                   double *out_value);
 
-/* Compile-time memory diagnostics (type_checker_memory.c). Phase 1 runs per
- * function after the body type-checks, while the function scope is still
- * live: use-after-free, double free, dangling stack addresses, constant
- * out-of-bounds indexes, constant-size memory-op overflows. Returns 0 when
- * it reported a hard error. */
 int type_checker_check_function_memory(TypeChecker *checker,
                                        ASTNode *declaration);
 
-/* Phase 2 runs once after the whole program type-checks: ownership
- * summaries (which parameters a function frees or keeps, whether it returns
- * a fresh allocation) are inferred to fixpoint over the call graph, then
- * each body is re-analyzed for cross-call use-after-free, cross-call double
- * free, and leaks that survive borrowing helpers. Warnings only. */
 int type_checker_check_program_memory(TypeChecker *checker, ASTNode *program);
 
 int type_checker_eval_integer_constant(ASTNode *expression,
@@ -143,15 +120,10 @@ Type *type_checker_resolve_typeof_argument(TypeChecker *checker,
 int type_checker_eval_offsetof(TypeChecker *checker, CallExpression *call,
                                SourceLocation location, long long *out_offset);
 
-/* `fieldof(T, "name")`: the Field `T.name` names, reached through a
- * compile-time string so a metaprogram can compose the name it looks up. */
 int type_checker_eval_fieldof(TypeChecker *checker, CallExpression *call,
                               SourceLocation location,
                               ComptimeValue *out_value);
 
-/* `layoutof(T)`: a digest of everything a stored value of T depends on. Pin it
- * with static_assert and a layout change fails the build instead of being
- * reinterpreted under a shape it was not written with. */
 int type_checker_eval_layoutof(TypeChecker *checker, CallExpression *call,
                                SourceLocation location, long long *out_digest);
 
@@ -231,10 +203,6 @@ int type_checker_ast_contains_node_type(ASTNode *node,
 
 int type_checker_is_null_pointer_constant(ASTNode *expression);
 
-/* Targets that accept a null pointer constant. Function pointers are pointers
- * too: `var f: fn(int32) -> int32 = 0;` is the same idea as a null data
- * pointer, and is how a table of entry points is declared before it is
- * populated at run time. */
 int type_checker_type_accepts_null_pointer(const Type *type);
 
 void type_checker_init_tracker_reset(TypeChecker *checker);
@@ -269,9 +237,6 @@ void type_checker_init_tracker_restore(TypeChecker *checker,
                                               const unsigned char *snapshot,
                                               size_t count);
 
-/* Merge a branch's end state into `accumulator`: a variable survives the join
-   only where every path initialized it. Used to close an if/else chain, so a
-   variable written on all paths is initialized after it. */
 void type_checker_init_tracker_join(unsigned char *accumulator,
                                            const unsigned char *branch,
                                            size_t count);
@@ -288,8 +253,6 @@ int type_checker_link_name_matches_symbol(const Symbol *symbol,
                                                  int decl_is_extern,
                                                  const char *decl_link_name);
 
-/* Record whether the last parameter was written `T[..]`, so a call gathers
-   what follows the fixed parameters into it. Idempotent. */
 void type_checker_note_gathered_parameter(FunctionDeclaration *declaration);
 
 int type_checker_register_function_signature(TypeChecker *checker,
@@ -309,9 +272,6 @@ int type_checker_is_int64_min_magnitude(const ASTNode *operand);
 Type *type_checker_infer_type_internal(TypeChecker *checker,
                                               ASTNode *expression);
 
-/* Shared target-neutral tensor builtin helpers. The epilogue checker lives in
- * its own translation unit to keep complete CodeView debug information in
- * normal MinGW builds. */
 const char *type_checker_tensor_option_identifier(ASTNode *node);
 int type_checker_tensor_option_u32(TypeChecker *checker, ASTNode *node,
                                    const char *name, uint32_t maximum,
@@ -356,14 +316,8 @@ int type_checker_check_for_statement(TypeChecker *checker,
 int type_checker_check_switch_statement(TypeChecker *checker,
                                                ASTNode *statement);
 
-/* Check and fold an aggregate literal against the type it initializes
- * (type_checker_aggregate.c). On success the literal's folded byte image and
- * relocations are attached to the node and `target` is returned. Elements that
- * are not compile-time constants are recorded as runtime stores for lowering
- * to emit after the image; `requires_constant` refuses those, for a `const` or
- * a module-scope `var`, where no code runs to perform them. */
 Type *type_checker_check_aggregate_literal(TypeChecker *checker,
                                            ASTNode *expression, Type *target,
                                            int requires_constant);
 
-#endif // TYPE_CHECKER_INTERNAL_H
+#endif

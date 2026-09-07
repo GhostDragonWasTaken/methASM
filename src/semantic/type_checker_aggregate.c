@@ -1,15 +1,3 @@
-// Aggregate literals: `[a, b, c]`, `[value; count]`, and `{ field: value }`.
-//
-// An aggregate literal has no type of its own. It takes the type of whatever it
-// initializes, which in Mettle is always written down -- every `var` and
-// `const` states its type -- so the target type is handed in rather than
-// inferred. Checking and folding happen together here: the literal is a
-// compile-time constant, so once its shape matches the target it collapses to
-// the laid-out bytes of the value, plus the relocations that finish the
-// pointer-sized holes at link time (`&func`, `&global`, and string elements).
-//
-// Lowering copies the image onto the IR module symbol for a global, or points a
-// local's initializing copy at it. Nothing downstream re-walks the literal.
 
 #include "type_checker_internal.h"
 
@@ -42,9 +30,6 @@ static void aggregate_image_free(AggregateImage *out) {
   out->runtime_store_capacity = 0;
 }
 
-/* Record an element to be stored after the image is copied in. The image keeps
- * its zero at this offset, so a value that is only known at run time costs one
- * store and nothing else. */
 static int aggregate_image_add_runtime_store(AggregateImage *out, size_t offset,
                                              ASTNode *element, Type *type) {
   if (out->runtime_store_count == out->runtime_store_capacity) {
@@ -65,8 +50,6 @@ static int aggregate_image_add_runtime_store(AggregateImage *out, size_t offset,
   return 1;
 }
 
-/* Takes ownership of `symbol`/`string` on success; frees them on failure so a
- * caller can hand over freshly duplicated strings unconditionally. */
 static int aggregate_image_add_reloc(AggregateImage *out, size_t offset,
                                      char *symbol, char *string,
                                      size_t string_length,
@@ -91,8 +74,6 @@ static int aggregate_image_add_reloc(AggregateImage *out, size_t offset,
   return 1;
 }
 
-/* --- constant folding ---------------------------------------------------- */
-
 typedef struct {
   int is_float;
   long long int_value;
@@ -103,11 +84,6 @@ static double aggregate_number_as_double(const AggregateNumber *value) {
   return value->is_float ? value->float_value : (double)value->int_value;
 }
 
-/* Fold a numeric element to a constant. This is the same ground the integer
- * folder in type_checker_safety.c covers, widened to carry floats, because a
- * `float64[]` table is exactly the kind of thing an aggregate constant is for.
- * Returns 0 without reporting when the expression is not a constant; the caller
- * reports, because it knows which element is at fault. */
 static int aggregate_fold_binary(TypeChecker *checker, ASTNode *expression,
                                  AggregateNumber *out);
 
@@ -136,7 +112,6 @@ static int aggregate_fold_number(TypeChecker *checker, ASTNode *expression,
     if (!identifier || !identifier->name) {
       return 0;
     }
-    /* `true` and `false` are ordinary identifiers with built-in meaning. */
     if (strcmp(identifier->name, "true") == 0 ||
         strcmp(identifier->name, "false") == 0) {
       out->is_float = 0;
@@ -144,9 +119,6 @@ static int aggregate_fold_number(TypeChecker *checker, ASTNode *expression,
       out->float_value = (double)out->int_value;
       return 1;
     }
-    /* A named const carries its folded value on its symbol, float included.
-     * Asking the integer folder first would refuse `const HALF = 0.5` as "not
-     * a compile-time constant", which it plainly is. */
     Symbol *symbol =
         symbol_table_lookup(checker->symbol_table, identifier->name);
     if (symbol && symbol->has_constant_value &&
@@ -231,7 +203,6 @@ static int aggregate_fold_number(TypeChecker *checker, ASTNode *expression,
   }
 
   case AST_FUNCTION_CALL: {
-    /* `sizeof(T)` and friends: integer-only, so defer to the shared folder. */
     long long value = 0;
     if (!type_checker_eval_integer_constant_with_checker(checker, expression,
                                                          &value)) {
@@ -285,9 +256,6 @@ static int aggregate_fold_binary(TypeChecker *checker, ASTNode *expression,
   long long value = 0;
   if (!type_checker_eval_integer_constant_with_checker(checker, expression,
                                                        &value)) {
-    /* Both sides already folded to integers above, so the operands are
-     * constant whether or not the shared integer folder can see them --
-     * a named const resolved from its symbol is the case it cannot. */
     long long l = left.int_value;
     long long r = right.int_value;
     if (strcmp(op, "+") == 0) {
@@ -326,8 +294,6 @@ static int aggregate_fold_binary(TypeChecker *checker, ASTNode *expression,
   return 1;
 }
 
-/* `&name`: the address of a module symbol, known only at link time. Returns the
- * referenced name, or NULL when the expression is not that shape. */
 static const char *aggregate_address_of_name(ASTNode *expression) {
   if (!expression || expression->type != AST_UNARY_EXPRESSION) {
     return NULL;
@@ -353,14 +319,10 @@ static void aggregate_store_bits(unsigned char *at, uint64_t bits,
   }
 }
 
-/* --- element and literal checking ---------------------------------------- */
-
 static int aggregate_fold_element(TypeChecker *checker, ASTNode *element,
                                   Type *type, size_t offset,
                                   AggregateImage *out);
 
-/* The element is not itself a literal, so it must be a constant of `type`.
- * Reports and returns 0 on anything else. */
 static int aggregate_fold_scalar(TypeChecker *checker, ASTNode *element,
                                  Type *type, size_t offset,
                                  AggregateImage *out) {
@@ -384,9 +346,6 @@ static int aggregate_fold_scalar(TypeChecker *checker, ASTNode *element,
                                          "literal");
       return 0;
     }
-    /* A `string` slot holds a pointer to a { chars, length } record, not the
-     * record itself, so the backend builds the record and points the slot at
-     * it. A `cstring` slot points straight at the characters. */
     (void)at;
     return aggregate_image_add_reloc(out, offset, NULL, copy, value_length,
                                      type->kind == TYPE_STRING);
@@ -403,16 +362,8 @@ static int aggregate_fold_scalar(TypeChecker *checker, ASTNode *element,
     const char *referenced = aggregate_address_of_name(element);
     if (referenced) {
       Symbol *symbol = symbol_table_lookup(checker->symbol_table, referenced);
-      /* The image records `&name` as a relocation, which the linker resolves
-       * against a symbol in the object file. A local lives on the stack and has
-       * no such symbol, so folding one produced an image referring to a name
-       * that does not exist -- surfacing as "Relocation refers to an undefined
-       * symbol" from the linker, with no source location. Only a module-scope
-       * name has an address that is known at link time. */
       if (symbol && symbol->kind != SYMBOL_FUNCTION && symbol->scope &&
           symbol->scope->type != SCOPE_GLOBAL) {
-        /* A local's address is not known until the frame exists, so it is
-           taken where the literal is written. */
         symbol->is_used = 1;
         return aggregate_image_add_runtime_store(out, offset, element, type);
       }
@@ -429,7 +380,7 @@ static int aggregate_fold_scalar(TypeChecker *checker, ASTNode *element,
       return aggregate_image_add_reloc(out, offset, copy, NULL, 0, 0);
     }
     if (type_checker_is_null_pointer_constant(element)) {
-      return 1; // already zero
+      return 1;
     }
     return aggregate_image_add_runtime_store(out, offset, element, type);
   }
@@ -489,7 +440,6 @@ static int aggregate_fold_scalar(TypeChecker *checker, ASTNode *element,
   return 0;
 }
 
-/* An array literal: `[a, b, c]` or `[value; count]`. */
 static int aggregate_fold_array(TypeChecker *checker, ASTNode *expression,
                                 AggregateLiteral *literal, Type *type,
                                 size_t offset, AggregateImage *out) {
@@ -549,8 +499,6 @@ static int aggregate_fold_array(TypeChecker *checker, ASTNode *expression,
   return 1;
 }
 
-/* A struct literal: `{ field: value, ... }`. Fields may be given in any order,
- * and any field left out keeps the zero it starts as. */
 static int aggregate_fold_struct(TypeChecker *checker, ASTNode *expression,
                                  AggregateLiteral *literal, Type *type,
                                  size_t offset, AggregateImage *out) {
@@ -646,9 +594,6 @@ static int aggregate_fold_element(TypeChecker *checker, ASTNode *element,
 
   if (type->kind == TYPE_STRUCT || type->kind == TYPE_ARRAY ||
       type->kind == TYPE_SLICE) {
-    /* An expression of the same type is a value to copy in, the way a
-       computed scalar is. Only something that is neither a literal nor a value
-       of this type has nothing to do here. */
     Type *value_type = type_checker_infer_type(checker, element);
     if (value_type &&
         type_checker_is_assignable_from(checker, type, value_type, element)) {
@@ -674,9 +619,6 @@ static int aggregate_fold_element(TypeChecker *checker, ASTNode *element,
     return 0;
   }
 
-  /* Type-check the element the same way an assignment to a binding of this
-   * type would be checked, so the diagnostics match the rest of the language,
-   * then fold it. A null pointer constant is exempt, as everywhere else. */
   Type *element_type = type_checker_infer_type(checker, element);
   if (!element_type) {
     return 0;
@@ -724,8 +666,6 @@ Type *type_checker_check_aggregate_literal(TypeChecker *checker,
         target->name ? target->name : "?");
     return NULL;
   }
-  /* `[a, b, c]` against a slice is the array of three, which then converts the
-     way any array does. The literal's own length is the only one there is. */
   if (target->kind == TYPE_SLICE && !literal->is_struct && target->base_type) {
     size_t written = literal->element_count;
     char array_name[128];
@@ -783,8 +723,6 @@ Type *type_checker_check_aggregate_literal(TypeChecker *checker,
     return NULL;
   }
 
-  /* Hand the folded value to the node; lowering reads it from here. Re-checking
-   * the same literal (a cloned generic body) replaces the old image. */
   free(literal->image);
   for (size_t i = 0; i < literal->reloc_count; i++) {
     free(literal->relocs[i].symbol);
@@ -792,8 +730,6 @@ Type *type_checker_check_aggregate_literal(TypeChecker *checker,
   }
   free(literal->relocs);
   if (requires_constant && out.runtime_store_count > 0) {
-    /* Nowhere for a store to go: a `const` and a module-scope `var` are laid
-       out in the object file, before any code of the program runs. */
     type_checker_set_error_at_location(
         checker, out.runtime_stores[0].element->location,
         "a constant and a module-scope variable are laid out before the "

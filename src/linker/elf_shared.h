@@ -35,16 +35,11 @@ void elf_shared_library_destroy(ElfSharedLibrary *library);
 const ElfSharedSymbol *elf_shared_library_find(const ElfSharedLibrary *library,
                                                const char *name);
 
-/* Resolves one -l argument against the search path and then the platform
- * defaults. "foo" looks for libfoo.so; ":libfoo.so.6" names a file exactly, the
- * way ld's -l:name does. Returns a malloc'd path, or NULL with an error. */
 char *elf_shared_library_locate(const char *library_name,
                                 const char *const *directories,
                                 size_t directory_count,
                                 char **error_message_out);
 
-/* Non-zero when the file at this path is an ELF shared object, or an ld script
- * that names one. */
 int elf_path_is_shared_library(const char *path);
 
 #endif

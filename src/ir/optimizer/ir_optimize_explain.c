@@ -23,30 +23,9 @@
 #define explain_fileno fileno
 #endif
 
-/* --explain: the optimization report.
- *
- * Every pass that makes a user-visible decision (the loop verifier in
- * ir_optimize_simd_contract.c, the inliner in ir_optimize_inline.c, the MIR
- * eligibility gate in codegen) records a remark here instead of printing
- * directly. At the end of the optimizer pipeline the remarks are sorted into
- * source order and printed as one coherent, human-first report:
- *
- *   saxpy (loop @ line 12): vectorized -> vfmadd231ps, 8-wide float32
- *   process (loop @ line 40): NOT vectorized
- *       |_ reason: each iteration calls `scale`; ...
- *       |_ fix: mark `scale` @inline, or hoist the call out of the loop
- *
- * Remarks are limited to the main input file (the focus file) so imported
- * stdlib modules don't flood the report. */
-
 static MTLC_THREAD_LOCAL int g_explain = 0;
 static MTLC_THREAD_LOCAL const char *g_explain_focus_file = NULL;
-/* Output binary path (-o): a large report is diverted to a `.explain.txt`
- * sidecar next to it instead of flooding the terminal. */
 static MTLC_THREAD_LOCAL const char *g_explain_output_path = NULL;
-/* Set while a fix hypothesis is being simulated on a scratch clone: the
- * re-run optimizer passes must not pollute the report with the clone's
- * remarks (the unroller, for one, records remarks from inside the stages). */
 static MTLC_THREAD_LOCAL int g_explain_hypothesis = 0;
 
 void ir_explain_set_hypothesis(int active) { g_explain_hypothesis = active; }
@@ -55,15 +34,7 @@ void ir_explain_set_output_path(const char *path) {
   g_explain_output_path = path;
 }
 
-/* ---- machine-readable report (--explain-json) -------------------------------
- * A `<output-stem>.explain.json` sidecar with the same content as the prose
- * report, for tooling (the editor panel parses this instead of prose). The
- * fragments are accumulated here as sections flush, and finalize assembles
- * the document. */
-
 static MTLC_THREAD_LOCAL int g_explain_json = 0;
-/* When set (by --annotate-asm), ir_explain_flush keeps the remark table alive
- * past optimization so the codegen annotator can join it onto emitted asm. */
 static MTLC_THREAD_LOCAL int g_explain_retain_remarks = 0;
 static MTLC_THREAD_LOCAL char *g_json_buf = NULL;
 static MTLC_THREAD_LOCAL size_t g_json_len = 0;
@@ -100,7 +71,6 @@ static void ir_explain_json_raw(const char *fmt, ...) {
   g_json_len += (size_t)needed;
 }
 
-/* Append a JSON string literal (quoted, escaped); NULL becomes null. */
 static void ir_explain_json_str(const char *s) {
   if (!g_explain_json) {
     return;
@@ -128,12 +98,6 @@ static void ir_explain_json_str(const char *s) {
   }
   ir_explain_json_raw("\"");
 }
-
-/* ---- report buffer ----------------------------------------------------------
- * Both report sections render here first (with color codes; they're stripped
- * if the report goes to a file). Routing happens once, at finalize time, when
- * the total size is known: small reports print to stderr as before, large
- * ones are written to the sidecar with a digest on stderr. */
 
 static MTLC_THREAD_LOCAL char *g_report_buf = NULL;
 static MTLC_THREAD_LOCAL size_t g_report_len = 0;
@@ -166,14 +130,9 @@ static void ir_explain_emit(const char *fmt, ...) {
   g_report_len += (size_t)needed;
 }
 
-/* Where the "where to start" plan goes, and whether it still owes the report a
- * block. The plan ranks codegen results that only exist after the optimization
- * report has been written, so it is rendered last and spliced back into place. */
 static MTLC_THREAD_LOCAL size_t g_plan_offset = 0;
 static MTLC_THREAD_LOCAL int g_plan_pending = 0;
 
-/* Digest stats collected while the sections render, for the one-paragraph
- * stderr summary that accompanies a file-diverted report. */
 static struct {
   size_t loops_vectorized;
   size_t loops_scalar;
@@ -185,16 +144,10 @@ static struct {
   size_t changes_improved;
   size_t changes_regressed;
   int had_baseline;
-  /* The first "where to start" entry. A diverted report shows counts, and
-     counts do not tell anyone what to do; this line does. */
   char start_here[240];
   int start_here_proven;
 } g_digest;
 
-/* A named number a pass measured about one remark: an unroll factor, a trip
- * count, how many instructions a callee weighs. Free-form on purpose -- a pass
- * with something to count adds a quantity instead of a struct field, and the
- * JSON carries it without any schema surgery. */
 typedef struct {
   char *name;
   long value;
@@ -202,35 +155,21 @@ typedef struct {
 
 #define IR_EXPLAIN_MAX_QUANTITIES 6
 
-/* One remark: an entity ("loop", "call to `f`") in a function, a colored
- * headline, and optional reason/fix detail lines.
- *
- * The prose is for a person; `code` and the quantities are for tools. A
- * consumer keying off `code` keeps working when the wording is improved, which
- * the wording regularly is. */
 typedef struct {
   char *function_name;
   char *entity;
   size_t line;
   size_t column;
-  size_t end_line; /* last line of the construct; 0 = unknown */
-  int positive; /* 1 = the optimizer did something good (green), 0 = declined */
+  size_t end_line;
+  int positive;
   char *headline;
-  char *reason;   /* may be NULL */
-  char *fix;      /* may be NULL */
-  char *verified; /* may be NULL: the fix was SIMULATED and proven to work */
-  /* May be NULL. The fix was SIMULATED, applied cleanly, and the loop still
-     did not vectorize: what this holds is the obstacle that surfaced next.
-     A fix worth making that does not finish the job on its own, which is a
-     different claim from both "proven" and "unknown". */
+  char *reason;
+  char *fix;
+  char *verified;
   char *partial;
-  char *code;     /* stable id for the decision; may be NULL */
-  size_t depth;   /* loop nest depth (1 = top level); 0 = not a loop/unknown */
-  int trivial;    /* 1 = routine housekeeping a reader can collapse */
-  /* 1 = the `fix` text says there is nothing to change: the loop is at its
-     floor, or the gap belongs to the compiler. Worth printing, but not an
-     instruction, so the triage never ranks it and the prose labels it a
-     note rather than a fix. */
+  char *code;
+  size_t depth;
+  int trivial;
   int advisory;
   IRExplainQuantity quantities[IR_EXPLAIN_MAX_QUANTITIES];
   size_t quantity_count;
@@ -239,47 +178,39 @@ typedef struct {
 static MTLC_THREAD_LOCAL IRExplainRemark *g_remarks = NULL;
 static MTLC_THREAD_LOCAL size_t g_remark_count = 0;
 static MTLC_THREAD_LOCAL size_t g_remark_capacity = 0;
-/* Did the last ir_explain_remark call actually append? The detail stamps read
- * this so a filtered remark's detail never lands on an unrelated one. */
 static MTLC_THREAD_LOCAL int g_last_remark_recorded = 0;
 
-/* Backend (codegen-stage) entries: per function, did it get the
- * register-allocating MIR backend or fall back to baseline codegen? */
 typedef struct {
   char *function_name;
   int ok;
-  char *detail;        /* gate reason code when !ok */
-  size_t instructions; /* non-nop IR size: where baseline codegen COSTS */
+  char *detail;
+  size_t instructions;
 } IRExplainBackendEntry;
 
 static MTLC_THREAD_LOCAL IRExplainBackendEntry *g_backend = NULL;
 static MTLC_THREAD_LOCAL size_t g_backend_count = 0;
 static MTLC_THREAD_LOCAL size_t g_backend_capacity = 0;
 
-/* ---- memory diagnostics (--explain surfacing, fed by the type checker) ---- */
 typedef struct {
-  int severity; /* 0 = warning, 1 = error */
+  int severity;
   size_t line;
-  char *code; /* stable finding id (M0101..), may be NULL */
+  char *code;
   char *headline;
-  char *fix; /* may be NULL */
+  char *fix;
 } IRExplainMemNote;
 
 static MTLC_THREAD_LOCAL IRExplainMemNote *g_mem = NULL;
 static MTLC_THREAD_LOCAL size_t g_mem_count = 0;
 static MTLC_THREAD_LOCAL size_t g_mem_capacity = 0;
 static MTLC_THREAD_LOCAL int g_mem_collect = 0;
-static MTLC_THREAD_LOCAL char *g_mem_focus = NULL; /* basename to filter by, or NULL */
+static MTLC_THREAD_LOCAL char *g_mem_focus = NULL;
 
-/* ---- --safe accounting (fed by the safety pass, before the optimizer) ---- */
 typedef struct {
   size_t line;
-  char *function_name; /* may be NULL */
-  int kind;            /* IRSafetySurvivorKind */
+  char *function_name;
+  int kind;
 } IRExplainSafetyNote;
 
-/* Enough to show the shape of what is left without turning the report into a
- * listing. The totals are exact regardless; only the per-line detail stops. */
 #define IR_EXPLAIN_SAFETY_MAX_NOTES 64
 
 static MTLC_THREAD_LOCAL IRExplainSafetyNote *g_safety = NULL;
@@ -296,9 +227,6 @@ static MTLC_THREAD_LOCAL size_t g_safety_exempt = 0;
 static MTLC_THREAD_LOCAL size_t g_safety_extent_tests = 0;
 static MTLC_THREAD_LOCAL size_t g_safety_region_calls = 0;
 
-/* A `@rule fn (m: Machine)` needs what the optimizer decided and nothing
- * printed. The collection is the same collection; only the report is silenced,
- * so a rule reads exactly what a reader would have. */
 static MTLC_THREAD_LOCAL int g_explain_quiet = 0;
 
 void ir_explain_set_quiet(int quiet) { g_explain_quiet = quiet; }
@@ -309,12 +237,6 @@ void ir_optimize_set_explain(int enabled, const char *focus_file) {
 }
 
 int ir_explain_enabled(void) { return g_explain; }
-
-/* ---- prose filter (--explain=SELECTOR) -------------------------------------
- * A whole program's report runs to hundreds of lines, and most of it is the
- * compiler doing the right thing. The selector narrows the prose to the part
- * the reader asked about. The JSON sidecar is never filtered: a tool wants the
- * whole picture and does its own narrowing. */
 
 static MTLC_THREAD_LOCAL const char *g_explain_filter = NULL;
 
@@ -344,9 +266,6 @@ static int ir_explain_remark_selected(const IRExplainRemark *r) {
   if (strcmp(f, "calls") == 0) {
     return r->entity && strncmp(r->entity, "call to ", 8) == 0;
   }
-  /* Otherwise a name: the function the decision was made in, or the decision
-   * code itself, so both `--explain=saxpy` and `--explain=dot-shape-address`
-   * do what they look like they do. */
   if (r->function_name && strcmp(r->function_name, f) == 0) {
     return 1;
   }
@@ -357,9 +276,6 @@ void ir_explain_set_retain_remarks(int enabled) {
   g_explain_retain_remarks = enabled ? 1 : 0;
 }
 
-/* --annotate-asm reads the collected remarks to enrich its codegen listing with
- * the same verified vectorization/inlining narration. These accessors expose the
- * remark table read-only without leaking the struct definition. */
 size_t ir_explain_remark_count(void) { return g_remark_count; }
 
 int ir_explain_remark_at(size_t i, const char **function_name,
@@ -411,8 +327,6 @@ void ir_explain_safety_note(const char *file, size_t line,
   if (!g_safety_collect || g_safety_count >= IR_EXPLAIN_SAFETY_MAX_NOTES) {
     return;
   }
-  /* An access with an unknown file is kept rather than risk dropping a real
-   * survivor, the same call the memory notes make. */
   if (g_safety_focus && file &&
       strcmp(ir_explain_path_basename(file), g_safety_focus) != 0) {
     return;
@@ -513,8 +427,6 @@ void ir_explain_memory_note(const char *file, int severity, size_t line,
   if (!g_mem_collect || !headline) {
     return;
   }
-  /* Scope to the focus file when one is known (mirrors optimizer remarks). A
-   * note with an unknown file is kept rather than risk dropping a real one. */
   if (g_mem_focus && file &&
       strcmp(ir_explain_path_basename(file), g_mem_focus) != 0) {
     return;
@@ -574,17 +486,6 @@ static int ir_explain_use_unicode(void) { return diag_style_unicode(); }
 static const char *glyph_elbow(void) { return diag_glyphs()->elbow; }
 static const char *glyph_arrow(void) { return diag_glyphs()->arrow; }
 
-/* ---- source echo ------------------------------------------------------------
- * A verdict that says "line 38" makes the reader open the file to find out
- * which loop it means. Printing the line costs one row and answers that, the
- * way the error diagnostics have always done it.
- *
- * The focus file is read once, on the first echo, and held as an index of line
- * starts. Only the focus file: with --explain-all the remarks come from several
- * files and a remark carries no filename of its own, so the report stays quiet
- * rather than quoting the wrong file. */
-
-/* A loop up to this many lines long is quoted whole. */
 #define IR_EXPLAIN_ECHO_MAX_LINES 5
 
 static MTLC_THREAD_LOCAL char *g_source_text = NULL;
@@ -659,7 +560,6 @@ static void ir_explain_source_free(void) {
   g_source_tried = 0;
 }
 
-/* Columns of leading whitespace on `line`, or (size_t)-1 when it is blank. */
 static size_t ir_explain_source_indent(size_t line) {
   const char *text = g_source_lines[line - 1];
   size_t n = 0;
@@ -691,11 +591,6 @@ static void ir_explain_echo_one(size_t line, size_t strip) {
                   diag_glyphs()->v, clr(EXPLAIN_RESET), painted, 10);
 }
 
-/* Echo the source a remark is about. A short loop is quoted whole, so the
- * reader sees the accumulator or the index expression the advice refers to
- * without opening the file; anything longer shows its first line, because a
- * forty-line loop pasted into a report helps nobody. The shared indentation is
- * stripped and the relative shape kept. */
 static void ir_explain_echo_source_range(size_t line, size_t end_line) {
   ir_explain_source_load();
   if (!g_source_lines || line == 0 || line > g_source_line_count) {
@@ -725,8 +620,6 @@ static void ir_explain_echo_source(size_t line) {
   ir_explain_echo_source_range(line, 0);
 }
 
-/* ---- remark store -------------------------------------------------------- */
-
 static char *ir_explain_strdup(const char *s) {
   if (!s) {
     return NULL;
@@ -739,11 +632,6 @@ static char *ir_explain_strdup(const char *s) {
   return copy;
 }
 
-/* Copy remark text, transliterating the report's known UTF-8 glyphs to ASCII
- * when the output target can't render UTF-8. Contributors (the loop verifier,
- * the inliner) embed → and — freely; this is the single choke point that keeps
- * them readable everywhere. Every replacement is no longer than the original
- * sequence, so the transliteration runs in place on the copy. */
 static char *ir_explain_text_dup(const char *s) {
   char *copy = ir_explain_strdup(s);
   if (!copy || ir_explain_use_unicode()) {
@@ -753,25 +641,25 @@ static char *ir_explain_text_dup(const char *s) {
   char *write = copy;
   while (*read) {
     if (read[0] == 0xE2 && read[1] == 0x86 && read[2] == 0x92) {
-      *write++ = '-'; /* → */
+      *write++ = '-';
       *write++ = '>';
       read += 3;
     } else if (read[0] == 0xE2 && read[1] == 0x80 && read[2] == 0x94) {
-      *write++ = '-'; /* — */
+      *write++ = '-';
       *write++ = '-';
       read += 3;
     } else if (read[0] == 0xE2 && read[1] == 0x94 && read[2] == 0x94) {
-      *write++ = '\\'; /* └ */
+      *write++ = '\\';
       *write++ = '_';
       read += 3;
     } else if (read[0] == 0xE2 && read[1] == 0x94 && read[2] == 0x80) {
-      *write++ = '-'; /* ─ */
+      *write++ = '-';
       read += 3;
     } else if (read[0] >= 0x80) {
-      *write++ = '?'; /* any other multibyte: never emit raw mojibake */
+      *write++ = '?';
       read++;
       while (*read >= 0x80 && *read < 0xC0) {
-        read++; /* skip the sequence's continuation bytes */
+        read++;
       }
     } else {
       *write++ = (char)*read++;
@@ -781,9 +669,6 @@ static char *ir_explain_text_dup(const char *s) {
   return copy;
 }
 
-/* Non-nop instruction weight: what the inliner's budgets, the backend gate and
- * this report all mean by "how big is this function". The inliner keeps a
- * private copy for its hot paths; this is the one the report uses. */
 size_t ir_explain_instruction_weight(const IRFunction *function) {
   if (!function) {
     return 0;
@@ -797,17 +682,12 @@ size_t ir_explain_instruction_weight(const IRFunction *function) {
   return weight;
 }
 
-/* ---- the codegen cost model ------------------------------------------------
- * Published by mir_annotate once every function is encoded. The optimizer's
- * half of the report says what it decided; this says what the decision costs,
- * which is the difference between "this loop did not vectorize" and "this loop
- * did not vectorize and runs 7.2 cycles an iteration, bottlenecked on p23". */
 typedef struct {
   char *function_name;
   size_t head_line;
   size_t tail_line;
   int depth;
-  int cycles_per_iter; /* centicycles */
+  int cycles_per_iter;
   const char *bottleneck;
   int has_kernel;
   int estimated;
@@ -853,7 +733,7 @@ void ir_explain_backend_loop(const char *function_name, const char *filename,
   cost->tail_line = tail_line;
   cost->depth = depth;
   cost->cycles_per_iter = cycles_per_iter;
-  cost->bottleneck = bottleneck; /* static port-name table; not owned */
+  cost->bottleneck = bottleneck;
   cost->has_kernel = has_kernel;
   cost->estimated = estimated;
 }
@@ -885,22 +765,11 @@ void ir_explain_backend_cost(const char *function_name, const char *filename,
   cost->estimated_spans = estimated_spans;
 }
 
-/* ---- the pass ledger -------------------------------------------------------
- * What each optimization pass actually did to this file: how often it ran, how
- * often it changed something, and the net instructions it removed. A pass that
- * runs forty times and never fires is as interesting as one that halves the
- * function -- both are invisible in a report that only lists vectorization and
- * inlining. Only collected under --explain, and only for the focus file. */
 #define IR_EXPLAIN_OPCODE_LIMIT ((size_t)IR_OP_SELECT + 1)
 #define IR_EXPLAIN_MAX_SITES 256
 #define IR_EXPLAIN_REPORTED_SITES 12
 #define IR_EXPLAIN_MAX_SHAPE_LINES 1024
 
-/* The shape of a function: how many of each opcode, and how many instructions
- * sit on each source line. Diffing two shapes says what a pass actually did --
- * "removed 8 loads and 8 stores at lines 38 and 39" rather than "changed
- * something". Cheap enough to take twice per pass run, which is the price of
- * the ledger being worth reading. */
 typedef struct {
   int *opcodes;
   size_t *lines;
@@ -909,19 +778,18 @@ typedef struct {
   size_t line_capacity;
 } IRExplainShape;
 
-/* One (function, line) the pass moved instructions at. */
 typedef struct {
   char *function_name;
   size_t line;
-  long delta; /* positive = instructions removed here */
+  long delta;
 } IRExplainSite;
 
 typedef struct {
-  const char *name; /* static pass-name pointer; not owned */
+  const char *name;
   size_t runs;
   size_t changed_runs;
-  long instructions_removed; /* negative = the pass added instructions */
-  int *opcode_delta;         /* per-opcode net change, lazily allocated */
+  long instructions_removed;
+  int *opcode_delta;
   IRExplainSite *sites;
   size_t site_count;
   size_t site_capacity;
@@ -931,8 +799,6 @@ typedef struct {
 static MTLC_THREAD_LOCAL IRExplainPassEntry g_passes[IR_EXPLAIN_MAX_PASSES];
 static MTLC_THREAD_LOCAL size_t g_pass_count = 0;
 
-/* The two scratch shapes, reused for every pass run so the ledger allocates
- * once rather than per pass. */
 static MTLC_THREAD_LOCAL IRExplainShape g_shape_before;
 static MTLC_THREAD_LOCAL IRExplainShape g_shape_after;
 
@@ -954,8 +820,6 @@ static int ir_explain_shape_reserve(IRExplainShape *shape) {
   return 1;
 }
 
-/* Count the function into `shape`. Instructions run roughly in line order, so
- * the last-line fast path turns the histogram into a linear scan in practice. */
 static int ir_explain_shape_take(IRExplainShape *shape,
                                  const IRFunction *function) {
   if (!ir_explain_shape_reserve(shape)) {
@@ -979,9 +843,6 @@ static int ir_explain_shape_take(IRExplainShape *shape,
     if (line == 0) {
       continue;
     }
-    /* An inlined callee's instructions carry ITS file's lines. Counting those
-     * would report sites at line numbers that mean nothing in the file the
-     * report is about, so only the function's own file contributes. */
     if (own_file && instruction->location.filename &&
         strcmp(instruction->location.filename, own_file) != 0) {
       continue;
@@ -999,7 +860,7 @@ static int ir_explain_shape_take(IRExplainShape *shape,
     }
     if (slot == (size_t)-1) {
       if (shape->line_count >= shape->line_capacity) {
-        continue; /* pathologically wide function: the opcode delta still lands */
+        continue;
       }
       slot = shape->line_count++;
       shape->lines[slot] = line;
@@ -1039,7 +900,6 @@ static void ir_explain_pass_record_site(IRExplainPassEntry *entry,
   site->delta = delta;
 }
 
-/* Is this pass run worth measuring? */
 static int ir_explain_pass_tracked(const IRFunction *function) {
   return g_explain && !g_explain_hypothesis && function &&
          function->instruction_count > 0 &&
@@ -1075,7 +935,7 @@ void ir_explain_pass_end(const IRFunction *function, const char *name,
   }
   entry->runs++;
   if (!changed) {
-    return; /* a clean run has nothing to describe */
+    return;
   }
   entry->changed_runs++;
 
@@ -1097,7 +957,6 @@ void ir_explain_pass_end(const IRFunction *function, const char *name,
   }
   entry->instructions_removed += removed;
 
-  /* Where it happened: lines whose instruction count moved. */
   for (size_t i = 0; i < g_shape_before.line_count; i++) {
     size_t line = g_shape_before.lines[i];
     int after = 0;
@@ -1129,17 +988,11 @@ void ir_explain_pass_end(const IRFunction *function, const char *name,
   }
 }
 
-/* ---- the per-function table ------------------------------------------------
- * One row per function in the focus file: where it starts, what it weighed
- * before and after optimization, and (merged in at flush time) how it fared in
- * the backend. The report's spine -- everything else hangs off a function. */
 typedef struct {
   char *name;
   size_t line;
   size_t instructions_before;
   size_t instructions_after;
-  /* Tallied from the remarks before they are freed, because the section is
-   * written later -- once codegen has decided the backend half. */
   size_t loops;
   size_t loops_vectorized;
   size_t calls_inlined;
@@ -1205,10 +1058,6 @@ void ir_explain_function_after(const IRFunction *function) {
   }
 }
 
-/* The machine snapshot a `@rule fn (m: Machine)` reads. A remark already says
- * which function, which loop or call, and what became of it, so this is where
- * the snapshot is filled: one source for what the optimizer decided, and no
- * second set of call sites to drift from it. */
 static void ir_machine_from_remark(const char *function_name,
                                    const char *entity, size_t line,
                                    size_t column, int positive,
@@ -1217,10 +1066,6 @@ static void ir_machine_from_remark(const char *function_name,
     return;
   }
   if (strcmp(entity, "loop") == 0) {
-    /* Only a vectorization verdict counts. A loop collects several remarks --
-     * a prefetch, an unroll, an alignment -- and none of them says whether it
-     * vectorized, so reading "something good happened here" as "it vectorized"
-     * would be the compiler telling a rule what the rule wanted to hear. */
     if (headline && strncmp(headline, "NOT vectorized", 14) == 0) {
       ir_machine_note_loop(function_name, file, line, column, 0, NULL);
     } else if (headline && strncmp(headline, "vectorized", 10) == 0) {
@@ -1252,9 +1097,6 @@ void ir_explain_remark(const char *function_name, const char *entity,
     return;
   }
 
-  /* Dedupe: an inlined callee's body can be cloned into several callers, each
-   * clone carrying the callee's original source locations; report the
-   * decision once. */
   for (size_t i = 0; i < g_remark_count; i++) {
     IRExplainRemark *r = &g_remarks[i];
     if (r->line == location.line && r->column == location.column &&
@@ -1295,10 +1137,6 @@ void ir_explain_remark(const char *function_name, const char *entity,
   g_last_remark_recorded = 1;
 }
 
-/* The remark most recently recorded, or NULL when the last ir_explain_remark
- * call was filtered out (wrong file, hypothesis run, duplicate). Every stamp
- * below goes through here, so a suppressed remark can never have its detail
- * land on the previous one. */
 static IRExplainRemark *ir_explain_last_remark(void) {
   if (!g_last_remark_recorded || g_remark_count == 0) {
     return NULL;
@@ -1352,8 +1190,6 @@ void ir_explain_remark_quantity(const char *name, long value) {
   q->value = value;
 }
 
-/* Stamp the nest depth on the most recent loop remark at `line` (the
- * contract walker computes containment after recording). 1 = top level. */
 void ir_explain_remark_loop_depth(size_t line, size_t depth) {
   for (size_t i = g_remark_count; i > 0; i--) {
     IRExplainRemark *r = &g_remarks[i - 1];
@@ -1399,12 +1235,11 @@ size_t ir_explain_inlined_calls_in_range(const char *function_name,
     }
     hits++;
     if (hits > 1) {
-      continue; /* ambiguous: the caller must not name one of several */
+      continue;
     }
     if (callee_line) {
       *callee_line = r->line;
     }
-    /* The entity reads "call to `name`"; hand back just the name. */
     const char *open = r->entity ? strchr(r->entity, '`') : NULL;
     const char *close = open ? strchr(open + 1, '`') : NULL;
     if (open && close && callee_out && callee_cap) {
@@ -1419,19 +1254,12 @@ size_t ir_explain_inlined_calls_in_range(const char *function_name,
   return hits;
 }
 
-/* The bracketed decision id that follows a verdict, ready to paste into
- * `mettle explain`. Empty when the pass recorded no id (positive housekeeping
- * remarks mostly), so the line reads exactly as it did before. Two rotating
- * buffers let one emit call carry two tags. */
 static const char *ir_explain_code_tag(const IRExplainRemark *r) {
   static MTLC_THREAD_LOCAL char buf[2][96];
   static MTLC_THREAD_LOCAL int slot = 0;
   if (!r->code || !r->code[0] || strcmp(r->code, "none") == 0) {
     return "";
   }
-  /* On a success the headline already names what happened, and the id is
-   * the same word again. It carries information only on a refusal, where it
-   * names the reason and is the argument to `mettle explain`. */
   if (r->positive) {
     return "";
   }
@@ -1453,14 +1281,6 @@ static int ir_explain_remark_compare(const void *a, const void *b) {
   return 0;
 }
 
-/* ---- repeated-refusal aggregation ------------------------------------------
- * Real-world functions (a setup-heavy main, an init routine) produce WALLS of
- * identical call refusals -- one fact ("main is over the caller budget")
- * repeated for every call site, drowning the remarks that matter. Identical
- * (caller, headline, reason, fix) call remarks are folded into one entry with
- * the line range and a deduplicated callee list. Remarks carrying a verified
- * line are never folded: each is a per-site proof. */
-
 #define IR_EXPLAIN_DOCS_BASE "https://suidvandiewereld.github.io/Mettle"
 #define IR_EXPLAIN_GROUP_MIN 4
 #define IR_EXPLAIN_GROUP_LIST_MAX 6
@@ -1472,15 +1292,10 @@ static int ir_explain_str_eq(const char *a, const char *b) {
   return strcmp(a, b) == 0;
 }
 
-/* A call remark eligible for folding: "call to `f`" entity with a reason
- * (the repeated-refusal shape). */
 static int ir_explain_remark_foldable(const IRExplainRemark *r) {
   return r->entity && strncmp(r->entity, "call to ", 8) == 0;
 }
 
-/* Verified text participates in the key: a generic per-group claim ("with
- * @inline this will inline") folds with its group, while per-site proofs
- * that differ in wording keep their own entries. */
 static int ir_explain_remarks_groupable(const IRExplainRemark *a,
                                         const IRExplainRemark *b) {
   return ir_explain_str_eq(a->function_name, b->function_name) &&
@@ -1491,7 +1306,6 @@ static int ir_explain_remarks_groupable(const IRExplainRemark *a,
          ir_explain_str_eq(a->partial, b->partial);
 }
 
-/* The callee name inside a "call to `f`" entity; "?" when unparsable. */
 static void ir_explain_entity_callee(const char *entity, char *buf,
                                      size_t cap) {
   const char *open = entity ? strchr(entity, '`') : NULL;
@@ -1505,9 +1319,6 @@ static void ir_explain_entity_callee(const char *entity, char *buf,
   buf[n] = '\0';
 }
 
-/* Build the group's deduplicated callee list ("a, b (x9), c ... and N more")
- * into `out`. Membership is determined by the same predicate the flush loop
- * groups by, starting at the group leader `first`. */
 static void ir_explain_group_callee_list(const IRExplainRemark *remarks,
                                          size_t first, char *out, size_t cap) {
   char names[64][96];
@@ -1560,27 +1371,16 @@ static void ir_explain_group_callee_list(const IRExplainRemark *remarks,
   }
 }
 
-/* ---- "since last build" diffing ---------------------------------------------
- * Each explain build writes a compact baseline of its loop/call outcomes to
- * `<output-stem>.explain.base`; the next build compares before rendering and
- * leads the report with what CHANGED -- newly vectorized loops, and (the part
- * benchmarks find too late) regressions. Entities are matched by (function,
- * ordinal within the function) so ordinary edits that shift line numbers do
- * not produce false alarms. */
-
 typedef struct {
   char function_name[128];
-  char callee[96]; /* calls only; empty for loops */
+  char callee[96];
   size_t ordinal;
   size_t line;
-  char status; /* 'V'/'S' for loops, 'I'/'R' for calls */
-  char kind;   /* 'L' or 'C' */
-  const char *reason; /* current-side only: points into g_remarks */
+  char status;
+  char kind;
+  const char *reason;
 } IRExplainBaseKey;
 
-/* Status for diffing, or 0 when the remark is not tracked. "vectorized
- * inner, scalar outer" is intentionally untracked: its own status lives on
- * the inner loop's remark. */
 static char ir_explain_remark_status(const IRExplainRemark *r, char *kind) {
   if (!r->entity || !r->headline) {
     return 0;
@@ -1611,8 +1411,6 @@ static char ir_explain_remark_status(const IRExplainRemark *r, char *kind) {
   return 0;
 }
 
-/* Build the tracked-outcome list from the (already sorted) remarks.
- * Returns a malloc'd array; count in *count_out. */
 static IRExplainBaseKey *ir_explain_build_keys(size_t *count_out) {
   IRExplainBaseKey *keys = calloc(g_remark_count ? g_remark_count : 1,
                                   sizeof(IRExplainBaseKey));
@@ -1639,7 +1437,6 @@ static IRExplainBaseKey *ir_explain_build_keys(size_t *count_out) {
     k->status = status;
     k->line = r->line;
     k->reason = r->reason;
-    /* ordinal: how many earlier tracked entries share (kind, fn, callee) */
     k->ordinal = 0;
     for (size_t j = 0; j < count; j++) {
       if (keys[j].kind == kind &&
@@ -1654,7 +1451,6 @@ static IRExplainBaseKey *ir_explain_build_keys(size_t *count_out) {
   return keys;
 }
 
-/* `<dir>/<stem><suffix>` from the output path; caller frees. */
 static char *ir_explain_derived_path(const char *suffix) {
   if (!g_explain_output_path) {
     return NULL;
@@ -1711,8 +1507,6 @@ static IRExplainBaseKey *ir_explain_read_baseline(size_t *count_out) {
     IRExplainBaseKey *k = &keys[count];
     memset(k, 0, sizeof(*k));
     k->kind = kind;
-    /* L \t fn \t ordinal \t status \t line
-     * C \t fn \t callee \t ordinal \t status \t line */
     char *cursor = line + 2;
     char *fields[5] = {0};
     int n_fields = 0;
@@ -1779,9 +1573,6 @@ ir_explain_find_key(const IRExplainBaseKey *keys, size_t count,
   return NULL;
 }
 
-/* Compare against the previous build, render the "changes" section, emit the
- * JSON changes object, update the digest, and rewrite the baseline. Runs on
- * the SORTED remark list before the main listing renders. */
 static void ir_explain_render_changes(void) {
   size_t current_count = 0, old_count = 0;
   IRExplainBaseKey *current = ir_explain_build_keys(&current_count);
@@ -1866,26 +1657,8 @@ static void ir_explain_print_header(const char *what) {
   ir_explain_emit("%c%s%c", 10, line, 10);
 }
 
-/* ---- "where to start" -------------------------------------------------------
- * The remark list is in source order, which is the right order to read a file
- * in and the wrong order to decide what to do. A report of forty findings
- * answers "what happened"; this block answers "what do I change", which is the
- * question the reader actually arrived with.
- *
- * Ranked by what the compiler can stand behind: a fix it applied to a clone
- * and re-checked outranks one it merely believes, and a fix inside a nested
- * loop outranks the same fix at top level. */
-
 #define IR_EXPLAIN_START_MAX 5
 
-/* Copy `text` into `out`, cut at `width` with an ellipsis. The full sentence is
- * a few lines below in the report, so this is a signpost rather than a summary.
- *
- * A fix line is usually an imperative clause followed by a parenthesised
- * example, and cutting inside the example leaves a fragment that reads as
- * damage ("... (e.g. `var row: float32* = ..."). So: drop the whole example
- * when the clause before it still carries the instruction, and otherwise fall
- * back to a word boundary. */
 static void ir_explain_fit(const char *text, size_t width, char *out,
                            size_t cap) {
   if (!text) {
@@ -1898,7 +1671,6 @@ static void ir_explain_fit(const char *text, size_t width, char *out,
     return;
   }
 
-  /* An open parenthesis at the cut means the cut lands inside an example. */
   size_t depth = 0, opened_at = 0;
   int inside = 0;
   for (size_t i = 0; i < width; i++) {
@@ -1916,7 +1688,7 @@ static void ir_explain_fit(const char *text, size_t width, char *out,
 
   size_t cut = width;
   if (inside && opened_at > width / 2) {
-    cut = opened_at; /* keep the clause, drop the example */
+    cut = opened_at;
     while (cut > 0 && text[cut - 1] == ' ') {
       cut--;
     }
@@ -1932,17 +1704,10 @@ static void ir_explain_fit(const char *text, size_t width, char *out,
   snprintf(out + cut, cap - cut, " ...");
 }
 
-/* Did the compiler identify what blocked this loop, or fall back to "no
- * recognizer claimed it"? The fallback's advice is the same checklist
- * everywhere, so it sorts below any diagnosis that names a cause. */
 static int ir_explain_names_a_cause(const IRExplainRemark *r) {
   return !(r->code && strcmp(r->code, "unrecognized-shape") == 0);
 }
 
-/* Rank the findings that have a fix into `order`, heaviest first, and return
- * how many entries it holds. `missed_out` counts every missed optimization and
- * `actionable_out` the subset with a fix. With `apply_filter` the ranking is
- * over the selected slice only; without it, over the whole file. */
 static size_t ir_explain_rank_fixes(int apply_filter, size_t *order,
                                     size_t *sites, size_t *missed_out,
                                     size_t *actionable_out) {
@@ -1956,10 +1721,6 @@ static size_t ir_explain_rank_fixes(int apply_filter, size_t *order,
     if (r->positive || (apply_filter && !ir_explain_remark_selected(r))) {
       continue;
     }
-    /* The outer loop of a nest is never a missed optimization: only
-     * innermost loops vectorize, so its remark is a signpost to the inner
-     * loop's problem, not a second problem. Counting it turns one finding
-     * into "1 of 2" and reads as though something else went wrong. */
     if (r->code && strcmp(r->code, "outer-of-nest") == 0) {
       continue;
     }
@@ -1969,15 +1730,6 @@ static size_t ir_explain_rank_fixes(int apply_filter, size_t *order,
     }
     actionable++;
 
-    /* One line per kind of work. Four sites needing the same change are one
-     * decision to make and four edits to do; showing them as four entries
-     * spends the whole list on one idea. The site named is the first the
-     * ranking reached, and the count says how far the work spreads.
-     *
-     * Folding on the advice, not the code. One code can cover several
-     * distinct causes with distinct fixes -- store-only-fill alone has three
-     * -- and folding those together hides real work behind unrelated work,
-     * including hiding a proven fix behind an unproven one. */
     if (r->code && r->fix) {
       int folded = 0;
       for (size_t j = 0; j < shown; j++) {
@@ -1994,15 +1746,6 @@ static size_t ir_explain_rank_fixes(int apply_filter, size_t *order,
       }
     }
 
-    /* Insertion sort into the top-N: proven first, then advice specific to
-     * this loop, then deepest, then earliest, so the same file always
-     * produces the same order.
-     *
-     * The specificity key matters on a real program. `unrecognized-shape` is
-     * the fallback the compiler reaches when it cannot name a cause, and its
-     * advice is the same checklist at every site; without this key a file
-     * with many such loops fills the list with one repeated sentence and
-     * buries the diagnoses that name a cause. */
     size_t at = shown;
     while (at > 0) {
       const IRExplainRemark *p = &g_remarks[order[at - 1]];
@@ -2045,19 +1788,13 @@ static size_t ir_explain_rank_fixes(int apply_filter, size_t *order,
   return shown;
 }
 
-/* A whole-function fallback, ready to print as a line of the plan. Built after
- * codegen (that is when the eligibility gate has run), which is why the plan is
- * rendered late and spliced back into the report at the point it belongs. */
 typedef struct {
-  char location[160];      /* "main (252 instrs)" */
-  char function_name[128]; /* the same function, for the JSON sidecar */
-  /* The gate's reason, and the loop it is about. Sized to hold both whole: a
-     reason is up to 256 and the loop list up to 96. */
+  char location[160];
+  char function_name[128];
   char why[384];
   const char *fix;
   size_t instructions_sort;
 } IRExplainBackendPlan;
-/* Two at most. A third repeats the same lesson and pushes out the loop work. */
 #define IR_EXPLAIN_BACKEND_PLAN_MAX 2
 static size_t ir_explain_collect_backend_plan(IRExplainBackendPlan *out);
 
@@ -2065,18 +1802,9 @@ static void ir_explain_render_start_here(void) {
   size_t order[IR_EXPLAIN_START_MAX];
   size_t actionable = 0, missed = 0;
 
-  /* Whole-function fallbacks lead the plan. A loop remark is a prediction about
-   * one loop; a fallback is a measurement over a whole function that already
-   * happened, and it costs every value in that function a register. Ranking it
-   * under a per-loop heuristic would put the smaller number first. */
   IRExplainBackendPlan backend_plan[IR_EXPLAIN_BACKEND_PLAN_MAX];
   size_t backend_shown = ir_explain_collect_backend_plan(backend_plan);
 
-  /* The same ranking, for tools. An editor showing a "what to fix" panel
-   * should not have to re-derive the order from the remark list and guess at
-   * the tie-breaks. Ranked over the whole file, since --explain=SELECTOR
-   * narrows the prose and leaves the sidecar alone. Always emitted, empty when
-   * there is nothing to do, so the document's shape does not vary. */
   if (g_explain_json) {
     size_t all_missed = 0, all_actionable = 0;
     size_t all_sites[IR_EXPLAIN_START_MAX];
@@ -2115,8 +1843,6 @@ static void ir_explain_render_start_here(void) {
   size_t shown = ir_explain_rank_fixes(1, order, sites, &missed, &actionable);
 
   if (shown == 0 && backend_shown == 0) {
-    /* Silence is ambiguous: it could mean a clean file or a report that
-     * forgot to say. One line, and only when there was something to miss. */
     if (missed > 0) {
       ir_explain_emit("  %s%zu missed optimization%s in this file, none with a "
                       "fix the compiler can name%s\n\n",
@@ -2126,8 +1852,6 @@ static void ir_explain_render_start_here(void) {
     return;
   }
 
-  /* One pass to size the location column, so the fixes line up and the block
-   * scans as a list rather than as ragged prose. */
   size_t location_width = 0;
   char location[IR_EXPLAIN_START_MAX][160];
   for (size_t i = 0; i < shown; i++) {
@@ -2184,8 +1908,6 @@ static void ir_explain_render_start_here(void) {
                clr(EXPLAIN_RESET));
     }
     ir_explain_fit(r->fix, sites[i] > 1 ? 66 : 84, fix, sizeof(fix));
-    /* The caveat has to survive the truncation that trims the fix text, or the
-     * plan reads as "do this and you are done" for a fix we know is partial. */
     const char *status = r->verified ? "proven" : (r->partial ? "step 1" : "");
     saw_proven |= r->verified ? 1 : 0;
     saw_partial |= (!r->verified && r->partial) ? 1 : 0;
@@ -2194,8 +1916,6 @@ static void ir_explain_render_start_here(void) {
                     clr(EXPLAIN_RESET), (int)location_width, location[i], fix,
                     spread);
   }
-  /* The lines above stand for `covered` findings, not `shown` of them, since
-   * each folds its own sites. The remainder is what no line represents. */
   size_t covered = 0;
   for (size_t i = 0; i < shown; i++) {
     covered += sites[i];
@@ -2204,7 +1924,6 @@ static void ir_explain_render_start_here(void) {
     ir_explain_emit("       %s... and %zu more below%s\n", clr(EXPLAIN_DIM),
                     actionable - covered, clr(EXPLAIN_RESET));
   }
-  /* The badges are only worth explaining on a report that uses them. */
   if (saw_proven || saw_partial) {
     ir_explain_emit("       %s%s%s%s\n", clr(EXPLAIN_DIM),
                     saw_proven ? "proven = applied to a clone and re-checked"
@@ -2219,8 +1938,6 @@ static void ir_explain_render_start_here(void) {
   ir_explain_emit("\n");
 }
 
-/* One remark as a JSON object in the "remarks" array. `kind` is explicit so
- * consumers never re-derive it from prose. */
 static void ir_explain_json_remark(const IRExplainRemark *r, const char *kind,
                                    const char *callee, size_t count,
                                    size_t line_end, const char *calls,
@@ -2254,9 +1971,6 @@ static void ir_explain_json_remark(const IRExplainRemark *r, const char *kind,
   if (r->depth > 0) {
     ir_explain_json_raw(",\"depth\":%zu", r->depth);
   }
-  /* Schema 2: the machine-readable half. `code` is the stable decision id,
-   * `column`/`endLine` the construct's extent, `trivial` marks housekeeping a
-   * reader can collapse, and `quantities` carries whatever the pass measured. */
   ir_explain_json_raw(",\"code\":");
   ir_explain_json_str(r->code);
   ir_explain_json_raw(",\"column\":%zu", r->column);
@@ -2281,13 +1995,6 @@ static void ir_explain_json_remark(const IRExplainRemark *r, const char *kind,
   ir_explain_json_raw("}");
 }
 
-/* Render what --safe did: how many accesses were checked, how many the
- * compiler proved could not fail, and where the rest are.
- *
- * The proportion is the whole point of the mode, so it leads. A survivor is
- * usually actionable: a constant-extent comparison is a couple of
- * instructions, while a runtime call means the compiler could not see how
- * large the object was, which is often a loop bound it could have been told. */
 static void ir_explain_typed_flush(void) {
   if (g_explain_json) {
     ir_explain_json_raw("\"proven_by_type\":[");
@@ -2329,12 +2036,6 @@ static void ir_explain_typed_flush(void) {
   ir_explain_emit("\n");
 }
 
-/* ---- the ledger: beliefs, proofs, effects, rules -------------------------
- * Four things the build rested on that are not optimizer decisions. A proof
- * and an effect were established by a pass and consumed by another; a rule was
- * run and answered; a belief was not established at all, and saying so is the
- * point. Collected wherever they happen and printed as their own sections. */
-
 #define IR_EXPLAIN_LEDGER_MAX 64
 
 typedef struct {
@@ -2361,7 +2062,6 @@ static MTLC_THREAD_LOCAL size_t g_ledger_rule_count = 0;
 static MTLC_THREAD_LOCAL size_t g_ledger_rule_total = 0;
 
 void ir_explain_ledger_set_collect(int enabled) { g_ledger_collect = enabled; }
-
 
 static IRExplainLedgerRow *ledger_push(IRExplainLedgerRow **table,
                                        size_t *count, size_t *total) {
@@ -2487,7 +2187,6 @@ void ir_explain_rule_ran(const char *rule, const char *verdict,
   row->steps = steps;
 }
 
-
 void ir_explain_ledger_flush(void) {
   if (!g_explain) {
     return;
@@ -2561,10 +2260,6 @@ void ir_explain_ledger_flush(void) {
   ir_explain_emit("\n");
 }
 
-/* The ledger sections are not optimizer decisions, so they mean the same thing
- * in a build the optimizer never ran. --explain without -O prints these and
- * says so, which is where a check a declared type deleted is visible: --release
- * emits no such check for anyone. */
 void ir_explain_ledger_standalone(const char *focus_file) {
   int saved = g_explain;
   const char *saved_focus = g_explain_focus_file;
@@ -2688,10 +2383,6 @@ static void ir_explain_safety_flush(void) {
   ir_explain_emit("\n");
 }
 
-/* Render the memory diagnostics the type checker handed us: a JSON "memory"
- * array (always emitted so the document's comma chain stays valid) and a prose
- * "memory report" section. Called at the tail of ir_explain_flush, so it lands
- * after "remarks" and before "backend" in the JSON buffer. */
 static void ir_explain_memory_flush(void) {
   if (g_explain_json) {
     ir_explain_json_raw("\"memory\":[");
@@ -2713,8 +2404,6 @@ static void ir_explain_memory_flush(void) {
   if (!g_explain) {
     return;
   }
-  /* A section whose whole content is "nothing to report" costs four lines to
-   * say what its absence already says. */
   if (g_mem_count == 0) {
     return;
   }
@@ -2750,8 +2439,6 @@ static void ir_explain_memory_flush(void) {
   ir_explain_emit("\n");
 }
 
-/* Fold the remarks into their functions. Called while the remarks are still
- * alive; the section itself is written after codegen. */
 static void ir_explain_tally_functions(void) {
   for (size_t r = 0; r < g_remark_count; r++) {
     const IRExplainRemark *remark = &g_remarks[r];
@@ -2780,8 +2467,6 @@ static void ir_explain_tally_functions(void) {
   }
 }
 
-/* The per-function table: the weight the pipeline started and finished with,
- * the decisions recorded against it, and how it fared in the backend. */
 static void ir_explain_functions_json(void) {
   if (!g_explain_json) {
     return;
@@ -2834,10 +2519,6 @@ static void ir_explain_functions_json(void) {
   ir_explain_json_raw("],");
 }
 
-/* A static hotness proxy: a loop body runs some multiple of its enclosing
- * loop's iterations, and nothing here has measured frequencies unless --pgo
- * ran. Ten per level, capped, is the same convention the codegen hot-cost
- * weighting uses -- enough to sort by, never mistaken for a measurement. */
 static long ir_explain_depth_weight(int depth) {
   long weight = 1;
   for (int i = 0; i < depth && i < 3; i++) {
@@ -2846,8 +2527,6 @@ static long ir_explain_depth_weight(int depth) {
   return weight;
 }
 
-/* The nest depth of the loop containing `line` in `function`, or 0 when the
- * line is not inside one. Uses the loop extents the vectorizer stamped. */
 static int ir_explain_enclosing_depth(const char *function, size_t line) {
   int deepest = 0;
   for (size_t i = 0; i < g_loop_cost_count; i++) {
@@ -2863,13 +2542,6 @@ static int ir_explain_enclosing_depth(const char *function, size_t line) {
   return deepest;
 }
 
-/* Every decision with a number on it, heaviest first.
- *
- * A long report is unreadable without an order, and line order is the wrong
- * one: it puts a one-line inline in a cold path above the scalar loop that
- * costs the program its afternoon. Loops are weighted by modelled cycles times
- * nest depth; refused calls by the callee's weight times the depth of the loop
- * they sit in. */
 static void ir_explain_hotspots_json(void) {
   if (!g_explain_json) {
     return;
@@ -2925,7 +2597,6 @@ static void ir_explain_hotspots_json(void) {
     count++;
   }
 
-  /* Selection sort: the list is short and this keeps the output stable. */
   for (size_t i = 0; i < count; i++) {
     size_t best = i;
     for (size_t j = i + 1; j < count; j++) {
@@ -2949,9 +2620,6 @@ static void ir_explain_hotspots_json(void) {
   ir_explain_json_raw("],");
 }
 
-/* Who called whom, and what became of it: one edge per caller/callee pair with
- * the sites inlined, the sites refused, and the callee's weight. Answers "where
- * did this function actually go" without re-deriving it from the remark list. */
 static void ir_explain_call_graph_json(void) {
   if (!g_explain_json) {
     return;
@@ -3025,9 +2693,6 @@ static void ir_explain_call_graph_json(void) {
   ir_explain_json_raw("],");
 }
 
-/* Every loop the backend measured, whether or not the optimizer had anything
- * to say about it. Keyed by function and head line so a consumer can join it
- * onto the remarks. Cycles are centicycles: 720 is 7.2 cycles an iteration. */
 static void ir_explain_loop_costs_json(void) {
   if (!g_explain_json) {
     return;
@@ -3049,8 +2714,6 @@ static void ir_explain_loop_costs_json(void) {
   ir_explain_json_raw("],");
 }
 
-/* The pass ledger, heaviest first: a reader wants the passes that moved the
- * most instructions, not the alphabetical list. */
 static void ir_explain_passes_json(void) {
   if (!g_explain_json) {
     return;
@@ -3063,7 +2726,7 @@ static void ir_explain_passes_json(void) {
     size_t best_changed = 0;
     for (size_t i = 0; i < g_pass_count; i++) {
       if (g_passes[i].runs == 0) {
-        continue; /* already emitted: runs is zeroed as we go */
+        continue;
       }
       long removed = g_passes[i].instructions_removed;
       if (best == (size_t)-1 || removed > best_removed ||
@@ -3084,8 +2747,6 @@ static void ir_explain_passes_json(void) {
                         entry->runs, entry->changed_runs,
                         entry->instructions_removed);
 
-    /* What it did: the opcodes it removed (positive) or introduced (negative).
-     * "-8 load, -8 store, +4 assign" is a pass description; "changed" is not. */
     if (entry->opcode_delta) {
       ir_explain_json_raw(",\"effects\":{");
       size_t effects = 0;
@@ -3100,7 +2761,6 @@ static void ir_explain_passes_json(void) {
       ir_explain_json_raw("}");
     }
 
-    /* Where it happened: the lines it moved the most instructions at. */
     if (entry->site_count > 0) {
       ir_explain_json_raw(",\"sites\":[");
       size_t shown = 0;
@@ -3122,7 +2782,7 @@ static void ir_explain_passes_json(void) {
         ir_explain_json_str(entry->sites[pick].function_name);
         ir_explain_json_raw(",\"line\":%zu,\"delta\":%ld}",
                             entry->sites[pick].line, entry->sites[pick].delta);
-        entry->sites[pick].delta = 0; /* consumed */
+        entry->sites[pick].delta = 0;
       }
       ir_explain_json_raw("]");
     }
@@ -3137,7 +2797,7 @@ static void ir_explain_passes_json(void) {
     entry->site_capacity = 0;
     free(entry->opcode_delta);
     entry->opcode_delta = NULL;
-    entry->runs = 0; /* consumed */
+    entry->runs = 0;
   }
   ir_explain_json_raw("],");
   g_pass_count = 0;
@@ -3155,9 +2815,6 @@ void ir_explain_flush(void) {
           ir_explain_remark_compare);
   }
   ir_explain_render_changes();
-  /* The plan belongs here, and half of what it ranks does not exist yet: the
-   * eligibility gate runs during codegen, after this flush. Remember the spot
-   * and fill it in once the whole report is assembled. */
   g_plan_offset = g_report_len;
   g_plan_pending = 1;
 
@@ -3174,13 +2831,9 @@ void ir_explain_flush(void) {
       if (suppressed && suppressed[i]) {
         continue;
       }
-      /* The selector hides prose only. The JSON sidecar and the digest
-       * tallies below stay whole-file, so a filtered run and an unfiltered
-       * one produce the same machine-readable document. */
       int show = ir_explain_remark_selected(r);
       shown_remarks += show ? 1 : 0;
 
-      /* Fold a run of identical call refusals into one entry. */
       if (suppressed && ir_explain_remark_foldable(r)) {
         size_t group_count = 0;
         size_t last_line = r->line;
@@ -3247,18 +2900,12 @@ void ir_explain_flush(void) {
                         clr(r->positive ? EXPLAIN_GREEN : EXPLAIN_RED),
                         r->headline, clr(EXPLAIN_RESET),
                         ir_explain_code_tag(r));
-        /* The line itself, but only where there is something to act on:
-         * quoting the source under every successful inline would treble the
-         * report and say nothing. */
         if (r->reason) {
           ir_explain_echo_source_range(r->line, r->end_line);
           ir_explain_emit("      %s%s reason: %s%s\n", clr(EXPLAIN_DIM),
                           glyph_elbow(), r->reason, clr(EXPLAIN_RESET));
         }
         if (r->fix) {
-          /* "fix: nothing to change here" is a contradiction. Where the
-           * advice describes the loop instead of instructing anyone, the
-           * label says so. */
           ir_explain_emit("      %s%s %s: %s%s\n", clr(EXPLAIN_DIM),
                           glyph_elbow(), r->advisory ? "note" : "fix", r->fix,
                           clr(EXPLAIN_RESET));
@@ -3276,7 +2923,6 @@ void ir_explain_flush(void) {
       if (r->verified) {
         g_digest.fixes_verified++;
       }
-      /* Digest tallies (loop/call outcomes by entity + headline). */
       if (r->entity && strcmp(r->entity, "loop") == 0) {
         if (strncmp(r->headline, "vectorized", 10) == 0) {
           g_digest.loops_vectorized++;
@@ -3304,9 +2950,6 @@ void ir_explain_flush(void) {
     }
     free(suppressed);
 
-    /* A selector that matched nothing is a question the report failed to
-     * answer, so say what the selector accepts rather than printing a blank
-     * section and letting the reader guess. */
     if (g_explain_filter && shown_remarks == 0) {
       ir_explain_emit("  nothing matches --explain=%s (%zu findings in this "
                       "file)\n",
@@ -3320,9 +2963,6 @@ void ir_explain_flush(void) {
                       g_remark_count, g_explain_filter, clr(EXPLAIN_RESET));
     }
 
-    /* Close the loop between the one-line verdict and the paragraph behind it.
-     * The example names a code the reader can actually see above, preferring a
-     * refusal, since that is the line they want explained. */
     const char *sample = NULL;
     for (size_t i = 0; i < g_remark_count && !sample && shown_remarks; i++) {
       if (!g_remarks[i].positive && g_remarks[i].code &&
@@ -3349,15 +2989,11 @@ void ir_explain_flush(void) {
 
   ir_explain_tally_functions();
 
-  /* Memory diagnostics land after "remarks" and before "backend". */
   ir_explain_safety_flush();
   ir_explain_memory_flush();
   ir_explain_ledger_flush();
 }
 
-/* The remarks outlive this flush: --annotate-asm reads them during codegen, and
- * the backend section (also after codegen) needs them to name the loop that
- * made a function ineligible. Released once the report is written. */
 static void ir_explain_release_remarks(void) {
   for (size_t i = 0; i < g_remark_count; i++) {
     free(g_remarks[i].function_name);
@@ -3378,8 +3014,6 @@ static void ir_explain_release_remarks(void) {
   g_remark_capacity = 0;
 }
 
-/* ---- backend (codegen) section ------------------------------------------- */
-
 void ir_explain_backend_function(const char *function_name,
                                  const char *filename, int ok,
                                  const char *detail, size_t instructions) {
@@ -3388,7 +3022,7 @@ void ir_explain_backend_function(const char *function_name,
   }
   for (size_t i = 0; i < g_backend_count; i++) {
     if (strcmp(g_backend[i].function_name, function_name) == 0) {
-      return; /* first decision wins; the gate can be probed more than once */
+      return;
     }
   }
   if (g_backend_count == g_backend_capacity) {
@@ -3408,12 +3042,6 @@ void ir_explain_backend_function(const char *function_name,
   e->instructions = instructions;
 }
 
-/* ---- report routing ---------------------------------------------------------
- * Small reports print to stderr exactly as before. Past a line threshold (a
- * real application produces hundreds of remarks) the full report is written
- * to `<output-stem>.explain.txt` next to the output binary, and stderr gets a
- * one-paragraph digest with the path. */
-
 #define IR_EXPLAIN_STDERR_MAX_LINES 200
 
 static size_t ir_explain_report_lines(void) {
@@ -3424,28 +3052,14 @@ static size_t ir_explain_report_lines(void) {
   return lines;
 }
 
-/* `<dir>/<stem>.explain.txt` from the output path; caller frees. */
 static char *ir_explain_sidecar_path(void) {
   return ir_explain_derived_path(".explain.txt");
 }
-
-/* ---- wrapping ---------------------------------------------------------------
- * The report is built one line per fact, and a reason can run past 300
- * columns. A terminal folds that at column 0, so the `\_ reason:` tree the
- * report is shaped around dissolves into a wall.
- *
- * Wrapping happens here, at the moment of writing to a terminal, and nowhere
- * else. A redirected run, a pipe into grep and the `.explain.txt` sidecar all
- * keep the one-line-per-fact form, so a pattern that matches a whole reason
- * keeps matching one. Only the interactive reader gets the typeset version,
- * which is the only reader whose width we know. */
 
 static int ir_explain_terminal_columns(void) {
   return (int)diag_style_columns();
 }
 
-/* Visible columns in `line` (ANSI escape sequences occupy none), counting a
- * UTF-8 sequence as the one column its glyph takes. */
 static size_t ir_explain_visible_width(const char *line, size_t len) {
   size_t width = 0;
   for (size_t i = 0; i < len; i++) {
@@ -3462,10 +3076,6 @@ static size_t ir_explain_visible_width(const char *line, size_t len) {
   return width;
 }
 
-/* Fold one already-rendered line to `columns`, breaking on spaces and
- * indenting continuations three columns inside the line's own indent, so a
- * wrapped detail still reads as subordinate to its verdict. Colors survive
- * the break: the sequence that opened the line has not been reset yet. */
 static void ir_explain_write_wrapped_line(FILE *out, const char *line,
                                           size_t len, size_t columns) {
   size_t indent = 0;
@@ -3474,7 +3084,7 @@ static void ir_explain_write_wrapped_line(FILE *out, const char *line,
   }
   size_t hang = indent + 3;
   if (hang + 24 > columns) {
-    hang = indent; /* a narrow terminal needs the width more than the shape */
+    hang = indent;
   }
 
   size_t start = 0;
@@ -3484,7 +3094,6 @@ static void ir_explain_write_wrapped_line(FILE *out, const char *line,
       fwrite(line + start, 1, len - start, out);
       break;
     }
-    /* Walk forward to the last space that still fits. */
     size_t width = 0, i = start, last_space = 0;
     while (i < len && width <= budget) {
       if (line[i] == '\x1b') {
@@ -3503,8 +3112,6 @@ static void ir_explain_write_wrapped_line(FILE *out, const char *line,
       i++;
     }
     if (last_space <= start) {
-      /* One unbreakable run (a path, a long identifier): let it overflow
-         rather than cutting it in half. */
       fwrite(line + start, 1, len - start, out);
       break;
     }
@@ -3530,8 +3137,6 @@ static void ir_explain_write_wrapped(FILE *out, size_t columns) {
   }
 }
 
-/* Write the buffer with ANSI color sequences stripped (the report renders
- * with stderr in mind; a file must stay plain). */
 static int ir_explain_write_plain(FILE *out) {
   for (size_t i = 0; i < g_report_len; i++) {
     if (g_report_buf[i] == '\x1b' && i + 1 < g_report_len &&
@@ -3549,10 +3154,6 @@ static int ir_explain_write_plain(FILE *out) {
   return 1;
 }
 
-/* Render the deferred plan and put it back where it belongs: after the changes
- * block, before the remarks. Splicing beats printing it at the end -- the plan
- * is the first thing a reader should meet, and a report that opens with the
- * detail and closes with the summary gets read in the wrong order. */
 static void ir_explain_splice_plan(void) {
   if (!g_plan_pending) {
     return;
@@ -3564,7 +3165,7 @@ static void ir_explain_splice_plan(void) {
   size_t tail_len = g_report_len - g_plan_offset;
   char *tail = tail_len ? malloc(tail_len) : NULL;
   if (tail_len && !tail) {
-    ir_explain_render_start_here(); /* at the end beats not at all */
+    ir_explain_render_start_here();
     return;
   }
   if (tail) {
@@ -3606,7 +3207,6 @@ void ir_explain_finalize(int force_stderr) {
     }
   }
 
-  /* The machine-readable sidecar, independent of where the prose went. */
   if (g_explain_json && g_json_buf) {
     char *json_path = ir_explain_derived_path(".explain.json");
     if (json_path) {
@@ -3615,8 +3215,6 @@ void ir_explain_finalize(int force_stderr) {
         const char *source = g_explain_focus_file
                                  ? ir_explain_path_basename(g_explain_focus_file)
                                  : "";
-        /* Schema 2 is additive: every schema 1 key still means what it did,
-         * so a consumer written against 1 keeps working unchanged. */
         fprintf(out, "{\"schema\":2,\"source\":\"%s\",", source);
         fwrite(g_json_buf, 1, g_json_len, out);
         fprintf(out,
@@ -3653,12 +3251,6 @@ void ir_explain_finalize(int force_stderr) {
   ir_explain_source_free();
 
   if (!diverted) {
-    /* Only a terminal gets the wrapped form, and only when it is narrower
-     * than the report. Everything else stays one line per fact.
-     *
-     * METTLE_EXPLAIN_COLUMNS forces a width, which is how the wrapping is
-     * tested (a test harness never has a terminal) and how someone whose
-     * terminal misreports its size can pin one. */
     int fd = explain_fileno(stderr);
     int columns = (fd >= 0 && explain_isatty(fd)) ? ir_explain_terminal_columns()
                                                   : 0;
@@ -3674,8 +3266,6 @@ void ir_explain_finalize(int force_stderr) {
     }
     diag_style_output_end();
   } else {
-    /* The digest: the report's conclusions in five lines, plus the path.
-     * Regressions lead -- they must never hide inside a sidecar. */
     diag_style_output_begin();
     {
       char label[64];
@@ -3708,7 +3298,6 @@ void ir_explain_finalize(int force_stderr) {
               "  backend: %zu/%zu functions register-allocated\n",
               g_digest.backend_ok, g_digest.backend_total);
     }
-    /* Counts say how the build went; this says what to do about it. */
     if (g_digest.start_here[0]) {
       char lead[200];
       ir_explain_fit(g_digest.start_here, 96, lead, sizeof(lead));
@@ -3734,13 +3323,8 @@ void ir_explain_finalize(int force_stderr) {
   }
 }
 
-/* Past this many optimized IR instructions, a whole-function fallback stops
- * being a curiosity and becomes the biggest single cost in the report: every
- * value in a function this size goes through the stack. Below it, splitting the
- * function out costs the reader more than the spills do. */
 #define IR_EXPLAIN_BACKEND_LARGE_INSTRUCTIONS 64
 
-/* True when `callee` had a loop of its own vectorized. */
 static int ir_explain_function_vectorized(const char *callee) {
   for (size_t i = 0; i < g_remark_count; i++) {
     const IRExplainRemark *r = &g_remarks[i];
@@ -3752,9 +3336,6 @@ static int ir_explain_function_vectorized(const char *callee) {
   return 0;
 }
 
-/* The calls this function inlined that brought a vectorized loop in with them.
- * Writes "kernel inlined from `imap` @ line 19" (or a list) into `buf` and
- * returns the first such line, or 0 when there are none. */
 static size_t ir_explain_inlined_kernel_calls(const char *function_name,
                                               char *buf, size_t cap) {
   size_t first = 0, listed = 0, w = 0;
@@ -3788,14 +3369,6 @@ static size_t ir_explain_inlined_kernel_calls(const char *function_name,
   return first;
 }
 
-/* Where this function's vectorized loops are, when a SIMD kernel is what made
- * it ineligible. Falling back is always ABOUT a construct in the source, and
- * "contains simd_vloop_i32" is not something a reader can act on without being
- * told which loop that is. Writes "loop @ line 29" or "loops @ lines 12, 20,
- * 29" into `buf` and returns the first line, or returns 0 and leaves `buf`
- * empty when no vectorized loop was recorded for the function. A function that
- * inlined several kernels gets all of them listed: picking one would be a
- * guess, and the list is short enough to read. */
 #define IR_EXPLAIN_KERNEL_LINES_MAX 4
 static size_t ir_explain_kernel_loop_lines(const char *function_name, char *buf,
                                            size_t cap) {
@@ -3819,10 +3392,6 @@ static size_t ir_explain_kernel_loop_lines(const char *function_name, char *buf,
     }
   }
   if (found == 0) {
-    /* No kernel of its own. A function reaches this gate with a kernel it
-     * never wrote all the time: inlining brings the callee's vectorized loop
-     * in with it. Pointing at the call is what lets the reader act -- the
-     * loop to move out is on the other side of it. */
     return buf && cap ? ir_explain_inlined_kernel_calls(function_name, buf, cap)
                       : 0;
   }
@@ -3844,9 +3413,6 @@ static size_t ir_explain_kernel_loop_lines(const char *function_name, char *buf,
   return lines[0];
 }
 
-/* True when the gate declined because of a SIMD kernel it cannot pass through,
- * as opposed to something about the function itself. The two need opposite
- * advice, and only the kernel families have a loop to point the reader at. */
 static int ir_explain_backend_detail_is_kernel(const char *detail) {
   if (!detail) {
     return 0;
@@ -3864,23 +3430,11 @@ static int ir_explain_backend_detail_is_kernel(const char *detail) {
          strncmp(detail, "vloop:", 6) == 0;
 }
 
-/* Translate the MIR gate's terse reason codes ("op:37", "vloop:width", ...)
- * into a sentence, plus what falling back actually COSTS and what the user can
- * do about it.
- *
- * Two families, and they need opposite advice. A SIMD kernel the allocator
- * cannot pass through still runs at full vector speed; only the scalar code
- * around it spills, so on a small function there is nothing worth doing. Every
- * other cause spills the whole function for a construct the reader chose. Both
- * turn actionable once the function is large, which is why size decides whether
- * the advice is an instruction or a note. */
 static void ir_explain_backend_reason(const IRExplainBackendEntry *e, char *buf,
                                       size_t cap, const char **consequence,
                                       const char **fix, int *advisory) {
   *consequence = NULL;
   *fix = NULL;
-  /* The same distinction the loop remarks draw: advice that says nothing
-     needs doing is a note, not an instruction. */
   *advisory = 0;
   if (!e->detail) {
     snprintf(buf, cap, "declined by the eligibility gate");
@@ -3894,8 +3448,6 @@ static void ir_explain_backend_reason(const IRExplainBackendEntry *e, char *buf,
       "every value in the function is kept on the stack instead of in "
       "registers";
 
-  /* Shared closing for every SIMD-kernel cause: same consequence, same fix,
-   * and the fix names the loop to move when there is one to name. */
   const char *kernel_family = NULL;
   char kernel_desc[192];
   kernel_desc[0] = '\0';
@@ -3921,8 +3473,6 @@ static void ir_explain_backend_reason(const IRExplainBackendEntry *e, char *buf,
              strncmp(e->detail, "slp_mac:", 8) == 0 ||
              strncmp(e->detail, "silu:", 5) == 0 ||
              strncmp(e->detail, "kernel:", 7) == 0) {
-    /* A kernel whose inline-passthrough subset doesn't cover this loop's exact
-     * shape (a mode-2 fill, an affine map with a runtime coefficient). */
     const char *kernel = "a SIMD kernel";
     if (strncmp(e->detail, "simd_fill:", 10) == 0) {
       kernel = "the fill kernel `simd_fill`";
@@ -4013,7 +3563,6 @@ static void ir_explain_backend_reason(const IRExplainBackendEntry *e, char *buf,
     return;
   }
 
-  /* One SIMD-kernel ending for all of the above. */
   snprintf(buf, cap, "%s", kernel_family);
   *consequence = kernel_consequence;
   if (large) {
@@ -4034,9 +3583,6 @@ static size_t ir_explain_collect_backend_plan(IRExplainBackendPlan *out) {
     if (e->ok || e->instructions < IR_EXPLAIN_BACKEND_LARGE_INSTRUCTIONS) {
       continue;
     }
-    /* --explain=SELECTOR narrows the prose, and a fallback answers to the
-     * function it happened in: name that function and it belongs, otherwise
-     * the reader asked about something else. */
     if (g_explain_filter && (!e->function_name ||
                              strcmp(g_explain_filter, e->function_name) != 0)) {
       continue;
@@ -4047,9 +3593,8 @@ static size_t ir_explain_collect_backend_plan(IRExplainBackendPlan *out) {
     ir_explain_backend_reason(e, reason, sizeof(reason), &consequence, &fix,
                               &advisory);
     if (advisory || !fix) {
-      continue; /* nothing to do about it is not a plan entry */
+      continue;
     }
-    /* Insert by size: the largest fallback is the most expensive one. */
     size_t at = found;
     while (at > 0 && e->instructions > out[at - 1].instructions_sort) {
       at--;
@@ -4083,8 +3628,6 @@ static size_t ir_explain_collect_backend_plan(IRExplainBackendPlan *out) {
   return found;
 }
 
-/* Sort helper: biggest functions first -- size is where baseline codegen
- * costs, so the list reads as a priority queue. */
 static int ir_explain_backend_size_compare(const void *a, const void *b) {
   const IRExplainBackendEntry *ea = a, *eb = b;
   if (ea->instructions != eb->instructions) {
@@ -4140,15 +3683,10 @@ void ir_explain_backend_flush(void) {
           g_backend_count - ok_count == 1 ? "" : "s",
           g_backend_count - ok_count == 1 ? "s" : "");
 
-      /* Group the bailed entries by their rendered reason sentence, ordered
-       * by the group's total instruction count (where the cost actually
-       * is). Entries were sorted by size already, so each group's function
-       * list reads largest-first. */
       qsort(g_backend, g_backend_count, sizeof(IRExplainBackendEntry),
             ir_explain_backend_size_compare);
       char *grouped = calloc(g_backend_count, 1);
       for (;;) {
-        /* Pick the ungrouped reason with the largest remaining total. */
         char best_reason[256];
         const char *best_consequence = NULL, *best_fix = NULL;
         int best_advisory = 0;
@@ -4189,8 +3727,6 @@ void ir_explain_backend_flush(void) {
           break;
         }
 
-        /* Render the group: header, consequence/fix once, then the largest
-         * members with sizes. */
         size_t members = 0;
         for (size_t j = best_first; j < g_backend_count; j++) {
           if (g_backend[j].ok || (grouped && grouped[j])) {
@@ -4246,9 +3782,6 @@ void ir_explain_backend_flush(void) {
           if (strcmp(best_reason, reason_j) != 0) {
             continue;
           }
-          /* Name the loop per member, not in the shared fix: one group can
-           * hold functions whose kernels sit on different lines, and a single
-           * line quoted above them would be wrong for all but one. */
           char lines[96];
           lines[0] = '\0';
           size_t kernel_line =
@@ -4302,7 +3835,7 @@ void ir_explain_backend_flush(void) {
           }
         }
         if (!grouped) {
-          break; /* allocation failed: rendered the largest group, stop */
+          break;
         }
       }
       free(grouped);
@@ -4312,16 +3845,12 @@ void ir_explain_backend_flush(void) {
 
   ir_explain_json_raw("]},");
 
-  /* Both need the backend decisions, so they land here rather than in the
-   * optimization-stage flush. */
   ir_explain_functions_json();
   ir_explain_loop_costs_json();
   ir_explain_call_graph_json();
   ir_explain_hotspots_json();
   ir_explain_passes_json();
 
-  /* Every section the plan ranks now exists. Render it before the tables it
-   * reads are released. */
   ir_explain_splice_plan();
 
   for (size_t i = 0; i < g_loop_cost_count; i++) {
@@ -4381,12 +3910,6 @@ void ir_explain_target_flush(const char *target_name) {
   ir_explain_finalize(0);
 }
 
-/* ---- hypothesis clone ------------------------------------------------------
- * A scratch deep copy of a function for simulating a suggested fix: the
- * caller mutates the clone, re-runs the vectorization stages on it, inspects
- * the result, and destroys it. Parameter names/types are copied because the
- * recognizers consult them (e.g. the uint8* gate on the byte-sum kernel). */
-
 IRFunction *ir_explain_clone_function(const IRFunction *src) {
   if (!src) {
     return NULL;
@@ -4415,10 +3938,6 @@ IRFunction *ir_explain_clone_function(const IRFunction *src) {
   }
   return clone;
 }
-
-/* ---- kernel descriptions --------------------------------------------------
- * What a vectorized loop actually became, in instruction-level terms a
- * performance programmer recognizes. */
 
 void ir_explain_kernel_desc(const IRInstruction *ins, char *buf, size_t cap) {
   if (!ins) {
@@ -4556,8 +4075,6 @@ void ir_explain_kernel_desc(const IRInstruction *ins, char *buf, size_t cap) {
   }
 }
 
-/* Render the --ml-opt report from the native pass's TSV (fn, gidx, kind, before,
- * after, saved, line, file), styled like the main report. */
 static const char *glyph_ellipsis(void) {
   return ir_explain_use_unicode() ? "\xE2\x80\xA6" : "..";
 }
@@ -4610,7 +4127,7 @@ void ir_explain_ml_opt(const char *path) {
     int skipped = verdict && strcmp(verdict, "skipped") == 0;
     int proven = verdict && strcmp(verdict, "proven") == 0;
     if (skipped) {
-      continue; /* declined applier or unverifiable speculative: never stood */
+      continue;
     }
     int sv = saved ? atoi(saved) : 0;
     long src_line = line ? atol(line) : 0;
@@ -4631,7 +4148,7 @@ void ir_explain_ml_opt(const char *path) {
     ml_fit(before, 30, bbuf, sizeof bbuf);
     if (src_line > 0) snprintf(loc, sizeof loc, "line %ld", src_line);
     else snprintf(loc, sizeof loc, "ir#%s", gi ? gi : "?");
-    const char *aft = (after[0] == '@') ? after + 1 : after;   /* drop sigil */
+    const char *aft = (after[0] == '@') ? after + 1 : after;
     fprintf(stderr, "    %s%s %-9s%s %s  %s  %s %s%s%s",
             clr(EXPLAIN_DIM), glyph_elbow(), loc, clr(EXPLAIN_RESET), kbuf, bbuf,
             glyph_arrow(), rejected ? clr(EXPLAIN_RED) : clr(EXPLAIN_GREEN), aft,

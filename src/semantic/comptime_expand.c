@@ -1,40 +1,14 @@
-/* Compile-time loop expansion.
- *
- * `comptime for f in typeof(T).fields { ... }` is not a loop the backend ever
- * sees. It is expanded here, during const eval, into one copy of the body per
- * field, each with `f` bound to a different compile-time Field. It has to run
- * before the body is type checked because that is the whole point: `f.type` is
- * a different type in every copy, so one copy can check clean while the next
- * fails, and a single shared check of the body could not tell you which.
- *
- * Every expansion registers a note frame here rather than in a later pass. The
- * attribution is only correct while the expansion that produced the code is
- * the one in progress, so it is captured then -- see
- * error_reporter_push_note_frame.
- *
- * The expanded blocks replace the `comptime for` node in its parent, so nothing
- * after this pass sees an AST_COMPTIME_FOR: lowering, the borrow checker, and
- * the contract checkers all walk ordinary blocks, and hold generated code to
- * exactly the standard hand-written code is held to. */
 #include "type_checker_internal.h"
 #include <ctype.h>
 
-/* One iteration's contribution to the context a generated node is checked in:
- * the binding it introduced, and the note that says which iteration that was. */
 typedef struct {
   const char *binding_name;
   ComptimeValue binding_value;
-  /* What the binding reads as: the row's own type for a table of values, and
-     NULL when the value's kind is enough to say (a field, a row). */
   Type *binding_type;
   const char *note;
   SourceSpan origin;
 } ComptimeFrame;
 
-/* A generated node and every frame it was generated under, outermost first. A
- * node from a nested `comptime for` at module scope needs all of them: the
- * inner body can read the outer field, and there is no enclosing scope holding
- * it the way there would be inside a function. */
 typedef struct {
   ASTNode *block;
   char *note;
@@ -46,8 +20,6 @@ typedef struct {
   size_t inherited_count;
 } ComptimeExpansion;
 
-/* The binding stack. Each slot carries the note of the iteration that pushed
- * it, so a node registered while it is in effect can inherit both. */
 struct ComptimeBindingSlot {
   Symbol *symbol;
   const char *note;
@@ -64,11 +36,6 @@ static int resolve_composed_names(TypeChecker *checker, ASTNode *node);
 static int capture_inherited(TypeChecker *checker, ComptimeExpansion *entry,
                              size_t count);
 
-/* What one `comptime for` site cost, so expansion can be held to a budget
- * rather than quietly becoming the reason builds got slow. Metaprogramming is
- * the most reliable way in the history of programming languages to destroy a
- * build time, and in every case the collapse was gradual and unattributed --
- * so the ledger exists from the first metaprogram, not after the regression. */
 typedef struct {
   SourceLocation location;
   const char *type_name;
@@ -76,8 +43,6 @@ typedef struct {
   size_t nodes;
 } ComptimeSiteCost;
 
-/* Open-addressed map from an expanded block to its expansion, so looking one
- * up while checking a block stays O(1) no matter how many were generated. */
 struct ComptimeExpansionTable {
   ComptimeExpansion *slots;
   size_t capacity;
@@ -87,8 +52,6 @@ struct ComptimeExpansionTable {
   size_t cost_capacity;
 };
 
-/* Nodes an expansion added, counted on the clone rather than estimated from
- * the source, so the ledger reports what was actually generated. */
 static size_t ast_node_count(const ASTNode *node) {
   if (!node) {
     return 0;
@@ -164,7 +127,7 @@ static int expansion_table_put(ComptimeExpansionTable *table,
   size_t at = expansion_hash(entry.block, table->capacity);
   while (table->slots[at].block) {
     if (table->slots[at].block == entry.block) {
-      return 0; /* a block is expanded once */
+      return 0;
     }
     at = (at + 1) & (table->capacity - 1);
   }
@@ -216,8 +179,6 @@ size_t type_checker_expansion_total_nodes(const TypeChecker *checker) {
   return total;
 }
 
-/* The ledger. Printed by --report-expansion, and the same numbers a build
- * budget is checked against, so what you are shown is what you are held to. */
 void type_checker_report_expansion(const TypeChecker *checker, FILE *out) {
   if (!out) {
     return;
@@ -237,9 +198,6 @@ void type_checker_report_expansion(const TypeChecker *checker, FILE *out) {
             checker->comptime_text_bytes);
   }
   if (sites == 0) {
-    /* An absence worth stating: a program that expanded nothing paid nothing,
-     * and saying so is the difference between a cost you avoided and a cost
-     * you merely hope you avoided. */
     fprintf(out, "comptime expansion: no sites; nothing generated\n");
     return;
   }
@@ -261,9 +219,6 @@ void type_checker_report_expansion(const TypeChecker *checker, FILE *out) {
   }
 }
 
-/* A budget is a contract, so exceeding it fails the build and names the site
- * that cost the most -- the same shape as @simd! and @noalloc refusing to
- * under-deliver quietly. */
 int type_checker_check_expansion_budget(TypeChecker *checker, size_t budget) {
   size_t total = type_checker_expansion_total_nodes(checker) +
                  checker->comptime_text_bytes;
@@ -287,22 +242,15 @@ int type_checker_check_expansion_budget(TypeChecker *checker, size_t budget) {
   return 0;
 }
 
-/* What a `comptime for` iterates. Two sequences exist: the fields of a type,
- * which reflect on what the program declared, and the rows of a constant
- * table, which are what the program wrote down. Each hands one binding value
- * to each iteration, and says how to name that iteration in a diagnostic. */
 typedef struct {
   int is_table;
-  Type *owner;       /* the type whose fields are iterated, or the row type */
+  Type *owner;
   uint32_t owner_index;
-  const char *label; /* what the cost ledger and messages call the sequence */
+  const char *label;
   size_t count;
-  AggregateLiteral *table; /* table only: the literal holding the rows */
+  AggregateLiteral *table;
 } ComptimeSource;
 
-/* The module-scope `const NAME = [ ... ]` declaration, found in the program
- * rather than in the symbol table: module-scope expansion runs before any
- * `const` has been declared, and a table has to be readable there. */
 static ASTNode *module_const_initializer(TypeChecker *checker,
                                          const char *name, Type **out_type) {
   Program *module = NULL;
@@ -334,9 +282,6 @@ static ASTNode *module_const_initializer(TypeChecker *checker,
   return NULL;
 }
 
-/* `NAME.rows`, where NAME is a constant table: an array of constants. Returns
- * 0 when the expression is not that shape, having reported nothing, so the
- * caller can try the other sequence; -1 when it is that shape and wrong. */
 static int resolve_table_sequence(TypeChecker *checker, ASTNode *sequence,
                                   ComptimeSource *out) {
   MemberAccess *member =
@@ -400,13 +345,10 @@ static int resolve_table_sequence(TypeChecker *checker, ASTNode *sequence,
   out->owner_index = type_checker_intern_type(checker, out->owner);
   out->label = named->name;
   out->table = literal;
-  /* The rows are the ones written. A short literal leaves the rest of the
-     array zeroed, and a zero row is not something to generate from. */
   out->count = literal->element_count;
   return 1;
 }
 
-/* Resolve the `comptime for` sequence: `<type>.fields`, or `TABLE.rows`. */
 static int resolve_sequence(TypeChecker *checker, ASTNode *sequence,
                             ComptimeSource *out) {
   int table = 0;
@@ -467,9 +409,6 @@ static int resolve_sequence(TypeChecker *checker, ASTNode *sequence,
   return 1;
 }
 
-/* What a diagnostic raised inside this iteration says about where it came from.
- * Written once: `mettle expand` prints it as a comment and the reporter prints
- * it as a note, and the two have to agree. */
 static void iteration_note(char *out, size_t capacity,
                            const ComptimeSource *source, const TypeField *field,
                            size_t index) {
@@ -482,12 +421,6 @@ static void iteration_note(char *out, size_t capacity,
            index + 1, field && field->name ? field->name : "<anonymous>");
 }
 
-/* The value the binding takes for one iteration. A field iteration hands out a
- * reference to the field; a table iteration hands out the row itself, whose
- * columns are read straight from the literal the program wrote. */
-/* The type a table of plain values binds its element as: the element type the
- * table declared, so a table of `int32` binds an `int32`. A table of rows and
- * a type's fields both say what they are through the value's kind. */
 static Type *binding_declared_type(const ComptimeSource *source) {
   if (!source || !source->is_table || !source->owner) {
     return NULL;
@@ -505,8 +438,6 @@ static ComptimeValue iteration_value(TypeChecker *checker,
     if (row && row->type == AST_AGGREGATE_LITERAL) {
       return comptime_row(row->data, source->owner_index, (uint32_t)index);
     }
-    /* A table of plain values has no columns to name, so the binding is the
-       value itself: `comptime for name in NAMES.rows` binds the string. */
     {
       ComptimeValue scalar = comptime_none();
       if (row && type_checker_eval_comptime(checker, row, &scalar)) {
@@ -518,10 +449,6 @@ static ComptimeValue iteration_value(TypeChecker *checker,
   return comptime_field_ref(source->owner_index, (uint32_t)index);
 }
 
-/* Record a cloned expansion against the binding it runs under and the note that
- * attributes it back to the `comptime for` that produced it. `inherit_count` is
- * how many frames were in effect before this iteration pushed its own, which is
- * exactly what the clone inherits. */
 static int register_expansion(TypeChecker *checker,
                               ComptimeForStatement *directive, ASTNode *clone,
                               const ComptimeSource *source,
@@ -568,8 +495,6 @@ static int read_field(TypeChecker *checker, ComptimeForStatement *directive,
   return 0;
 }
 
-/* Build one iteration: a clone of the body registered with the binding it runs
- * under and the note that attributes it back to the `comptime for`. */
 static ASTNode *expand_iteration(TypeChecker *checker,
                                  ComptimeForStatement *directive,
                                  const ComptimeSource *source,
@@ -590,9 +515,6 @@ static ASTNode *expand_iteration(TypeChecker *checker,
     return NULL;
   }
 
-  /* A local declaration inside the body can compose its name too, and it is
-   * resolved here for the same reason a module-scope one is: this is the only
-   * point at which the binding has a value. */
   SourceSpan origin = source_span_from_location(directive->keyword_location,
                                                 strlen("comptime"));
   size_t inherit_count = checker->comptime_binding_count;
@@ -620,7 +542,6 @@ static ASTNode *expand_iteration(TypeChecker *checker,
   return clone;
 }
 
-/* The declaration name a generated node carries, for the collision check. */
 static const char *declaration_name(const ASTNode *node) {
   switch (node->type) {
   case AST_FUNCTION_DECLARATION: {
@@ -648,11 +569,6 @@ static const char *declaration_name(const ASTNode *node) {
   }
 }
 
-/* One iteration at module scope: the body's declarations, cloned individually
- * with their names composed, so each lands in the module rather than inside a
- * block the module would have to look through.
- *
- * Appends to `out`; the caller owns everything appended either way. */
 static int expand_declaration_iteration(TypeChecker *checker,
                                         ComptimeForStatement *directive,
                                         const ComptimeSource *source,
@@ -708,9 +624,6 @@ static int expand_declaration_iteration(TypeChecker *checker,
   return ok;
 }
 
-/* Two iterations that generate the same name mean one of them is not in the
- * program, and a generator that quietly drops half its output is the kind of
- * under-delivery contracts exist to prevent. */
 static int check_generated_names(TypeChecker *checker,
                                  ComptimeForStatement *directive,
                                  ASTNode **generated, size_t count) {
@@ -735,15 +648,11 @@ static int check_generated_names(TypeChecker *checker,
   return 1;
 }
 
-/* The binding symbol, built the same way the statement-scope path builds it so
- * a generated declaration sees exactly what a generated block would. */
 static Symbol *binding_symbol(TypeChecker *checker, const char *name,
                               ComptimeValue value, Type *declared,
                               SourceSpan origin) {
   Type *binding_type = declared ? declared : checker->builtin_field;
   Symbol *symbol = NULL;
-  /* A row answers to its columns, and a plain value is that value: a table of
-     strings binds a string, which reads as one wherever it is written. */
   if (value.kind == COMPTIME_ROW) {
     binding_type = checker->builtin_row;
   } else if (!declared) {
@@ -824,8 +733,6 @@ Symbol *type_checker_lookup_expansion_binding(const TypeChecker *checker,
   if (!checker || !name) {
     return NULL;
   }
-  /* Innermost first: a nested `comptime for` reusing an outer binding's name
-   * gets its own value, which is what a scope would have done. */
   for (size_t i = checker->comptime_binding_count; i > 0; i--) {
     Symbol *binding = checker->comptime_bindings[i - 1].symbol;
     if (binding && binding->name && strcmp(binding->name, name) == 0) {
@@ -835,8 +742,6 @@ Symbol *type_checker_lookup_expansion_binding(const TypeChecker *checker,
   return NULL;
 }
 
-/* Snapshot the frames in effect, so a node generated by a nested directive can
- * be checked later under the same context it was generated under. */
 static int capture_inherited(TypeChecker *checker, ComptimeExpansion *entry,
                              size_t count) {
   entry->inherited = NULL;
@@ -890,8 +795,6 @@ void type_checker_enter_expansion_decl(TypeChecker *checker,
   if (!entry) {
     return;
   }
-  /* Outermost first, so the reported chain reads the way the source nests and
-   * an inner binding shadows an outer one of the same name. */
   for (size_t i = 0; i < entry->inherited_count; i++) {
     push_frame(checker, entry->inherited[i].binding_name,
                entry->inherited[i].binding_value,
@@ -917,9 +820,6 @@ void type_checker_leave_expansion_decl(TypeChecker *checker,
   }
 }
 
-/* A composed name has to be spellable, or the program it generates could not
- * have been written by hand -- which is the standard generated code is held
- * to everywhere else here. */
 static int is_identifier_text(const char *text) {
   if (!text || !*text) {
     return 0;
@@ -935,9 +835,6 @@ static int is_identifier_text(const char *text) {
   return 1;
 }
 
-/* Join `ident("prefix", f.name)` into the name the declaration will carry.
- * Evaluated here rather than during checking because this is the only point at
- * which the iteration's binding has a value and the name is still changeable. */
 static const char *compose_name(TypeChecker *checker, ASTNode *composed) {
   char joined[512];
   size_t length = 0;
@@ -977,25 +874,15 @@ static const char *compose_name(TypeChecker *checker, ASTNode *composed) {
   return string_intern(joined);
 }
 
-/* Resolve every composed name in a freshly cloned expansion, with the
- * iteration's binding in effect: the name a declaration takes, and every
- * reference to one, so a generated declaration can be reached from the
- * iteration that generated it. */
 static int resolve_composed_names(TypeChecker *checker, ASTNode *node) {
   if (!node) {
     return 1;
   }
 
-  /* A nested `comptime for` resolves its own names when it expands, under its
-   * own binding. Reaching into it from out here would ask about a binding that
-   * does not have a value yet. */
   if (node->type == AST_COMPTIME_FOR) {
     return 1;
   }
 
-  /* `ident(...)` where a value goes: the name of something this iteration
-   * generated. Folded to that name, so nothing after this pass sees a call to
-   * a function that was never declared. */
   if (node->type == AST_FUNCTION_CALL) {
     CallExpression *call = (CallExpression *)node->data;
     if (call && call->function_name &&
@@ -1071,16 +958,10 @@ static int resolve_composed_names(TypeChecker *checker, ASTNode *node) {
   return 1;
 }
 
-/* An `ident(...)` still standing after expansion was written where no
- * `comptime for` could reach it. Reported here rather than left to fail as a
- * missing name, which would point at the wrong thing. */
 int type_checker_check_composed_names(TypeChecker *checker, ASTNode *node) {
   if (!checker || !node) {
     return 1;
   }
-  /* A directive still standing is one the expander refused and has already
-   * reported on. The unresolved names inside it are that failure, not a second
-   * one. */
   if (node->type == AST_COMPTIME_FOR) {
     return 1;
   }
@@ -1207,10 +1088,6 @@ static int expand_one_round(TypeChecker *checker, ASTNode *block,
     }
   }
 
-  /* Build the replacement list first and swap it in only once every directive
-   * has expanded. A directive that fails halfway leaves the block exactly as
-   * it was, so the AST stays consistent for the rest of the walk and the
-   * remaining statements still get checked and reported on. */
   ASTNode **expanded = NULL;
   size_t expanded_count = 0;
   size_t expanded_capacity = 0;
@@ -1226,17 +1103,9 @@ static int expand_one_round(TypeChecker *checker, ASTNode *block,
 
     ComptimeDeclScope outer = {0, 0};
 
-    /* One directive per round at module scope: the types the last one
-     * generated are registered before this one resolves its sequence, which is
-     * what lets a directive reflect on what an earlier directive wrote. A
-     * directive left for the next round is copied over untouched. */
     if (child && child->type == AST_COMPTIME_FOR &&
         !(one_directive && retired > 0)) {
       retired++;
-      /* A directive this expansion generated is expanded under the binding
-       * that generated it, so a nested `comptime for` at module scope can
-       * still read the outer field. Inside a block the enclosing scope does
-       * this; a module has no such scope, so it is pushed around the round. */
       type_checker_enter_expansion_decl(checker, child, &outer);
 
       ComptimeForStatement *directive = (ComptimeForStatement *)child->data;
@@ -1255,8 +1124,6 @@ static int expand_one_round(TypeChecker *checker, ASTNode *block,
         break;
       }
 
-      /* Zero fields, or zero rows, expands to nothing. That is an answer,
-         not an error. */
       size_t iterations = source.count;
       Program *body = (Program *)directive->body->data;
       size_t per_iteration =
@@ -1287,8 +1154,6 @@ static int expand_one_round(TypeChecker *checker, ASTNode *block,
         if (ok && module_scope) {
           ok = check_generated_names(checker, directive, owned, produced);
         }
-        /* A partial expansion is still counted: what a failed directive cost
-         * before it failed is real, and the ledger reports what happened. */
         size_t generated = 0;
         for (size_t k = 0; k < produced; k++) {
           generated += ast_node_count(owned[k]);
@@ -1339,17 +1204,10 @@ static int expand_one_round(TypeChecker *checker, ASTNode *block,
     }
   }
   if (!ok) {
-    /* Clones already handed to the expansion table stay alive: the table keys
-     * on their addresses, and a freed address could be handed back out and
-     * match a block that was never expanded. */
     free(expanded);
     return 0;
   }
 
-  /* Committed. The `comptime for` nodes this round consumed are unreachable
-   * now, and their bodies were cloned, so retiring them cannot touch an
-   * expansion. A directive held back for the next round is still in the list
-   * and is left alone. */
   for (size_t i = 0; i < program->declaration_count; i++) {
     ASTNode *child = program->declarations[i];
     int carried = 0;
@@ -1379,16 +1237,9 @@ static int expand_one_round(TypeChecker *checker, ASTNode *block,
 int type_checker_expand_comptime_block(TypeChecker *checker, ASTNode *block,
                                        int module_scope) {
   if (!module_scope) {
-    /* A nested directive inside a block is reached again when that block is
-     * checked, so one round is all a block ever needs. */
     return expand_one_round(checker, block, 0, 0);
   }
 
-  /* A directive that generates a directive leaves the new one in the module,
-   * where no later pass would look for it. So module scope expands until there
-   * is nothing left. Each round retires every directive it can see, and the
-   * ones it uncovers came from a shallower nesting level in the source, so the
-   * rounds are bounded by how deeply the program nested them. */
   for (;;) {
     Program *program;
     size_t remaining = 0;
@@ -1396,10 +1247,6 @@ int type_checker_expand_comptime_block(TypeChecker *checker, ASTNode *block,
       return 0;
     }
     checker->expansion_rounds++;
-    /* Register what this round generated before the next directive resolves
-     * its sequence. That is the fixed point the abstraction kind needs: a
-     * generated type is a type, and the next directive reflects on it the way
-     * it reflects on a written one. */
     if (!type_checker_register_generated_types(checker, block)) {
       return 0;
     }

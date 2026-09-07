@@ -1,6 +1,5 @@
 #include "ir_optimize_internal.h"
 
-/* ---- recovered optimizer passes ---- */
 int ir_instruction_insert_move(IRFunction *function, size_t index,
                                       IRInstruction *instruction) {
   if (!function || !instruction || index > function->instruction_count) {
@@ -24,7 +23,6 @@ int ir_instruction_insert_move(IRFunction *function, size_t index,
   function->instructions[index] = *instruction;
   function->instruction_count++;
 
-  /* A move: the array now owns the tensor block. */
   instruction->tensor = NULL;
   instruction->op = IR_OP_NOP;
   instruction->dest = ir_operand_none();
@@ -63,7 +61,6 @@ int ir_match_forward_i32_index(const IRInstruction *index_prod,
       ir_operand_is_int_value(&index_prod->rhs, 2)) {
     return 1;
   }
-  /* Lowering emits index * elem_size before later strength-reduction to <<. */
   if (strcmp(index_prod->text, "*") == 0 &&
       ir_operand_is_int_value(&index_prod->rhs, 4)) {
     return 1;
@@ -199,10 +196,6 @@ int ir_ptr_induction_iv_start_value(const IRFunction *function,
     }
   }
 
-  /* Fallback when straight-line scanning hit a label: the init is only
-   * trustworthy if it is the iv's ONLY write before the header. With several
-   * writes (an if/else init, a previous loop's increment) the first constant
-   * assign found says nothing about the value actually entering the loop. */
   {
     const IRInstruction *init = NULL;
     for (size_t i = 0; i < header_index; i++) {
@@ -253,11 +246,6 @@ static int ir_ptr_binding_find(IRPtrBaseBinding *bindings, size_t count,
   return -1;
 }
 
-/* 1 on success, -1 when the fixed binding table is full (the loop simply has
- * more distinct bases or address temps than the transform can carry: decline
- * it), 0 only for an allocation failure. Running out of slots is a routine
- * property of the input, and reporting it as a pass failure turned a loop the
- * transform merely could not hold into a compiler crash. */
 static int ir_ptr_binding_add(IRPtrBaseBinding *bindings, size_t *count,
                               size_t header_index, const char *base,
                               const char *addr_temp) {
@@ -364,11 +352,6 @@ static int ir_ptr_induction_rewrite_instruction(
   return 1;
 }
 
-/* `keep_iv` converts the bound accesses while leaving the counter machinery
- * in place: the increment and the iv-fed shifts stay, and whatever becomes
- * unread dies in the ordinary dead-temp sweep. The sound way to convert a
- * loop where something else still reads the counter (a reversed index, a
- * stored counter value); deleting the increment used to freeze it. */
 static int ir_ptr_induction_should_drop_body_insn(
     const IRInstruction *ins, const IRPtrBaseBinding *bindings,
     size_t binding_count, const char *iv_symbol, int keep_iv) {
@@ -394,11 +377,6 @@ static int ir_ptr_induction_should_drop_body_insn(
   return 0;
 }
 
-/* True when this instruction's value can only reach the address temps the
- * transform deletes: a pure temp-producer whose every reader, transitively,
- * is dropped or is such a producer itself. Anything observable -- a symbol
- * write, a store of the value, a read outside the loop -- keeps the counter
- * alive and refuses the conversion. */
 static int ir_ptr_iv_chain_dies_in_drops(const IRFunction *function,
                                          size_t body_start, size_t body_end,
                                          const IRPtrBaseBinding *bindings,
@@ -440,10 +418,8 @@ static int ir_ptr_iv_chain_dies_in_drops(const IRFunction *function,
       continue;
     }
     if (j < body_start || j >= body_end) {
-      return 0; /* the value escapes the loop */
+      return 0;
     }
-    /* A store is never dropped, only retargeted: its ADDRESS read disappears
-     * when the address is a bound temp, but its VALUE is observable. */
     if (reader->op == IR_OP_STORE) {
       int as_value =
           (reader->lhs.kind == IR_OPERAND_TEMP && reader->lhs.name &&
@@ -458,7 +434,6 @@ static int ir_ptr_iv_chain_dies_in_drops(const IRFunction *function,
       }
       continue;
     }
-    /* Same for a load: its address read is replaced when bound. */
     if (reader->op == IR_OP_LOAD) {
       if (reader->lhs.kind == IR_OPERAND_TEMP && reader->lhs.name &&
           strcmp(reader->lhs.name, temp) == 0 &&
@@ -481,12 +456,6 @@ static int ir_ptr_iv_chain_dies_in_drops(const IRFunction *function,
   return 1;
 }
 
-/* Leave PURE reductions (a self-accumulate `acc = acc OP <loaded>`, acc != iv,
- * and NO array store) alone: the SIMD sum/dot recognizers handle them far
- * better but need the loop in INDEXED form, and walking the load pointer here
- * would hide that shape. A loop that ALSO stores to an array is a real map
- * (sum_i32 etc. won't claim it anyway), so pointer-induction must still run.
- * Safe -- this only declines an optimization, never changes results. */
 static int ir_ptr_loop_is_pure_reduction(const IRFunction *function,
                                          size_t body_start, size_t body_end,
                                          const char *iv_symbol) {
@@ -571,13 +540,6 @@ static int ir_ptr_collect_bindings(const IRFunction *function,
   return 1;
 }
 
-/* The counter is deleted along with its increment, so nothing may read it
- * except computation that dies into the dropped address temps. When something
- * else DOES read it -- a reversed index chain, a stored counter value -- the
- * loop still converts, but in keep-the-counter mode: the increment and iv-fed
- * shifts stay, and only the bound address producers are dropped. Previously
- * such loops either froze the counter (a stored `i * 2` went stale: the gather
- * test's silent miscompile) or bailed. */
 static int ir_ptr_must_keep_counter(const IRFunction *function,
                                     size_t body_start, size_t body_end,
                                     const IRPtrBaseBinding *bindings,
@@ -589,16 +551,6 @@ static int ir_ptr_must_keep_counter(const IRFunction *function,
     if (ins->op == IR_OP_NOP) {
       continue;
     }
-    /* Only two kinds of instruction are droppable without asking who reads
-     * them: a bound address producer, which the rewrite replaces, and the
-     * counter's own increment, which goes with the counter.
-     *
-     * `iv << k` is NOT one of them. Asking should_drop_body_insn here counted
-     * every iv-fed shift as address scaling and skipped it before the chain
-     * analysis below could see it, so `for i in 0..n { arr[i] = i * 4 + 1; }`
-     * -- where one shift feeds the address and an identical one feeds the
-     * stored value -- lost the value's shift and wrote the same number into
-     * every element. */
     if (ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
         ir_ptr_lookup_addr_temp(bindings, binding_count, ins->dest.name)) {
       continue;
@@ -746,8 +698,6 @@ static int ir_ptr_emit_loop(IRFunction *function, size_t header_index,
       continue;
     }
 
-    /* Rewrites are only valid inside this loop; the iv and addr temps may be
-     * reused by later loops that keep their indexed form. */
     if (i <= jump_index &&
         !ir_ptr_induction_rewrite_instruction(&rewritten, bindings,
                                               binding_count, iv_symbol,
@@ -834,18 +784,10 @@ static int ir_try_pointer_induction_at(IRFunction *function, size_t header_index
     return 1;
   }
 
-  /* Likewise leave unit-stride int32 MAPS that the general int vectorizer
-   * claims (it needs the indexed `iv << 2` form; walking the pointers here
-   * would hide the shape and leave the loop scalar). Probed with the real
-   * matcher so this decline tracks the vectorizer's gates exactly; loops it
-   * refuses (division, casts to narrow ints, over-budget DAGs, ...) still
-   * get the pointer walk. */
   if (ir_auto_vectorize_int_claimable(function, header_index)) {
     return 1;
   }
 
-  /* Same for early-exit search loops the find skip-ahead claims: it needs the
-   * indexed `a + (iv << 2)` / `a + iv` form to recognize the predicate. */
   if (ir_auto_vectorize_find_claimable(function, header_index)) {
     return 1;
   }

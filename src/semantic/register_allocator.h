@@ -72,4 +72,4 @@ int register_allocator_is_callee_saved(CallingConventionSpec* spec,
 int register_allocator_is_floating_point_type(Type* type);
 const char* register_allocator_register_name(x86Register reg);
 
-#endif // REGISTER_ALLOCATOR_H
+#endif

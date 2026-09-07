@@ -16,8 +16,6 @@ void arm64_emit_free(Arm64Emit *e) {
 }
 
 void arm64_fail(Arm64Emit *e, const char *fmt, ...) {
-  /* Keep the first cause. Once lowering has failed every later step fails too,
-   * and only the first one tells the user something they can act on. */
   if (!e->error || !e->reason[0]) {
     va_list ap;
     va_start(ap, fmt);
@@ -55,7 +53,6 @@ int arm64_emit_word(Arm64Emit *e, uint32_t word) {
     arm64_fail(e, "out of memory growing the code buffer");
     return 0;
   }
-  /* A64 instruction stream is little-endian; build host is LE so a raw copy. */
   memcpy(e->code.data + e->code.len, &word, 4);
   e->code.len += 4;
   return 1;
@@ -163,8 +160,6 @@ int arm64_emit_label_address(Arm64Emit *e, Arm64Reg rd, int label) {
     return 0;
   }
   size_t at = e->code.len;
-  /* Emit all four words unconditionally: finalize patches the immediates in
-   * place and cannot change the instruction count. */
   int ok = arm64_emit_word(e, arm64_movz(1, rd, 0, 0)) &&
            arm64_emit_word(e, arm64_movk(1, rd, 0, 1)) &&
            arm64_emit_word(e, arm64_movk(1, rd, 0, 2)) &&
@@ -205,7 +200,7 @@ int arm64_emit_finalize(Arm64Emit *e) {
         return 0;
       }
       word = (word & ~0x03FFFFFFu) | ((uint32_t)words & 0x03FFFFFFu);
-    } else { /* ARM64_FIX_IMM19 */
+    } else {
       if (words < -(1L << 18) || words >= (1L << 18)) {
         arm64_fail(e,
                    "conditional branch displacement %ld bytes exceeds the "
@@ -220,8 +215,6 @@ int arm64_emit_finalize(Arm64Emit *e) {
   return 1;
 }
 
-/* mov to/from SP is the add-immediate-#0 form (reg 31 = SP there), NOT the
- * ORR/mov-reg form (reg 31 = XZR). */
 int arm64_emit_prologue(Arm64Emit *e, int frame_bytes, const Arm64Reg *saved,
                         int n_saved) {
   if (frame_bytes < 0 || (frame_bytes & 15) != 0) {
@@ -236,12 +229,6 @@ int arm64_emit_prologue(Arm64Emit *e, int frame_bytes, const Arm64Reg *saved,
     ok = arm64_emit_word(e, arm64_sub_imm(1, ARM64_SP, ARM64_SP,
                                           (uint32_t)frame_bytes, 0));
   } else if (ok && frame_bytes > 4095) {
-    /* Large frame: two subtract-immediates (the second shifted by 12) reach 24
-     * bits and keep sp in the SP-capable immediate slot. The old form
-     * subtracted VIA A REGISTER -- and in the shifted-register encoding, Rd=31
-     * is XZR, not SP: the subtraction went to the zero register, sp never
-     * moved, and every big-frame function ran above the top of its stack. The
-     * epilogue restores sp from x29, so no symmetric work. */
     uint32_t v = (uint32_t)frame_bytes;
     if (v > 0xFFFFFF) {
       arm64_fail(e, "frame of %d bytes exceeds the 16MB prologue reach",
@@ -268,7 +255,6 @@ int arm64_emit_epilogue(Arm64Emit *e, int frame_bytes, const Arm64Reg *saved,
   for (int i = 0; ok && i < n_saved; i++) {
     ok = arm64_emit_word(e, arm64_ldr_imm(1, saved[i], ARM64_SP, 8 * i));
   }
-  /* Restore sp to the FP/LR save slot (mov sp, x29), pop {FP,LR}, return. */
   ok = ok && arm64_emit_word(e, arm64_mov_sp(ARM64_SP, ARM64_X29)) &&
        arm64_emit_word(e, arm64_ldp_post(1, ARM64_X29, ARM64_X30, ARM64_SP,
                                          16)) &&

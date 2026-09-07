@@ -1,34 +1,11 @@
 #include "ir_optimize_internal.h"
 
-/* Tail-recursion elimination. Converts a function's direct self tail calls
- * into parameter rebinding plus a jump back to the function entry, so each
- * eliminated call site costs a loop iteration instead of a stack frame.
- *
- * Three shapes are handled, matched against the exact lowering output
- * (including the empty errdefer diamond emitted before every return):
- *
- *   1. `return self(args)`            -> rebind params, jump entry
- *   2. `self(args); return`  (void)   -> rebind params, jump entry
- *   3. `return E1 + E2 + self(args)`  -> acc += E1 + E2, rebind, jump entry
- *
- * Shape 3 introduces a hidden int64 accumulator initialized to 0 at entry;
- * every OTHER return in the function is rewritten to `return acc + value`.
- * Reordering the additions (accumulating on the way down instead of on the
- * unwind) relies on integer + being associative and commutative, so shape 3
- * is refused for float adds. Runs before the inliner so the remaining
- * non-tail self calls still get bounded self-recursion expansion on the
- * already-looped body. */
-
 typedef struct {
   size_t call_index;
   size_t return_index;
-  /* Instruction indices consumed by this site (call, chain adds, diamond,
-   * return): replaced by the rebind+jump sequence. */
   size_t first_index;
   size_t last_index;
-  /* Accumulator terms: the non-call operand of each chain add, in order. */
   IROperand chain_terms[8];
-  /* Dest temp of each chain add (for the outside-use soundness check). */
   const char *chain_dests[8];
   size_t chain_term_count;
 } IRTailSite;
@@ -49,8 +26,6 @@ static size_t ir_tre_skip_nops(const IRFunction *function, size_t index) {
   return index;
 }
 
-/* Count uses of a temp across the whole function, excluding instructions in
- * [first, last] (the candidate site region). */
 static size_t ir_tre_temp_uses_outside(const IRFunction *function,
                                        const char *temp_name, size_t first,
                                        size_t last) {
@@ -90,15 +65,6 @@ static int ir_tre_label_referenced_outside(const IRFunction *function,
   return 0;
 }
 
-/* Match the empty errdefer diamond the lowerer emits before every return:
- *   ASSIGN tX <- <anything>
- *   BRANCH_ZERO tX -> Lok
- *   JUMP Lend
- *   LABEL Lok
- *   LABEL Lend
- * Returns the index just past the diamond, or `index` unchanged if the shape
- * is not present. A diamond with real errdefer handlers has code between the
- * labels and will not match, which correctly refuses the transform. */
 static size_t ir_tre_skip_errdefer_diamond(const IRFunction *function,
                                            size_t index) {
   size_t i = ir_tre_skip_nops(function, index);
@@ -130,11 +96,9 @@ static size_t ir_tre_skip_errdefer_diamond(const IRFunction *function,
       strcmp(label_end->text, jump->text) != 0) {
     return index;
   }
-  /* The guard temp must not be read anywhere else. */
   if (ir_tre_temp_uses_outside(function, assign->dest.name, i, i + 4) != 0) {
     return index;
   }
-  /* The diamond's labels must not be jump targets from elsewhere. */
   if (ir_tre_label_referenced_outside(function, label_ok->text, i, i + 4) ||
       ir_tre_label_referenced_outside(function, label_end->text, i, i + 4)) {
     return index;
@@ -142,8 +106,6 @@ static size_t ir_tre_skip_errdefer_diamond(const IRFunction *function,
   return i + 5;
 }
 
-/* Try to match a tail site starting at the self call at `call_index`.
- * On success fills `site` and returns 1. */
 static int ir_tre_match_site(const IRFunction *function, size_t call_index,
                              IRTailSite *site) {
   const IRInstruction *call = &function->instructions[call_index];
@@ -157,7 +119,6 @@ static int ir_tre_match_site(const IRFunction *function, size_t call_index,
 
   size_t i = ir_tre_skip_nops(function, call_index + 1);
 
-  /* Integer add chain folding the call result toward the return value. */
   while (traced && i < function->instruction_count) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op != IR_OP_BINARY || ins->is_float || !ins->text ||
@@ -196,21 +157,15 @@ static int ir_tre_match_site(const IRFunction *function, size_t call_index,
   const IRInstruction *ret = &function->instructions[ret_index];
 
   if (site->chain_term_count > 0) {
-    /* Shape 3: the chain's final temp must be exactly what is returned. */
     if (!ir_tre_operand_is_temp_named(&ret->lhs, traced)) {
       return 0;
     }
   } else if (traced && ir_tre_operand_is_temp_named(&ret->lhs, traced)) {
-    /* Shape 1: return self(args). */
   } else if (ret->lhs.kind == IR_OPERAND_NONE) {
-    /* Shape 2: void self call falling through to `return`. */
   } else {
     return 0;
   }
 
-  /* Soundness: the call result and every chain temp must be consumed only
-   * inside this site region - a reader elsewhere would observe a value the
-   * rewrite no longer computes. */
   if (call->dest.kind == IR_OPERAND_TEMP && call->dest.name &&
       ir_tre_temp_uses_outside(function, call->dest.name, call_index,
                                ret_index) != 0) {
@@ -228,9 +183,6 @@ static int ir_tre_match_site(const IRFunction *function, size_t call_index,
   return 1;
 }
 
-/* A base-case return operand the accumulator rewrite can widen: an integer
- * constant, a symbol with a known integer declared type (param or local), or
- * a temp produced by a non-float instruction. */
 static int ir_tre_return_operand_is_integer(const IRFunction *function,
                                             size_t return_index) {
   const IROperand *operand = &function->instructions[return_index].lhs;
@@ -305,7 +257,6 @@ static int ir_tre_rewrite_function(IRFunction *function,
   snprintf(acc_name, sizeof(acc_name), "__tre_acc_%s", function->name);
 
   size_t start = 0;
-  /* Keep a leading entry label ahead of the preamble. */
   if (function->instruction_count > 0 &&
       function->instructions[0].op == IR_OP_LABEL) {
     IRInstruction cloned = {0};
@@ -351,12 +302,10 @@ static int ir_tre_rewrite_function(IRFunction *function,
     const IRTailSite *site = NULL;
     if (ir_tre_site_contains(sites, site_count, i, &site)) {
       if (i != site->call_index) {
-        continue; /* rest of the site region is dropped */
+        continue;
       }
       const IRInstruction *call = &function->instructions[site->call_index];
 
-      /* acc += chain terms (they were computed before the call and are still
-       * live; the callee cannot touch them - no address escapes). */
       for (size_t t = 0; t < site->chain_term_count; t++) {
         IRInstruction add = {0};
         add.op = IR_OP_BINARY;
@@ -371,8 +320,6 @@ static int ir_tre_rewrite_function(IRFunction *function,
         }
       }
 
-      /* Copy args to fresh temps first, then rebind the params, so a swapped
-       * or shifted argument list never reads an already-overwritten param. */
       for (size_t a = 0; a < call->argument_count; a++) {
         char temp_name[64];
         snprintf(temp_name, sizeof(temp_name), ".tre%zu_%zu", site->call_index,
@@ -466,8 +413,6 @@ static int ir_tre_function(IRFunction *function, int *changed) {
     return 1;
   }
 
-  /* If any local or parameter has its address taken, frames are observable
-   * and merging them into one loop body is unsound. */
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op == IR_OP_INLINE_ASM) {
@@ -509,8 +454,6 @@ static int ir_tre_function(IRFunction *function, int *changed) {
   }
 
   if (use_acc) {
-    /* Every return NOT belonging to a matched site must be rewritable as
-     * `return acc + value`, which requires an integer value. */
     for (size_t i = 0; i < function->instruction_count; i++) {
       if (function->instructions[i].op != IR_OP_RETURN ||
           ir_tre_site_contains(sites, site_count, i, NULL)) {
@@ -518,7 +461,7 @@ static int ir_tre_function(IRFunction *function, int *changed) {
       }
       if (function->instructions[i].lhs.kind == IR_OPERAND_NONE ||
           !ir_tre_return_operand_is_integer(function, i)) {
-        return 1; /* refuse the whole transform */
+        return 1;
       }
     }
   }

@@ -23,14 +23,6 @@ static int emit_getmainargs_prologue(BinaryCodeBuffer *code,
   return 1;
 }
 
-/* Linux/SysV self-contained program entry. The kernel transfers control to
- * `_start` with the stack laid out as:
- *     [rsp]      = argc
- *     [rsp + 8]  = argv[0]
- *     ...        = argv[argc-1], NULL, envp..., NULL
- * rsp is 16-byte aligned at entry and there is no return address. We pass argc
- * (RDI) and &argv (RSI) to main per SysV, call it, then invoke the exit(2)
- * syscall with main's return value. No libc, no CRT object. */
 static int binary_write_elf_start_object(const char *path, int profile_runtime,
                                          int stack_trace_init,
                                          int main_wants_argc_argv) {
@@ -54,7 +46,6 @@ static int binary_write_elf_start_object(const char *path, int profile_runtime,
     return 1;
   }
 
-  /* Give the runtime the kernel supplied argument and environment block. */
   if (!binary_emit_mov_reg_mem(&code, BINARY_GP_RDI, BINARY_GP_RSP, 0) ||
       !binary_emit_lea_reg_mem(&code, BINARY_GP_RSI, BINARY_GP_RSP, 8) ||
       !binary_emit_call_placeholder(&code, &runtime_startup_offset) ||
@@ -63,7 +54,6 @@ static int binary_write_elf_start_object(const char *path, int profile_runtime,
     goto cleanup;
   }
 
-  /* Optional crash-handler init before main. It takes no args. */
   if (stack_trace_init) {
     if (!binary_emit_call_placeholder(&code, &crash_startup_offset) ||
         !binary_call_relocation_table_add(&relocations, "mettle_crash_startup",
@@ -72,11 +62,6 @@ static int binary_write_elf_start_object(const char *path, int profile_runtime,
     }
   }
 
-  /* main(argc, argv): argc = [rsp], &argv = rsp + 8.
-   * At _start, rsp % 16 == 0. The crash-startup call above (if emitted) pushed
-   * and popped a return address symmetrically, so rsp is still 16-aligned here.
-   * A direct `call main` with nothing else pushed satisfies SysV's "rsp % 16
-   * == 0 immediately before call" rule. */
   if (main_wants_argc_argv) {
     if (!binary_emit_mov_reg_mem(&code, BINARY_GP_RDI, BINARY_GP_RSP, 0) ||
         !binary_emit_lea_reg_mem(&code, BINARY_GP_RSI, BINARY_GP_RSP, 8)) {
@@ -91,9 +76,6 @@ static int binary_write_elf_start_object(const char *path, int profile_runtime,
   }
 
   if (profile_runtime) {
-    /* Preserve main's result across the report call. The kernel gives _start
-     * a 16 byte aligned stack. A push moves it off that boundary, so reserve
-     * one more word before call to keep the SysV call site aligned. */
     if (!binary_emit_push_reg(&code, BINARY_GP_RAX) ||
         !binary_emit_sub_rsp_imm32(&code, 8) ||
         !binary_emit_call_placeholder(&code, &report_call_offset) ||
@@ -105,8 +87,6 @@ static int binary_write_elf_start_object(const char *path, int profile_runtime,
     }
   }
 
-  /* exit(main_result): syscall 60, status in RDI. main returns int32 in EAX;
-   * move it to EDI (zero-extends into RDI), set RAX = 60, syscall. */
   if (!binary_emit_mov_reg_reg(&code, BINARY_GP_RDI, BINARY_GP_RAX) ||
       !binary_emit_mov_reg_imm32_zero_extend(&code, BINARY_GP_RAX, 60) ||
       !binary_emit_syscall(&code)) {
@@ -183,11 +163,6 @@ static int append_arm64_call(BinaryCodeBuffer *code,
                                           call_offset);
 }
 
-/* AArch64 Linux entry with the same kernel stack contract as x86-64 Linux.
- * x19 keeps the initial stack pointer across calls. x20 keeps main's result
- * across the optional profile report. Both registers are callee saved under
- * AAPCS64. The kernel enters with SP aligned to 16 bytes, so every BL below has
- * the required alignment without a frame. */
 static int binary_write_elf_arm64_start_object(const char *path,
                                                int profile_runtime,
                                                int stack_trace_init,
@@ -339,15 +314,6 @@ int binary_write_program_startup_object_for_target(
     goto cleanup;
   }
 
-  /* Give the runtime its chance to run before main, the same as the ELF entry
-   * points do. Only they called it, so anything the Windows runtime wanted to
-   * set up at startup was written and never reached -- the console output code
-   * page among it, which is why a program printing UTF-8 drew mojibake.
-   *
-   * The arguments are zeroed rather than forwarded: on Windows the entry point
-   * is handed no argument block, and the runtime reads the command line itself
-   * through mettle_rt_getmainargs below. The parameters are there so one
-   * declaration serves both platforms. */
   if (!binary_emit_mov_reg_imm32_zero_extend(&code, BINARY_GP_RCX, 0) ||
       !binary_emit_mov_reg_imm32_zero_extend(&code, BINARY_GP_RDX, 0) ||
       !binary_emit_call_placeholder(&code, &runtime_startup_offset) ||

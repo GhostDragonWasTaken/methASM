@@ -90,7 +90,6 @@ static int import_library_read_file(const char *path,
   return 1;
 }
 
-
 static int import_library_reserve_symbols(ImportLibrary *library,
                                           size_t minimum_count,
                                           char **error_message_out) {

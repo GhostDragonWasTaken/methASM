@@ -1,7 +1,3 @@
-/* Frontend type-table layout and queries.
- *
- * Offsets, field names, enum members, and pointer/array/slice shape live on
- * Type and are filled here, before const eval, not in the backend. */
 #include "symbol_table.h"
 #include "string_intern.h"
 #include "common.h"
@@ -115,7 +111,6 @@ static int compute_struct_layout(Type *type) {
       continue;
     }
 
-    /* Bitfield: pack into consecutive storage units of the declared type. */
     size_t storage_bits = field_size * 8;
     if (storage_bits == 0 || width > storage_bits) {
       return 0;
@@ -186,7 +181,6 @@ int type_compute_layout(Type *type) {
   case TYPE_STRING:
     return compute_struct_layout(type);
   case TYPE_TAGGED_ENUM:
-    /* Tag + payload union already filled by the enum builder. */
     return type->size > 0;
   default:
     return 1;

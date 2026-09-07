@@ -1,56 +1,29 @@
 #include "ir_optimize_internal.h"
 
-/* ============================================================================
- * E-class pilot over straight-line integer arithmetic.
- *
- * A destructive rewrite commits to one form and loses the others; an e-graph
- * keeps every equivalent form in one class and lets extraction pick per use.
- * This pass is the reversible pilot of that idea: it builds e-classes for the
- * temp dataflow of straight-line integer regions, saturates them with the
- * same algebraic identities the rewrite table applies destructively
- * (commutativity, association with constants, folding, the x+0/x*1/x*2^k
- * family), and rewrites a definition only when extraction finds a strictly
- * cheaper form. Everything else is left exactly as written.
- *
- * Gated on METTLE_EGRAPH=1 and registered as an ordinary fixpoint pass, so
- * every change it makes runs under the translation-validation snapshot
- * harness (--verify), and METTLE_SKIP_PASS=egraph_simplify turns it off.
- *
- * What it measured, which is the point of building it as a pilot: on IR the
- * ordinary pipeline has already optimized, saturation finds almost nothing.
- * The destructive passes reach the easy equivalences first, and what is left
- * is rarely a cheaper form of a single instruction. Disabling reassociation
- * makes it visible -- the non-adjacent constant chains the const-chain table
- * cannot see collapse here -- which is the honest shape of the result: the
- * value of an e-graph in this compiler is subsuming the destructive rules and
- * extracting per target, not finding extra folds on x86. Keep that in mind
- * before spending a quarter on the full version.
- * ==========================================================================*/
-
 #define EG_MAX_NODES 512
 #define EG_MAX_LEAVES 128
 #define EG_SATURATE_ROUNDS 4
 
 typedef enum {
   EG_CONST,
-  EG_LEAF, /* a symbol or a temp defined outside the region */
+  EG_LEAF,
   EG_BIN
 } EgKind;
 
 typedef struct {
   EgKind kind;
-  long long value;   /* EG_CONST */
-  int leaf;          /* EG_LEAF: index into the leaf name table */
-  char op;           /* EG_BIN: '+','-','*','&','|','^','<','>' for shifts see op2 */
-  char op2;          /* second char of "<<"/">>" or 0 */
-  int a, b;          /* EG_BIN: child e-class ids */
+  long long value;
+  int leaf;
+  char op;
+  char op2;
+  int a, b;
 } EgNode;
 
 typedef struct {
   EgNode nodes[EG_MAX_NODES];
-  int node_class[EG_MAX_NODES]; /* e-class of each node */
+  int node_class[EG_MAX_NODES];
   int node_count;
-  int parent[EG_MAX_NODES]; /* union-find over class ids */
+  int parent[EG_MAX_NODES];
   const char *leaves[EG_MAX_LEAVES];
   int leaf_count;
 } EGraph;
@@ -101,8 +74,6 @@ static int eg_node_equal(EGraph *g, const EgNode *n, const EgNode *m) {
   return 0;
 }
 
-/* Hashcons: add the node, returning the e-class of an existing equal node
- * when there is one (congruence), a fresh class otherwise. -1 on overflow. */
 static int eg_add(EGraph *g, const EgNode *n) {
   for (int i = 0; i < g->node_count; i++) {
     if (eg_node_equal(g, &g->nodes[i], n)) {
@@ -138,7 +109,6 @@ static int eg_add_bin(EGraph *g, char op, char op2, int a, int b) {
   return eg_add(g, &n);
 }
 
-/* The class's constant value, when any node in it is a constant. */
 static int eg_class_const(EGraph *g, int c, long long *out) {
   c = eg_find(g, c);
   for (int i = 0; i < g->node_count; i++) {
@@ -171,13 +141,9 @@ static int eg_is_commutative(char op, char op2) {
                       op == '^');
 }
 
-/* One saturation round: for every BIN node, offer its equivalent forms and
- * union them into its class. The identities mirror the destructive table in
- * ir_optimize_rewrite.c; here both forms stay alive. Returns 1 when any
- * union or new node changed the graph. */
 static int eg_saturate_round(EGraph *g) {
   int changed = 0;
-  int count = g->node_count; /* nodes added this round wait for the next */
+  int count = g->node_count;
   for (int i = 0; i < count; i++) {
     EgNode n = g->nodes[i];
     if (n.kind != EG_BIN) {
@@ -188,7 +154,6 @@ static int eg_saturate_round(EGraph *g) {
     int has_a = eg_class_const(g, n.a, &ca);
     int has_b = eg_class_const(g, n.b, &cb);
 
-    /* Constant folding. */
     if (has_a && has_b) {
       long long v;
       if (eg_fold(n.op, n.op2, ca, cb, &v)) {
@@ -200,7 +165,6 @@ static int eg_saturate_round(EGraph *g) {
       }
     }
 
-    /* Commutativity. */
     if (eg_is_commutative(n.op, n.op2)) {
       int c = eg_add_bin(g, n.op, 0, n.b, n.a);
       if (c >= 0 && eg_find(g, c) != eg_find(g, cls)) {
@@ -209,7 +173,6 @@ static int eg_saturate_round(EGraph *g) {
       }
     }
 
-    /* Identity elements: x+0, x-0, x*1, x&-1, x|0, x^0, x<<0, x>>0. */
     if (has_b &&
         ((cb == 0 && (n.op == '+' || n.op == '-' || n.op == '|' ||
                       n.op == '^' || n.op2 != 0)) ||
@@ -220,7 +183,6 @@ static int eg_saturate_round(EGraph *g) {
         changed = 1;
       }
     }
-    /* Annihilators: x*0, x&0. */
     if (has_b && cb == 0 && (n.op == '*' || n.op == '&') && n.op2 == 0) {
       int c = eg_add_const(g, 0);
       if (c >= 0 && eg_find(g, c) != eg_find(g, cls)) {
@@ -228,7 +190,6 @@ static int eg_saturate_round(EGraph *g) {
         changed = 1;
       }
     }
-    /* x - x and x ^ x. */
     if ((n.op == '-' || n.op == '^') && n.op2 == 0 &&
         eg_find(g, n.a) == eg_find(g, n.b)) {
       int c = eg_add_const(g, 0);
@@ -238,9 +199,6 @@ static int eg_saturate_round(EGraph *g) {
       }
     }
 
-    /* Association with a constant: (x + c1) + c2 = x + (c1 + c2), and the
-     * multiplicative twin. This is the reassociation the const-chain table
-     * does destructively, without needing the two instructions adjacent. */
     if ((n.op == '+' || n.op == '*') && n.op2 == 0 && has_b) {
       int ac = eg_find(g, n.a);
       for (int j = 0; j < count; j++) {
@@ -272,8 +230,6 @@ static int eg_saturate_round(EGraph *g) {
 
 static int eg_class_leaf_node(EGraph *g, int c);
 
-/* The cheapest node of the class whose children are leaves or constants (so
- * it can replace one instruction in place). Returns node index or -1. */
 static int eg_class_best_shallow(EGraph *g, int c) {
   c = eg_find(g, c);
   int best = -1;
@@ -285,10 +241,6 @@ static int eg_class_best_shallow(EGraph *g, int c) {
     const EgNode *n = &g->nodes[i];
     int cost = 0;
     if (n->kind == EG_BIN) {
-      /* Both children have to extract as a leaf or a constant for this node
-       * to replace one instruction in place. Asked through the same helper
-       * the rewrite below uses to fetch them, so "there is one" and "here it
-       * is" can never disagree. */
       if (eg_class_leaf_node(g, n->a) < 0 || eg_class_leaf_node(g, n->b) < 0) {
         continue;
       }
@@ -302,7 +254,6 @@ static int eg_class_best_shallow(EGraph *g, int c) {
   return best;
 }
 
-/* A leaf/const representative node of the class, or -1. */
 static int eg_class_leaf_node(EGraph *g, int c) {
   c = eg_find(g, c);
   for (int i = 0; i < g->node_count; i++) {
@@ -336,9 +287,6 @@ static char eg_op_char(const char *text, char *op2) {
     *op2 = '<';
     return '<';
   }
-  /* `>>` is excluded: the node key does not carry the instruction's
-   * signedness, and merging an arithmetic shift with a logical one over the
-   * same operands would be wrong. */
   return 0;
 }
 
@@ -371,23 +319,15 @@ int ir_egraph_simplify_pass(IRFunction *function, int *changed) {
     return 0;
   }
 
-  /* Name -> e-class bindings for the current straight-line region. Temps
-   * bind at their def; symbols bind at each ASSIGN, SSA-style, with the
-   * newest binding shadowing (lookups scan backward). A region breaks at
-   * control flow, calls, loads, stores, and any write this pass cannot
-   * model. */
   enum { EG_MAX_DEFS = 256 };
   struct {
     const char *name;
     int is_symbol;
     int cls;
     size_t at;
-    int rewritable; /* integer BINARY temp defs get extraction */
+    int rewritable;
   } defs[EG_MAX_DEFS];
   int def_count = 0;
-  /* Symbols written inside the region: their leaf nodes denote the value at
-   * region entry, so a form that references such a leaf may only replace a
-   * def sitting before the first write. Cheaper to forbid than to date. */
   const char *written_syms[EG_MAX_DEFS];
   int written_count = 0;
 
@@ -397,7 +337,7 @@ int ir_egraph_simplify_pass(IRFunction *function, int *changed) {
     const IRInstruction *ins =
         i < function->instruction_count ? &function->instructions[i] : NULL;
     if (ins && ins->op == IR_OP_NOP) {
-      continue; /* a nop neither feeds nor invalidates the region */
+      continue;
     }
     char op2 = 0;
     char opch =
@@ -415,9 +355,6 @@ int ir_egraph_simplify_pass(IRFunction *function, int *changed) {
     int breaks = !ins || (!is_bin && !is_copy);
 
     if (breaks) {
-      /* Region ends: extract. Rewrite any def whose class has a strictly
-       * cheaper single-instruction form, unless the form reads a leaf whose
-       * symbol was rebound inside the region. */
       for (int d = 0; d < def_count; d++) {
         int cls = defs[d].cls;
         if (!defs[d].rewritable) {
@@ -451,11 +388,6 @@ int ir_egraph_simplify_pass(IRFunction *function, int *changed) {
                     eg_op_char(target->text, &op2) == '*' && op2 == 0
                 ? 4
                 : 1;
-        /* Does the current form read a value computed inside the region? A
-         * temp always is; a symbol is when a binding shadows its leaf. The
-         * extracted form reads only leaves and constants, so at equal op
-         * cost it still wins: it cuts the dependency chain and lets the
-         * feeding instruction go dead. */
         int cur_reads_computed = 0;
         const IROperand *cur_ops[2] = {&target->lhs, &target->rhs};
         for (int k = 0; k < 2; k++) {
@@ -521,7 +453,6 @@ int ir_egraph_simplify_pass(IRFunction *function, int *changed) {
       continue;
     }
 
-    /* Bind operands to classes (a copy reads its source twice, harmlessly). */
     int cls[2] = {-1, -1};
     const IROperand *ops[2] = {&ins->lhs,
                                is_copy ? &ins->lhs : &ins->rhs};
@@ -532,7 +463,6 @@ int ir_egraph_simplify_pass(IRFunction *function, int *changed) {
       } else if ((o->kind == IR_OPERAND_SYMBOL ||
                   o->kind == IR_OPERAND_TEMP) &&
                  o->name) {
-        /* Newest in-region binding shadows; scan backward. */
         for (int d = def_count - 1; d >= 0; d--) {
           if (defs[d].is_symbol == (o->kind == IR_OPERAND_SYMBOL ? 1 : 0) &&
               strcmp(defs[d].name, o->name) == 0) {
@@ -554,8 +484,6 @@ int ir_egraph_simplify_pass(IRFunction *function, int *changed) {
     }
     if (cls[0] < 0 || cls[1] < 0 || def_count >= EG_MAX_DEFS ||
         written_count >= EG_MAX_DEFS) {
-      /* Untracked operand (a load result, a call, an out-of-region temp):
-       * end the region conservatively at this instruction. */
       def_count = 0;
       written_count = 0;
       memset(g, 0, sizeof(*g));
@@ -564,7 +492,7 @@ int ir_egraph_simplify_pass(IRFunction *function, int *changed) {
 
     int c;
     if (is_copy) {
-      c = cls[0]; /* the copy's dest joins its source's class */
+      c = cls[0];
     } else {
       c = eg_add_bin(g, opch, op2, cls[0], cls[1]);
       if (c >= 0) {
@@ -585,9 +513,6 @@ int ir_egraph_simplify_pass(IRFunction *function, int *changed) {
     defs[def_count].is_symbol = dest_sym;
     defs[def_count].cls = c;
     defs[def_count].at = i;
-    /* Only a temp-dest BINARY is extraction material: a symbol def is an
-     * observable store other code may read at this exact position. Its
-     * BINDING still folds forward into everything downstream. */
     defs[def_count].rewritable = (!is_copy && dest_temp) ? 1 : 0;
     def_count++;
     if (dest_sym) {

@@ -1,11 +1,3 @@
-// `mettle explain <CODE>`: extended documentation for diagnostic codes,
-// modeled on `rustc --explain`. One entry per stable code.
-//
-// Two tables live here. DOCS covers the compile diagnostics (E0001..E0007,
-// M0101..M0119). DECISIONS covers the optimizer decision codes the --explain
-// report prints in brackets after each verdict, so a reader who sees
-// `[dot-shape-address]` in the report can ask for the long version of it
-// without leaving the terminal.
 #include "error_explain.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -715,14 +707,6 @@ static const ErrorCodeDoc DOCS[] = {
      "same inside a compiled program, in `--release` too.\n"},
 };
 
-/* ---- optimizer decision codes ----------------------------------------------
- * The `--explain` report tags every verdict with one of these, and the
- * `--explain-json` sidecar carries the same string in its `code` field. The
- * prose in the report is one line, because a report of forty one-liners is
- * readable and a report of forty paragraphs is not. The paragraph lives here.
- *
- * `group` sorts the index; `applies` is the one-line gloss the index shows. */
-
 typedef enum {
   DECISION_VECTOR_REFUSAL,
   DECISION_INLINE_REFUSAL,
@@ -737,7 +721,6 @@ typedef struct {
 } DecisionDoc;
 
 static const DecisionDoc DECISIONS[] = {
-    /* ---- vectorization refusals ------------------------------------------ */
     {"call-in-body", DECISION_VECTOR_REFUSAL,
      "The loop body calls a function",
      "A SIMD kernel runs eight lanes at once. A call runs one. So a loop that\n"
@@ -1082,7 +1065,6 @@ static const DecisionDoc DECISIONS[] = {
      "\n"
      "A loop that meets all of that and still lands here is worth reporting.\n"},
 
-    /* ---- inlining refusals ----------------------------------------------- */
     {"callee-no-body", DECISION_INLINE_REFUSAL,
      "The callee has no body to inline",
      "The function is declared but not defined in this program: an `extern`,\n"
@@ -1210,7 +1192,6 @@ static const DecisionDoc DECISIONS[] = {
      "Fix: mark the callee @inline, which raises its priority. Deep call\n"
      "chains hit this most: each level of nesting costs a round.\n"},
 
-    /* ---- applied optimizations ------------------------------------------- */
     {"vectorized", DECISION_APPLIED,
      "The loop became a SIMD kernel",
      "The whole loop now runs as vector instructions, several elements per\n"
@@ -1428,9 +1409,6 @@ static void print_code_list(void) {
   printf("  mettle explain dot-shape-address\n");
 }
 
-/* Strip the punctuation a code picks up when it is pasted out of a report:
- * brackets from `[E0004]`, backticks and quotes from prose, and a trailing
- * comma or period. Case is left alone; the callers fold it themselves. */
 static void normalize_code(const char *code, char *out, size_t cap) {
   size_t n = 0;
   for (const char *p = code; *p && n + 1 < cap; p++) {
@@ -1452,7 +1430,6 @@ static int code_equal_fold(const char *a, const char *b) {
     if (cb >= 'A' && cb <= 'Z') {
       cb = (char)(cb - 'A' + 'a');
     }
-    /* '_' and '-' are the same separator as far as a reader is concerned. */
     if (ca == '_') {
       ca = '-';
     }
@@ -1466,7 +1443,6 @@ static int code_equal_fold(const char *a, const char *b) {
   return *a == '\0' && *b == '\0';
 }
 
-/* Does `code` contain `fragment`, ignoring case and treating '_' as '-'? */
 static int code_contains_fold(const char *code, const char *fragment) {
   size_t n = strlen(fragment);
   size_t len = strlen(code);
@@ -1500,8 +1476,6 @@ static int code_contains_fold(const char *code, const char *fragment) {
   return 0;
 }
 
-/* Edit distance, capped at a small band: the suggestion is only worth making
- * when the input is close, so anything past `limit` returns limit + 1. */
 static size_t edit_distance(const char *a, const char *b, size_t limit) {
   size_t la = strlen(a), lb = strlen(b);
   if (la > lb ? la - lb > limit : lb - la > limit) {
@@ -1537,10 +1511,9 @@ static size_t edit_distance(const char *a, const char *b, size_t limit) {
   return row[lb];
 }
 
-/* The closest known code to `code`, or NULL when nothing is close enough. */
 static const char *nearest_code(const char *code) {
   const char *best = NULL;
-  size_t best_distance = 4; /* anything further away is not a typo */
+  size_t best_distance = 4;
 
   for (size_t i = 0; i < DECISIONS_COUNT; i++) {
     size_t d = edit_distance(code, DECISIONS[i].code, best_distance);
@@ -1564,8 +1537,6 @@ int mettle_explain_error_code(const char *code) {
     print_code_list();
     return 0;
   }
-  /* site/explain/ is generated from these tables, so a page cannot drift
-   * from what the compiler says in the terminal. */
   if (strcmp(code, "--json") == 0) {
     print_code_json();
     return 0;
@@ -1590,9 +1561,6 @@ int mettle_explain_error_code(const char *code) {
     }
   }
 
-  /* A fragment of a code, which is what anyone types when they remember the
-   * distinctive half of it. One hit resolves; several list, since guessing
-   * between them would be worse than showing the choice. */
   if (strlen(normalized) >= 3) {
     const DecisionDoc *only = NULL;
     size_t hits = 0;

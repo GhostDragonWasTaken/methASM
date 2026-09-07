@@ -1,9 +1,5 @@
 #include "type_checker_internal.h"
 
-/* Kept in a separate translation unit so the normal MinGW CodeView build
- * retains complete debug information for the already-large expression
- * checker. The implementation remains frontend-only and lowers to the
- * target-neutral tensor epilogue descriptor. */
 Type *type_checker_tensor_epilogue_builtin(TypeChecker *checker,
                                                   ASTNode *expression,
                                                   CallExpression *call,

@@ -1,22 +1,5 @@
 #include "ir_optimize_internal.h"
 
-/* ============================================================================
- * The shared affine loop model.
- *
- * Every loop recognizer asks the same questions before it asks its own: is
- * this a counted `while (iv < bound)` loop, is the body straight-line, does
- * the counter start at zero and step by one, is the bound loop-invariant, and
- * is this index an affine function of a symbol. Each recognizer used to
- * answer them privately, against the exact instruction shapes it happened to
- * be written for, which is where recognizer rot comes from: the shape
- * drifts, the private matcher silently stops matching.
- *
- * This module answers them once, against the model. A recognizer that
- * consumes IRAffineLoop matches semantics (a counted loop with these
- * properties) and keeps only its kernel-specific matching for itself.
- * ==========================================================================*/
-
-/* True when `symbol` is written anywhere in [start, end). */
 int ir_affine_symbol_written_in(const IRFunction *function, size_t start,
                                 size_t end, const char *symbol) {
   if (!function || !symbol) {
@@ -32,13 +15,6 @@ int ir_affine_symbol_written_in(const IRFunction *function, size_t start,
   return 0;
 }
 
-/* Model the counted loop whose header label sits at header_index. Fills the
- * structural facts every recognizer gates on; each is computed once, here,
- * so a recognizer never re-derives one against its own idea of the shape.
- * Returns 0 when the loop is not a counted `while (iv < bound)` loop at all.
- * The boolean facts (straight_line_body, starts_at_zero, bound_invariant,
- * unit_step) are reported, not required: a recognizer that tolerates an
- * interior branch reads the model and decides for itself. */
 int ir_affine_model_loop(IRFunction *function, size_t header_index,
                          IRAffineLoop *out) {
   if (!function || !out) {
@@ -52,8 +28,6 @@ int ir_affine_model_loop(IRFunction *function, size_t header_index,
 
   const IRInstruction *compare =
       &function->instructions[out->bounds.compare_index];
-  /* ir_find_while_loop_bounds already proved: integer BINARY `<` with a
-   * symbol lhs feeding the branch. */
   if (compare->rhs.kind != IR_OPERAND_SYMBOL &&
       compare->rhs.kind != IR_OPERAND_INT) {
     return 0;
@@ -150,15 +124,6 @@ int ir_affine_body_unclaimable(IRAffineLoop *loop) {
   return loop->c_unclaimable;
 }
 
-/* Overflow-checked composition of the decomposition arithmetic.
- *
- * These matter more than they look. The safe-mode elision consumes the
- * result to decide a bounds check is unnecessary, so a coefficient that
- * wrapped is not a missed optimization, it is a check removed on the strength
- * of a wrong number. Signed overflow is also undefined, which means the
- * compiler building THIS compiler is entitled to assume it never happens.
- * Every composition below refuses rather than wraps, and refusing costs only
- * the optimization. */
 static int ir_affine_add(long long a, long long b, long long *out) {
   if ((b > 0 && a > LLONG_MAX - b) || (b < 0 && a < LLONG_MIN - b)) {
     return 0;
@@ -202,8 +167,6 @@ static int ir_affine_mul(long long a, long long b, long long *out) {
   return 1;
 }
 
-/* Left shift of a negative value is undefined, so this routes through the
- * multiply rather than shifting. */
 static int ir_affine_shl(long long a, long long s, long long *out) {
   if (s < 0 || s > 62) {
     return 0;
@@ -211,13 +174,6 @@ static int ir_affine_shl(long long a, long long s, long long *out) {
   return ir_affine_mul(a, 1LL << s, out);
 }
 
-/* Decompose an index operand as `coeff * name + addend`, following producer
- * chains: a bare symbol is (1*name + 0), an integer is (0*NULL + c), and
- * ASSIGN copies, +/- constants, * constants, and << constants compose. This
- * is the one answer to "is this index affine in something", shared by the
- * safety elision and any recognizer that reads indices. Depth-capped: an
- * index that takes more than a handful of steps to decompose is not one of
- * the shapes anything here optimizes. */
 static int ir_affine_decompose_rec(const IRFunction *function, size_t before,
                                    const IROperand *index, int depth,
                                    const char **name_out, long long *coeff_out,
@@ -266,7 +222,7 @@ static int ir_affine_decompose_rec(const IRFunction *function, size_t before,
 
   if (strcmp(producer->text, "+") == 0) {
     if (ln && rn) {
-      return 0; /* two symbols: not affine in one */
+      return 0;
     }
     if (!ir_affine_add(lc, rc, coeff_out) ||
         !ir_affine_add(la, ra, addend_out)) {
@@ -277,7 +233,7 @@ static int ir_affine_decompose_rec(const IRFunction *function, size_t before,
   }
   if (strcmp(producer->text, "-") == 0) {
     if (rn) {
-      return 0; /* subtracting a symbol flips its sign; no consumer wants it */
+      return 0;
     }
     if (!ir_affine_sub(la, ra, addend_out)) {
       return 0;
@@ -290,7 +246,7 @@ static int ir_affine_decompose_rec(const IRFunction *function, size_t before,
     if (ln && rn) {
       return 0;
     }
-    if (rn) { /* const * name */
+    if (rn) {
       if (!ir_affine_mul(rc, la, coeff_out) ||
           !ir_affine_mul(ra, la, addend_out)) {
         return 0;
@@ -329,17 +285,6 @@ int ir_affine_index_decompose(const IRFunction *function, size_t before,
                                  coeff_out, addend_out);
 }
 
-/* ---- loop fingerprint ---------------------------------------------------
- *
- * A stable hash of a loop body's dataflow, independent of the names the
- * frontend happened to generate: symbols and temps hash as their order of
- * first appearance, and the operands of commutative operators combine
- * order-free. Two compiles of the same source produce the same fingerprint,
- * and most refactors that preserve the body's dataflow do too, so CI can
- * pair fingerprints with --explain claims across compiler versions: a loop
- * whose fingerprint held still while its claim flipped from vectorized to
- * scalar is recognizer rot, caught without a benchmark. */
-
 #define IR_FP_MAX_NAMES 160
 
 typedef struct {
@@ -371,7 +316,7 @@ static unsigned long long ir_fp_name(IRFpNames *names, const char *name) {
     names->names[names->count] = name;
     return (unsigned long long)(++names->count);
   }
-  return ir_fp_string(name); /* overflow: still deterministic */
+  return ir_fp_string(name);
 }
 
 static unsigned long long ir_fp_operand(IRFpNames *names,

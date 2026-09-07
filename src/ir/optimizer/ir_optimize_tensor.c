@@ -1,16 +1,5 @@
 #include "ir_optimize_internal.h"
-#include "../../common.h" // mettle_free_string
-
-/* A chain is the exact sequential composition
- *
- *   D = A0*B0 + C
- *   D = A1*B1 + D
- *   ...
- *
- * represented in one neutral instruction. It does not promise a backend
- * fragment ABI: a backend may replay the component operations. Backends with
- * cooperative-register tiles can instead load C once, keep D resident, and
- * store once. */
+#include "../../common.h"
 
 static size_t tensor_stride_operand_index(const MtlcTensorMmaDesc *desc,
                                           unsigned requested) {
@@ -105,22 +94,6 @@ static int tensor_pipeline_barrier(const IRInstruction *instruction) {
           instruction->memory_order == MTLC_MEMORY_ORDER_SEQ_CST);
 }
 
-/* Retain one accumulator across completion/publication of one or more staged
- * tiles. Copy groups are commonly issued before START, so each legal region
- * between connected MMAs is pure scalar work plus neutral async-copy
- * bookkeeping and a wait-then-workgroup-barrier handoff:
- *
- *   MMA(stage[0], C -> D)
- *   async_copy.wait(...)
- *   barrier(workgroup, acq_rel)
- *   MMA(stage[1], D -> D)
- *
- *   async_copy.wait(...)
- *   barrier(workgroup, acq_rel)
- *   MMA(stage[2], D -> D)
- *   ...
- *
- * The verifier independently rechecks every handoff after every pass. */
 static int tensor_try_form_pipeline_residency(IRFunction *function,
                                               size_t first_index,
                                               uint32_t *next_group_id,
@@ -140,7 +113,7 @@ static int tensor_try_form_pipeline_residency(IRFunction *function,
   const IROperand *output = &first->arguments[3];
   size_t last_update_index = SIZE_MAX;
   size_t update_count = 0;
-  int handoff_state = 0; /* 0 issuing, 1 waited, 2 published */
+  int handoff_state = 0;
   for (size_t i = first_index + 1; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
     if (instruction->op == IR_OP_TENSOR_MMA) {
@@ -225,21 +198,6 @@ static int tensor_label_exists(const IRFunction *function, const char *label) {
   return 0;
 }
 
-/* Recognize one exact loop-carried composition without assuming a particular
- * induction variable or trip-count spelling:
- *
- *   D = A0*B0 + C
- *   while (uniform condition) {
- *     <register-only address/counter arithmetic>
- *     D = Ai*Bi + D
- *     <register-only counter arithmetic>
- *   }
- *
- * The body must be a single linear block with exactly one MMA and no memory,
- * call, barrier, atomic, or other observable operation. We split only the
- * loop-exit edge into a commit block; outer guards that share the original end
- * label bypass the commit and therefore cannot observe an uninitialized
- * resident accumulator. */
 static int tensor_try_form_loop_residency(IRFunction *function,
                                           size_t first_index,
                                           uint32_t *next_group_id,
@@ -314,7 +272,6 @@ static int tensor_try_form_loop_residency(IRFunction *function,
   }
   if (update_index == SIZE_MAX || jump_index == SIZE_MAX) return 0;
 
-  /* No second entry to the loop header may bypass the residency start. */
   for (size_t i = 0; i < function->instruction_count; i++) {
     if (i == jump_index) continue;
     const IRInstruction *instruction = &function->instructions[i];
@@ -362,8 +319,6 @@ static int tensor_try_form_loop_residency(IRFunction *function,
   jump.text = (char *)original_exit;
   jump.location = first->location;
 
-  /* Insertion clones all borrowed strings/operands. It occurs after the source
-   * instructions, so their indices remain stable even if the array grows. */
   if (!ir_function_insert_instruction(function, exit_label_index, &label) ||
       !ir_function_insert_instruction(function, exit_label_index + 1,
                                       &commit) ||

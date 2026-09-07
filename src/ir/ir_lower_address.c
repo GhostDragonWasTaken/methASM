@@ -1,14 +1,8 @@
-// AST->IR lowering: lvalue address, symbol assignment, pointer arithmetic.
 #include "ir_lowering_internal.h"
 #include "ir_explain_ledger.h"
 #include "ir_explain_safety.h"
-#include "frontend/mtlc_frontend.h" // mtlc_type_from_frontend
+#include "frontend/mtlc_frontend.h"
 
-/* Spell an access the way the source did, for a --safe failure message. The
- * report already carries the file and line; this is what makes it read as the
- * programmer's own expression rather than a temp number. Anything the walk
- * does not recognize contributes "?", which is honest and still points at the
- * right shape. */
 static void ir_safety_describe(const ASTNode *expression, char *buffer,
                                size_t capacity, int depth) {
   if (!buffer || capacity == 0) {
@@ -59,14 +53,6 @@ static void ir_safety_describe(const ASTNode *expression, char *buffer,
   }
 }
 
-/* Park a local aggregate literal's folded image in the module as a hidden
- * constant, and hand back its name.
- *
- * An aggregate literal is a compile-time constant wherever it appears, so a
- * local one is the same value a global one would be: laying it out once in the
- * object file and copying from it beats emitting a store per element, and it
- * costs nothing when the literal is large. Returns an owned name, or NULL on
- * failure (with the error already set). */
 static char *ir_intern_aggregate_literal(IRLoweringContext *context,
                                          ASTNode *literal_node,
                                          Type *dest_type) {
@@ -114,7 +100,7 @@ static char *ir_intern_aggregate_literal(IRLoweringContext *context,
   entry.init_relocs = relocs;
   entry.init_reloc_count = literal->reloc_count;
   IRModuleSymbol *added = ir_program_add_symbol(context->program, &entry);
-  free(relocs); /* the program deep-copied them */
+  free(relocs);
   if (!added) {
     free(name);
     ir_set_error(context, "Out of memory while interning aggregate literal");
@@ -123,10 +109,6 @@ static char *ir_intern_aggregate_literal(IRLoweringContext *context,
   return name;
 }
 
-/* The elements the literal could not fold, stored into the image once it is in
- * place. The checker gave each one an absolute byte offset into the target, so
- * a nested literal needs no walking here: its runtime elements are already in
- * this list, at the offsets they occupy in the whole value. */
 static int ir_emit_aggregate_runtime_stores(IRLoweringContext *context,
                                             IRFunction *function,
                                             const IROperand *dest_address,
@@ -228,16 +210,6 @@ int ir_emit_aggregate_literal_copy(IRLoweringContext *context,
   }
   free(source_name);
 
-  /* A block move is spelled as a STORE whose value operand is the source
-   * ADDRESS, which the backend only reads that way past one machine word. An
-   * aggregate that is exactly one machine load wide goes through a register
-   * instead: load the word, then store it.
-   *
-   * Only 1/2/4/8 qualify. A 3-, 5-, 6-, or 7-byte aggregate (`struct Rgb { r:
-   * uint8; g: uint8; b: uint8; }`) has no single load that covers it exactly --
-   * widening to the next power of two would read past the object and, on the
-   * store side, clobber whatever follows it -- so it takes the block move,
-   * which is byte-exact for any size. */
   IROperand value = source_address;
   if (dest_type->size == 1 || dest_type->size == 2 || dest_type->size == 4 ||
       dest_type->size == 8) {
@@ -278,22 +250,8 @@ int ir_emit_aggregate_literal_copy(IRLoweringContext *context,
                                           literal_node, location);
 }
 
-/* Above this many bytes the zero-fill is one string operation rather than a
- * run of immediate stores. Eight 8-byte stores is the ceiling chosen for the
- * unrolled form; the crossover is broad, since rep stos pays its setup whatever
- * the count and a store costs about a cycle. */
 #define IR_ZERO_FILL_STORE_MAX 256u
 
-/* An aggregate local declared without an initializer starts zeroed, which is
- * the contract docs/declarations.md states and the one `new T` already keeps
- * through mettle_heap_zeroed. Stack storage has no such guarantee underneath
- * it, so the zeroing is emitted here, at the declaration rather than in the
- * prologue: an aggregate declared inside a loop is a fresh object on every
- * iteration and has to start zeroed on every iteration.
- *
- * It is spelled as a memset call because both backends already turn a
- * three-argument memset into an inline rep stos rather than a real call, so a
- * leaf function stays a leaf. */
 int ir_emit_zero_fill_local(IRLoweringContext *context, IRFunction *function,
                             const char *local_name, Type *type,
                             SourceLocation location) {
@@ -310,11 +268,6 @@ int ir_emit_zero_fill_local(IRLoweringContext *context, IRFunction *function,
     return 0;
   }
 
-  /* Small aggregates store the zeros directly. A struct is usually a handful
-   * of bytes, and the rep stos below costs the same ~15 cycles of setup for 8
-   * bytes as for 128, which is most of a small function's call. Measured on a
-   * hot 8-byte struct: 5ns per call through the string operation, against a
-   * single immediate store here. */
   if (type->size <= IR_ZERO_FILL_STORE_MAX) {
     static const size_t widths[] = {8, 4, 2, 1};
     size_t offset = 0;
@@ -386,11 +339,6 @@ int ir_emit_aggregate_literal_copy_to_symbol(IRLoweringContext *context,
   return ok;
 }
 
-/* The frontend's nested scopes have been popped by IR lowering time. The IR
- * declaration stream is therefore the authoritative scoped record for whether
- * an array-shaped source binding already IS an address-space pointer (rather
- * than inline host storage whose address must be taken). Scan backwards so a
- * later shadowing declaration wins. */
 static int ir_symbol_is_address_space_allocation(const IRFunction *function,
                                                  const char *name) {
   if (!function || !name) return 0;
@@ -475,13 +423,6 @@ IROperand ir_clone_operand_local(const IROperand *operand) {
   }
 }
 
-/* Whole-struct copy: IR_OP_ASSIGN only moves scalar width through RAX. When
- * both sides are the same by-reference struct on stack, memcpy via IR_OP_STORE.
- *
- * The symbol table scope of the function body has typically been popped by the
- * time IR lowering runs, so we cannot rely on symbol_table_lookup here. Instead
- * callers thread the resolved struct Type * (cached on AST nodes or fetched via
- * the type_checker by name). */
 int ir_try_emit_aggregate_symbol_memcpy(
     IRLoweringContext *context, IRFunction *function, const char *dest_name,
     const IROperand *value, Type *dest_type, SourceLocation location) {
@@ -491,12 +432,6 @@ int ir_try_emit_aggregate_symbol_memcpy(
       value->kind != IR_OPERAND_SYMBOL || !value->name) {
     return 0;
   }
-  /* `string` copies whole, like the struct it is: sixteen bytes, not the one
-   * word a plain store would move, which would leave the length reading
-   * whatever happened to sit beside the pointer. A tagged enum has the same
-   * shape -- a discriminant beside the widest payload -- so `vs[0] = I(21)`
-   * moved the tag and left the payload behind, and the match that read it
-   * back saw whatever the slot already held. */
   if (!dest_type ||
       (dest_type->kind != TYPE_STRUCT && dest_type->kind != TYPE_STRING &&
        dest_type->kind != TYPE_SLICE &&
@@ -539,21 +474,6 @@ int ir_try_emit_aggregate_symbol_memcpy(
   }
 }
 
-/* Gives an aggregate value a home that has an address.
- *
- * The wide-copy paths below build their source operand with
- * ir_emit_address_of_symbol, so they need the value to be a named symbol. A
- * call returning a struct yields a temp instead, which has no address to copy
- * from -- so those paths declined and the caller fell back to a single
- * word-sized store, dropping everything past the first 8 bytes. That is what
- * corrupted `cfg.rect = ui_rect_xywh(...)`: the rect arrived as a temp, only
- * its first word landed in the field, and controls were then created from
- * garbage width and height.
- *
- * Spilling through a fresh local uses only paths already known good: symbol
- * assignment moves a whole aggregate correctly, and the local then supplies the
- * address the wide store needs. Returns 1 and fills `out_symbol` when a spill
- * happened, 0 when the value was already usable or cannot be spilled. */
 static int ir_spill_aggregate_value_to_local(IRLoweringContext *context,
                                              IRFunction *function,
                                              const IROperand *value,
@@ -568,12 +488,8 @@ static int ir_spill_aggregate_value_to_local(IRLoweringContext *context,
     return 0;
   }
   if (value->kind == IR_OPERAND_SYMBOL) {
-    return 0;               /* already addressable */
+    return 0;
   }
-  /* A string literal is a value with no address of its own here, the same
-   * problem a call result has. Giving it a local makes `h.name = "x"` a
-   * sixteen-byte copy like every other whole-record assignment, instead of a
-   * one-word store that leaves the length beside it untouched. */
   if ((value->kind != IR_OPERAND_TEMP && value->kind != IR_OPERAND_STRING) ||
       !dest_type->name) {
     return 0;
@@ -618,12 +534,6 @@ static int ir_spill_aggregate_value_to_local(IRLoweringContext *context,
   return 1;
 }
 
-/* Whole-struct copy into an arbitrary lvalue address (e.g. `cfg.rect = r;`).
- *
- * Mirrors ir_try_emit_aggregate_symbol_memcpy, but the destination is an
- * already-computed address operand rather than a named symbol. Without this,
- * the lvalue-store path emits a single word-sized IR_OP_STORE for an aggregate
- * RHS and silently drops everything past the first 8 bytes. */
 int ir_try_emit_aggregate_address_memcpy(IRLoweringContext *context,
                                          IRFunction *function,
                                          const IROperand *dest_addr,
@@ -634,12 +544,6 @@ int ir_try_emit_aggregate_address_memcpy(IRLoweringContext *context,
   if (!context || !function || !dest_addr || !value) {
     return 0;
   }
-  /* `string` copies whole, like the struct it is: sixteen bytes, not the one
-   * word a plain store would move, which would leave the length reading
-   * whatever happened to sit beside the pointer. A tagged enum has the same
-   * shape -- a discriminant beside the widest payload -- so `vs[0] = I(21)`
-   * moved the tag and left the payload behind, and the match that read it
-   * back saw whatever the slot already held. */
   if (!dest_type ||
       (dest_type->kind != TYPE_STRUCT && dest_type->kind != TYPE_STRING &&
        dest_type->kind != TYPE_SLICE &&
@@ -662,7 +566,6 @@ int ir_try_emit_aggregate_address_memcpy(IRLoweringContext *context,
     IRInstruction store = {0};
     int ok = 0;
 
-    /* A call result arrives as a temp, which has no address to copy from. */
     if (ir_spill_aggregate_value_to_local(context, function, value, dest_type,
                                           location, &spilled)) {
       source = &spilled;
@@ -1028,18 +931,6 @@ static int ir_lower_member_address(IRLoweringContext *context,
                                    IROperand *out_address,
                                    Type **out_type);
 
-/* Where element (i, j) of a static view sits, in elements from the base.
-   The layout is part of the type, so this is the one place that reads it and
-   every access through the type gets the same answer.
-
-     row            i * E1 + j
-     col            j * E0 + i
-     interleave(k)  (j / k) * (E0 * k) + i * k + (j % k)
-     swizzle64      i * E1 + ((j / C) ^ (i % (E1 / C))) * C + (j % C), C = 8 bytes
-     swizzle128     the same with C = 16 bytes
-
-   The swizzles exist so a workgroup reading a column touches a different
-   16-byte chunk on every row, which is what puts the lanes in distinct banks. */
 int ir_lower_static_view_offset(IRLoweringContext *context,
                                        IRFunction *function, Type *view_type,
                                        IROperand *row, IROperand *column,
@@ -1149,9 +1040,6 @@ int ir_lower_static_view_offset(IRLoweringContext *context,
                              out_offset);
 }
 
-/* An element of a view whose extents are in its type. Both indices are
-   consumed at once, because a swizzled address is not a row address plus a
-   column. */
 static int ir_lower_static_view_element(IRLoweringContext *context,
                                         IRFunction *function,
                                         ASTNode *expression,
@@ -1321,13 +1209,6 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
     }
 
     if (out_type) {
-      /* The local's own binding answers first. Lowering runs after the type
-       * checker popped its scopes, so symbol_table_lookup and the inference
-       * below reach the GLOBAL of the same name: a local shadowing a global
-       * took the global's type here, and `s.x` on a struct local shadowing a
-       * global `s` failed lowering as "Member access requires struct or string
-       * lvalue object". The address a line below already resolves through the
-       * binding; only the type did not. */
       const IRLocalBinding *binding =
           ir_local_binding_find(context, identifier->name);
       Type *bound_type = (binding && binding->type_text)
@@ -1375,18 +1256,8 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
 
     Type *array_type =
         ir_infer_expression_type(context, index_expression->array);
-    /* `s[i]` reads the i'th character. A string is a pointer and a length, so
-     * the base is its `chars` field and the stride is one byte. The view is
-     * borrowed and may point into rodata, so this is a read: the type checker
-     * rejects assignment through it before lowering sees the expression. */
     int base_is_string = array_type && array_type->kind == TYPE_STRING;
-    /* A slice holds its data pointer at offset 0 and its length at 8, so
-       indexing one reads the pointer first. The extent is right there beside
-       it, which is what the bounds check below uses. */
     int base_is_slice = array_type && array_type->kind == TYPE_SLICE;
-    /* An element of a view whose extents are in its type. The inner index is
-       still on the tree, so both are read here and the layout turns them into
-       one address. */
     if (index_expression->array &&
         index_expression->array->type == AST_INDEX_EXPRESSION) {
       ArrayIndexExpression *inner =
@@ -1451,9 +1322,6 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
         load_data.lhs = ir_clone_operand_local(&slice_address);
         load_data.rhs = ir_operand_int(8);
         load_data.alias_class = IR_ALIAS_CLASS_POINTER;
-        /* The data pointer's own type is what says where the elements live,
-         * so a `T global[]` indexes through a global address rather than a
-         * generic one. */
         if (array_type->field_types && array_type->field_count > 0) {
           load_data.value_type =
               mtlc_type_from_frontend(array_type->field_types[0]);
@@ -1462,12 +1330,9 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
         ir_operand_destroy(&load_data.lhs);
       }
     } else if (array_type->kind == TYPE_ARRAY && is_address_space_allocation) {
-      /* Workgroup/private arrays lower to pointer-valued storage bindings. */
       lowered_base =
           ir_lower_expression(context, function, index_expression->array, &base);
     } else if (array_type->kind == TYPE_ARRAY) {
-      // For inline arrays (including struct fields), indexing must use the
-      // address of the array storage, not a loaded value.
       lowered_base = ir_lower_lvalue_address(context, function,
                                              index_expression->array, &base,
                                              NULL);
@@ -1484,10 +1349,6 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
       return 0;
     }
 
-    /* --safe supersedes both legacy checks here. Its check traps on a null
-     * base with a better message, and it compares the scaled byte offset
-     * without sign, so a negative index fails the same comparison as an
-     * oversized one instead of slipping past a signed `index < length`. */
     int index_proven_by_type =
         array_type->kind == TYPE_ARRAY && index_expression->index &&
         type_checker_refined_index_fits(index_expression->index->resolved_type,
@@ -1526,8 +1387,6 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
         ir_operand_destroy(&index);
         return 0;
       }
-      /* The one bounds check a pointer could never have: the length travels
-         with the value, so the check reads it from there. */
       if (base_is_slice &&
           !ir_emit_slice_bounds_check(context, function, expression->location,
                                       &slice_address, &index)) {
@@ -1561,13 +1420,6 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
       return 0;
     }
 
-    /* An inline array carries its own length, so the check is a comparison
-     * against a constant the compiler already holds. Through a pointer, only
-     * the runtime knows how large the allocation is.
-     *
-     * Address-space allocations are workgroup and private GPU storage, whose
-     * bounds the device enforces and whose address is not a host pointer the
-     * shadow map could describe. */
     if (!is_address_space_allocation && !index_proven_by_type) {
       long long extent = IR_SAFETY_EXTENT_UNKNOWN;
       if (array_type->kind == TYPE_ARRAY && array_type->array_size > 0) {
@@ -1668,13 +1520,6 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
   }
 
   default: {
-    /* An aggregate rvalue -- a struct returned by a call, as in
-     * `make_point().x` -- has no storage to point at, so a member or index
-     * access on one had nowhere to read from and this reported "not
-     * assignable". Give it storage: declare a synthetic local of the value's
-     * type, assign the value into it, and hand back that local's address. This
-     * is the same shape the frontend already produces for
-     * `var t: S = make_point(); t.x`, just without the source-level name. */
     Type *value_type = ir_infer_expression_type(context, expression);
     if (!value_type || !value_type->name ||
         (value_type->kind != TYPE_STRUCT && value_type->kind != TYPE_ARRAY &&
@@ -1747,10 +1592,6 @@ static int ir_lower_member_address(IRLoweringContext *context,
 
   IROperand object_address = ir_operand_none();
   Type *object_type = ir_infer_expression_type(context, member->object);
-  /* A field reached through a pointer is checked once the field's offset and
-   * width are known, a few statements below. Reaching one through an inline
-   * struct needs no check: the object's own storage is what bounds it, and
-   * whatever produced that storage was checked already. */
   int base_is_pointer = 0;
 
   if (object_type && object_type->kind == TYPE_POINTER) {
@@ -1767,13 +1608,6 @@ static int ir_lower_member_address(IRLoweringContext *context,
     }
     object_type = object_type->base_type;
   } else {
-    /* `string` takes the struct path. It is a {chars, length} record, so the
-     * fields are measured from the record's address, and that is what the
-     * lvalue walk yields for a local, a parameter, or a field of another
-     * aggregate alike. Reading the object as a VALUE here was the other half
-     * of the two-representations problem: it worked for a parameter, whose
-     * slot happens to hold a pointer, and read a local's own first eight
-     * bytes as the base address. */
     if (!ir_lower_lvalue_address(context, function, member->object,
                                  &object_address, &object_type)) {
       return 0;

@@ -2,8 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The snapshot owns its strings: this file is archived into libmtlc, and the
-   frontend's interner is not on that side of the line. */
 static char *machine_dup(const char *text) {
   size_t length;
   char *copy;

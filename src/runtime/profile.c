@@ -58,7 +58,7 @@ static size_t g_edge_count = 0;
 static size_t g_edge_capacity = 0;
 static uint64_t *g_block_counts = NULL;
 static size_t g_block_capacity = 0;
-static size_t g_block_max_id = 0; /* highest block id ever seen, + 1 = count */
+static size_t g_block_max_id = 0;
 #if defined(_WIN32) || defined(_WIN64)
 static int g_qpc_initialized = 0;
 static LARGE_INTEGER g_qpc_frequency = {0};
@@ -676,9 +676,6 @@ static void mettle_profile_report_operations(
   }
 }
 
-/* The runtime uses Mettle's owned stdio (the internal linker
- * for --build resolves no __mingw_fprintf), so the sidecar is built in a
- * growable byte buffer and written with one OS call. */
 typedef struct {
   char *data;
   size_t len;
@@ -792,10 +789,6 @@ static int mprof_write_file(const char *path, const char *data, size_t length) {
 #endif
 }
 
-/* Machine-readable companion to the stderr report: the measured side of the
- * VTune-style codegen view. The extension joins blocks[] with the static
- * <stem>.annot.json (per-instruction block ids + port cost) to attribute
- * real execution frequency onto the microarchitecture model. */
 static void mettle_profile_write_sidecar(void) {
   const char *path = getenv("METTLE_PROFILE_OUT");
   size_t function_count = (size_t)mettle_profile_name_count;

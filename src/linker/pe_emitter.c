@@ -1403,9 +1403,6 @@ static int pe_is_exportable_name(const char *name) {
       strcmp(name, "_start") == 0) {
     return 0;
   }
-  /* Compiler-owned tables (crash/debug/profile metadata) live in the user
-   * object so they resolve without a startup link, but they are not part of
-   * the DLL interface. Only `export fn/var` names cross it. */
   if (strncmp(name, "mettle_", 7) == 0) {
     return 0;
   }
@@ -2044,11 +2041,6 @@ int pe_emit_executable(LinkResolution *resolution, const char *output_path,
     goto cleanup;
   }
 
-  /* Read/write, so the ownership check below can read the image back through
-   * this handle. Opening a finished executable is what a virus scanner charges
-   * for, and it was costing more than the whole link: remove any previous
-   * output first so this open finds no old image to inspect, and never open
-   * the file a second time. */
   remove(output_path);
   file = fopen(output_path, "w+b");
   if (!file) {
@@ -2106,8 +2098,6 @@ cleanup:
   if (file) {
     fclose(file);
     if (!ok) {
-      /* Half an image, or one that failed the ownership check: leaving it
-       * behind would let a later step mistake it for a finished executable. */
       remove(output_path);
     }
   }

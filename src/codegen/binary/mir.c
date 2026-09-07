@@ -65,7 +65,7 @@ void mir_function_init(MirFunction *fn, BinaryFunctionContext *context) {
   memset(fn, 0, sizeof(*fn));
   fn->context = context;
   fn->indirect_return_vreg = MIR_VREG_NONE;
-  fn->cur_ir_index = -1; /* no IR instruction open yet (annotator) */
+  fn->cur_ir_index = -1;
 }
 
 void mir_function_destroy(MirFunction *fn) {
@@ -153,8 +153,6 @@ int mir_emit(MirFunction *fn, const MirInst *inst) {
     fn->insn_capacity = new_cap;
   }
   fn->insns[fn->insn_count++] = *inst;
-  /* --annotate-asm: trace each emitted op back to the IR instruction being
-   * lowered, unless the caller already set a specific ir_index. */
   if (inst->ir_index < 0 && fn->cur_ir_index >= 0) {
     fn->insns[fn->insn_count - 1].ir_index = fn->cur_ir_index;
   }
@@ -225,8 +223,6 @@ MirOperand mir_op_mem_vreg(MirVregId base, MirVregId index, int scale,
   op.mem.phys_base_valid = 0;
   return op;
 }
-
-/* ---- dump --------------------------------------------------------------- */
 
 static const char *const MIR_OPCODE_NAMES[MIR_OPCODE_COUNT] = {
     [MIR_NOP] = "nop",

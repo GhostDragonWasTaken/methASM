@@ -4,49 +4,21 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Enforcement of the `@simd` / `@simd!` loop attributes.
- *
- * ir_lowering.c brackets each attributed loop with IR_OP_NOP markers whose
- * `text` is "@@simd:B:<id>:<mode>" / "@@simd:E:<id>:0" (see IR_SIMD_MARKER_PREFIX
- * in ir.h). By the time ir_verify_simd_contracts runs -- last in
- * ir_optimize_function_pipeline, after every vectorizer -- a loop a recognizer
- * accepted has been rewritten into a SIMD intrinsic op sitting between its
- * markers. So the contract test is simply: is there a vectorized op between B
- * and E?
- *
- *   @simd  (hint)     -> warn when not vectorized, keep the scalar loop
- *   @simd! (contract) -> hard compile error when not vectorized
- *
- * Enforcement only happens when optimization runs (-O / --release); plain debug
- * builds leave the markers as inert NOPs (ir_note_simd_contracts_unverified
- * prints one note explaining this and strips them). With --simd-report, every
- * `@simd` loop additionally reports what it became. */
-
-/* Set when a `@simd!` contract is violated, so the driver can tell a user error
- * apart from an internal compiler error. */
 static int g_simd_contract_user_error = 0;
-/* --simd-report: emit a note for every `@simd` loop (vectorized or not). */
 static int g_simd_report = 0;
 
 void ir_optimize_reset_user_error(void) { g_simd_contract_user_error = 0; }
 
 int ir_optimize_had_user_error(void) { return g_simd_contract_user_error; }
 
-/* Other contract checkers (`@inline!`, `@noalloc`) report through the same
- * "user error, not ICE" channel `@simd!` uses. */
 void ir_optimize_note_user_error(void) { g_simd_contract_user_error = 1; }
 
 void ir_optimize_set_simd_report(int enabled) { g_simd_report = enabled; }
 
-/* Program access for program-level fix simulations (call-in-body re-runs the
- * inliner, which needs callee lookup). NULL outside the per-function stage. */
 static MTLC_THREAD_LOCAL IRProgram *g_explain_program = NULL;
 
 void ir_explain_set_program(IRProgram *program) { g_explain_program = program; }
 
-/* The module symbol table of the program currently being optimized, for a
- * per-function pass that needs to resolve a global by name. NULL outside a
- * program stage, which simply means the pass declines. */
 const IRModuleSymbol *ir_optimize_module_symbol(const char *name) {
   if (!g_explain_program || !name) {
     return NULL;
@@ -60,17 +32,10 @@ static int ir_instruction_is_simd_marker(const IRInstruction *instruction) {
                  strlen(IR_SIMD_MARKER_PREFIX)) == 0;
 }
 
-/* Any op in [IR_OP_COUNT_WORD_STARTS, IR_OP_SIMD_OUTER_LANE_F64] is one of the
- * accelerated idiom / SIMD intrinsics the recognizers emit; its presence means
- * the loop was claimed by a vectorizer. */
 static int ir_op_is_vectorized(IROpcode op) {
   return op >= IR_OP_COUNT_WORD_STARTS && op <= IR_OP_SIMD_OUTER_LANE_F64;
 }
 
-/* First vectorized instruction in (begin, end). With any_depth == 0 only ops
- * at this loop's own nesting level count (ops inside a nested marked loop
- * belong to that loop); with any_depth == 1 the whole region counts. Returns
- * NULL when nothing vectorized. */
 static const IRInstruction *ir_region_vectorized_ins(const IRFunction *function,
                                                      size_t begin, size_t end,
                                                      int any_depth) {
@@ -95,13 +60,6 @@ static int ir_region_vectorized_op(const IRFunction *function, size_t begin,
   return ins ? (int)ins->op : -1;
 }
 
-/* The find skip-ahead vectorizes a search loop WITHOUT removing it: the
- * counter's init (which sits BEFORE a while-loop's marker region) becomes an
- * IR_OP_SIMD_FIND and the surviving scalar loop replays only the hit
- * iteration. Detect it so @simd contracts and the --explain report credit
- * the loop as vectorized: find the region's loop counter (the header
- * compare's lhs) and walk the straight-line code above the region for the
- * SIMD_FIND that initializes it. */
 static const IRInstruction *ir_region_skipahead_ins(const IRFunction *function,
                                                     size_t begin, size_t end) {
   const char *iv = NULL;
@@ -140,9 +98,6 @@ static const IRInstruction *ir_region_skipahead_ins(const IRFunction *function,
   return NULL;
 }
 
-/* True when (begin, end) still contains a loop header label -- i.e. an actual
- * loop survived optimization. A region with markers but no loop label was
- * fully unrolled (constant trip count) or removed outright. */
 static int ir_region_has_loop_label(const IRFunction *function, size_t begin,
                                     size_t end) {
   for (size_t i = begin + 1; i < end; i++) {
@@ -158,8 +113,6 @@ static int ir_region_has_loop_label(const IRFunction *function, size_t begin,
 
 static int ir_label_is_loop_header(const char *label);
 
-/* Loop headers in a region. Distinguishes "the body gained a loop" from "this
-   loop is still a loop", which a plain label test cannot. */
 static size_t ir_region_loop_header_count(const IRFunction *function,
                                           size_t begin, size_t end) {
   size_t count = 0;
@@ -172,11 +125,6 @@ static size_t ir_region_loop_header_count(const IRFunction *function,
   return count;
 }
 
-/* A loop's ENTRY label, as opposed to any of the other labels a loop emits.
- * `while` lowers to `ir_while_N` (entry) plus `ir_while_end_N` (exit), and the
- * exit contains the entry's name as a prefix -- so a plain substring test
- * counts one loop twice. Anything that walks headers to find nesting has to
- * tell them apart. */
 static int ir_label_is_loop_header(const char *label) {
   if (!label) {
     return 0;
@@ -188,16 +136,6 @@ static int ir_label_is_loop_header(const char *label) {
          strstr(label, "ir_while_end_") == NULL;
 }
 
-/* The source line of a loop header nested strictly inside (begin, end), or 0
- * when the region holds a single loop.
- *
- * The `@simd` marker records cannot answer this: the inliner deliberately drops
- * markers from an inlined copy, so a loop that arrived with an inlined call
- * leaves no record behind. Without a structural check the outer loop reads as a
- * leaf, and the leaf classifier then blames the INNER loop's exit test on a
- * data-dependent `if` and prescribes a branchless rewrite -- for a body whose
- * source contains no branch at all. Past the region's own header, a second
- * header can only belong to a nested loop. */
 static size_t ir_region_inner_loop_line(const IRFunction *function,
                                         size_t begin, size_t end) {
   int seen_header = 0;
@@ -210,8 +148,6 @@ static size_t ir_region_inner_loop_line(const IRFunction *function,
       seen_header = 1;
       continue;
     }
-    /* Labels carry no location of their own; take the first instruction after
-     * the header that does. */
     for (size_t j = i + 1; j < end; j++) {
       if (function->instructions[j].location.line) {
         return function->instructions[j].location.line;
@@ -222,42 +158,22 @@ static size_t ir_region_inner_loop_line(const IRFunction *function,
   return 0;
 }
 
-/* A branch/jump whose target is one of the runtime-check labels the lowerer
- * injects (null-check, bounds-check). These appear per pointer/array access at
- * -O (they're absent at --release), so they must NOT count as user control flow
- * -- otherwise every loop that touches a pointer is misreported as having "its
- * own control flow". */
 static int ir_label_is_runtime_check(const char *label) {
   if (!label) {
     return 0;
   }
-  /* `nullhoist` is the skip label null_check_licm leaves when it lifts a
-   * check out of the loop. Leaving it off this list made the diagnosis count
-   * the compiler's own branch as the programmer's, so a straight-line
-   * `@simd! for i in 0..n { a[i] = a[i] * 3 + 1; }` was told its body
-   * "branches on data (an `if` or `&&`/`||` per iteration)". */
   return strstr(label, "trap_null") != NULL || strstr(label, "nonnull") != NULL ||
          strstr(label, "nullhoist") != NULL ||
          strstr(label, "trap_bounds") != NULL || strstr(label, "in_bounds") != NULL;
 }
 
-/* What a data-dependent `if` in a loop body is actually doing.
- *
- * "Compute both arms and select arithmetically" is sound counsel for a
- * predicated store and no help at all for a running maximum, which has no
- * arithmetic form to rewrite into -- and which now vectorizes on its own when
- * the rest of the loop allows it, so a reader who followed that advice would
- * be rewriting a loop the compiler had already declined for some other reason.
- * Naming the shape is what makes the sentence after it worth acting on. */
 typedef enum {
   IR_BRANCH_SHAPE_OTHER = 0,
-  IR_BRANCH_SHAPE_EXTREMUM,    /* if (v > m) { m = v; } */
-  IR_BRANCH_SHAPE_COUNT,       /* if (cond) { c = c + 1; } */
-  IR_BRANCH_SHAPE_CLAMP_STORE  /* if (v > hi) { v = hi; } ... a[i] = v; */
+  IR_BRANCH_SHAPE_EXTREMUM,
+  IR_BRANCH_SHAPE_COUNT,
+  IR_BRANCH_SHAPE_CLAMP_STORE
 } IRBranchShape;
 
-/* The symbol a diamond's arm writes, plus what kind of write it is. `at` is
- * the BRANCH_ZERO; the arm runs to its jump-to-end. */
 static IRBranchShape ir_classify_one_diamond(const IRFunction *function,
                                              size_t at, size_t end,
                                              const IRInstruction *compare,
@@ -278,9 +194,6 @@ static IRBranchShape ir_classify_one_diamond(const IRFunction *function,
   if (jump >= end) {
     return IR_BRANCH_SHAPE_OTHER;
   }
-  /* An arm may do more than one thing (`v = lim; clipped = clipped + 1;`).
-   * The write that names a tested operand is the one the shape is about; the
-   * others are bookkeeping alongside it. */
   for (size_t i = at + 1; i < jump; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (!ir_instruction_writes_destination(ins) ||
@@ -306,18 +219,12 @@ static IRBranchShape ir_classify_one_diamond(const IRFunction *function,
         compare && (ir_operand_is_symbol_named(&compare->lhs, w->dest.name) ||
                     ir_operand_is_symbol_named(&compare->rhs, w->dest.name));
     *written_out = w->dest.name;
-    /* `c = c + <x>`: a predicated count, or a conditional running sum. */
     if (!writes_tested_operand && w->op == IR_OP_BINARY && w->text &&
         w->text[0] == '+' && !w->text[1] &&
         (ir_operand_is_symbol_named(&w->lhs, w->dest.name) ||
          ir_operand_is_symbol_named(&w->rhs, w->dest.name))) {
       return IR_BRANCH_SHAPE_COUNT;
     }
-    /* A tested operand copied back UNCHANGED is an extremum. Recomputing it
-     * (`v = 0.0 - v`, an absolute value) is a different shape entirely, and
-     * calling that a running maximum would name the wrong variable. The copy
-     * is either the other tested operand by name, or the load temp behind it:
-     * an arm that re-reads `a[i]` writes a fresh temp for the same element. */
     if (writes_tested_operand && w->op == IR_OP_LOAD) {
       return IR_BRANCH_SHAPE_EXTREMUM;
     }
@@ -332,8 +239,6 @@ static IRBranchShape ir_classify_one_diamond(const IRFunction *function,
       if (w->lhs.kind == IR_OPERAND_TEMP) {
         const IRInstruction *src =
             ir_find_temp_producer_before(function, write, w->lhs.name);
-        /* A cast counts: `(int32)bytes[i]` is still the element that was
-         * tested, only widened. Arithmetic does not. */
         if (src && (src->op == IR_OP_LOAD || src->op == IR_OP_CAST)) {
           return IR_BRANCH_SHAPE_EXTREMUM;
         }
@@ -346,9 +251,6 @@ static IRBranchShape ir_classify_one_diamond(const IRFunction *function,
   }
 }
 
-/* The dominant shape among the region's data-dependent diamonds, with the
- * symbol the arm writes. A clamp's two diamonds (a low bound and a high one)
- * report as one clamp; a mixed body reports OTHER. */
 static IRBranchShape ir_region_branch_shape(const IRFunction *function,
                                             size_t begin, size_t end,
                                             const char **written_out) {
@@ -358,9 +260,6 @@ static IRBranchShape ir_region_branch_shape(const IRFunction *function,
   size_t body_lo = begin + 1;
   size_t exit_test = (size_t)-1;
 
-  /* The loop's own exit test is the first branch after its header. It is the
-   * trip count, not a decision about an element, and counting it as one leaves
-   * every real diamond looking like a mixed body. */
   for (size_t i = begin; i < end; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op == IR_OP_LABEL && ir_label_is_loop_header(ins->text)) {
@@ -398,11 +297,9 @@ static IRBranchShape ir_region_branch_shape(const IRFunction *function,
     }
     one = ir_classify_one_diamond(function, i, end, compare, &written);
     if (one == IR_BRANCH_SHAPE_EXTREMUM && has_store) {
-      /* A tested value written back and then stored is a clamp, not a
-       * reduction: the running state is the element, not an accumulator. */
       one = IR_BRANCH_SHAPE_CLAMP_STORE;
     } else if (one == IR_BRANCH_SHAPE_CLAMP_STORE && !has_store) {
-      one = IR_BRANCH_SHAPE_OTHER; /* nothing stored: not a clamp */
+      one = IR_BRANCH_SHAPE_OTHER;
     }
     if (!seen) {
       shape = one;
@@ -415,8 +312,6 @@ static IRBranchShape ir_region_branch_shape(const IRFunction *function,
   return seen ? shape : IR_BRANCH_SHAPE_OTHER;
 }
 
-/* The loop counter of the while-loop whose header opens this region, or NULL.
- * The header's compare is `iv < bound`, and its left side names the counter. */
 static const char *ir_region_loop_counter(const IRFunction *function,
                                           size_t begin, size_t end) {
   for (size_t i = begin; i < end; i++) {
@@ -435,10 +330,6 @@ static const char *ir_region_loop_counter(const IRFunction *function,
           !c->lhs.name) {
         return NULL;
       }
-      /* Pointer induction can rewrite the exit test to walk a pointer while
-       * the source's counter lives on, still indexing the arrays the test no
-       * longer mentions. The index math is what these diagnoses read, so take
-       * the counter the body increments by one. */
       if (!ir_symbol_contains(c->lhs.name, "__ptr_")) {
         return c->lhs.name;
       }
@@ -459,10 +350,6 @@ static const char *ir_region_loop_counter(const IRFunction *function,
   return NULL;
 }
 
-/* The element stride of an address index, in elements, or 0 when the index is
- * not an affine function of the counter this understands. `elem_size` is the
- * access width in bytes, so a byte offset of `iv << 3` on a 4-byte access is a
- * stride of two. */
 static long long ir_index_element_stride(const IRFunction *function,
                                          size_t before, const IROperand *index,
                                          const char *iv, long long elem_size,
@@ -472,7 +359,7 @@ static long long ir_index_element_stride(const IRFunction *function,
     return 0;
   }
   if (ir_operand_is_symbol_named(index, iv)) {
-    return elem_size == 1 ? 1 : 0; /* raw counter: one element only at width 1 */
+    return elem_size == 1 ? 1 : 0;
   }
   if (index->kind != IR_OPERAND_TEMP || !index->name) {
     return 0;
@@ -481,8 +368,6 @@ static long long ir_index_element_stride(const IRFunction *function,
   if (!p || p->op != IR_OP_BINARY || p->is_float || !p->text) {
     return 0;
   }
-  /* `X << k` and `X * k` both scale; `X + c` shifts the start without changing
-   * the stride. */
   if ((strcmp(p->text, "<<") == 0 || strcmp(p->text, "*") == 0) &&
       p->rhs.kind == IR_OPERAND_INT) {
     long long scale = strcmp(p->text, "<<") == 0
@@ -517,11 +402,6 @@ static long long ir_index_element_stride(const IRFunction *function,
   return 0;
 }
 
-/* Does the region access memory with a stride greater than one element? The
- * kernels all walk their bases by one vector per iteration, so `a[i*3]` is
- * outside every one of them -- and saying so beats the catch-all, which tells
- * a reader whose index is already what they meant to write to go make it
- * unit-stride. */
 static long long ir_region_strided_access(const IRFunction *function,
                                           size_t begin, size_t end) {
   const char *iv = ir_region_loop_counter(function, begin, end);
@@ -560,12 +440,6 @@ static long long ir_region_strided_access(const IRFunction *function,
   return worst > 1 ? worst : 0;
 }
 
-/* Does an access index the counter PLUS something that does not vary -- the
- * `m[row * cols + c]` of every row-major inner loop? The access is perfectly
- * unit-stride; it just is not `base[i]`, which is the only address form the
- * kernels index off. Naming the invariant term turns the catch-all into an
- * edit: bind it to a pointer before the loop. Returns 1 and fills `element`
- * with the base array's name when it finds one. */
 static int ir_region_invariant_index_term(const IRFunction *function,
                                           size_t begin, size_t end,
                                           const char **base_out) {
@@ -606,8 +480,6 @@ static int ir_region_invariant_index_term(const IRFunction *function,
         strcmp(inner->text, "+") != 0) {
       continue;
     }
-    /* One side the counter, the other a runtime value -- not a literal, which
-     * the address folder handles on its own. */
     if ((ir_operand_is_symbol_named(&inner->lhs, iv) &&
          inner->rhs.kind != IR_OPERAND_INT) ||
         (ir_operand_is_symbol_named(&inner->rhs, iv) &&
@@ -619,21 +491,11 @@ static int ir_region_invariant_index_term(const IRFunction *function,
   return 0;
 }
 
-/* Forward decl: the dependence-analysis recurrence finder lives further down
- * (next to the deeper --explain diagnosis that shares it). */
 static const char *ir_region_find_serial_recurrence(const IRFunction *function,
                                                     size_t begin, size_t end,
                                                     const char **ops,
                                                     size_t *n_ops);
 
-/* Best-effort explanation of why a loop the user marked `@simd` did not
- * vectorize, derived from the surviving scalar IR between the markers. A clean
- * counted loop has exactly one exit test (branch) and one back-edge (jump);
- * extras mean the body carries its own control flow (a nested loop or an `if`),
- * which the recognizers don't handle. */
-/* Does this region carry a compiler-inserted null or bounds check? Those are
- * absent under --release, so their presence is the difference between a build
- * that vectorizes and one that does not. */
 static int ir_region_has_runtime_check(const IRFunction *function, size_t begin,
                                        size_t end) {
   for (size_t i = begin + 1; i < end && i < function->instruction_count; i++) {
@@ -656,7 +518,7 @@ static const char *ir_simd_bail_reason(const IRFunction *function, size_t begin,
   static char reason_buffer[512];
   int has_call = 0, has_new = 0, has_asm = 0;
   int branch_count = 0, jump_count = 0;
-  int has_i16 = 0, has_i64 = 0; /* unsupported memory element widths */
+  int has_i16 = 0, has_i64 = 0;
   int past_header = 0;
   for (size_t i = begin + 1; i < end; i++) {
     const IRInstruction *ins = &function->instructions[i];
@@ -667,18 +529,12 @@ static const char *ir_simd_bail_reason(const IRFunction *function, size_t begin,
       }
       continue;
     }
-    /* Skip the once-only preamble between the begin marker and the header
-     * label (a for-loop's initializer, hoisted pure calls): it is not the
-     * loop and must not drive the diagnosis. */
     if (!past_header) {
       continue;
     }
     switch (ins->op) {
     case IR_OP_CALL:
     case IR_OP_CALL_INDIRECT:
-      /* Ignore compiler-injected runtime-check traps (null/bounds checks emit
-       * a guarded call to mettle_crash_trap_ex at -O; they're absent at
-       * --release). Only user calls should drive the diagnosis. */
       if (!(ins->text && strstr(ins->text, "crash_trap"))) {
         has_call = 1;
       }
@@ -702,9 +558,6 @@ static const char *ir_simd_bail_reason(const IRFunction *function, size_t begin,
       break;
     case IR_OP_LOAD:
     case IR_OP_STORE: {
-      /* Vectorizable element widths: 1 (int8/uint8), 4 (int32/float32),
-       * 8-float (float64). 16-bit ints and 64-bit ints have no kernel. The
-       * load/store size lives in rhs; is_float distinguishes f64 from i64. */
       long long sz = (ins->rhs.kind == IR_OPERAND_INT) ? ins->rhs.int_value : 4;
       if (!ins->is_float) {
         if (sz == 2) {
@@ -719,11 +572,6 @@ static const char *ir_simd_bail_reason(const IRFunction *function, size_t begin,
       break;
     }
   }
-  /* A kernel replaces the loop wholesale, so it has nowhere to put a
-   * per-element trap. When this build keeps the runtime checks, that is the
-   * difference between it and a build that would vectorize, and it belongs in
-   * the message whatever else the loop is doing: the reader's next move is
-   * --release, not rewriting a loop that is already fine. */
   const char *keeps_checks =
       ir_region_has_runtime_check(function, begin, end)
           ? "; this build also keeps the runtime checks inside the loop, which "
@@ -742,9 +590,6 @@ static const char *ir_simd_bail_reason(const IRFunction *function, size_t begin,
     IR_SIMD_BAIL("the loop body contains inline assembly");
   }
   if (ir_region_inner_loop_line(function, begin, end)) {
-    /* Check the nest BEFORE the branch count: an inner loop's own exit test
-     * and back-edge are extra branches, and calling those a data-dependent
-     * branch sends the reader looking for an `if` that is not there. */
     IR_SIMD_BAIL("the loop body contains a nested loop (possibly from an "
                  "inlined call); only the innermost loop of a nest vectorizes");
   }
@@ -761,10 +606,6 @@ static const char *ir_simd_bail_reason(const IRFunction *function, size_t begin,
            "(use int32/int8, or float32/float64)";
   }
   {
-    /* A non-reassociable loop-carried recurrence (dependence analysis): a
-     * scalar computed from its own previous value through *, /, a shift, or a
-     * bitwise/xor op. The iterations form a dependency chain -- a genuine
-     * scalar floor, not a missing kernel. */
     const char *ops[6];
     size_t n_ops = 0;
     if (ir_region_find_serial_recurrence(function, begin, end, ops, &n_ops)) {
@@ -775,25 +616,12 @@ static const char *ir_simd_bail_reason(const IRFunction *function, size_t begin,
              "not";
     }
   }
-  /* Nothing about the loop itself disqualifies it, but this build keeps the
-   * runtime checks, and a kernel replaces the loop wholesale so it has nowhere
-   * to put a per-element trap. Saying so names the difference between this
-   * build and one that would vectorize, which "no kernel claimed this shape"
-   * does not. */
-  /* Honest fallback: we've ruled out the disqualifiers we can detect, so the
-   * truthful statement is that no kernel claimed this shape -- NOT an assertion
-   * of a specific cause we haven't verified. The checks are appended, never
-   * substituted: a non-unit stride does not vectorize under --release either,
-   * and naming the checks first would send the reader after a flag that
-   * changes nothing. */
   IR_SIMD_BAIL("no vectorizer recognized this loop's shape (e.g. a non-unit "
                "stride, a loop-carried dependence, or a reduction/operation "
                "no kernel covers)");
 #undef IR_SIMD_BAIL
 }
 
-/* Stable names for the IRSimdBailId schema (internal header). Used by future
- * structured output; kept in one place so the enum and names stay in sync. */
 const char *ir_simd_bail_id_name(int id) {
   switch ((IRSimdBailId)id) {
   case IR_SIMD_BAIL_NONE:                return "none";
@@ -834,10 +662,6 @@ const char *ir_simd_bail_id_name(int id) {
     }                                                                          \
   } while (0)
 
-/* The advice just written tells the reader there is nothing to change: the
- * loop is at its floor, or the gap is the compiler's. It is still worth
- * printing, since "this is fine" is an answer, but it is not a fix and the
- * report's triage must not rank it as one. */
 #define IR_SIMD_MARK_ADVISORY()                                                \
   do {                                                                         \
     if (advisory_out) {                                                        \
@@ -845,20 +669,10 @@ const char *ir_simd_bail_id_name(int id) {
     }                                                                          \
   } while (0)
 
-/* ---- loop-carried recurrence detection (dependence analysis) ---------------
- * A reduction whose only carried operation reassociates ('+'/'-') is NOT a
- * serial bottleneck -- the lanes can sum partials and combine at the end, and
- * the reduction kernels do exactly that. Any other carried operation (*, /, %,
- * the shifts, the bitwise ops, xor, and float '*'/'/') makes each iteration
- * genuinely depend on the previous result, so no lane can start before the one
- * before it finishes. That distinction is the whole diagnosis below. */
 static int ir_recur_op_is_reassociable(const char *text) {
   return text && text[0] && !text[1] && (text[0] == '+' || text[0] == '-');
 }
 
-/* Record a distinct carried operator (for the human-readable "through `*`,
- * `>>`" list); silently caps the set. The stored pointers are the instruction
- * texts, valid for the lifetime of the diagnosis. */
 #define IR_RECUR_MAX_OPS 6
 static void ir_recur_note_op(const char **ops, size_t *n_ops, const char *t) {
   if (!t || !t[0]) {
@@ -874,14 +688,6 @@ static void ir_recur_note_op(const char **ops, size_t *n_ops, const char *t) {
   }
 }
 
-/* Does `op` -- an operand feeding a symbol's in-body definition -- transitively
- * read the PRIOR-iteration value of `sym`? Walks temp producers backward inside
- * the loop region; sets *nonreassoc when any operation on a reaching path does
- * not reassociate, and collects the reaching operators into `ops`. Conservative
- * by construction: an operand it cannot resolve ends that path as "does not
- * reach", so a reported recurrence is always a real one (it never invents a
- * dependence that isn't in the IR). The depth bound also keeps it cheap on the
- * pathological deeply-nested temp chain. */
 static int ir_recur_operand_reaches(const IRFunction *function, size_t before,
                                     const IROperand *op, const char *sym,
                                     int *nonreassoc, const char **ops,
@@ -890,7 +696,7 @@ static int ir_recur_operand_reaches(const IRFunction *function, size_t before,
     return 0;
   }
   if (op->kind == IR_OPERAND_SYMBOL && op->name && strcmp(op->name, sym) == 0) {
-    return 1; /* a read of the symbol's value from before this iteration */
+    return 1;
   }
   if (op->kind != IR_OPERAND_TEMP || !op->name) {
     return 0;
@@ -900,9 +706,6 @@ static int ir_recur_operand_reaches(const IRFunction *function, size_t before,
   if (!p) {
     return 0;
   }
-  /* Only straight-line data ops carry a value chain. A CALL/LOAD result is not
-   * the symbol's prior value (a call-in-body is diagnosed separately; a load is
-   * fresh array data), so those paths correctly do not reach. */
   if (p->op != IR_OP_BINARY && p->op != IR_OP_CAST && p->op != IR_OP_ASSIGN) {
     return 0;
   }
@@ -925,13 +728,6 @@ static int ir_recur_operand_reaches(const IRFunction *function, size_t before,
   return found;
 }
 
-/* The loop's first non-reassociable loop-carried recurrence: a scalar symbol
- * whose in-body value is computed from its own previous value through at least
- * one operation that does not reassociate. Returns the symbol (NULL when none),
- * filling `ops` with the distinct carried operators for the message. Handles
- * both the direct form (`s = s <op> x`) and the temp+ASSIGN form
- * (`%t = s <op> x; s <- %t`). The induction variable's own `i = i + 1` is a
- * reassociable '+' recurrence and is therefore never reported. */
 static const char *ir_region_find_serial_recurrence(const IRFunction *function,
                                                     size_t begin, size_t end,
                                                     const char **ops,
@@ -983,14 +779,9 @@ static const char *ir_region_find_serial_recurrence(const IRFunction *function,
   return NULL;
 }
 
-/* Which float width dominates the region's memory traffic (defined with the
- * fix simulations below, and used by the diagnosis to name it). */
 static long long ir_simd_majority_float_width(const IRFunction *function,
                                               size_t begin, size_t end);
 
-/* The element type of a declared array type: "float32[64]" -> "float32".
- * Falls back to a readable placeholder so the advice still parses as English
- * when the declaration is a shape this does not model. */
 static void ir_type_element_name(const char *declared, char *out, size_t cap) {
   const char *bracket = declared ? strchr(declared, '[') : NULL;
   size_t n = bracket ? (size_t)(bracket - declared) : 0;
@@ -1030,11 +821,6 @@ static const char *ir_simd_field_base_symbol(const IRFunction *function,
   return NULL;
 }
 
-/* --explain: a deeper diagnosis than ir_simd_bail_reason, split into a reason
- * (what blocked vectorization), a fix (what the user can change), and a
- * machine-readable IRSimdBailId every branch must set. Best-effort but never
- * speculative: each claim is derived from instructions actually present in
- * the region. Empty fix = nothing actionable. */
 static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
                                  size_t end, char *reason, size_t reason_cap,
                                  char *fix, size_t fix_cap, int *diagnosis_out,
@@ -1059,14 +845,8 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
   int load_count = 0, store_count = 0, byte_store_count = 0;
   int reloaded_base_count = 0;
   const char *reloaded_base_sym = NULL;
-  int past_header = 0; /* seen the loop's own header label yet? */
+  int past_header = 0;
   const char *body_local = NULL;
-  /* A stack array whose address the body re-takes every iteration
-   * (`%t <- &@a` inside the loop). The kernels index off an invariant base
-   * SYMBOL, so a base that is a fresh temp each iteration never matches --
-   * even though the source reads `a[i]`, which is exactly the shape the
-   * generic advice would tell the writer to produce. Naming the array lets
-   * the fill diagnosis below give advice that can actually be followed. */
   const char *rebased_array = NULL;
 
   for (size_t i = begin + 1; i < end; i++) {
@@ -1078,28 +858,17 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
       }
       continue;
     }
-    /* The marker region starts BEFORE a for-loop's initializer, and hoisted
-     * preamble code (pure-call LICM results, pointer setup) lands there too.
-     * Everything before the header label runs ONCE -- it is not the loop, so
-     * it must not drive the diagnosis. */
     if (!past_header) {
       continue;
     }
     switch (ins->op) {
     case IR_OP_DECLARE_LOCAL:
-      /* A local declared INSIDE the loop body (after the header label -- a
-       * range-for's induction local sits between the markers but BEFORE the
-       * header and is fine) is one no recognizer's load->compute->store
-       * matching can see through. The common source is an inlined callee's
-       * parameter copy that copy-propagation couldn't fold (float32 narrowing
-       * keeps the copy alive). */
       if (past_header && !body_local && ins->dest.kind == IR_OPERAND_SYMBOL &&
           ins->dest.name) {
         body_local = ins->dest.name;
       }
       break;
     case IR_OP_ADDRESS_OF:
-      /* `%t <- &@a` in the body: record the array it names, once. */
       if (!rebased_array && ins->lhs.kind == IR_OPERAND_SYMBOL &&
           ins->lhs.name) {
         const char *declared =
@@ -1138,8 +907,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
       }
       break;
     case IR_OP_RETURN:
-      /* A return INSIDE the loop body is the definitive early-exit marker
-       * (`if (...) return x;` -- the find/compare/parse shape). */
       has_return_in_body = 1;
       break;
     case IR_OP_LOAD:
@@ -1184,11 +951,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
       break;
     }
     case IR_OP_BINARY: {
-      /* Integer '+' accumulation of a computed value into a symbol
-       * (`total = total + %t`): together with byte loads this identifies the
-       * vpsadbw byte-sum shape, whose kernel requires an int64 accumulator.
-       * The added operand must be a temp -- `i = i + 1` (a constant) is an
-       * induction variable, not a data sum. */
       if (!ins->is_float && ins->text && ins->text[0] == '+' &&
           !ins->text[1] && ins->dest.kind == IR_OPERAND_SYMBOL &&
           ins->dest.name &&
@@ -1201,9 +963,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
         has_int_accum = 1;
         int_accum_sym = ins->dest.name;
       }
-      /* Float multiply + float '+' accumulation = a dot-product-shaped
-       * reduction (used below to give an address-pattern diagnosis when no
-       * kernel claimed it). */
       if (ins->is_float && ins->text && ins->text[0] == '*' && !ins->text[1]) {
         has_float_mul = 1;
       }
@@ -1235,9 +994,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
       IR_SIMD_SET_DIAG(IR_SIMD_BAIL_SAFETY_IN_BODY);
       return;
     }
-    /* Advice differs fundamentally by what the callee IS: a program-defined
-     * function can be inlined (and that fix can be simulated); an extern has
-     * no body, so "mark it @inline" would be advice that cannot work. */
     IRFunction *callee_fn =
         g_explain_program ? ir_program_find_function(g_explain_program, callee)
                           : NULL;
@@ -1291,14 +1047,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
     return;
   }
   if (branch_count > 1 || jump_count > 1) {
-    /* Early exit vs internal branching deserve OPPOSITE advice. A branch
-     * whose target label is not inside the region leaves the loop before the
-     * trip count -- a compare/search shape where the early exit IS the
-     * algorithm and scalar code is the right output. A branch that stays
-     * inside the region is a data-dependent diamond, where branchless
-     * rewriting is real advice. (The first body branch is usually the
-     * loop's own exit test, so it is expected to leave the region; only an
-     * ADDITIONAL outward branch marks an early exit.) */
     int outward_branches = 0;
     for (size_t t = 0; t < branch_target_count; t++) {
       int inside = 0;
@@ -1333,9 +1081,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
       IRBranchShape shape =
           ir_region_branch_shape(function, begin, end, &written);
       if (shape == IR_BRANCH_SHAPE_EXTREMUM) {
-        /* A running extremum HAS a kernel (vmaxps/vmaxpd/vpmaxsd), so the
-         * branch is not what stopped this one. Say what did, or the reader
-         * rewrites a loop whose branch was never the problem. */
         const char *acc_type =
             written ? ir_function_local_declared_type(function, written) : NULL;
         snprintf(reason, reason_cap,
@@ -1346,9 +1091,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
                  acc_type ? "` is the accumulator)" : "");
         if (acc_type && strcmp(acc_type, "float64") != 0 &&
             strcmp(acc_type, "float32") != 0 && strcmp(acc_type, "int32") != 0) {
-          /* The lane width comes from the ELEMENTS, so widening the
-             accumulator alone moves nothing: the loop comes back refused for
-             the widening it now does in the body. Name the array. */
           snprintf(fix, fix_cap,
                    "widen the array to int32 elements (float32 and float64 "
                    "work too): the extremum kernel carries those lane widths "
@@ -1378,9 +1120,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
                  "accumulate",
                  written ? written : "the accumulator",
                  written ? written : "the accumulator");
-        /* Respelling the guard does not help: a guard on a computed value is
-           refused whatever it is compared against. Adding the comparison is
-           what the kernel takes, and it takes every comparison. */
         snprintf(fix, fix_cap,
                  "over int32 elements, add the comparison rather than "
                  "branching on it: `%s = %s + ((a[i] & 6) != 0);` vectorizes, "
@@ -1424,11 +1163,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
              "the loop reads/writes 16-bit integers, and no 16-bit kernels "
              "exist");
     if (has_int_accum) {
-      /* The int32 sum kernel additionally requires an int64 accumulator, so
-       * for a sum loop the honest fix names every needed change (and the
-       * paired hypothesis transform simulates exactly this). When the
-       * accumulator is already int64, retyping the elements is the whole
-       * fix. */
       const char *acc_type =
           int_accum_sym ? ir_function_local_declared_type(function,
                                                           int_accum_sym)
@@ -1468,12 +1202,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
     return;
   }
   {
-    /* Loop-carried serial recurrence (dependence analysis): a scalar computed
-     * from its own previous value through a non-reassociable operation -- the
-     * leaf_call hash/RNG shape (`acc = (acc*K + C) ^ (i + (acc>>7))`), a float
-     * product/quotient chain, an IIR filter. The lanes form a dependency chain
-     * and cannot run independently, so this is a genuine scalar floor, not a
-     * missing kernel. */
     const char *ops[IR_RECUR_MAX_OPS];
     size_t n_ops = 0;
     const char *recur_symbol =
@@ -1507,10 +1235,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
     }
   }
   if (has_f32 && has_f64) {
-    /* Naming the width turns "pick one" into an instruction, and it is the
-     * width the paired simulation converges on, so the kernel the report
-     * promises is the one this edit produces. The minority is what a reader
-     * would retype: it is the odd array out. */
     long long keep = ir_simd_majority_float_width(function, begin, end);
     snprintf(reason, reason_cap,
              "the loop mixes float32 and float64 elements; each kernel "
@@ -1594,9 +1318,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
     return;
   }
   if (store_count > 0 && load_count == 0) {
-    /* Three causes are distinguishable here, and the generic address message
-     * is wrong for all of them: it tells a writer who already wrote `a[i]` to
-     * make the index unit-stride. Check the specific ones first. */
     if (store_count > 1) {
       snprintf(reason, reason_cap,
                "the body writes %d destinations; the fill kernel fills one "
@@ -1621,11 +1342,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
       return;
     }
     if (rebased_array) {
-      /* The writer already wrote `a[i]`. Telling them to make the index
-       * unit-stride would be advice they have followed, so name the real
-       * obstacle: a stack array's address is retaken each iteration, and the
-       * kernel needs one invariant base. Binding a pointer once fixes it and
-       * costs nothing at runtime. */
       char element[64];
       ir_type_element_name(
           ir_function_local_declared_type(function, rebased_array), element,
@@ -1655,9 +1371,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
     return;
   }
   {
-    /* Before the catch-all: a stride the reader wrote deliberately. Telling
-     * them to "use unit-stride `a[i]`" is not advice for `rgb[i*3+1]` -- the
-     * layout is the point -- so name the stride and say it is a gap. */
     long long stride = ir_region_strided_access(function, begin, end);
     if (stride > 1) {
       snprintf(reason, reason_cap,
@@ -1676,12 +1389,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
     }
   }
   {
-    /* A `>>` the lanes cannot take. Every other integer op is congruent mod
-     * 2^32, so 32-bit lanes reproduce it whatever width the scalar used; a
-     * right shift reads bits back DOWN, and a lane that wrapped where the
-     * scalar did not would shift different ones. The recognizer takes the
-     * shift only where the shifted value is provably inside int32, and a
-     * runtime factor in the expression makes that unprovable. */
     int shift_count = 0;
     int variable_shift = 0;
     for (size_t i = begin + 1; i < end; i++) {
@@ -1702,9 +1409,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
         variable_shift++;
       }
     }
-    /* A shift by a value the loop reads has no kernel at all, and no source
-       rewrite reaches one. Saying so beats dropping through to the catch-all,
-       which offers a shape checklist this loop already satisfies. */
     if (variable_shift > 0 && load_count > 0) {
       snprintf(reason, reason_cap,
                "the body shifts by a value that is not a constant; the kernels "
@@ -1724,10 +1428,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
                "shown to stay inside int32; the lanes are 32 bits wide, so a "
                "shift is only reproduced exactly when no wider intermediate "
                "could have been shifted");
-      /* The old text here offered `(r*77 + g*150 + b*29) >> 8` as the shape
-         that works. It is the shape being refused, so it read as the compiler
-         citing the reader's own code back as the counterexample. Masking is
-         the change that moves it, and it is the only one. */
       snprintf(fix, fix_cap,
                "mask the value down to the bits the shift needs: "
                "`(x & 65535) >> 8` bounds it inside int32 and the kernel then "
@@ -1737,8 +1437,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
     }
   }
   {
-    /* The row-major inner loop. Unit-stride, but indexed off `base + invariant`
-     * rather than `base`, which is the one address form the kernels walk. */
     const char *base = NULL;
     if (ir_region_invariant_index_term(function, begin, end, &base)) {
       snprintf(reason, reason_cap,
@@ -1755,22 +1453,10 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
       return;
     }
   }
-  /* Reaching here means every disqualifier above was checked and none held,
-   * so the honest statement is that no recognizer claimed the loop, not a
-   * guess at which requirement it missed.
-   *
-   * "by the time the vectorizers ran" is load-bearing. The report quotes the
-   * source line right above this, and that line may still show a call the
-   * inliner has since removed; without the qualifier the sentence reads as a
-   * denial of what the reader can see. */
   snprintf(reason, reason_cap,
            "no vectorizer recognized this loop's shape: by the time the "
            "vectorizers ran, its body had no call, branch, unsupported "
            "element width or carried dependence left to blame");
-  /* A checklist of what the kernels take, which is a description rather than
-     an instruction: it names no edit to this loop. Advisory keeps it out of
-     "where to start", where it used to outrank nothing and get read as the
-     compiler's best idea. The reader still sees it under the loop. */
   snprintf(fix, fix_cap,
            "compare the loop against the shapes that do vectorize: "
            "unit-stride `a[i]` (not `a[i*k]`) over int8/int32/float32/float64, "
@@ -1779,16 +1465,6 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
   IR_SIMD_MARK_ADVISORY();
 }
 
-/* ---- fix hypothesis simulation ---------------------------------------------
- * "Verified" fix suggestions: apply the suggested source change as an
- * equivalent IR rewrite on a scratch clone, re-run the real vectorization
- * stages on it, and check whether a kernel claimed the loop. Only then does
- * the report print `verified: with that change ...` -- the claim is the
- * optimizer's own acceptance, not a prediction. */
-
-/* Marker id of the loop beginning at `begin` (-1 when unparsable). The clone's
- * instruction indexes shift when passes rewrite it, so the loop is re-located
- * by this id afterwards. */
 static int ir_simd_marker_id_at(const IRFunction *function, size_t begin) {
   const IRInstruction *marker = &function->instructions[begin];
   char which = 0;
@@ -1801,8 +1477,6 @@ static int ir_simd_marker_id_at(const IRFunction *function, size_t begin) {
   return id;
 }
 
-/* Find the B/E marker pair with `id` in `function`; returns 1 and fills the
- * region bounds on success. */
 static int ir_simd_find_marker_region(const IRFunction *function, int id,
                                       size_t *begin_out, size_t *end_out) {
   size_t begin = (size_t)-1;
@@ -1827,27 +1501,13 @@ static int ir_simd_find_marker_region(const IRFunction *function, int id,
   return 0;
 }
 
-/* A fix mutator applies one suggested source fix to the CLONE as the
- * equivalent IR rewrite, scoped to the loop region [begin, end]. Returns 1
- * when the rewrite was applied (the simulation may proceed), 0 when the
- * expected shape wasn't found (no claim is made), and -1 when the mutator
- * POSITIVELY established the suggested fix cannot be written for this loop
- * (the report then replaces the advice instead of printing it). The clone is
- * disposable: it only has to convince the recognizers, not execute -- which
- * is what keeps mutators small. */
 #define IR_SIMD_FIX_INAPPLICABLE (-1)
 typedef int (*IRSimdFixMutator)(IRFunction *clone, size_t begin, size_t end);
 
-/* Widen the loop's integer accumulator to int64 on the clone, the way the
- * suggested source fix would: retype its DECLARE_LOCAL, and retarget the
- * widening cast feeding the accumulation when one exists. The byte-sum kernel
- * insists on the cast form (`s += (int64)a[i]`); the int32 sum kernel also
- * accepts the cast-free widening form, so `cast_required` distinguishes them. */
 static int ir_simd_widen_accumulator(IRFunction *clone, size_t begin,
                                      size_t end, int cast_required) {
   int rewrote_cast = 0, rewrote_decl = 0;
   const char *acc_symbol = NULL;
-  /* Locate the accumulation `S = S + %t` in the region. */
   for (size_t i = begin + 1; i < end && !acc_symbol; i++) {
     const IRInstruction *ins = &clone->instructions[i];
     if (ins->op == IR_OP_BINARY && !ins->is_float && ins->text &&
@@ -1856,7 +1516,6 @@ static int ir_simd_widen_accumulator(IRFunction *clone, size_t begin,
         ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
         strcmp(ins->lhs.name, ins->dest.name) == 0) {
       acc_symbol = ins->dest.name;
-      /* The widening cast that produces %t, scanning backwards. */
       for (size_t j = i; j-- > begin;) {
         IRInstruction *cast = &clone->instructions[j];
         if (cast->op == IR_OP_CAST && cast->dest.kind == IR_OPERAND_TEMP &&
@@ -1886,26 +1545,16 @@ static int ir_simd_widen_accumulator(IRFunction *clone, size_t begin,
   return rewrote_decl && (rewrote_cast || !cast_required);
 }
 
-/* Mutator for IR_SIMD_BAIL_BYTE_SUM_NARROW_ACC ("declare the accumulator as
- * int64"). */
 static int ir_simd_mutate_byte_sum_int64(IRFunction *clone, size_t begin,
                                          size_t end) {
   return ir_simd_widen_accumulator(clone, begin, end, 1);
 }
 
-/* Mutator for IR_SIMD_BAIL_I32_SUM_NARROW_ACC: the int32 sum kernel admits
- * the cast-free widening form whenever the accumulator is declared int64, so
- * only the declaration needs retyping. */
 static int ir_simd_mutate_i32_sum_int64(IRFunction *clone, size_t begin,
                                         size_t end) {
   return ir_simd_widen_accumulator(clone, begin, end, 0);
 }
 
-/* Retype the loop's integer memory accesses from `from_size` bytes to int32
- * (loads/stores to size 4, the matching address scale shift to <<2), the IR
- * image of "use int32 elements". When the loop accumulates, the accumulator
- * is also widened to int64 (the int32 sum kernel's requirement, and what the
- * paired fix text tells the user). */
 static int ir_simd_retype_int_elems_to_i32(IRFunction *clone, size_t begin,
                                            size_t end, long long from_size,
                                            long long from_shift) {
@@ -1928,27 +1577,20 @@ static int ir_simd_retype_int_elems_to_i32(IRFunction *clone, size_t begin,
   if (!rewrote) {
     return 0;
   }
-  /* Best-effort: maps have no accumulator, sums need theirs widened. */
   ir_simd_widen_accumulator(clone, begin, end, 0);
   return 1;
 }
 
-/* Mutator for IR_SIMD_BAIL_INT16_ELEMENTS ("use int32 elements ..."). */
 static int ir_simd_mutate_int16_to_i32(IRFunction *clone, size_t begin,
                                        size_t end) {
   return ir_simd_retype_int_elems_to_i32(clone, begin, end, 2, 1);
 }
 
-/* Mutator for IR_SIMD_BAIL_INT64_ELEMENTS ("use int32 arrays ..."). */
 static int ir_simd_mutate_int64_to_i32(IRFunction *clone, size_t begin,
                                        size_t end) {
   return ir_simd_retype_int_elems_to_i32(clone, begin, end, 8, 3);
 }
 
-/* Which float width dominates the region's memory traffic, or 0 when the
- * region is not mixed. The minority is what a reader would retype, and it is
- * what the mutator below converges, so the kernel the simulation names is the
- * kernel that edit produces. */
 static long long ir_simd_majority_float_width(const IRFunction *function,
                                               size_t begin, size_t end) {
   int f32 = 0, f64 = 0;
@@ -1970,10 +1612,6 @@ static long long ir_simd_majority_float_width(const IRFunction *function,
   return (f32 >= f64) ? 4 : 8;
 }
 
-/* Mutator for IR_SIMD_BAIL_MIXED_FLOAT_WIDTHS ("keep the loop in one float
- * width"). Retypes the minority width onto the majority, scale shifts and
- * all, and lets the real vectorizer say whether one width was the only thing
- * in the way. */
 static int ir_simd_mutate_single_float_width(IRFunction *clone, size_t begin,
                                              size_t end) {
   long long keep = ir_simd_majority_float_width(clone, begin, end);
@@ -1984,11 +1622,6 @@ static int ir_simd_mutate_single_float_width(IRFunction *clone, size_t begin,
   long long keep_shift = (keep == 4) ? 2 : 3;
   long long drop_shift = (keep == 4) ? 3 : 2;
 
-  /* Temps loaded at the dropped width. Retyping the load leaves the width
-   * cast that consumed it behind, and the recognizers still see it; the
-   * reader's edit deletes that cast along with the type. Only casts fed by a
-   * load this pass retyped are touched, so an int-to-float conversion (real
-   * work) is never mistaken for width bookkeeping. */
   char retyped[32][64];
   size_t retyped_count = 0;
 
@@ -2007,7 +1640,6 @@ static int ir_simd_mutate_single_float_width(IRFunction *clone, size_t begin,
       }
       continue;
     }
-    /* The index scale that went with the dropped width. */
     if (ins->op == IR_OP_BINARY && !ins->is_float && ins->text &&
         strcmp(ins->text, "<<") == 0 && ins->rhs.kind == IR_OPERAND_INT &&
         ins->rhs.int_value == drop_shift &&
@@ -2019,7 +1651,7 @@ static int ir_simd_mutate_single_float_width(IRFunction *clone, size_t begin,
         ins->lhs.kind == IR_OPERAND_TEMP && ins->lhs.name) {
       for (size_t r = 0; r < retyped_count; r++) {
         if (strcmp(retyped[r], ins->lhs.name) == 0) {
-          ins->op = IR_OP_ASSIGN; /* both sides are `keep` wide now */
+          ins->op = IR_OP_ASSIGN;
           break;
         }
       }
@@ -2028,7 +1660,6 @@ static int ir_simd_mutate_single_float_width(IRFunction *clone, size_t begin,
   return rewrote;
 }
 
-/* True when some instruction in (begin, end) writes the symbol `sym`. */
 static int ir_simd_symbol_written_in_region(const IRFunction *function,
                                             size_t begin, size_t end,
                                             const char *sym) {
@@ -2043,10 +1674,6 @@ static int ir_simd_symbol_written_in_region(const IRFunction *function,
   return 0;
 }
 
-/* True when the value of `sym`/`temp` is invariant across the loop region:
- * not the iv, and (transitively) reading no symbol the body writes.
- * Conservative: an unresolvable producer or a chain deeper than the budget
- * counts as variant, so a "yes" is trustworthy. */
 static int ir_simd_symbol_is_region_invariant(const IRFunction *function,
                                               size_t begin, size_t end,
                                               const char *sym,
@@ -2086,17 +1713,6 @@ static int ir_simd_temp_is_region_invariant(const IRFunction *function,
   return 1;
 }
 
-/* Mutator for IR_SIMD_BAIL_DOT_SHAPE_ADDRESS ("hoist invariant index math
- * into a pointer before the loop"): for each access whose index is
- * `invariant + iv`, retarget it to a fresh row-pointer symbol indexed by the
- * iv alone -- exactly the IR a hoisted `var row: T* = &m[inv];` + `row[iv]`
- * produces inside the loop. All in place: the scale shift's operand becomes
- * the iv, the address add's base becomes `__hypo_rowN`, and the dead
- * index-add slot becomes that symbol's DECLARE_LOCAL (the recognizers consult
- * only the declared type; the clone never executes). The invariance of the
- * hoisted half IS checked (conservatively) -- otherwise the simulation could
- * prove a fix the user cannot actually write. */
-/* The loop's induction variable: lhs of the header's `iv < bound` compare. */
 static const char *ir_simd_region_induction_variable(const IRFunction *clone,
                                                      size_t begin,
                                                      size_t end) {
@@ -2176,7 +1792,6 @@ static const IROperand *ir_simd_row_invariant_half(IRFunction *clone,
   return other;
 }
 
-/* The address add consuming the shifted index: `addr = base + %shifted`. */
 static IRInstruction *ir_simd_address_add(IRFunction *clone, size_t at,
                                           size_t end, const char *shifted) {
   for (size_t k = at + 1; k < end; k++) {
@@ -2240,8 +1855,6 @@ static int ir_simd_mutate_dot_row_pointer(IRFunction *clone, size_t begin,
     shl->lhs = ir_operand_symbol(iv);
     ir_operand_destroy(&addr->lhs);
     addr->lhs = ir_operand_symbol(row_name);
-    /* The index add is now dead; its slot becomes the row pointer's
-     * DECLARE_LOCAL so ir_symbol_is_float_array_base accepts the base. */
     ir_instruction_destroy_storage(idx);
     memset(idx, 0, sizeof(*idx));
     idx->op = IR_OP_DECLARE_LOCAL;
@@ -2252,25 +1865,9 @@ static int ir_simd_mutate_dot_row_pointer(IRFunction *clone, size_t begin,
   if (rewrites > 0) {
     return 1;
   }
-  /* The dot shape was there but its index half changes every iteration:
-   * the suggested hoist is positively unwritable, not merely unmatched. */
   return variant_index_seen ? IR_SIMD_FIX_INAPPLICABLE : 0;
 }
 
-/* "bind the array to a pointer once before the loop" (store-only-fill on a
- * stack array). The fill kernel indexes off an invariant base SYMBOL; a stack
- * array's address is retaken inside the body, so the store's base is a fresh
- * temp every iteration and no kernel claims it.
- *
- * The rewrite is the source change: the in-body `%t <- &@a` becomes a pointer
- * local declared before the loop, and the address add reads that symbol. Like
- * the row-pointer mutator, this reshapes the clone rather than executing it;
- * the claim being tested is whether the recognizer accepts the shape the user
- * would produce, and the clone is discarded either way.
- *
- * Returns 0 for the other store-only-fill causes (several stores, byte
- * elements), whose loops have no in-body address-of to hoist, so they never
- * pick up a proof they have not earned. */
 static int ir_simd_mutate_fill_base_pointer(IRFunction *clone, size_t begin,
                                             size_t end) {
   int rewrites = 0;
@@ -2293,10 +1890,9 @@ static int ir_simd_mutate_fill_base_pointer(IRFunction *clone, size_t begin,
     const char *declared =
         ir_function_local_declared_type(clone, addr_of->lhs.name);
     if (!declared || !strchr(declared, '[')) {
-      continue; /* not a stack array: nothing to bind */
+      continue;
     }
 
-    /* The address add that consumes it: `%addr = %base + %scaled`. */
     IRInstruction *addr = NULL;
     for (size_t k = i + 1; k < end; k++) {
       IRInstruction *cand = &clone->instructions[k];
@@ -2312,10 +1908,6 @@ static int ir_simd_mutate_fill_base_pointer(IRFunction *clone, size_t begin,
       continue;
     }
 
-    /* Point the address add at the array symbol itself and drop the
-     * per-iteration address-of. That is what binding a pointer once achieves
-     * from the kernel's side: one invariant base for the whole loop instead
-     * of a fresh temp each time round. */
     ir_operand_destroy(&addr->lhs);
     addr->lhs = ir_operand_symbol(addr_of->lhs.name);
     ir_instruction_destroy_storage(addr_of);
@@ -2326,10 +1918,6 @@ static int ir_simd_mutate_fill_base_pointer(IRFunction *clone, size_t begin,
   return rewrites > 0;
 }
 
-/* Hoist the body's local declaration above the loop header, which is what
- * "declare it before the loop" does to the instruction stream. A DECLARE_LOCAL
- * names storage and carries no value (the initializer lowers to a separate
- * store), so moving it changes nothing the loop computes. */
 static int ir_simd_mutate_hoist_body_local(IRFunction *clone, size_t begin,
                                            size_t end) {
   size_t header = 0, decl = 0;
@@ -2357,10 +1945,6 @@ static int ir_simd_mutate_hoist_body_local(IRFunction *clone, size_t begin,
   return 1;
 }
 
-/* The transform table: which diagnoses have a paired fix simulation. Growing
- * the hypothesis engine = adding a mutator and one row here.
- * `inapplicable_fix` (optional) replaces the advice when the mutator returns
- * IR_SIMD_FIX_INAPPLICABLE -- proven-useless advice must not be printed. */
 static const struct {
   IRSimdBailId diagnosis;
   IRSimdFixMutator mutate;
@@ -2379,17 +1963,6 @@ static const struct {
      "access is genuinely non-unit-stride"},
 };
 
-/* The shared simulation driver: clone the function, apply the mutator, re-run
- * the real optimization stages (remark recording suppressed), re-locate the
- * loop by marker id (indexes shift), and check whether a kernel claimed it.
- * On success fills `desc` with the kernel description and returns 1; returns
- * IR_SIMD_FIX_INAPPLICABLE when the mutator proved the fix unwritable.
- *
- * When the fix applied but the loop stayed scalar, the run also holds the
- * answer to the question the reader asks next: what blocks it NOW. Diagnosing
- * the mutated clone yields that, and the caller reports the advice as a first
- * step instead of implying it finishes the job. IR_SIMD_FIX_PARTIAL says
- * `next_reason` was filled. */
 #define IR_SIMD_FIX_PARTIAL 2
 static int ir_explain_simulate_fix(const IRFunction *function, size_t begin,
                                    size_t end, IRSimdFixMutator mutate,
@@ -2429,9 +2002,6 @@ static int ir_explain_simulate_fix(const IRFunction *function, size_t begin,
       ir_simd_explain_bail(clone, new_begin, new_end, next_reason,
                            next_reason_cap, scratch, sizeof(scratch),
                            &next_diagnosis, &next_advisory);
-      /* Only a NEW obstacle is worth reporting. The same diagnosis coming back
-       * means the mutator did not move the loop at all, and repeating it as
-       * though it were the next step would send the reader in a circle. */
       if (next_diagnosis != IR_SIMD_BAIL_NONE && next_diagnosis != diagnosis) {
         verified = IR_SIMD_FIX_PARTIAL;
       } else {
@@ -2443,12 +2013,6 @@ static int ir_explain_simulate_fix(const IRFunction *function, size_t begin,
   return verified;
 }
 
-/* Run the fix simulation paired with `diagnosis`, if any. Returns 1 and fills
- * `desc` when the simulated fix was accepted by the optimizer; returns
- * IR_SIMD_FIX_INAPPLICABLE (and sets *inapplicable_fix_out to the replacement
- * advice) when the mutator proved the suggested fix unwritable; returns
- * IR_SIMD_FIX_PARTIAL (filling `next_reason`/`next_fix`) when the fix applied
- * cleanly and the loop still did not vectorize. */
 static int ir_explain_try_fix_for_diagnosis(const IRFunction *function,
                                             size_t begin, size_t end,
                                             int diagnosis, char *desc,
@@ -2472,29 +2036,6 @@ static int ir_explain_try_fix_for_diagnosis(const IRFunction *function,
   return 0;
 }
 
-/* The CALL_IN_BODY fix simulation. It has no table row because it is
- * program-level: pretend the loop's callee is @inline, re-run the INLINER on
- * a caller clone, then revectorize and check the region. Honesty guards: the
- * pretend flag cannot bypass the inliner's structural rejections, remark
- * recording is suppressed for the whole nested run, and the claim requires
- * the loop itself to have collapsed into a kernel (no surviving loop header
- * label) -- a vectorized loop INLINED FROM THE CALLEE inside a still-scalar
- * outer loop must not be passed off as "this loop vectorizes".
- *
- * Tri-state result:
- *   1  verified: the @inline (or @noinline-removal) advice WORKS; `desc` has
- *      the kernel the loop becomes.
- *   -1 proven inapplicable: the simulation ran and showed the advice cannot
- *      help. *decline_reason_out is the inliner's own structural refusal
- *      when that was the cause (e.g. the callee contains loops), or NULL
- *      when the callee DID inline but the loop still stayed scalar; in the
- *      latter case *nest_after_out says whether a loop nest remains (the
- *      callee's loops landed in the body -- only innermost loops vectorize).
- *   0  couldn't tell (no program/marker/callee, clone failure, or the forced
- *      inliner run made no change for reasons the simulation cannot see);
- *      the caller keeps its generic advice.
- * Fills `callee_out` (the advice target) and *was_noinline_out (1 = the
- * simulated change was REMOVING `@noinline`, not adding @inline). */
 static int ir_explain_simulate_inline_fix(const IRFunction *function,
                                           size_t begin, size_t end,
                                           char *callee_out, size_t callee_cap,
@@ -2512,8 +2053,6 @@ static int ir_explain_simulate_inline_fix(const IRFunction *function,
     return 0;
   }
 
-  /* The diagnosed callee: first user call past the loop header (the same walk
-   * the diagnosis made). */
   const char *callee = NULL;
   int past_header = 0;
   for (size_t i = begin + 1; i < end && !callee; i++) {
@@ -2548,12 +2087,6 @@ static int ir_explain_simulate_inline_fix(const IRFunction *function,
     if (ir_optimize_function_revectorize(clone)) {
       size_t new_begin = 0, new_end = 0;
       if (ir_simd_find_marker_region(clone, marker_id, &new_begin, &new_end)) {
-        /* Loop HEADERS, not any label carrying a loop's name. `while` emits
-         * `ir_while_N` and `ir_while_end_N`, and a substring test counts the
-         * exit label as a surviving loop. That read every collapsed loop as
-         * still looping, so a verified fix was reported as disproven and the
-         * reader was told inlining is not the blocker when removing
-         * `@noinline` is the whole fix. */
         size_t before = ir_region_loop_header_count(function, begin, end);
         size_t after = ir_region_loop_header_count(clone, new_begin, new_end);
         const IRInstruction *kernel =
@@ -2562,18 +2095,12 @@ static int ir_explain_simulate_inline_fix(const IRFunction *function,
           ir_explain_kernel_desc(kernel, desc, desc_cap);
           verified = 1;
         } else {
-          /* The callee inlined cleanly, yet the loop is still scalar: the
-           * @inline advice is disproven. Only a RISE in headers means the
-           * callee brought loops in; the loop's own header surviving just
-           * means it stayed scalar. */
           *nest_after_out = (after > before);
           verified = -1;
         }
       }
     }
   } else if (*decline_reason_out) {
-    /* The inliner refused the callee even with the pretend flags set --
-     * structural, so no decorator the user adds can change the outcome. */
     verified = -1;
   }
   ir_explain_set_hypothesis(0);
@@ -2586,7 +2113,7 @@ static void ir_clear_simd_markers(IRFunction *function) {
     IRInstruction *instruction = &function->instructions[i];
     if (ir_instruction_is_simd_marker(instruction)) {
       mettle_free_string(instruction->text);
-      instruction->text = NULL; /* op stays IR_OP_NOP -- inert everywhere */
+      instruction->text = NULL;
     }
   }
 }
@@ -2594,8 +2121,6 @@ static void ir_clear_simd_markers(IRFunction *function) {
 #define IR_SIMD_MAX_NESTING 64
 #define IR_SIMD_MAX_LOOPS 256
 
-/* One marker-bracketed loop region, collected during the contract walk so the
- * --explain pass can reason about nests (which loop contains which). */
 typedef struct {
   size_t begin;
   size_t end;
@@ -2603,9 +2128,6 @@ typedef struct {
   SourceLocation location;
 } IRSimdLoopRecord;
 
-/* The last source line the loop covers, for an editor that wants to highlight
- * the construct rather than its header line. Inlined bodies carry their own
- * file's lines, so only instructions from the loop's own file count. */
 static size_t ir_simd_loop_end_line(const IRFunction *function,
                                     const IRSimdLoopRecord *loop) {
   size_t last = loop->location.line;
@@ -2627,23 +2149,11 @@ static size_t ir_simd_loop_end_line(const IRFunction *function,
   return last;
 }
 
-/* --explain: one remark per recorded loop, nest-aware:
- *   - vectorized at its own level        -> "vectorized -> <kernel>"
- *   - scalar but a nested loop vectorized -> "vectorized inner, scalar outer"
- *   - scalar with a scalar nested loop    -> NOT vectorized (points inward)
- *   - no loop left between the markers    -> fully unrolled / removed
- *   - scalar leaf                         -> NOT vectorized + reason + fix */
 static void ir_explain_report_loops(const IRFunction *function,
                                     const IRSimdLoopRecord *loops,
                                     size_t loop_count) {
   for (size_t k = 0; k < loop_count; k++) {
     const IRSimdLoopRecord *L = &loops[k];
-    /* Focus filter FIRST: remarks outside the focus file are dropped at
-     * record time anyway, but the fix simulations below (clone + re-run the
-     * optimizer, and for call-in-body the inliner too) are the expensive
-     * part -- without this gate every imported module's loops were being
-     * simulated and then discarded (5+ seconds of --explain on a real
-     * application; ~100ms with it). */
     if (!ir_explain_location_enabled(&L->location)) {
       continue;
     }
@@ -2655,9 +2165,6 @@ static void ir_explain_report_loops(const IRFunction *function,
     const IRInstruction *any =
         own ? own : ir_region_vectorized_ins(function, L->begin, L->end, 1);
 
-    /* Nest depth (1 = top level): how many recorded loops contain this one.
-     * Stamped on the remark for the JSON sidecar -- a deeply nested scalar
-     * loop is a better optimization target than a top-level one. */
     size_t nest_depth = 1;
     for (size_t m = 0; m < loop_count; m++) {
       if (m != k && loops[m].begin < L->begin && loops[m].end > L->end) {
@@ -2675,15 +2182,11 @@ static void ir_explain_report_loops(const IRFunction *function,
       if (inner_line == 0) {
         inner_line = loops[m].location.line;
       }
-      /* Point the message at a vectorized inner loop when one exists. */
       if (!own && any &&
           ir_region_vectorized_ins(function, loops[m].begin, loops[m].end, 1)) {
         inner_line = loops[m].location.line;
       }
     }
-    /* A nest the records cannot see: the inlined callee's loops carry no
-     * markers. Fall back to the labels, and name the call that brought the
-     * loop in so the advice matches what the reader wrote. */
     size_t inlined_loop_from_line = 0;
     char inlined_loop_callee[128];
     inlined_loop_callee[0] = '\0';
@@ -2723,9 +2226,6 @@ static void ir_explain_report_loops(const IRFunction *function,
       ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
     } else if (has_inner) {
       if (inlined_loop_callee[0]) {
-        /* The reader's source shows a call here, not a loop. Say where the
-         * loop came from, or the advice reads as being about code they never
-         * wrote. */
         snprintf(reason, sizeof(reason),
                  "the call to `%s` on line %zu was inlined, so that callee's "
                  "loop (line %zu) now sits in this body; only innermost loops "
@@ -2753,8 +2253,6 @@ static void ir_explain_report_loops(const IRFunction *function,
       ir_explain_remark_advisory();
       ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
     } else if (!ir_region_has_loop_label(function, L->begin, L->end)) {
-      /* The unroller records a definitive "fully unrolled (N iterations)"
-       * remark when it was the cause; only guess when nothing claimed it. */
       if (!ir_explain_has_remark_at(L->location.line, "loop")) {
         ir_explain_remark(function->name, "loop", L->location, 1,
                           "eliminated: no loop remains after "
@@ -2768,16 +2266,10 @@ static void ir_explain_report_loops(const IRFunction *function,
       int advisory = 0;
       ir_simd_explain_bail(function, L->begin, L->end, reason, sizeof(reason),
                            fix, sizeof(fix), &diagnosis, &advisory);
-      /* When the diagnosis has a paired hypothesis transform, simulate the
-       * suggested fix and let the vectorizer itself confirm it. A proven-
-       * inapplicable fix is REPLACED, never printed -- bad advice with a
-       * confident tone is the failure mode this whole report exists to end. */
       char verified[512], partial[512];
       verified[0] = partial[0] = '\0';
       char kernel_desc[128];
       if (diagnosis == IR_SIMD_BAIL_CALL_IN_BODY) {
-        /* Program-level simulation: pretend-@inline the callee, re-run the
-         * inliner on a clone, revectorize. */
         char callee[128];
         int was_noinline = 0;
         const char *decline_reason = NULL;
@@ -2786,10 +2278,6 @@ static void ir_explain_report_loops(const IRFunction *function,
             function, L->begin, L->end, callee, sizeof(callee), kernel_desc,
             sizeof(kernel_desc), &was_noinline, &decline_reason, &nest_after);
         if (sim == -1) {
-          /* The simulation DISPROVED the @inline advice; printing it anyway
-           * (and letting an editor offer it as a one-click fix) is exactly
-           * the confident-bad-advice failure mode this report exists to end.
-           * Replace reason and fix with what the simulation learned. */
           if (decline_reason) {
             snprintf(reason, sizeof(reason),
                      "each iteration calls `%s`, and `@inline` cannot help: "
@@ -2816,8 +2304,6 @@ static void ir_explain_report_loops(const IRFunction *function,
           advisory = 1;
         } else if (sim == 1) {
           if (was_noinline) {
-            /* The right advice for a vetoed callee is removing the veto;
-             * also correct the fix line, which suggested @inline. */
             snprintf(fix, sizeof(fix),
                      "remove `@noinline` from `%s` (it blocks this loop's "
                      "vectorization), or hoist the call out of the loop",
@@ -2849,15 +2335,9 @@ static void ir_explain_report_loops(const IRFunction *function,
                    "then vectorizes \xE2\x86\x92 %s",
                    kernel_desc);
         } else if (sim == IR_SIMD_FIX_INAPPLICABLE && inapplicable_fix) {
-          /* The simulation disproved the advice, so what is left describes
-           * the loop rather than instructing anyone. */
           snprintf(fix, sizeof(fix), "%s", inapplicable_fix);
           advisory = 1;
         } else if (sim == IR_SIMD_FIX_PARTIAL && next_reason[0]) {
-          /* The fix is right and it is not enough. Saying so, and naming what
-           * surfaces next, beats letting the reader make the edit and find the
-           * verdict unchanged. The next obstacle goes on its own line: spliced
-           * into the fix it buries the one thing to do first. */
           size_t used = strlen(fix);
           snprintf(fix + used, sizeof(fix) - used, " (first step only)");
           snprintf(partial, sizeof(partial),
@@ -2920,13 +2400,12 @@ int ir_verify_simd_contracts(IRFunction *function) {
       continue;
     }
 
-    /* which == 'E' */
     if (depth <= 0) {
-      continue; /* unbalanced; should not happen */
+      continue;
     }
     depth--;
     if (depth >= IR_SIMD_MAX_NESTING) {
-      continue; /* its matching begin was past the nesting cap */
+      continue;
     }
 
     size_t begin_index = open[depth].begin_index;
@@ -2943,7 +2422,7 @@ int ir_verify_simd_contracts(IRFunction *function) {
     }
 
     if (loop_mode == SIMD_ATTR_REPORT) {
-      continue; /* --explain bookkeeping only; no contract to enforce */
+      continue;
     }
 
     int vec_op = ir_region_vectorized_op(function, begin_index, i);
@@ -2955,7 +2434,7 @@ int ir_verify_simd_contracts(IRFunction *function) {
         fprintf(stderr, "%s:%zu:%zu: note: @simd loop vectorized (%s)\n", file,
                 loc.line, loc.column, ir_opcode_name((IROpcode)vec_op));
       }
-      continue; /* contract honored */
+      continue;
     }
 
     const char *reason = ir_simd_bail_reason(function, begin_index, i);
@@ -2999,8 +2478,6 @@ void ir_note_simd_contracts_unverified(IRProgram *program) {
                      strlen(IR_SIMD_MARKER_PREFIX),
                  "%c:%d:%d", &which, &id, &mode) == 3 &&
           which == 'B' && mode != SIMD_ATTR_REPORT) {
-        /* Report-only markers come from --explain, not from a user `@simd`;
-         * they don't represent an unverified contract. */
         marker_count++;
       }
     }

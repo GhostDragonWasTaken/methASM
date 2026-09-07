@@ -7,15 +7,11 @@
 
 #define NKIND 10
 #define NOPS 17
-#define NFEAT 9        /* v1 scalar node features */
-#define NEDGE 8        /* v1 typed edges */
+#define NFEAT 9
+#define NEDGE 8
 
-/* v2 (`MLGO`) additionally carries observational-equivalence features and the
- * value-equality edges built from them; see src/ir/ml_obs.c and
- * docs/ml-opt-oracle.md. A v1 (`MLGN`) blob takes exactly the v1 path, so the
- * shipped model's behaviour is unchanged by any of this. */
-#define NFEAT_OBS (NFEAT + ML_OBS_NOBS)   /* 9 + 36 = 45 */
-#define NEDGE_OBS 12                      /* + same-value and dominating-same-value */
+#define NFEAT_OBS (NFEAT + ML_OBS_NOBS)
+#define NEDGE_OBS 12
 #define NFEAT_MAX NFEAT_OBS
 #define NEDGE_MAX NEDGE_OBS
 
@@ -24,7 +20,6 @@
 #define MLW_FLAG_PONDER 4
 #define MLW_FLAG_AUX 8
 
-/* Must equal gnn_oracle.MAX_CAND. */
 #define ML_PTR_MAX_CAND 8
 #define DELETE_CLASS 1
 #define AFFINE_CLASS 3
@@ -126,8 +121,6 @@ static int three_token(const char *rhs, char *a, size_t acap, char *op, size_t o
   return grp;
 }
 
-/* True if `s` is a decimal literal that is a power of two >= 2 (shift/mask hint).
- * Mirrors gnn_model.py _operand_feats.pow2 for train/inference feature parity. */
 static int is_pow2_str(const char *s) {
   if (!s[0]) return 0;
   for (const char *p = s; *p; p++) if (*p < '0' || *p > '9') return 0;
@@ -135,10 +128,6 @@ static int is_pow2_str(const char *s) {
   return v >= 2 && (v & (v - 1)) == 0;
 }
 
-/* Five binary-operand features matching gnn_model.py _operand_feats EXACTLY (the
- * op embedding cannot express them): operands equal (a^a, (a^b)^b cancellation),
- * and whether an operand is the literal -1 (NOT mask), 0, 1, or a power of two.
- * Writes 5 floats into out[]. */
 static void operand_feats(const char *ins, float out[5]) {
   for (int i = 0; i < 5; i++) out[i] = 0.f;
   char dest[256], rhs[512], a[256], o[16], b[256];
@@ -275,26 +264,21 @@ static int count_consts(const char *s) {
 
 typedef struct {
   int d, layers, nclass, ok;
-  int version;              /* 1 = MLGN (shipped), 2 = MLGO (oracle) */
+  int version;
   int nfeat, nedge, flags, max_steps;
   float *kind_emb, *op_emb, *feat_w, *feat_b;
   float **msg_w, **msg_b;
   float *selfw_w, *selfw_b;
   float *norm_w, *norm_b;
   float *head0_w, *head0_b, *head2_w, *head2_b;
-  /* v2 PONDER: one shared block applied recurrently with a GRU update and an
-   * ACT halting scalar. msg_w/msg_b hold the single block's messages. */
   float *gru_wih, *gru_whh, *gru_bih, *gru_bhh;
   float *halt_w, *halt_b;
-  /* v2 PTR / AUX heads. */
   float *ptr_q_w, *ptr_q_b, *ptr_k_w, *ptr_k_b, *ptr_none;
   float *live_w, *live_b, *risk_w, *risk_b;
 } Weights;
 
-static Weights G;    /* unified genius model (6 actions incl. COLLAPSE) */
+static Weights G;
 
-/* Speculative deletes withheld by the risk head this compile (METTLE_ML_RISK).
- * Reported so the saving is measurable rather than asserted. */
 static long ml_risk_declined = 0;
 
 static float *rd(FILE *f, size_t n) {
@@ -358,7 +342,6 @@ static int load_weights_into(Weights *W, const char *path) {
     }
     if (fread(W->selfw_w + (size_t)li * d * d, sizeof(float), (size_t)d * d, f) != (size_t)d * d) fail = 1;
     if (fread(W->selfw_b + (size_t)li * d, sizeof(float), d, f) != (size_t)d) fail = 1;
-    /* v2 PONDER emits the GRU update between the block and its LayerNorm. */
     if (!fail && ponder) {
       W->gru_wih = rd(f, (size_t)3 * d * d);
       W->gru_whh = rd(f, (size_t)3 * d * d);
@@ -394,9 +377,6 @@ static int load_weights_into(Weights *W, const char *path) {
     W->risk_b = rd(f, 2);
     if (!W->live_w || !W->live_b || !W->risk_w || !W->risk_b) fail = 1;
   }
-  /* A blob longer than its header describes means the writer and this reader
-   * disagree about the layout, which would otherwise show up as a subtly wrong
-   * model rather than an error. */
   if (!fail) {
     char tail;
     if (fread(&tail, 1, 1, f) == 1) {
@@ -421,13 +401,6 @@ static int load_weights(void) {
   return load_weights_into(&G, path);
 }
 
-/* Dense matvec y = W.x + b. Computes eight output rows at a time: the eight dot
- * products are independent, so their mul/add chains pipeline instead of stalling
- * on a single accumulator's latency, and x[i] is loaded once and reused across
- * the eight rows. The eight parallel accumulators also SLP-vectorize cleanly
- * (two 128-bit lanes on SSE2, one 256-bit on AVX). Each row is still summed in
- * ascending i order, so every y[o] is bit-identical to the plain sequential dot
- * product -- no FP reassociation, so model decisions are unchanged. */
 static void linear(float *restrict y, const float *restrict x,
                    const float *restrict W, const float *restrict b,
                    int out, int in) {
@@ -486,11 +459,6 @@ static void layernorm(float *x, const float *g, const float *b, int d) {
   for (int i = 0; i < d; i++) x[i] = (x[i] - mean) * inv * g[i] + b[i];
 }
 
-/* Relational GNN forward over the typed-edge graph; writes per-node argmax class
- * to out[]. Reusable across both models (genius 5-class, collapse 2-class). */
-/* `out_h`, when non-NULL, receives the final per-node hidden states (caller
- * frees). The pointer head scores PAIRS of nodes, so it needs the embeddings and
- * not just the per-node argmax. */
 static void gnn_forward(Weights *W, int n, int *kind, int *op, float *feat,
                         int **esrc, int **edst, int *ecnt, int *out,
                         float **out_h) {
@@ -509,18 +477,9 @@ static void gnn_forward(Weights *W, int n, int *kind, int *op, float *feat,
   float *agg = malloc((size_t)n * d * sizeof(float));
   float *acc = malloc((size_t)n * d * sizeof(float));
   int *deg = calloc((size_t)n, sizeof(int));
-  /* Per-source message cache: W_t.h[s] depends only on (layer, edge-type, source),
-   * so compute it once per distinct source and scatter to every destination.
-   * The touched list keeps relation accumulation sparse: most edge types touch
-   * only a slice of the function graph, so avoid clearing and folding n*d floats. */
   float *msgbuf = malloc((size_t)n * d * sizeof(float));
   int *computed_gen = calloc((size_t)n, sizeof(int));
   int *touched = malloc((size_t)n * sizeof(int));
-  /* PONDER: one shared block applied up to max_steps times, each node halting
-   * when its accumulated halting probability saturates. A halted node FREEZES
-   * (it still sends messages but stops updating), which is what makes the early
-   * exit sound here and cheap: its state cannot change again, so skipping its
-   * update changes nothing. `y` accumulates the halting-weighted state. */
   int steps = ponder ? (W->max_steps > 0 ? W->max_steps : 16) : L;
   float *cum = NULL, *y = NULL, *hnew = NULL, *gbuf = NULL;
   if (ponder) {
@@ -530,7 +489,7 @@ static void gnn_forward(Weights *W, int n, int *kind, int *op, float *feat,
     gbuf = malloc((size_t)6 * d * sizeof(float));
   }
   for (int li = 0; li < steps; li++) {
-    int wi = ponder ? 0 : li;      /* shared weights when pondering */
+    int wi = ponder ? 0 : li;
     if (ponder) {
       int running = 0;
       for (int i = 0; i < n; i++) if (cum[i] < 0.99f) { running = 1; break; }
@@ -576,11 +535,9 @@ static void gnn_forward(Weights *W, int n, int *kind, int *op, float *feat,
       continue;
     }
     for (int i = 0; i < n; i++) {
-      if (cum[i] >= 0.99f) continue;                 /* halted: frozen */
+      if (cum[i] >= 0.99f) continue;
       float *hi = h + (size_t)i * d, *ai = agg + (size_t)i * d;
       for (int c = 0; c < d; c++) ai[c] = ai[c] > 0 ? ai[c] : 0.0f;
-      /* GRUCell(input = relu(agg), hidden = h); PyTorch gate order is r, z, n
-       * and weight_ih/weight_hh are each [3d, d]. */
       float *gi = gbuf, *gh = gbuf + 3 * d;
       linear(gi, ai, W->gru_wih, W->gru_bih, 3 * d, d);
       linear(gh, hi, W->gru_whh, W->gru_bhh, 3 * d, d);
@@ -662,9 +619,6 @@ static char *dominators(VecI *preds, int n) {
   return dom;
 }
 
-/* Affine-form simplification (port of tools/mlopt/affine.py): track each value as
- * an SSA-versioned affine form over straight-line regions; emit CONST or COPY when
- * it collapses. Sound: unmasked re-emit only when exact in Z/2^64. */
 #define AFF_BITS 40
 static const long long AFF_MOD = 1LL << AFF_BITS;
 static const long long AFF_M40 = (1LL << AFF_BITS) - 1;
@@ -677,14 +631,13 @@ static int is_lit_tok(const char *s) {
   return 1;
 }
 
-/* `& b` is identity mod 2^40 iff b's low 40 bits are all set (b == 2^k-1, k>=40) */
 static int is_widemask(const char *b) {
   if (!is_lit_tok(b)) return 0;
   long long v = atoll(b);
   return v >= AFF_M40 && ((v + 1) & v) == 0;
 }
 
-static int has_float_lit(const char *s) {            /* \d+\.\d+ */
+static int has_float_lit(const char *s) {
   for (const char *p = s; *p; p++)
     if (*p >= '0' && *p <= '9') {
       const char *q = p; while (*q >= '0' && *q <= '9') q++;
@@ -693,7 +646,6 @@ static int has_float_lit(const char *s) {            /* \d+\.\d+ */
   return 0;
 }
 
-/* infer_params: symbols used before declared (port of ml_pass.infer_params) */
 static void infer_params(char **texts, int n, VecS *params) {
   VecS declared = {0};
   for (int i = 0; i < n; i++) {
@@ -705,7 +657,7 @@ static void infer_params(char **texts, int n, VecS *params) {
     }
     char t0[256], t1[16]; nth_token(s, 0, t0, sizeof t0); nth_token(s, 1, t1, sizeof t1);
     const char *tgt = (t0[0] == '@' && (strcmp(t1, "<-") == 0 || strcmp(t1, "=") == 0)) ? t0 : NULL;
-    for (const char *p = s; *p; ) {                  /* findall @\w+ */
+    for (const char *p = s; *p; ) {
       if (*p == '@' && is_word((unsigned char)p[1])) {
         const char *st = p++; while (is_word((unsigned char)*p)) p++;
         size_t l = (size_t)(p - st); char sym[256]; if (l >= sizeof sym) l = sizeof sym - 1;
@@ -773,7 +725,7 @@ static int aff_env_idx(AffCtx *c, const char *tok) {
   for (int i = 0; i < c->env_n; i++) if (strcmp(c->env_tok.a[i], tok) == 0) return i;
   return -1;
 }
-static void aff_env_set(AffCtx *c, const char *tok, Form f) {     /* takes ownership of f */
+static void aff_env_set(AffCtx *c, const char *tok, Form f) {
   int i = aff_env_idx(c, tok);
   if (i >= 0) { form_free(&c->env_f[i]); c->env_f[i] = f; return; }
   if (c->env_n == c->env_cap) { c->env_cap = c->env_cap ? c->env_cap * 2 : 16;
@@ -794,7 +746,6 @@ static void aff_reset(AffCtx *c, VecS *params) {
   for (int i = 0; i < params->n; i++) { char *t = aff_curtok(c, params->a[i]); set_add(&c->bits40, t); free(t); }
 }
 
-/* atom(tok): the form of an operand. Returns owned Form. */
 static Form aff_atom(AffCtx *c, const char *tok) {
   if (is_lit_tok(tok)) { Form f = {0}; f.cst = atoll(tok); f.exact = 1; return f; }
   char *bt = aff_curtok(c, tok);
@@ -809,13 +760,11 @@ static int aff_fits40(AffCtx *c, const char *tok) {
   char *bt = aff_curtok(c, tok); int r = set_has(&c->bits40, bt); free(bt); return r;
 }
 
-/* rhs_form: returns 1 + owned Form, or 0 (no form). */
 static int aff_rhs_form(AffCtx *c, const char *rhs, Form *out) {
   char a[256], o[16], b[256];
   int grp = three_token(rhs, a, sizeof a, o, sizeof o, b, sizeof b);
-  if (grp != 1) {                                  /* not arithmetic: maybe a bare atom */
+  if (grp != 1) {
     if (is_lit_tok(rhs)) { *out = aff_atom(c, rhs); return 1; }
-    /* single name token? */
     int ok = (rhs[0] == '@' || rhs[0] == '%');
     for (const char *p = rhs; ok && *p; p++)
       if (!(is_word((unsigned char)*p) || *p == '.' || *p == '$' || *p == '@' || *p == '%')) ok = 0;
@@ -825,7 +774,7 @@ static int aff_rhs_form(AffCtx *c, const char *rhs, Form *out) {
   if (strcmp(o, "&") == 0 && is_widemask(b)) {
     Form fa = aff_atom(c, a);
     if (aff_fits40(c, a)) { *out = fa; return 1; }
-    fa.exact = 0; *out = fa; return 1;             /* lossy: only value mod 2^40 known */
+    fa.exact = 0; *out = fa; return 1;
   }
   Form fa = aff_atom(c, a), fb = aff_atom(c, b);
   if (strcmp(o, "+") == 0) { *out = form_add(&fa, &fb, 1); form_free(&fa); form_free(&fb); return 1; }
@@ -853,8 +802,6 @@ static int aff_rhs_fits40(AffCtx *c, const char *rhs) {
   return 0;
 }
 
-/* emit: classify the collapsed form as a disposition. kind 1=CONST,2=COPY,0=none.
- * arg receives the constant (signed decimal, round-trips through atoll) or name. */
 static int aff_emit(AffCtx *c, const char *dest, const Form *form, int orig_is_mask,
                     const char *orig_rhs, char *arg, size_t acap) {
   (void)dest;
@@ -862,9 +809,9 @@ static int aff_emit(AffCtx *c, const char *dest, const Form *form, int orig_is_m
   if (nv == 0) {
     if (!form->exact) return 0;
     char buf[32]; snprintf(buf, sizeof buf, "%lld", form->cst);
-    if (strcmp(orig_rhs, buf) == 0) return 0;       /* already this constant */
+    if (strcmp(orig_rhs, buf) == 0) return 0;
     snprintf(arg, acap, "%lld", form->cst);
-    return 1;                                        /* CONST */
+    return 1;
   }
   if (nv != 1) return 0;
   int idx = -1; for (int i = 0; i < form->n; i++) if (form->c[i] != 0) { idx = i; break; }
@@ -874,25 +821,24 @@ static int aff_emit(AffCtx *c, const char *dest, const Form *form, int orig_is_m
   if (nl >= sizeof name) return 0;
   memcpy(name, form->v[idx], nl); name[nl] = 0;
   char *ct = aff_curtok(c, name); int cur = strcmp(ct, form->v[idx]) == 0; free(ct);
-  if (!cur) return 0;                                /* value no longer held by this name */
+  if (!cur) return 0;
   if (k == 1 && form->cst == 0) {
     int copy_ok = form->exact || (orig_is_mask && set_has(&c->bits40, form->v[idx]));
     if (!copy_ok) return 0;
     if (strcmp(orig_rhs, name) == 0) return 0;
     snprintf(arg, acap, "%s", name);
-    return 2;                                        /* COPY */
+    return 2;
   }
-  return 0;     /* name+const / name*k: real but not a single COPY/CONST disposition */
+  return 0;
 }
 
-/* Fill aff_kind[j] (0/1/2) and aff_arg[j] for each instruction. */
 static void affine_run(char **texts, int n, VecS *params, int *aff_kind, char **aff_arg) {
   AffCtx c = {0};
   aff_reset(&c, params);
   for (int i = 0; i < n; i++) {
     const char *s = texts[i];
     aff_kind[i] = 0; aff_arg[i] = NULL;
-    if (starts(s, "local ") && strstr(s, "float")) {   /* ^local @x : ... float */
+    if (starts(s, "local ") && strstr(s, "float")) {
       char tok[256]; nth_token(s, 1, tok, sizeof tok);
       if (tok[0] == '@' && strstr(s, ":")) set_add(&c.floats, tok);
     }
@@ -936,9 +882,6 @@ static void affine_run(char **texts, int n, VecS *params, int *aff_kind, char **
   vs_free(&c.ver_name); vi_free(&c.ver_v); vs_free(&c.bits40); vs_free(&c.floats);
 }
 
-/* Semantic collapse: a tangled pure expr whose value is always 0 (CONST) or a
- * single leaf (COPY), confirmed over many 64-bit vectors. Leaves must have <=1
- * def (SSA-equivalent) so the free-variable abstraction is exact. */
 static const char *PURE8[] = {"+", "-", "*", "&", "|", "^", "<<", ">>"};
 static int is_pure_op(const char *o) { for (int i = 0; i < 8; i++) if (strcmp(o, PURE8[i]) == 0) return 1; return 0; }
 
@@ -951,9 +894,9 @@ static int pure_def_of(char **texts, int n, const char *name, char *op, char *a,
     if (three_token(rhs, ta, sizeof ta, to, sizeof to, tb, sizeof tb) == 1 && is_pure_op(to)) {
       strcpy(op, to); strcpy(a, ta); strcpy(b, tb); return 1;
     }
-    return 0;            /* defined, but not a pure binop -> treat as a leaf */
+    return 0;
   }
-  return 0;              /* not defined here (param) -> leaf */
+  return 0;
 }
 
 static int collect_leaves(char **texts, int n, const char *name, VecS *leaves, VecS *visited, int depth) {
@@ -1003,7 +946,6 @@ static unsigned long long lcg64(void) {
   return g_lcg;
 }
 
-/* returns 1 + kind(1=CONST,2=COPY) + arg if the flagged temp collapses */
 static int collapse_check(char **texts, int n, int ri, char *arg, size_t acap,
                           int *out_kind, int *saved) {
   char dest[256], rhs[512];
@@ -1037,11 +979,6 @@ static int collapse_check(char **texts, int n, int ri, char *arg, size_t acap,
   return kind != 0;
 }
 
-/* Bitwise superoptimizer realizer: a pure-&|^~ expr over <=4 leaves is an exact
- * bitwise function; evaluating leaves at their 2^k column constants yields its
- * truth table (a proof, since &|^~ are bit-independent). Look it up in bw_lib.txt
- * and REWRITE to the optimum when cheaper. Non-bitwise sub-values are opaque
- * leaves; other-than-0/-1 literals or >4 leaves bail to plain collapse. */
 typedef struct { int k; unsigned long long fp; char post[48]; } BwEnt;
 static BwEnt *g_bw; static int g_bw_n; static int g_bw_loaded;
 
@@ -1080,8 +1017,6 @@ static const char *bw_lookup(int k, unsigned long long fp) {
   return NULL;
 }
 
-/* classify a def for the bitwise walk: 1=binary &|^ (op,a,b), 2=unary ~ (a),
- * 0=opaque leaf. Non-bitwise defs are opaque leaves. */
 static int bw_def_of(char **texts, int n, const char *name, char *op, char *a, char *b) {
   for (int i = 0; i < n; i++) {
     char dest[256], rhs[512];
@@ -1099,11 +1034,9 @@ static int bw_def_of(char **texts, int n, const char *name, char *op, char *a, c
 }
 
 #define BW_BAIL (-999)
-/* Walk the DAG: collect distinct variable leaves, count internal &|^~ nodes
- * (cost). Returns cost, or BW_BAIL on a non-0/-1 literal or >4 leaves. */
 static int bw_walk(char **texts, int n, const char *name, VecS *leaves, VecS *vis, int depth) {
   if (depth > 24) return BW_BAIL;
-  if (is_lit_tok(name)) {                       /* literal: only 0 / -1 (all-ones) allowed */
+  if (is_lit_tok(name)) {
     long long v = atoll(name);
     return (v == 0 || v == -1) ? 0 : BW_BAIL;
   }
@@ -1124,7 +1057,7 @@ static int bw_walk(char **texts, int n, const char *name, VecS *leaves, VecS *vi
     if (ca == BW_BAIL) return BW_BAIL;
     return ca + 1;
   }
-  if (!set_has(leaves, name)) {                 /* opaque variable leaf */
+  if (!set_has(leaves, name)) {
     if (leaves->n >= 4) return BW_BAIL;
     vs_push(leaves, strdup(name));
   }
@@ -1156,9 +1089,6 @@ static unsigned long long bw_eval(char **texts, int n, const char *name,
   return idx >= 0 ? bw_col(idx, k) : 0;
 }
 
-/* If the flagged root is a pure-bitwise expr with a strictly cheaper optimum,
- * fill `out` with a REWRITE postfix (space-separated, leaves substituted) and
- * return 1. */
 static int superopt_check(char **texts, int n, int ri, char *out, size_t cap, int *saved) {
   bw_load();
   if (!g_bw_n) return 0;
@@ -1177,14 +1107,14 @@ static int superopt_check(char **texts, int n, int ri, char *out, size_t cap, in
   const char *post = bw_lookup(k, fp);
   if (!post) { vs_free(&leaves); return 0; }
   int ocost = 0; for (const char *p = post; *p; p++) if (*p == '~' || *p == '&' || *p == '|' || *p == '^') ocost++;
-  if (ocost >= cost) { vs_free(&leaves); return 0; }      /* not strictly cheaper */
+  if (ocost >= cost) { vs_free(&leaves); return 0; }
   if (saved) *saved = cost - ocost;
-  if (ocost == 0) {                                       /* leaf / constant -> COPY / CONST */
+  if (ocost == 0) {
     if (post[0] == 'L') snprintf(out, cap, "COPY %s", leaves.a[post[1] - '0']);
     else snprintf(out, cap, "CONST %s", post[0] == 'Z' ? "0" : "-1");
     vs_free(&leaves); return 1;
   }
-  size_t off = (size_t)snprintf(out, cap, "REWRITE");      /* serialize optimal postfix */
+  size_t off = (size_t)snprintf(out, cap, "REWRITE");
   for (const char *p = post; *p; ) {
     char tok[260];
     if (*p == 'L') { int j = p[1] - '0'; p += 2; snprintf(tok, sizeof tok, "%s", leaves.a[j]); }
@@ -1199,9 +1129,6 @@ static int superopt_check(char **texts, int n, int ri, char *out, size_t cap, in
   return 1;
 }
 
-/* GF(2)-affine superoptimizer (handles shifts): a single-variable {^,~,<<c,>>c}
- * expr is f(v)=M.v^b, exact via f(0) + 64 basis evals (a proof that sees through
- * shifts). Look (M,b) up in gf2_lib1.txt and REWRITE when cheaper. */
 typedef struct { unsigned long long b, cols[64]; char post[40]; } Gf2Ent;
 static Gf2Ent *g_gf2; static int g_gf2_n, g_gf2_loaded;
 
@@ -1242,8 +1169,6 @@ static const char *gf2_lookup(unsigned long long b, unsigned long long *cols) {
   return NULL;
 }
 
-/* def classify for GF(2): 1=xor(a,b) 2=not(a) 3=shl(a,cnt) 4=shr(a,cnt) 0=leaf,
- * -1=non-GF(2) (bail). */
 static int gf2_def_of(char **texts, int n, const char *name, char *a, char *b, int *cnt) {
   for (int i = 0; i < n; i++) {
     char dest[256], rhs[512];
@@ -1275,7 +1200,7 @@ static int gf2_walk(char **texts, int n, const char *name, char *var, int *havev
     return (x == BW_BAIL || y == BW_BAIL) ? BW_BAIL : x + y + 1; }
   if (kd == 2 || kd == 3 || kd == 4) { int x = gf2_walk(texts, n, a, var, havevar, depth + 1);
     return x == BW_BAIL ? BW_BAIL : x + 1; }
-  if (*havevar) { if (strcmp(var, name) != 0) return BW_BAIL; }   /* 2nd distinct var -> bail */
+  if (*havevar) { if (strcmp(var, name) != 0) return BW_BAIL; }
   else { strcpy(var, name); *havevar = 1; }
   return 0;
 }
@@ -1308,7 +1233,7 @@ static int gf2_check(char **texts, int n, int ri, char *out, size_t cap, int *sa
   int ocost = 0; for (const char *q = post; *q; q++) if (*q == '~' || *q == '^' || *q == '<' || *q == '>') ocost++;
   if (ocost >= cost) return 0;
   if (saved) *saved = cost - ocost;
-  if (ocost == 0) {                                        /* leaf / constant */
+  if (ocost == 0) {
     if (post[0] == 'L') snprintf(out, cap, "COPY %s", var);
     else snprintf(out, cap, "CONST %s", post[0] == 'Z' ? "0" : "-1");
     return 1;
@@ -1321,7 +1246,7 @@ static int gf2_check(char **texts, int n, int ri, char *out, size_t cap, int *sa
     else if (*q == 'O') { q++; strcpy(tok, "-1"); }
     else if (*q == '^' || *q == '~') { tok[0] = *q; tok[1] = 0; q++; }
     else if (*q == '<' || *q == '>') { char c = *q; q++; int v = 0; while (*q >= '0' && *q <= '9') v = v * 10 + (*q++ - '0');
-      snprintf(tok, sizeof tok, "%c%c%d", c, c, v); }                 /* <<N / >>N */
+      snprintf(tok, sizeof tok, "%c%c%d", c, c, v); }
     else { q++; continue; }
     int w = snprintf(out + off, cap - off, " %s", tok);
     if (w < 0 || (size_t)w >= cap - off) return 0;
@@ -1330,8 +1255,6 @@ static int gf2_check(char **texts, int n, int ri, char *out, size_t cap, int *sa
   return off > 0;
 }
 
-/* Pretty-print a REWRITE postfix (operands, ~ & | ^, <<N, >>N) as infix, for the
- * --explain "after" column. Leading @ on operands is dropped (reads like source). */
 static void infix_from_postfix(const char *pf, char *out, size_t cap) {
   char buf[600]; snprintf(buf, sizeof buf, "%s", pf);
   static char pool[64][256]; char *st[64]; int sp = 0, pn = 0;
@@ -1352,9 +1275,6 @@ static void infix_from_postfix(const char *pf, char *out, size_t cap) {
   snprintf(out, cap, "%s", sp > 0 ? st[sp - 1] : pf);
 }
 
-/* Reconstruct a source-level infix string for the expression rooted at `name`,
- * expanding pure-op %-temps (binary, unary ~, shift), stopping at leaves. Used for
- * the --explain "before" column so it reads like source, not raw IR temps. */
 static void dag_infix(char **texts, int n, const char *name, char *out, size_t cap, int depth) {
   if (depth > 12 || cap < 8) { snprintf(out, cap, "%s", name[0] == '@' ? name + 1 : name); return; }
   if (name[0] == '%') {
@@ -1374,7 +1294,7 @@ static void dag_infix(char **texts, int n, const char *name, char *out, size_t c
         snprintf(out, cap, "~%s", as);
         return;
       }
-      break;     /* defined here but not a pure op -> treat as a leaf */
+      break;
     }
   }
   snprintf(out, cap, "%s", name[0] == '@' ? name + 1 : name);
@@ -1384,9 +1304,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
                              Buf *out, Buf *explain) {
   if (n <= 0 || n > 6000) return;
 
-  /* Memory-bearing functions are processed: GVN only numbers pure 3-token
-   * arithmetic (loads/stores/address-of are never numbered), so reuse is sound
-   * regardless of surrounding memory. */
   int *kind = calloc(n, sizeof(int)), *op = calloc(n, sizeof(int));
   const int NF = G.nfeat > 0 ? G.nfeat : NFEAT;
   float *feat = calloc((size_t)n * NF, sizeof(float));
@@ -1492,9 +1409,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
   esrc[6] = dse_s.a; edst[6] = dse_d.a; ecnt[6] = dse_s.n;
   esrc[7] = dse_d.a; edst[7] = dse_s.a; ecnt[7] = dse_s.n;
 
-  /* v2 only: observational-equivalence features and the value-equality edges
-   * derived from them. A v1 model leaves all of this untouched, so its graph and
-   * its predictions are bit-identical to before. */
   VecI sv_s = {0}, sv_d = {0}, dsv_s = {0}, dsv_d = {0};
   MlObsFp *ofps = NULL;
   if (G.nfeat >= NFEAT_OBS && G.nedge >= NEDGE_OBS) {
@@ -1509,7 +1423,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
     ofps = calloc((size_t)n, sizeof(MlObsFp));
     if (ofps) {
       ml_obs_fingerprints(texts, n, ofps, NULL, NULL);
-      /* 8/9: nearest earlier node with the same value */
       for (int i = 0; i < n; i++) {
         if (!ml_obs_edge_eligible(&ofps[i])) continue;
         for (int p = i - 1; p >= 0; p--) {
@@ -1520,7 +1433,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
           }
         }
       }
-      /* 10/11: nearest earlier node with the same value that also DOMINATES */
       if (sv_s.n > 0) {
         if (!dom) dom = dominators(preds, n);
         if (dom) {
@@ -1548,13 +1460,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
   float *hstate = NULL;
   int want_ptr = (G.flags & MLW_FLAG_PTR) && getenv("METTLE_ML_PTR") &&
                  getenv("METTLE_ML_PTR")[0] != '0';
-  /* METTLE_ML_RISK=<t>: decline speculative deletes whose predicted probability
-   * of validator rejection is at least t. The gate's cost is real -- it snapshots
-   * the function and re-executes it on generated inputs -- and roughly two thirds
-   * of speculative deletes are rejected, so a model that can rank its own
-   * proposals turns that into avoidable work rather than unavoidable work.
-   * Declining can only remove proposals, never add or alter one, so this cannot
-   * affect correctness: the worst case is a sound rewrite left unmade. */
   double risk_thresh = -1.0;
   {
     const char *rt = getenv("METTLE_ML_RISK");
@@ -1564,7 +1469,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
   gnn_forward(&G, n, kind, op, feat, esrc, edst, ecnt, action,
               (want_ptr || want_risk) ? &hstate : NULL);
 
-  /* p(reject) per node from the auxiliary risk head. */
   float *risk_p = NULL;
   if (want_risk && hstate) {
     risk_p = malloc((size_t)n * sizeof(float));
@@ -1577,13 +1481,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
     }
   }
 
-  /* METTLE_ML_ACTIONS=<path>: append the model's raw per-instruction argmax,
-   * `function<TAB>ir-index<TAB>class`, BEFORE any transform decides whether it
-   * can realize it. The disposition file only records proposals a transform
-   * accepted, so it cannot tell you what the network actually predicted. This
-   * can, which is what makes it possible to check the C forward pass against
-   * PyTorch on the same graph (tools/mlopt/check_forward.py) rather than
-   * assuming the port is faithful. Off unless the variable is set. */
   {
     const char *ap = getenv("METTLE_ML_ACTIONS");
     if (ap && ap[0]) {
@@ -1595,8 +1492,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
       }
     }
   }
-  /* COLLAPSE is the model's 6th action (same forward pass). METTLE_ML_COLLAPSE_ALL
-   * runs the verifier on every root (diagnostic). */
   int *collapse_flag = calloc(n, sizeof(int));
   if (getenv("METTLE_ML_COLLAPSE_ALL")) {
     for (int i = 0; i < n; i++) collapse_flag[i] = 1;
@@ -1605,8 +1500,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
   }
 
   char **gvn_src = calloc(n, sizeof(char *));
-  /* Per-node: did the pointer head choose this source rather than the sound
-     analysis? Decides whether the disposition is emitted as COPY or COPY?. */
   unsigned char *gvn_model_src = calloc(n, 1);
   {
     Intern vk = {0}; VecS vk_a = {0}, vk_b = {0};
@@ -1634,9 +1527,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
       for (int i = 0; i < n; i++) {
         if (vdefn[i]) for (int k = 0; k < K; k++)
           if (strcmp(vdefn[i], vk_a.a[k]) == 0 || strcmp(vdefn[i], vk_b.a[k]) == 0) kill[(size_t)i * K + k] = 1;
-        /* a call or store may write a global / address-taken local through memory,
-         * so it kills every expression that reads an @-symbol (%-temps are SSA and
-         * unaffected). Without this, `x == 0` survives a call that writes x. */
         if (texts[i][0] == '*' || has_call(texts[i])) {
           for (int k = 0; k < K; k++)
             if (vk_a.a[k][0] == '@' || vk_b.a[k][0] == '@') kill[(size_t)i * K + k] = 1;
@@ -1673,28 +1563,11 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
       }
       free(gen); free(kill); free(ain); free(aout); free(tmp);
     }
-    /* METTLE_ML_PTR: let the model NAME the reuse target instead of taking the
-     * one the available-expressions analysis picked.
-     *
-     * The candidate set is the union of the dominating same-expression and
-     * dominating same-value relations -- the same set the pointer head was
-     * trained against. Slot 0 is "decline"; a node whose best slot is 0 keeps
-     * whatever the sound analysis said, so the head can only ADD proposals or
-     * redirect ones the analysis already wanted to make.
-     *
-     * Anything the head chooses that the analysis did not is emitted as `COPY?`
-     * (see disp_speculative in ml_opt.c): the source came from a network, so it
-     * carries no construction-time proof and must face the interpreter gate even
-     * on functions the gate would otherwise skip. Without that marking this
-     * would be an unsound widening rather than a new proposal class. */
     if (want_ptr && hstate) {
       int d = G.d;
       float *q = malloc((size_t)d * sizeof(float));
       float *k = malloc((size_t)d * sizeof(float));
       for (int i = 0; i < n; i++) {
-        /* MAX_CAND must match gnn_oracle.MAX_CAND: the head was trained with
-           at most this many candidates per node, and a longer list at inference
-           would score slots the model never saw. */
         int cs[ML_PTR_MAX_CAND], nc = 0;
         for (int e = 0; e < ecnt[6] && nc < ML_PTR_MAX_CAND; e++)
           if (edst[6][e] == i) cs[nc++] = esrc[6][e];
@@ -1706,7 +1579,7 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
         }
         if (nc == 0) continue;
         linear(q, hstate + (size_t)i * d, G.ptr_q_w, G.ptr_q_b, d, d);
-        float best = G.ptr_none[0];      /* slot 0: decline */
+        float best = G.ptr_none[0];
         int bestc = -1;
         for (int c = 0; c < nc; c++) {
           linear(k, hstate + (size_t)cs[c] * d, G.ptr_k_w, G.ptr_k_b, d, d);
@@ -1728,8 +1601,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
     free(vdefn); free(keyid); vs_free(&vk.keys); vs_free(&vk_a); vs_free(&vk_b);
   }
 
-  /* AFFINE is opt-in (METTLE_ML_AFFINE): ~0 real wins post-classical and ~2x
-   * compile time, so the default stays GVN+collapse. */
   VecS params = {0};
   int *aff_kind = calloc(n, sizeof(int)); char **aff_arg = calloc(n, sizeof(char *));
   if (getenv("METTLE_ML_AFFINE")) {
@@ -1740,8 +1611,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
   for (int j = 0; j < n; j++) {
     char drhs[512] = "", ddst[256] = "";
     split_def(texts[j], ddst, sizeof ddst, drhs, sizeof drhs);
-    /* explain record (TSV): fn, gidx, kind, before-expr, after-expr, ops-saved.
-     * `bexpr` is the source-level reconstruction of the original expression. */
     char ex[1200], after[600], bexpr[512]; int saved = 0;
     if (ddst[0]) dag_infix(texts, n, ddst, bexpr, sizeof bexpr, 0);
     else snprintf(bexpr, sizeof bexpr, "%s", drhs);
@@ -1772,12 +1641,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
         continue;
       }
     }
-    /* Speculative dead-code delete (--ml-opt-speculative): the model's DELETE
-     * action carries no construction-time proof, so the disposition is a bare
-     * NOP that ml_opt.c applies ONLY behind the interpreter-differential gate.
-     * Control flow and locals are never proposed; stores/defs/calls are fair
-     * game because the validator observes buffers, globals, and the extern
-     * trace. */
     static int speculative = -1;
     if (speculative < 0) {
       const char *e = getenv("METTLE_ML_SPECULATIVE");
@@ -1787,7 +1650,7 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
         (kind[j] == 5 || kind[j] == 6 || kind[j] == 7 || kind[j] == 8)) {
       if (risk_p && risk_p[j] >= (float)risk_thresh) {
         ml_risk_declined++;
-        continue;                    /* the model expects the gate to reject */
+        continue;
       }
       char line[700];
       snprintf(line, sizeof line, "%s %d NOP\n", fname, gidx[j]);
@@ -1810,9 +1673,6 @@ static void process_function(const char *fname, char **texts, int *gidx, int n,
       char a[256], o[16], b[256];
       if (drhs[0] == 0 || three_token(drhs, a, sizeof a, o, sizeof o, b, sizeof b) == 0) continue;
       char line[700];
-      /* `COPY?` when the pointer head chose this source: model-sourced, so it
-       * carries no construction-time proof and must face the interpreter gate
-       * even where the gate would otherwise pass a COPY through unchecked. */
       snprintf(line, sizeof line, "%s %d COPY%s %s\n", fname, gidx[j],
                gvn_model_src[j] ? "?" : "", gvn_src[j]);
       buf_add(out, line);
@@ -1870,8 +1730,6 @@ int ml_gnn_run(const char *ir_dump_path, char **out_disp) {
         int gi = 0; const char *r = q; while (*r >= '0' && *r <= '9') { gi = gi * 10 + (*r - '0'); r++; }
         if (*r == ':') { r++; while (*r == ' ' || *r == '\t') r++;
           size_t l = strlen(r); while (l && (r[l - 1] == ' ' || r[l - 1] == '\t' || r[l - 1] == '\r')) l--;
-          /* drop dead NOP nodes: noise the model wasn't trained on (gidx keeps
-           * the original index so dispositions still target the right instr) */
           if (!(l == 3 && r[0] == 'n' && r[1] == 'o' && r[2] == 'p')) {
             char *t = malloc(l + 1); memcpy(t, r, l); t[l] = 0;
             vs_push(&texts, t); vi_push(&gidx, gi);
@@ -1890,7 +1748,7 @@ int ml_gnn_run(const char *ir_dump_path, char **out_disp) {
     if (ef) { fputs(explain.s, ef); fclose(ef); }
     free(explain.s);
   } else {
-    remove("_mlopt.explain");                 /* no transforms this run */
+    remove("_mlopt.explain");
   }
 
   if (ml_risk_declined > 0) {

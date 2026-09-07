@@ -288,11 +288,6 @@ static int check_phases(ErrorReporter *reporter, const Program *program,
   return ok;
 }
 
-/* A phase that ends at a barrier gets a counter and a wait. Every thread
- * calls the wait, whether or not it runs that phase, because a barrier the
- * threads that skip the phase walk past is not one. The counter only ever
- * rises: a thread arriving for frame g leaves the count at g times the number
- * of threads, so there is no reset to race over and no sense bit to flip. */
 static int build_barrier(SourceBuffer *buffer, const char *schedule,
                          const SchedulePhase *phase, long long threads,
                          size_t *generated) {

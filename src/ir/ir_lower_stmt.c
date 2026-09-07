@@ -1,4 +1,3 @@
-// AST->IR lowering: statement lowering (with defer scopes).
 #include "ir_lowering_internal.h"
 #include "frontend/mtlc_frontend.h"
 #include "string_intern.h"
@@ -52,10 +51,6 @@ static int ir_lower_multi_return_value(IRLoweringContext *context,
     IRInstruction add = {0};
     IRInstruction store = {0};
 
-    /* An array field has no whole-value copy here: the block-copy helper
-     * takes a struct or a string, and falling through to a word-sized store
-     * would keep the first element and leave the rest undefined. Say so
-     * rather than failing the lowering with no reason attached. */
     if (field_type && field_type->kind == TYPE_ARRAY) {
       ir_set_error(context,
                    "An array cannot be one of several return values; return a "
@@ -87,11 +82,6 @@ static int ir_lower_multi_return_value(IRLoweringContext *context,
       free(tuple_name);
       return 0;
     }
-    /* A field wider than a register word is copied whole. Sizing this store
-     * with ir_type_storage_size() collapsed a `string` to its first eight
-     * bytes, so a returned view kept its pointer and read its length from
-     * whatever sat beside it -- which is why `return (s, "", 0)` handed back
-     * an empty first string. */
     if (ir_try_emit_aggregate_address_memcpy(context, function, &field_address,
                                              &component, field_type,
                                              location)) {
@@ -196,8 +186,6 @@ static int ir_lower_multi_assignment(IRLoweringContext *context,
         !ir_make_temp_operand(context, &field_value)) {
       goto cleanup;
     }
-    /* The backend loads at most one machine word, so a wide field is moved
-     * into the target by address instead of through a register. */
     if (field_type->size > 8 && field_type->size <= (size_t)INT_MAX) {
       IROperand target_address = ir_operand_none();
       IRInstruction copy = {0};
@@ -275,9 +263,6 @@ static int ir_lower_multi_assignment(IRLoweringContext *context,
   return ok;
 }
 
-/* Does this expression name `target`? Written so that an unrecognized node
- * answers yes: a missed case then costs a zero-fill that was not needed, where
- * the other way round it would elide one that was. */
 static int ir_expression_names(const ASTNode *node, const char *target) {
   if (!node || !target) {
     return node ? 1 : 0;
@@ -320,8 +305,6 @@ static int ir_expression_names(const ASTNode *node, const char *target) {
     if (!call) {
       return 1;
     }
-    /* `v.method()` reads v through the receiver, which is not one of the
-     * arguments. */
     if (call->object && ir_expression_names(call->object, target)) {
       return 1;
     }
@@ -337,9 +320,6 @@ static int ir_expression_names(const ASTNode *node, const char *target) {
   }
 }
 
-/* Resolve an assignment target to the byte range it writes within `root`, or
- * return 0 when the shape is anything else. Only constant paths qualify: a
- * field chain, a constant index, or the whole variable. */
 static int ir_lvalue_byte_range(const ASTNode *target, const char *root_name,
                                 Type *root_type, size_t *offset_out,
                                 size_t *size_out, Type **type_out) {
@@ -418,13 +398,6 @@ static int ir_lvalue_byte_range(const ASTNode *target, const char *root_name,
   }
 }
 
-/* Is the zero-fill for `name` dead -- is every byte of it written before
- * anything reads it? Reads ahead through the rest of the enclosing block,
- * stopping at the first statement it cannot account for. A `var v: Vector3;`
- * whose three fields are assigned on the next three lines needs no fill, and
- * that shape is most of what constructors are made of.
- *
- * Every unhandled shape stops the walk and keeps the fill. */
 static int ir_zero_fill_is_dead(IRLoweringContext *context, const char *name,
                                 Type *type) {
   if (!context || !name || !type || type->size == 0 || type->size > 4096u ||
@@ -449,8 +422,6 @@ static int ir_zero_fill_is_dead(IRLoweringContext *context, const char *name,
     }
 
     if (statement->type == AST_VAR_DECLARATION) {
-      /* A redeclaration of the same name would make the writes below belong to
-       * a different object. */
       const VarDeclaration *declaration =
           (const VarDeclaration *)statement->data;
       if (!declaration || !declaration->name ||
@@ -472,8 +443,6 @@ static int ir_zero_fill_is_dead(IRLoweringContext *context, const char *name,
     if (!assignment || assignment->target_count > 0) {
       break;
     }
-    /* The value is evaluated before the store lands, so a read of the variable
-     * on the right is a read of bytes the fill was responsible for. */
     if (ir_expression_names(assignment->value, name)) {
       break;
     }
@@ -483,7 +452,7 @@ static int ir_zero_fill_is_dead(IRLoweringContext *context, const char *name,
     Type *written_type = NULL;
     if (assignment->target) {
       if (!ir_expression_names(assignment->target, name)) {
-        continue; /* writes some other variable */
+        continue;
       }
       if (!ir_lvalue_byte_range(assignment->target, name, type, &offset, &width,
                                 &written_type)) {
@@ -494,7 +463,7 @@ static int ir_zero_fill_is_dead(IRLoweringContext *context, const char *name,
       offset = 0;
       width = type->size;
     } else {
-      continue; /* writes some other variable */
+      continue;
     }
 
     if (offset > type->size || width > type->size - offset) {
@@ -599,7 +568,6 @@ static int ir_lower_address_space_local(IRLoweringContext *context,
   int is_dynamic_workgroup_view =
       decl_type && decl_type->kind == TYPE_POINTER && decl_type->base_type &&
       declaration->address_space == AST_ADDRESS_SPACE_WORKGROUP;
-  /* A view whose extents are in its type allocates their product. */
   long long static_view_elements = 0;
   if (decl_type && decl_type->kind == TYPE_SLICE && decl_type->base_type &&
       decl_type->view_extents[0] > 0) {
@@ -633,8 +601,6 @@ static int ir_lower_address_space_local(IRLoweringContext *context,
     return 0;
   }
   local->op = IR_OP_ADDRESS_SPACE_ALLOC;
-  /* Zero is the neutral dynamic-workgroup-arena sentinel. It is never
-   * accepted for private storage or a fixed source array. */
   local->rhs = ir_operand_int(
       is_static_storage ? (long long)decl_type->array_size
                         : static_view_elements);
@@ -650,9 +616,6 @@ static int ir_lower_zeroed_aggregate_local(IRLoweringContext *context,
                                            Type *decl_type,
                                            const char *local_name,
                                            const char *declared_name) {
-  /* The read-ahead is only valid when the tracked position really is this
-   * statement: a body lowered outside a block loop leaves the fields
-   * pointing at some enclosing list. */
   int position_is_tracked =
       context->block_statements &&
       context->block_statement_index < context->block_statement_count &&
@@ -674,13 +637,6 @@ static int ir_lower_var_declaration(IRLoweringContext *context, IRFunction *func
     return 0;
   }
 
-  // Top-level `const` is folded at use sites (SYMBOL_CONSTANT) and never
-  // reaches this local-statement path. A local `const` is an immutable local
-  // variable: it gets normal storage and initialization here, and the type
-  // checker rejects reassignment.
-  //
-  // Type/Field consts are the exception: they have no runtime representation,
-  // so they must not become locals even inside a function.
   if (declaration->is_const) {
     Type *const_type = ir_resolve_named_type(context, declaration->type_name);
     if (!const_type && declaration->initializer) {
@@ -696,9 +652,6 @@ static int ir_lower_var_declaration(IRLoweringContext *context, IRFunction *func
   if (!decl_type && declaration->initializer) {
     decl_type = declaration->initializer->resolved_type;
   }
-  /* Bind before anything is emitted: a name already declared in this
-   * function at a different type gets one of its own, so the two do not
-   * share a frame slot (and a type) in the backends. */
   const char *decl_type_text = ir_backend_type_name(declaration->type_name);
   if (!decl_type_text && declaration->initializer &&
       declaration->initializer->resolved_type) {
@@ -732,12 +685,6 @@ static int ir_lower_var_declaration(IRLoweringContext *context, IRFunction *func
                                     &local, local_name)) {
     return 0;
   }
-  // For inferred-type locals (`var x = expr;`) the declaration carries no
-  // type_name. The binary/direct-object backend resolves a local's type from
-  // this textual payload, so fall back to the name of the type the checker
-  // inferred for the initializer. The Type (and its name) outlives codegen,
-  // matching the lifetime of the type_name pointer used above, and `text` is
-  // never freed by the IR. Leaving it NULL is harmless for the asm backend.
   if (!local.text && declaration->initializer &&
       declaration->initializer->resolved_type) {
     local.text = (char *)ir_backend_type_name(
@@ -754,12 +701,6 @@ static int ir_lower_var_declaration(IRLoweringContext *context, IRFunction *func
   }
   ir_operand_destroy(&local.dest);
 
-  /* No initializer: an aggregate still has to start zeroed. `string` is in
-   * the list because the used-before-initialized check exempts it with the
-   * other aggregates, and an uninitialized one is a wild pointer carrying a
-   * garbage length -- zeroed, it is the empty string. GPU locals are left
-   * alone: their storage is not a host stack frame and the device paths have
-   * no memset to lower the fill to. */
   if (!declaration->initializer && decl_type &&
       (decl_type->kind == TYPE_ARRAY || decl_type->kind == TYPE_STRUCT ||
        decl_type->kind == TYPE_SLICE || decl_type->kind == TYPE_STRING) &&
@@ -772,8 +713,6 @@ static int ir_lower_var_declaration(IRLoweringContext *context, IRFunction *func
 
   if (declaration->initializer &&
       declaration->initializer->type == AST_AGGREGATE_LITERAL) {
-    /* The literal was folded to a constant image at type-check time; copy it
-     * in wholesale rather than lowering it as an expression. */
     return ir_emit_aggregate_literal_copy_to_symbol(
         context, function, local_name, declaration->initializer,
         decl_type, statement->location);
@@ -800,11 +739,6 @@ static int ir_lower_named_assignment(IRLoweringContext *context,
   if (!assign_type && assignment->value) {
     assign_type = assignment->value->resolved_type;
   }
-  /* The decay reads the target's DECLARED type, which the fallback above
-   * cannot supply: a local's scope is gone by lowering time, so the symbol
-   * lookup misses and `assign_type` becomes the value's own type, which
-   * for an array is the array and would hide the decay. The binding keeps
-   * the declared spelling. */
   Type *decay_target =
       ir_lookup_symbol_type(context, assignment->variable_name);
   if (!decay_target && binding) {
@@ -851,12 +785,6 @@ static int ir_lower_named_assignment(IRLoweringContext *context,
     assign.location = statement->location;
     assign.dest = ir_operand_symbol(target_name);
     assign.lhs = *value;
-    /* Target float width for the narrowing/widening on store. A local's
-     * own binding is authoritative -- the symbol table is keyed by source
-     * name, so a shadowed local resolves there to whichever declaration
-     * won. Otherwise the symbol table, then (for an inferred local, which
-     * has no declared type text) the emitted DECLARE_LOCAL. Gate that IR
-     * scan on a floating RHS so non-float assigns stay O(1). */
     int target_float_bits =
         binding ? ir_named_type_float_bits(context, binding->type_text)
                 : ir_symbol_float_bits(context, assignment->variable_name);
@@ -902,8 +830,6 @@ static int ir_lower_assignment(IRLoweringContext *context, IRFunction *function,
                                      statement->location);
   }
 
-  /* An aggregate literal on the right is a folded constant, not something to
-   * evaluate: copy its image into the destination. */
   if (assignment->value->type == AST_AGGREGATE_LITERAL) {
     Type *literal_type = assignment->value->resolved_type;
     if (assignment->variable_name) {
@@ -991,9 +917,6 @@ static int ir_lower_assignment(IRLoweringContext *context, IRFunction *function,
     return 0;
   }
 
-  /* Aggregate destinations (struct fields, indexed struct elements) must copy
-   * the whole struct. A plain IR_OP_STORE of an aggregate RHS only moves one
-   * word, silently dropping everything past the first 8 bytes. */
   if (ir_try_emit_aggregate_address_memcpy(context, function, &address, &value,
                                            target_type,
                                            statement->location)) {
@@ -1064,10 +987,6 @@ static int ir_lower_for_statement(IRLoweringContext *context, IRFunction *functi
     }
   }
 
-  /* The initializer declares a variable scoped to the loop, so it needs
-   * a scope of its own: without one the loop variable stayed the live
-   * binding for its name after the loop ended, and a `for i in 0..3`
-   * beside an outer `i` left that outer name reading 3. */
   ir_local_scope_enter(context);
   if (!ir_lower_statement_or_expression(context, function,
                                         for_data->initializer)) {
@@ -1315,8 +1234,6 @@ static int ir_lower_if_statement(IRLoweringContext *context, IRFunction *functio
       free(end_label);
       return 0;
     }
-    /* A branch every work item of the group decides the same way is a group
-       decision, and a device backend takes the uniform form of it. */
     if (if_data->uniform_mode == 3) {
       ir_mark_branches_uniform(function, branches_before);
     }
@@ -1329,9 +1246,6 @@ static int ir_lower_if_statement(IRLoweringContext *context, IRFunction *functio
         free(end_label);
         return 0;
       }
-      /* Inside an arm no work item agrees on, the group effects a kernel
-         provides do not reach: a collective there speaks to a group that is
-         not all here. */
       if (if_data->uniform_mode != 3) {
         ir_mark_calls_divergent(function, arm_before);
       }
@@ -1425,9 +1339,6 @@ static int ir_lower_block(IRLoweringContext *context, IRFunction *function,
   if (!program) {
     return 1;
   }
-  /* A block the expander generated carries the note naming its iteration.
-   * Stamp it for the duration so `trace` can attribute the values, and
-   * restore afterwards so a sibling block is not credited to it. */
   const char *saved_expansion_note = context->current_expansion_note;
   const char *block_note =
       context->type_checker
@@ -1494,8 +1405,6 @@ static int ir_lower_break_statement(IRLoweringContext *context, IRFunction *func
     }
     return 0;
   }
-  // The jump leaves every scope between here and the loop, so their
-  // deferred statements run before it.
   if (!ir_emit_defers_until_scope(context, function, defers,
                                   frame->defers)) {
     return 0;
@@ -1519,8 +1428,6 @@ static int ir_lower_continue_statement(IRLoweringContext *context, IRFunction *f
     }
     return 0;
   }
-  // The iteration ends here, so the body's deferred statements run, exactly
-  // as they would on the path that falls off the end of the body.
   if (!ir_emit_defers_until_scope(context, function, defers,
                                   frame->defers)) {
     return 0;
@@ -1534,8 +1441,6 @@ static int ir_lower_defer_statement(IRLoweringContext *context, IRFunction *func
   if (!defers) {
     return 1;
   }
-  // Snapshot argument values now so the deferred call captures them by value
-  // rather than re-reading the variables at scope exit.
   char *cap_name = NULL;
   char **cap_temps = NULL;
   size_t cap_count = 0;
@@ -1570,8 +1475,6 @@ static int ir_lower_fallthrough_statement(IRLoweringContext *context, IRFunction
                           "after it");
     return 0;
   }
-  /* The case ends here, so its scopes' deferred statements run before the
-     next case begins, the same as on the path that leaves the switch. */
   if (!ir_emit_defers_until_scope(context, function, defers,
                                   frame->defers)) {
     return 0;
@@ -1593,12 +1496,6 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
   case AST_PROGRAM:
     return ir_lower_block(context, function, statement, defers);
 
-
-  /* The one place a staged swap is allowed to take effect. Applying it
-   * anywhere else, or on a timer, or at a safepoint the compiler chose, would
-   * be control flow at a point the programmer did not write. The call is the
-   * whole cost, and a program with no quiesce point never emits it and never
-   * links the swap runtime. */
   case AST_QUIESCE_STATEMENT: {
     ir_declare_swap_apply_helper(context);
     IRInstruction apply = {0};
@@ -1614,10 +1511,8 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
   case AST_VAR_DECLARATION:
     return ir_lower_var_declaration(context, function, statement, defers);
 
-
   case AST_ASSIGNMENT:
     return ir_lower_assignment(context, function, statement, defers);
-
 
   case AST_FUNCTION_CALL: {
     IROperand ignored = ir_operand_none();
@@ -1666,7 +1561,6 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
   case AST_RETURN_STATEMENT:
     return ir_lower_return_statement(context, function, statement, defers);
 
-
   case AST_INLINE_ASM: {
     InlineAsm *inline_asm = (InlineAsm *)statement->data;
     if (!inline_asm || !inline_asm->assembly_code) {
@@ -1683,14 +1577,11 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
   case AST_IF_STATEMENT:
     return ir_lower_if_statement(context, function, statement, defers);
 
-
   case AST_WHILE_STATEMENT:
     return ir_lower_while_statement(context, function, statement, defers);
 
-
   case AST_FOR_STATEMENT:
     return ir_lower_for_statement(context, function, statement, defers);
-
 
   case AST_SWITCH_STATEMENT:
     return ir_lower_switch_statement(context, function, statement, defers);
@@ -1698,7 +1589,6 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
   case AST_MATCH_STATEMENT: {
     MatchStatement *m = (MatchStatement *)statement->data;
     if (m && m->is_expression) {
-      // match used as an expression-statement: lower it and discard the value.
       IROperand discarded = ir_operand_none();
       int r = ir_lower_match_expression(context, function, statement,
                                         &discarded);
@@ -1711,18 +1601,14 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
   case AST_FALLTHROUGH_STATEMENT:
     return ir_lower_fallthrough_statement(context, function, statement, defers);
 
-
   case AST_BREAK_STATEMENT:
     return ir_lower_break_statement(context, function, statement, defers);
-
 
   case AST_CONTINUE_STATEMENT:
     return ir_lower_continue_statement(context, function, statement, defers);
 
-
   case AST_DEFER_STATEMENT:
     return ir_lower_defer_statement(context, function, statement, defers);
-
 
   case AST_ERRDEFER_STATEMENT: {
     if (!defers) {
@@ -1736,13 +1622,6 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
   }
 
   default: {
-    /* Any expression usable as a bare statement (result discarded), e.g. a
-     * call for its side effects. The AST_IDENTIFIER..AST_NEW_EXPRESSION range
-     * covers most expression kinds contiguously; a few were added later at
-     * other enum positions and are listed explicitly, notably
-     * AST_FUNC_PTR_CALL: a call through a function-pointer/closure struct
-     * field or expression result, used as a statement (`obj.callback(args);`).
-     */
     int is_statement_expression =
         (statement->type >= AST_IDENTIFIER &&
          statement->type <= AST_NEW_EXPRESSION) ||
@@ -1778,8 +1657,6 @@ if (launch->work) {
                            (launch->kernel_block[2] > 0
                                 ? launch->kernel_block[2]
                                 : 1);
-  /* One block covers block_volume threads, but a `per = warp` kernel
-   * spends 32 of them per work item, so it covers that many fewer. */
   long long threads_per_item = launch->kernel_threads_per_item > 0
                                    ? launch->kernel_threads_per_item
                                    : 1;
@@ -1848,10 +1725,6 @@ static int ir_lower_gpu_launch(IRLoweringContext *context,
     ir_set_error(context, "Out of memory while lowering GPU launch");
     return 0;
   }
-  /* A typed dispatch names a declared `extern kernel` rather than holding a
-   * handle in a host variable: resolve it by name against the loaded module.
-   * The runtime caches by the (compile-time constant) name pointer, so a
-   * per-token launch pays a pointer compare, not a driver lookup. */
   if (launch->typed_kernel && launch->kernel &&
       launch->kernel->type == AST_IDENTIFIER && launch->kernel->data) {
     const char *kernel_name = ((Identifier *)launch->kernel->data)->name;
@@ -1880,9 +1753,6 @@ static int ir_lower_gpu_launch(IRLoweringContext *context,
     free(argument_types);
     return 0;
   }
-  /* `work: N` launches ceil(N / block volume) blocks of the kernel's
-   * declared shape, so the host stops mirroring that arithmetic at every
-   * call site. */
   if (!ir_lower_gpu_launch_work(context, function, launch, statement,
                                 arguments)) {
     goto gpu_launch_lower_fail;

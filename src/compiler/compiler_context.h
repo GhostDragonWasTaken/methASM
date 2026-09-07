@@ -75,4 +75,4 @@ void mettle_compiler_ctx_write_report(FILE *output, const char *reason,
 
 void mettle_compiler_ctx_write_snapshot(void);
 
-#endif /* COMPILER_CONTEXT_H */
+#endif

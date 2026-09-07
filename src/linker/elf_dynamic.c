@@ -443,9 +443,6 @@ static int elf_dynamic_build_symbols(ElfDynamicPlan *plan,
         symbol->merged_section_index == LINKED_SECTION_INDEX_NONE) {
       continue;
     }
-    /* The bundled runtime rides along so the library is self-contained, but
-     * publishing its malloc and its memcpy would interpose them on whoever
-     * loads the result. Only what the program itself defines is exported. */
     if (symbol->defining_object_index < resolution->object_count &&
         resolution->objects[symbol->defining_object_index].is_runtime_default) {
       continue;

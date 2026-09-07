@@ -1,6 +1,6 @@
 #include "codegen/binary/internal.h"
 
-#include "common.h" /* mettle_fnv1a_hash, for the operand-type index */
+#include "common.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -19,13 +19,6 @@ int code_generator_binary_get_local_offset(BinaryFunctionContext *context,
   return binary_named_slot_table_get_offset(&context->local_slots, name);
 }
 
-/* Whether `--safe` describes this local to its runtime map, which is asked by
- * the frame layout so it can give the local a unit of that map to itself.
- *
- * Read off the IR rather than passed in as a flag: the pass that decides which
- * locals are worth describing has already said so, by emitting a registration
- * whose argument is the address of the local. Nothing else needs to agree on
- * the criteria, and a change to them cannot leave the two out of step. */
 int binary_function_local_is_safety_described(const IRFunction *function,
                                               const char *name) {
   if (!function || !name) {
@@ -40,8 +33,6 @@ int binary_function_local_is_safety_described(const IRFunction *function,
         !call->arguments[0].name) {
       continue;
     }
-    /* The address is taken immediately before the call, so a short walk back
-     * finds it without a general search. */
     for (size_t back = i; back-- > 0;) {
       const IRInstruction *take = &function->instructions[back];
       if (take->op != IR_OP_ADDRESS_OF ||
@@ -82,15 +73,6 @@ int code_generator_binary_get_symbol_offset(BinaryFunctionContext *context,
   return code_generator_binary_get_local_offset(context, name);
 }
 
-/* The module symbol a value operand named `name` actually refers to, or NULL.
- *
- * Two names never reach a module symbol here. A local or parameter of the
- * function being emitted owns its name outright, so a global spelled the same
- * way is a different object whose type says nothing about this storage. And a
- * function symbol carries its RETURN type in ->type, which is not the type of
- * the name -- reading it as one made `var fmod: int64` (shadowing a
- * float-returning `fmod`) a float slot, so every store to it converted and it
- * read back as the bit pattern of a double. */
 const CgSym *code_generator_binary_value_symbol(CodeGenerator *generator,
                                                 BinaryFunctionContext *context,
                                                 const char *name) {
@@ -134,8 +116,6 @@ int code_generator_binary_resolved_type_is_float64(const MtlcType *type) {
   return type && type->kind == MTLC_TYPE_FLOAT64 && type->size == 8;
 }
 
-/* IEEE-754 width of a resolved type: 32 for float32, 64 for float64, else 0
- * (not a floating type). */
 int code_generator_binary_resolved_type_float_bits(const MtlcType *type) {
   if (!type) {
     return 0;
@@ -162,9 +142,6 @@ int code_generator_binary_resolved_type_is_abi_supported(MtlcType *type,
     return 1;
   }
 
-  /* Aggregates are supported through the ABI classifier: DIRECT aggregates
-   * are raw 1/2/4/8-byte register values; INDIRECT aggregates use hidden
-   * pointers. */
   if (code_generator_type_is_aggregate(type)) {
     return 1;
   }
@@ -189,7 +166,6 @@ MtlcType *code_generator_binary_get_resolved_type(CodeGenerator *generator,
   return code_generator_named_type(generator, resolved_name);
 }
 
-/* Float width (0/32/64) of a named type, e.g. a parameter/local type name. */
 int code_generator_binary_named_type_float_bits(CodeGenerator *generator,
                                                        const char *type_name) {
   if (!type_name || type_name[0] == '\0') {
@@ -206,9 +182,6 @@ int code_generator_binary_is_marked_float64_symbol(
              0;
 }
 
-/* The float64_symbols table doubles as a float-width map: the stored slot
- * value is the IEEE-754 width (32 or 64) of the named symbol/temp. Width 0
- * means "not recorded". */
 int code_generator_binary_marked_symbol_float_bits(
     const BinaryFunctionContext *context, const char *name) {
   int width = 0;
@@ -224,11 +197,6 @@ int code_generator_binary_mark_float_symbol(
   if (!context || !name || name[0] == '\0') {
     return 0;
   }
-  /* binary_named_slot_table_add fails a re-add with a different value, but a
-   * symbol/temp may legitimately be visited by more than one marking pass
-   * (declared-type pass and instruction-result pass). The first recorded
-   * width is authoritative; treat an already-present entry as success
-   * instead of aborting code generation. */
   if (binary_named_slot_table_get_offset(&context->float64_symbols, name) >=
       0) {
     return 1;
@@ -250,9 +218,6 @@ int code_generator_binary_symbol_is_scalar_accessible(
     return 1;
   }
 
-  /* Indirect parameters: the home slot holds a struct POINTER (8 bytes),
-   * which is scalar-accessible even though the symbol's type is aggregate.
-   * Downstream consumers use that pointer as the struct's base address. */
   if (symbol->kind == CG_SYM_PARAMETER &&
       symbol->data.variable.is_indirect_param) {
     return 1;
@@ -353,13 +318,6 @@ size_t code_generator_binary_symbol_write_count(
     return 0;
   }
 
-  /* A parameter is written once before any instruction runs, by the call that
-   * passed it, and that write has no IR to count. Without it a parameter
-   * assigned once in the body looked like a symbol with a single DEFINITIONAL
-   * write, when the write is really a mutation of a value that already had
-   * one. The alias below leans on this count to decide whether a copy can
-   * share its source's storage: `var t: int64 = b; b = 5; return t;` returned
-   * 5. */
   for (size_t p = 0; p < function->parameter_count; p++) {
     if (function->parameter_names && function->parameter_names[p] &&
         strcmp(function->parameter_names[p], name) == 0) {
@@ -413,12 +371,6 @@ int code_generator_binary_collect_symbol_aliases(
         code_generator_binary_get_local_offset(context, name) <= 0 ||
         code_generator_binary_get_symbol_offset(context, target) <= 0 ||
         code_generator_binary_symbol_write_count(ir_function, name) != 1 ||
-        /* The alias makes `name` share `target`'s storage, which is only sound
-         * if `target` keeps the aliased value for as long as `name` is live.
-         * If `target` is written more than once it can be mutated after the
-         * `name <- target` copy while `name` is still read later, so the alias
-         * would observe the mutated value (silent miscompile). Require `target`
-         * to have a single, definitional write. */
         code_generator_binary_symbol_write_count(ir_function, target) != 1 ||
         binary_named_slot_table_get_offset(&context->address_taken_symbols,
                                            name) >= 0 ||
@@ -493,14 +445,6 @@ int code_generator_binary_operand_mentions_symbol_or_alias(
   return alias_target && strcmp(alias_target, name) == 0;
 }
 
-/* Label name -> the earliest instruction index that defines it.
- *
- * The loop-weight walk asks, for every jump, whether some earlier label matches
- * its target. Answering that by scanning the prefix costs nothing when the
- * answer is yes and the label is near, and costs the whole function when the
- * answer is no -- which is every forward jump, and a function built out of
- * if/else is almost entirely forward jumps. That made frame preparation
- * quadratic in the size of a branch-heavy function. */
 void binary_label_index_destroy(BinaryLabelIndex *index) {
   if (!index) {
     return;
@@ -542,7 +486,7 @@ int binary_label_index_build(const IRFunction *function,
     slot = (size_t)mettle_fnv1a_hash(instruction->text) & mask;
     while (index->names[slot]) {
       if (strcmp(index->names[slot], instruction->text) == 0) {
-        break; /* the earliest definition wins, as the prefix scan did */
+        break;
       }
       slot = (slot + 1) & mask;
     }
@@ -589,12 +533,6 @@ size_t *code_generator_binary_build_loop_weights(
     weights[i] = 1;
   }
 
-  /* Weight each instruction by 4^(loop nesting depth) so that values used in
-   * inner loops outscore those used only in outer loops. A back-jump to an
-   * earlier label marks [label, jump] as one loop body; nested bodies multiply,
-   * matching how often the instruction actually executes. Without compounding,
-   * a hot innermost temporary (e.g. the insertion-sort scan value) ties with
-   * every outer-loop variable and loses the register-promotion contest. */
   BinaryLabelIndex labels;
   if (!binary_label_index_build(function, &labels)) {
     free(weights);
@@ -609,12 +547,10 @@ size_t *code_generator_binary_build_loop_weights(
 
     label_index = binary_label_index_find(&labels, jump->text);
     if (label_index == (size_t)-1 || label_index >= jump_index) {
-      continue; /* a forward jump, or no such label: not a loop back-edge */
+      continue;
     }
 
     for (size_t i = label_index; i <= jump_index; i++) {
-      /* Cap to avoid overflow on pathologically deep nesting; 4^10 already
-       * dwarfs any realistic outer-loop score. */
       if (weights[i] <= (size_t)BINARY_LOOP_WEIGHT_CAP) {
         weights[i] *= 4;
       }
@@ -716,9 +652,6 @@ int code_generator_binary_symbol_assigned_register(
       return 1;
     }
   }
-  /* A module symbol is never itself register-resident (that was a frontend
-   * register-allocator property of locals/params, which codegen no longer
-   * consults), so there is no further register to assign here. */
   return 0;
 }
 
@@ -745,13 +678,6 @@ int code_generator_binary_function_can_promote_rsi_rdi(
     return 0;
   }
 
-  /* RSI/RDI are callee-saved (non-volatile) only under the MS-x64 ABI, where a
-   * value promoted into them survives a call because the callee preserves them.
-   * Under SysV (Linux/ELF) RSI/RDI are CALLER-saved: any call clobbers them, so
-   * a hot local promoted there would be silently destroyed across the call.
-   * On SysV, therefore, allow RSI/RDI promotion only when the function makes no
-   * calls at all. (The promoter has a separate no-calls fast path; this guard
-   * covers the with-calls case.) */
   if (code_generator_binary_active_abi()->counts_classes_separately &&
       code_generator_binary_function_has_calls(function)) {
     return 0;
@@ -802,19 +728,6 @@ int code_generator_binary_function_can_promote_rsi_rdi(
   return 1;
 }
 
-/* Every symbol's promotion score, accumulated in one walk of the function.
- *
- * The selection loop below picks one symbol per available register, and it
- * used to call code_generator_binary_function_symbol_score for each candidate,
- * which walks the whole function. That is registers x symbols x instructions:
- * on a function with thousands of locals it was the single largest cost in the
- * compiler, larger than every IR pass put together. The score of a name does
- * not change while the loop runs, so it is computed once here.
- *
- * The tally must match the scorer exactly: an operand credits the symbol it
- * names, and separately credits an alias target when the alias resolves to a
- * different name (the scorer returns on the direct match before it looks at
- * the alias, so the same operand never counts twice for one name). */
 typedef struct {
   const char **names;
   size_t *scores;
@@ -1059,13 +972,6 @@ static int binary_promote_pointer_steps(CodeGenerator *generator,
       if (is_pointer_step && op_i == 2) {
         continue;
       }
-      /* Globals belong to the scoring loop below, which records them in
-       * register_global_symbols as well. This path records only
-       * register_symbols, and the prologue's load and the epilogue's store
-       * both key off the other table -- so a global promoted here lived in a
-       * register that was never filled from memory and never written back.
-       * `n = n + 1` on a global int32 matches the pointer-step shape exactly,
-       * so every write to such a counter was dropped. */
       if (binary_global_symbol(generator, name)) {
         continue;
       }
@@ -1225,9 +1131,6 @@ int code_generator_binary_promote_hot_symbols(
     return 0;
   }
 
-  /* An asm block clobbers registers the compiler never told it about, so
-   * nothing may live in one across it. Every value keeps its stack home, which
-   * is also the home an `{x}` operand binding resolves to. */
   if (ir_function_has_inline_asm(ir_function) ||
       ir_function->has_volatile_access) {
     return 1;
@@ -1423,7 +1326,6 @@ MtlcType *code_generator_binary_get_operand_type(CodeGenerator *generator,
   }
 }
 
-/* Slot for `name`, appending an empty entry when absent. NULL only on OOM. */
 static BinaryOperandTypeEntry *binary_operand_type_slot(
     BinaryOperandTypeIndex *ix, const char *name) {
   size_t b = mettle_fnv1a_hash(name) & (ix->bucket_count - 1);
@@ -1469,10 +1371,6 @@ static BinaryOperandTypeEntry *binary_operand_type_slot(
   return &ix->items[ix->count - 1];
 }
 
-/* One pass over the function, recording for each operand name the first
- * DECLARE_LOCAL type text and the first baked value_type per operand kind.
- * Leaves `built` set either way: a function whose index cannot be allocated
- * simply resolves nothing here, exactly as an empty function would. */
 static void binary_operand_type_index_build(BinaryOperandTypeIndex *ix,
                                             const IRFunction *fn) {
   ix->built = 1;
@@ -1552,8 +1450,6 @@ MtlcType *code_generator_binary_get_operand_type_in_context(
   }
 
   if (context) {
-    /* prepare_function_context sets both from the same IRFunction, so the
-     * pointer it recorded is the function this name lookup used to perform. */
     ir_function = context->ir_function;
     if (!ir_function && context->function_name) {
       ir_function = code_generator_find_ir_function_binary(
@@ -1564,8 +1460,6 @@ MtlcType *code_generator_binary_get_operand_type_in_context(
     return NULL;
   }
 
-  /* Both remaining lookups used to scan every instruction with a strcmp per
-   * instruction, once per operand -- quadratic in the function's size. */
   if (context && ir_function == context->ir_function) {
     if (!context->operand_types.built) {
       binary_operand_type_index_build(&context->operand_types, ir_function);
@@ -1574,12 +1468,6 @@ MtlcType *code_generator_binary_get_operand_type_in_context(
   }
 
   if (operand->kind == IR_OPERAND_SYMBOL) {
-    /* Parameters carry no IR_OP_DECLARE_LOCAL, and the param symbol is often out
-     * of scope in the symbol table by codegen time, so resolve them from the
-     * function signature. Without this a uint64/int32/etc. parameter used as a
-     * divide/shift/compare operand falls back to "signed", miscompiling unsigned
-     * arithmetic at -O0 (where copy-prop hasn't replaced the symbol with a typed
-     * temp). */
     for (size_t i = 0; i < ir_function->parameter_count; i++) {
       if (ir_function->parameter_names && ir_function->parameter_names[i] &&
           strcmp(ir_function->parameter_names[i], operand->name) == 0) {
@@ -1597,14 +1485,6 @@ MtlcType *code_generator_binary_get_operand_type_in_context(
     }
   }
 
-  /* Builder-API temps (and symbols with no param/local home) carry no
-   * DECLARE_LOCAL; their defining instruction bakes the result type into
-   * value_type (mtlc_binary/mtlc_cast/mtlc_load). For a temp this is the only
-   * type source, so resolving it lets a narrow temp be canonicalized just like
-   * a narrow named home -- `(x << 28)` computed into a temp gets sign-extended
-   * before a following arithmetic shift reads it. Without this an unsigned or
-   * narrow temp operand resolves NULL -> "signed"/unwidened and miscompiles
-   * unsigned / % >> and compares in API-built modules. */
   if (entry) {
     MtlcType *baked = operand->kind == IR_OPERAND_SYMBOL ? entry->symbol_type
                                                          : entry->temp_type;
@@ -1686,13 +1566,6 @@ static int code_generator_binary_mark_float_globals(
           !generator->ir_program) {
         continue;
       }
-      /* A local or parameter of this function owns the name outright: the
-       * global of the same name is a different object and its width says
-       * nothing about this storage. Without this, an `int64` local named like
-       * a float-returning function (`var fmod: int64`) was marked float and
-       * every store to it converted, so it read back as the bits of a double.
-       * A function name is never a float value either -- a function symbol
-       * carries its RETURN type in ->type, which is not the type of the name. */
       if (binary_named_slot_table_get_offset(&context->local_slots, op->name) >=
               0 ||
           binary_named_slot_table_get_offset(&context->parameter_slots,
@@ -1760,16 +1633,11 @@ int code_generator_binary_prepare_function_context(
     }
   }
 
-  /* Does this function return INDIRECT? The Win64 ABI passes the hidden
-   * out-pointer as the first integer argument, consuming home slot 0 and
-   * shifting user-parameter homes up by one. */
   MtlcType *fn_return_type =
       ir_function->return_type_name
           ? code_generator_binary_get_resolved_type(
                 generator, ir_function->return_type_name, 1)
           : NULL;
-  /* Reached from outside under SysV, an aggregate of 16 bytes or less goes
-   * back in registers and takes no hidden out-pointer. */
   context->returns_sysv_registers =
       code_generator_binary_active_abi()->counts_classes_separately &&
       code_generator_binary_function_is_abi_public(generator,
@@ -1785,8 +1653,6 @@ int code_generator_binary_prepare_function_context(
           ? 1
           : 0;
   if (has_hidden_return) {
-    /* Account for the extra home slot in parameter_home_size so the frame
-     * layout includes room for the hidden pointer. */
     if (ir_function->parameter_count >
         (size_t)(INT_MAX / BINARY_FUNCTION_STACK_SLOT_SIZE - 1)) {
       code_generator_set_error(generator,
@@ -1815,8 +1681,6 @@ int code_generator_binary_prepare_function_context(
       return 0;
     }
 
-    /* Mark INDIRECT parameters on the symbol so load/lvalue paths know to
-     * deref the home slot (which holds a pointer, not the struct itself). */
     {
       MtlcType *param_type =
           ir_function->parameter_types
@@ -1833,12 +1697,6 @@ int code_generator_binary_prepare_function_context(
         binary_function_context_destroy(context);
         return 0;
       }
-      /* The historical indirect-parameter marking mutated the frontend param
-       * symbol here, but at codegen the function scope is already popped, so the
-       * lookup never returned a parameter and this never fired -- the indirect
-       * struct-parameter ABI is realized from the IR. Removed with the frontend
-       * symbol-table dependency; parameter_name is still resolved for its type
-       * below. (void) it to keep the loop variable used. */
       (void)parameter_name;
     }
 
@@ -1912,14 +1770,6 @@ int code_generator_binary_prepare_function_context(
     local_storage_size = scalar_local ? BINARY_FUNCTION_STACK_SLOT_SIZE
                                       : (int)local_type->size;
 
-    /* --safe: a local this function hands to the safety runtime is described
-     * to a map that resolves an address to its owning object at 16-byte
-     * resolution. Two objects sharing one of those units cannot both be
-     * described, and the runtime refuses to guess between them, so the one
-     * that matters most goes uncovered: an overrun of a few bytes lands in the
-     * unit the object shares with its neighbour. Giving these their own units
-     * is what makes the coverage real. Only the locals the pass chose to
-     * describe pay the padding. */
     safety_described =
         binary_function_local_is_safety_described(ir_function,
                                                   instruction->dest.name);
@@ -1934,12 +1784,6 @@ int code_generator_binary_prepare_function_context(
             BINARY_SAFETY_GRANULE * BINARY_SAFETY_GRANULE;
       }
     }
-    /* `struct Empty { }` is a deliberate shape: `comptime for` over a type's
-     * fields needs the zero-field case to iterate zero times. Declaring one as
-     * a local asked the frame for 0 bytes and was reported as an internal
-     * compiler error. Give it a byte so it has a distinct address, and keep
-     * rejecting a size that came out negative, which means the size overflowed
-     * on the way here. */
     if (local_storage_size == 0) {
       local_storage_size = 1;
     }
@@ -2077,13 +1921,6 @@ int code_generator_binary_prepare_function_context(
     }
   }
 
-  /* Pre-mark referenced global float symbols with their DECLARED float width,
-   * symmetric with the parameter/local declared-type passes above. The mark map
-   * is first-wins, and a written float global (`@g <- t`, where t is a float64
-   * temp from a double-precision expression) would otherwise be recorded by the
-   * instruction-result pass below at the temp's width (64), mislabeling a
-   * float32 global. Globals are not declared by a DECLARE_LOCAL, so without this
-   * they have no authoritative declared-width mark. */
   if (!code_generator_binary_mark_float_globals(generator, ir_function,
                                                context)) {
     binary_function_context_destroy(context);
@@ -2184,9 +2021,6 @@ int code_generator_binary_prepare_function_context(
     return 0;
   }
 
-  /* Reserve a function-level slot for each IR_OP_CALL whose return type is
-   * INDIRECT. Each slot's rbp offset goes into context->indirect_return_slot_offsets
-   * in instruction order and is consumed by emit_call. */
   int indirect_return_total = 0;
   for (size_t pp_i = 0; pp_i < ir_function->instruction_count; pp_i++) {
     const IRInstruction *pp_insn = &ir_function->instructions[pp_i];
@@ -2199,15 +2033,8 @@ int code_generator_binary_prepare_function_context(
                   ? callee->data.function.return_type
                   : callee->type;
     } else if (pp_insn->value_type) {
-      /* Symbol-less runtime call injected at IR lowering: the return type
-       * lives on the instruction. Keep in step with the call emitter's
-       * call_return_type fallback or the cursor and the plan disagree. */
       ret_t = pp_insn->value_type;
     }
-    /* A SysV aggregate of 16 bytes or less comes back in registers and is
-     * spilled into one of these slots, so it needs one reserved even though it
-     * takes no hidden out-pointer. Keep this in step with the matching test in
-     * the call emitter or the cursor and the plan disagree. */
     {
       BinarySysvAggregate ret_agg;
       int sysv_register_return =
@@ -2249,9 +2076,6 @@ int code_generator_binary_prepare_function_context(
     indirect_return_total += slot_bytes;
   }
 
-  /* Rebuild space for aggregate parameters SysV hands over in registers. The
-   * same predicate and classification the prologue uses, so the two agree on
-   * which parameters need it. */
   int incoming_aggregate_total = 0;
   if (ir_function->parameter_count > 0) {
     context->incoming_aggregate_offsets =
@@ -2275,9 +2099,6 @@ int code_generator_binary_prepare_function_context(
           generator,
           ir_function->parameter_types ? ir_function->parameter_types[i] : NULL,
           0);
-      /* Only the shapes whose home holds a pointer need rebuilding. A small
-       * aggregate the backend already calls DIRECT keeps its value in the home
-       * slot exactly as before. */
       if (!code_generator_binary_classify_sysv_aggregate(pt, &agg) ||
           agg.in_memory || agg.eightbyte_count == 0 ||
           code_generator_abi_classify(pt) != ABI_PASS_INDIRECT) {
@@ -2336,8 +2157,6 @@ int code_generator_binary_emit_reg_reg_move(
     }
     return binary_emit_movzx_reg_reg32(buffer, destination, source);
   }
-  /* Sub-4-byte integers extend so the destination holds the canonical wrapped
-   * value for its signedness, matching stack homes and the MIR backend. */
   if (is_integer && width == 2) {
     return is_signed ? binary_emit_movsx_reg_reg16(buffer, destination, source)
                      : binary_emit_movzx_reg_reg16(buffer, destination, source);

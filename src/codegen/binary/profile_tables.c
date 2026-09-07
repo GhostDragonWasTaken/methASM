@@ -5,13 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* --- --debug-hooks struct layout tables ------------------------------------
- * The debug runtime expands struct/array/pointer variables by name: it strips
- * `*`/`[N]` suffixes off a type-name string and looks the base up in these
- * tables. So every emitted field type must be a name the runtime can resolve
- * the same way; dbg_type_display_name reconstructs `Point*` / `int32[64]`
- * spellings for derived types whose MtlcType nodes carry no name. */
-
 static int dbg_type_display_name(MtlcType *type, char *buffer, size_t cap) {
   if (!type || cap == 0) {
     return 0;
@@ -39,7 +32,6 @@ static int dbg_type_display_name(MtlcType *type, char *buffer, size_t cap) {
   }
 }
 
-/* Unwrap pointers/arrays to the underlying named struct, or NULL. */
 static MtlcType *dbg_underlying_struct(MtlcType *type) {
   int guard = 0;
   while (type && guard++ < 8 &&
@@ -73,8 +65,6 @@ static void dbg_collect_structs(MtlcType *type, MtlcType **list, size_t *count,
 static int dbg_emit_u64_table(BinaryEmitter *emitter, size_t rdata_section,
                               const char *symbol, const uint64_t *values,
                               size_t count) {
-  /* A zero-length table still defines the symbol (one dummy slot) so the
-   * debug runtime's externs always link. */
   size_t slots = count > 0 ? count : 1u;
   uint64_t dummy = 0;
   size_t offset = 0;
@@ -157,8 +147,6 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
   const char **profile_files = NULL;
   uint64_t *profile_lines = NULL;
 
-  /* The debugger reuses the profile registry and these embedded tables for
-   * its function/file/line metadata, so --debug-hooks emits them too. */
   if (!generator || (!generator->profile_runtime && !generator->debug_hooks) ||
       !generator->ir_program) {
     return 1;
@@ -270,11 +258,6 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
   free(profile_files);
   free(profile_lines);
 
-  /* --debug-hooks: the per-variable registration tables (indexed by the
-   * local_id the mettle_dbg_local hook passes) and the struct layout tables
-   * the runtime uses to expand struct/array/pointer variables. All symbols
-   * are ALWAYS defined (possibly empty) so debug.o's externs link even for
-   * programs with no variables or no structs. */
   if (generator->debug_hooks) {
     enum { DBG_MAX_STRUCTS = 256 };
     size_t local_count = program->debug_local_entry_count;
@@ -312,9 +295,6 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
       }
     }
 
-    /* Struct layouts, flattened: per struct a [start, count) window into the
-     * parallel field arrays. Field type names are reconstructed spellings
-     * (`Point*`, `int32[8]`) the runtime can re-resolve. */
     size_t field_total = 0;
     for (size_t s = 0; s < struct_count; s++) {
       field_total += structs[s]->field_count;
@@ -324,7 +304,7 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
     const char **struct_names = NULL;
     uint64_t *struct_sizes = NULL, *field_starts = NULL, *field_counts = NULL;
     const char **field_names = NULL;
-    char **field_type_names = NULL; /* owned display-name strings */
+    char **field_type_names = NULL;
     uint64_t *field_offsets = NULL;
     char **scratch_c = NULL, **scratch_d = NULL, **scratch_e = NULL;
     if (ok) {

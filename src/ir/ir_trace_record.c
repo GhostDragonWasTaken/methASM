@@ -65,8 +65,6 @@ static int emit_event(IRFunction *fn, size_t at, const char *kind,
 
 static const char *record_lock_kind(const char *called) {
   const char *name = record_display_name(called);
-  /* Only an unconditional acquire counts. A `try` that fails took nothing,
-   * so recording one as a lock would make every balanced run look unbalanced. */
   if (strcmp(name, "spin_lock") == 0 || strcmp(name, "mutex_lock") == 0 ||
       strcmp(name, "mutex_lock_infinite") == 0 ||
       strcmp(name, "pthread_mutex_lock") == 0 ||
@@ -118,9 +116,6 @@ static int instrument_one(IRFunction *fn, size_t *sites) {
     if (insn->op != IR_OP_CALL || !insn->text) {
       continue;
     }
-    /* `mettle_string_free` releases exactly one block, so a ledger that
-     * counted the string this allocated and not the release of it would say a
-     * program leaks where it does not. */
     if (strcmp(record_display_name(insn->text), "free") == 0 ||
         strcmp(record_display_name(insn->text), "mettle_string_free") == 0) {
       const IROperand *pointer =
@@ -146,11 +141,6 @@ static int instrument_one(IRFunction *fn, size_t *sites) {
     if (fn->instructions[i - 1].op != IR_OP_RETURN) {
       continue;
     }
-    /* The flush goes after the leave in source order, which means inserting
-     * it first: both land at the same index and the later insert pushes the
-     * earlier one down. A program that leaves through `exit` rather than
-     * returning from main writes whatever had already filled a buffer, which
-     * docs/known-limitations.md says. */
     if (is_main &&
         !emit_call(fn, i - 1, "mettle_trace_flush", NULL, 0,
                    fn->instructions[i - 1].location)) {

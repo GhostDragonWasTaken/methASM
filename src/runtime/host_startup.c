@@ -1,4 +1,3 @@
-/* Entry code for the reference compiler itself. No platform C startup runs. */
 
 #if defined(_WIN32)
 

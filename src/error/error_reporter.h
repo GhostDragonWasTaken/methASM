@@ -13,8 +13,6 @@ typedef enum {
   ERROR_INTERNAL
 } ErrorType;
 
-/* Short labels printed in diagnostic header, e.g. [E0002].
-   Stable across compiler versions, useful for test grep and docs. */
 #define ERROR_CODE_LEXICAL   "E0001"
 #define ERROR_CODE_SYNTAX    "E0002"
 #define ERROR_CODE_SEMANTIC  "E0003"
@@ -26,17 +24,10 @@ typedef enum {
 typedef enum {
   DIAG_SEVERITY_ERROR,
   DIAG_SEVERITY_WARNING,
-  /* Standalone informational message */
   DIAG_SEVERITY_NOTE,
-  /* Note attached to the preceding diagnostic (printed inline) */
   DIAG_SEVERITY_NOTE_OF
 } ErrorSeverity;
 
-/* Part of libmtlc: the reporter is a frontend-NEUTRAL diagnostics facility. It
- * renders errors/warnings against raw source text + SourceLocation/SourceSpan
- * positions and knows nothing about any AST or token stream -- the backend
- * (e.g. the compile-time interpreter) and any frontend can both report through
- * it. Keep it that way: no frontend includes here. */
 #include "../source_location.h"
 
 typedef struct {
@@ -56,14 +47,7 @@ typedef struct {
   char *message;
   char *suggestion;
   char *code_snippet;
-  /* Short text rendered inline after the caret underline, e.g.
-     "expected 'int64', found 'string'". Optional. */
   char *span_label;
-  /* Overrides the code derived from `type`, for analyses with a finer code
-     range of their own: the memory and range checks report M0101..M0119
-     rather than
-     the generic E0003 its findings would otherwise carry. NULL means use the
-     type's code. */
   char *code_override;
 } ErrorReport;
 
@@ -72,11 +56,6 @@ typedef struct {
   char *source_code;
 } ErrorReporterSource;
 
-/* One link in the chain of code-generating contexts a diagnostic was reported
-   from, e.g. "expanded from comptime-for iteration 1 (field `x`)". Frames
-   are pushed by the stage doing the generating and are attached to every
-   diagnostic raised while they are live, so attribution is captured as the
-   diagnostic is created rather than reconstructed afterwards. */
 typedef struct {
   SourceSpan span;
   char *message;
@@ -94,14 +73,10 @@ typedef struct {
   size_t source_capacity;
   const char *current_filename;
   const char *current_source_code;
-  /* Set when the most recent add was suppressed as a duplicate/cascade, so
-     follow-up label/note attachments know to skip themselves too. */
   int last_add_suppressed;
-  /* Live expansion chain, outermost first. */
   ErrorNoteFrame *note_frames;
   size_t note_frame_count;
   size_t note_frame_capacity;
-  /* Guards the note frames from attaching themselves to their own notes. */
   int emitting_note_frames;
 } ErrorReporter;
 
@@ -143,40 +118,19 @@ void error_reporter_add_warning_span_suggestion(ErrorReporter *reporter,
                                                 const char *message,
                                                 const char *suggestion);
 
-/* Replace the message of the most recently added error with a more precise
-   contextual one (e.g. "Expected '(', found identifier" -> "Expected '('
-   after 'if'"). No-op if the last add was suppressed as a cascade. */
 void error_reporter_refine_last(ErrorReporter *reporter, const char *message);
-/* Move a span's caret onto the first whole-word occurrence of `token` on its
-   line (searching from the span's column), so diagnostics underline the name
-   rather than a leading keyword. Returns the span unchanged if not found. */
 SourceSpan error_reporter_span_snap_to_token(ErrorReporter *reporter,
                                              SourceSpan span,
                                              const char *token);
-/* Attach an inline caret label to the most recently added diagnostic. */
 void error_reporter_set_last_label(ErrorReporter *reporter, const char *label);
-/* Stamp a finer code on the most recently added diagnostic, replacing the one
-   its ErrorType implies. The memory and range checks use this to report
-   M0101..M0119,
-   so `mettle explain` can be reached from the diagnostic the reader is looking
-   at. No-op if the last add was suppressed as a cascade. */
 void error_reporter_set_last_code(ErrorReporter *reporter, const char *code);
-/* Attach a note (with its own source snippet) to the most recently added
-   diagnostic, e.g. "function 'add' defined here". */
 void error_reporter_add_note_of_span(ErrorReporter *reporter, SourceSpan span,
                                      const char *message);
 
-/* Push a context frame naming the code-generating step now in progress. Every
-   error and warning added until the matching pop carries the whole live chain
-   as notes, so a diagnostic raised inside generated code always names what
-   generated it and where. `span` should point at the source the programmer
-   wrote (the `comptime for` keyword), not at the generated node. Returns 1 on
-   success; on failure nothing is pushed and the caller must not pop. */
 int error_reporter_push_note_frame(ErrorReporter *reporter, SourceSpan span,
                                    const char *message);
 void error_reporter_pop_note_frame(ErrorReporter *reporter);
 size_t error_reporter_note_frame_depth(const ErrorReporter *reporter);
-/* Switch diagnostic printing to newline-delimited JSON (for tooling). */
 void error_reporter_set_format_json(int enabled);
 int error_reporter_format_json(void);
 int error_reporter_get_warning_count(ErrorReporter *reporter);
@@ -194,21 +148,14 @@ char *error_reporter_get_line_from_source(const char *source,
                                           size_t line_number);
 char *error_reporter_create_caret_line(size_t column, size_t length);
 
-// Common error suggestions
 const char *error_reporter_suggest_for_token(const char *token);
-// Returns a heap-allocated suggestion string (caller must free), or NULL.
 char *error_reporter_suggest_for_type_mismatch(const char *expected,
                                                const char *actual);
 
-// Case-insensitive-tolerant Levenshtein edit distance between two strings.
 size_t error_reporter_edit_distance(const char *a, const char *b);
 
-// Given a misspelled `name` and a list of `candidates` (count entries),
-// returns the heap-allocated closest candidate within a sensible edit-distance
-// threshold (scaled to the name length), or NULL if none is close enough.
-// Caller must free the returned string.
 char *error_reporter_closest_candidate(const char *name,
                                        const char *const *candidates,
                                        size_t count);
 
-#endif // ERROR_REPORTER_H
+#endif
