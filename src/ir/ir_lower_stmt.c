@@ -516,6 +516,1071 @@ static int ir_zero_fill_is_dead(IRLoweringContext *context, const char *name,
 static int ir_lower_gpu_launch(IRLoweringContext *context,
                                IRFunction *function, ASTNode *statement);
 
+static int ir_lower_var_initializer(IRLoweringContext *context,
+                                    IRFunction *function,
+                                    VarDeclaration *declaration,
+                                    Type *decl_type, const char *local_name,
+                                    ASTNode *statement) {
+  IROperand value = ir_operand_none();
+  if (!ir_lower_expression(context, function, declaration->initializer,
+                           &value)) {
+    return 0;
+  }
+  if (ir_should_decay_array_to_address(decl_type,
+                                       declaration->initializer) &&
+      !ir_decay_array_operand_to_address(
+          context, function, &value, declaration->initializer->location)) {
+    ir_operand_destroy(&value);
+    return 0;
+  }
+  if (ir_should_build_slice_from_array(decl_type,
+                                       declaration->initializer) &&
+      !ir_build_slice_operand_from_array(
+          context, function, &value,
+          declaration->initializer->resolved_type, decl_type,
+          declaration->initializer->location)) {
+    ir_operand_destroy(&value);
+    return 0;
+  }
+  if (ir_should_coerce_string_to_cstring(context, decl_type,
+                                         declaration->initializer) &&
+      !ir_coerce_string_operand_to_cstring(
+          context, function, &value, declaration->initializer->location)) {
+    ir_operand_destroy(&value);
+    return 0;
+  }
+  if (ir_try_emit_aggregate_symbol_memcpy(context, function,
+                                          local_name, &value,
+                                          decl_type, statement->location)) {
+    ir_operand_destroy(&value);
+  } else if (ir_small_float_local(context, function, declaration->name,
+                                  local_name, decl_type)) {
+    int stored = ir_emit_small_float_home_store(
+        context, function, local_name, decl_type, &value,
+        statement->location);
+    ir_operand_destroy(&value);
+    if (!stored) {
+      return 0;
+    }
+  } else {
+    IRInstruction assign = {0};
+    assign.op = IR_OP_ASSIGN;
+    assign.location = statement->location;
+    assign.dest = ir_operand_symbol(local_name);
+    assign.lhs = value;
+    ir_assign_apply_float_bits(
+        &assign, &assign.lhs,
+        ir_named_type_float_bits(context, declaration->type_name));
+    if (!assign.dest.name) {
+      ir_operand_destroy(&value);
+      ir_set_error(context,
+                   "Out of memory while lowering variable initializer");
+      return 0;
+    }
+    if (!ir_emit(context, function, &assign)) {
+      ir_operand_destroy(&assign.dest);
+      ir_operand_destroy(&value);
+      return 0;
+    }
+    ir_operand_destroy(&assign.dest);
+    ir_operand_destroy(&value);
+  }
+  return 1;
+}
+
+static int ir_lower_address_space_local(IRLoweringContext *context,
+                                        IRFunction *function,
+                                        VarDeclaration *declaration,
+                                        Type *decl_type, IRInstruction *local,
+                                        const char *local_name) {
+  int is_static_storage =
+      decl_type && decl_type->kind == TYPE_ARRAY && decl_type->base_type &&
+      decl_type->array_size > 0 && decl_type->array_size <= UINT32_MAX;
+  int is_dynamic_workgroup_view =
+      decl_type && decl_type->kind == TYPE_POINTER && decl_type->base_type &&
+      declaration->address_space == AST_ADDRESS_SPACE_WORKGROUP;
+  /* A view whose extents are in its type allocates their product. */
+  long long static_view_elements = 0;
+  if (decl_type && decl_type->kind == TYPE_SLICE && decl_type->base_type &&
+      decl_type->view_extents[0] > 0) {
+    static_view_elements = 1;
+    for (size_t e = 0; e < 4 && decl_type->view_extents[e]; e++) {
+      static_view_elements *= (long long)decl_type->view_extents[e];
+    }
+  }
+  if (!is_static_storage && !static_view_elements &&
+      !is_dynamic_workgroup_view) {
+    ir_operand_destroy(&local->dest);
+    ir_set_error(context,
+                 "Invalid GPU address-space declaration '%s' reached IR "
+                 "lowering",
+                 declaration->name);
+    return 0;
+  }
+  MtlcAddressSpace address_space =
+      declaration->address_space == AST_ADDRESS_SPACE_WORKGROUP
+          ? MTLC_ADDRESS_SPACE_WORKGROUP
+          : MTLC_ADDRESS_SPACE_PRIVATE;
+  MtlcType *element_type =
+      mtlc_type_from_frontend(decl_type->base_type);
+  const MtlcType *pointer_type =
+      mtlc_type_pointer_in(element_type, address_space);
+  if (!element_type || !pointer_type) {
+    ir_operand_destroy(&local->dest);
+    ir_set_error(context,
+                 "Unable to lower GPU address-space type for '%s'",
+                 declaration->name);
+    return 0;
+  }
+  local->op = IR_OP_ADDRESS_SPACE_ALLOC;
+  /* Zero is the neutral dynamic-workgroup-arena sentinel. It is never
+   * accepted for private storage or a fixed source array. */
+  local->rhs = ir_operand_int(
+      is_static_storage ? (long long)decl_type->array_size
+                        : static_view_elements);
+  local->text = decl_type->base_type->name;
+  local->value_type = (MtlcType *)pointer_type;
+  local->address_space = address_space;
+  return 1;
+}
+
+static int ir_lower_zeroed_aggregate_local(IRLoweringContext *context,
+                                           IRFunction *function,
+                                           ASTNode *statement,
+                                           Type *decl_type,
+                                           const char *local_name,
+                                           const char *declared_name) {
+  /* The read-ahead is only valid when the tracked position really is this
+   * statement: a body lowered outside a block loop leaves the fields
+   * pointing at some enclosing list. */
+  int position_is_tracked =
+      context->block_statements &&
+      context->block_statement_index < context->block_statement_count &&
+      context->block_statements[context->block_statement_index] == statement;
+  if (!(position_is_tracked &&
+        ir_zero_fill_is_dead(context, declared_name, decl_type)) &&
+      !ir_emit_zero_fill_local(context, function, local_name, decl_type,
+                               statement->location)) {
+    return 0;
+  }
+  return 1;
+}
+
+static int ir_lower_var_declaration(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  VarDeclaration *declaration = (VarDeclaration *)statement->data;
+  if (!declaration || !declaration->name) {
+    ir_set_error(context, "Malformed variable declaration");
+    return 0;
+  }
+
+  // Top-level `const` is folded at use sites (SYMBOL_CONSTANT) and never
+  // reaches this local-statement path. A local `const` is an immutable local
+  // variable: it gets normal storage and initialization here, and the type
+  // checker rejects reassignment.
+  //
+  // Type/Field consts are the exception: they have no runtime representation,
+  // so they must not become locals even inside a function.
+  if (declaration->is_const) {
+    Type *const_type = ir_resolve_named_type(context, declaration->type_name);
+    if (!const_type && declaration->initializer) {
+      const_type = declaration->initializer->resolved_type;
+    }
+    if (type_is_comptime_only(const_type)) {
+      return 1;
+    }
+  }
+
+  IRInstruction local = {0};
+  Type *decl_type = ir_resolve_named_type(context, declaration->type_name);
+  if (!decl_type && declaration->initializer) {
+    decl_type = declaration->initializer->resolved_type;
+  }
+  /* Bind before anything is emitted: a name already declared in this
+   * function at a different type gets one of its own, so the two do not
+   * share a frame slot (and a type) in the backends. */
+  const char *decl_type_text = ir_backend_type_name(declaration->type_name);
+  if (!decl_type_text && declaration->initializer &&
+      declaration->initializer->resolved_type) {
+    decl_type_text = ir_backend_type_name(
+        declaration->initializer->resolved_type->name);
+  }
+  const char *local_name =
+      ir_local_bind(context, declaration->name, decl_type_text);
+  local.op = IR_OP_DECLARE_LOCAL;
+  local.location = statement->location;
+  local.dest = ir_operand_symbol(local_name);
+  local.text = (char *)ir_backend_type_name(declaration->type_name);
+  {
+    double bound_lo = 0.0;
+    double bound_hi = 0.0;
+    double bound_err = 0.0;
+    if (declaration->type_name && decl_type &&
+        type_checker_float_bound(decl_type, &bound_lo, &bound_hi,
+                                 &bound_err)) {
+      ir_declare_float_bound(string_intern(declaration->type_name), bound_lo,
+                             bound_hi);
+    }
+    if (declaration->type_name && decl_type &&
+        type_checker_type_excludes_zero(decl_type)) {
+      ir_declare_nonzero_type(string_intern(declaration->type_name));
+    }
+  }
+  local.value_type = mtlc_type_from_frontend(decl_type);
+  if (declaration->address_space != AST_ADDRESS_SPACE_DEFAULT &&
+      !ir_lower_address_space_local(context, function, declaration, decl_type,
+                                    &local, local_name)) {
+    return 0;
+  }
+  // For inferred-type locals (`var x = expr;`) the declaration carries no
+  // type_name. The binary/direct-object backend resolves a local's type from
+  // this textual payload, so fall back to the name of the type the checker
+  // inferred for the initializer. The Type (and its name) outlives codegen,
+  // matching the lifetime of the type_name pointer used above, and `text` is
+  // never freed by the IR. Leaving it NULL is harmless for the asm backend.
+  if (!local.text && declaration->initializer &&
+      declaration->initializer->resolved_type) {
+    local.text = (char *)ir_backend_type_name(
+        declaration->initializer->resolved_type->name);
+  }
+  if (!local.dest.name) {
+    ir_set_error(context,
+                 "Out of memory while lowering variable declaration");
+    return 0;
+  }
+  if (!ir_emit(context, function, &local)) {
+    ir_operand_destroy(&local.dest);
+    return 0;
+  }
+  ir_operand_destroy(&local.dest);
+
+  /* No initializer: an aggregate still has to start zeroed. `string` is in
+   * the list because the used-before-initialized check exempts it with the
+   * other aggregates, and an uninitialized one is a wild pointer carrying a
+   * garbage length -- zeroed, it is the empty string. GPU locals are left
+   * alone: their storage is not a host stack frame and the device paths have
+   * no memset to lower the fill to. */
+  if (!declaration->initializer && decl_type &&
+      (decl_type->kind == TYPE_ARRAY || decl_type->kind == TYPE_STRUCT ||
+       decl_type->kind == TYPE_SLICE || decl_type->kind == TYPE_STRING) &&
+      declaration->address_space == AST_ADDRESS_SPACE_DEFAULT &&
+      !function->is_kernel &&
+      !ir_lower_zeroed_aggregate_local(context, function, statement, decl_type,
+                                       local_name, declaration->name)) {
+    return 0;
+  }
+
+  if (declaration->initializer &&
+      declaration->initializer->type == AST_AGGREGATE_LITERAL) {
+    /* The literal was folded to a constant image at type-check time; copy it
+     * in wholesale rather than lowering it as an expression. */
+    return ir_emit_aggregate_literal_copy_to_symbol(
+        context, function, local_name, declaration->initializer,
+        decl_type, statement->location);
+  }
+
+  if (declaration->initializer &&
+      !ir_lower_var_initializer(context, function, declaration, decl_type,
+                                local_name, statement)) {
+    return 0;
+  }
+  return 1;
+}
+
+static int ir_lower_named_assignment(IRLoweringContext *context,
+                                     IRFunction *function, ASTNode *statement,
+                                     Assignment *assignment,
+                                     IRDeferScope *defers, IROperand *value) {
+  const IRLocalBinding *binding =
+      ir_local_binding_find(context, assignment->variable_name);
+  const char *target_name =
+      binding ? binding->ir_name : assignment->variable_name;
+  Type *assign_type =
+      ir_lookup_symbol_type(context, assignment->variable_name);
+  if (!assign_type && assignment->value) {
+    assign_type = assignment->value->resolved_type;
+  }
+  /* The decay reads the target's DECLARED type, which the fallback above
+   * cannot supply: a local's scope is gone by lowering time, so the symbol
+   * lookup misses and `assign_type` becomes the value's own type, which
+   * for an array is the array and would hide the decay. The binding keeps
+   * the declared spelling. */
+  Type *decay_target =
+      ir_lookup_symbol_type(context, assignment->variable_name);
+  if (!decay_target && binding) {
+    decay_target = ir_resolve_named_type(context, binding->type_text);
+  }
+  if (ir_should_build_slice_from_array(decay_target, assignment->value) &&
+      !ir_build_slice_operand_from_array(
+          context, function, value, assignment->value->resolved_type,
+          decay_target, assignment->value->location)) {
+    ir_operand_destroy(value);
+    return 0;
+  }
+  if (ir_should_decay_array_to_address(decay_target, assignment->value) &&
+      !ir_decay_array_operand_to_address(context, function, value,
+                                         assignment->value->location)) {
+    ir_operand_destroy(value);
+    return 0;
+  }
+  if (ir_should_coerce_string_to_cstring(context, assign_type,
+                                         assignment->value) &&
+      !ir_coerce_string_operand_to_cstring(
+          context, function, value, assignment->value->location)) {
+    ir_operand_destroy(value);
+    return 0;
+  }
+  if (ir_try_emit_aggregate_symbol_memcpy(
+          context, function, target_name, value,
+          assign_type, statement->location)) {
+    ir_operand_destroy(value);
+    return 1;
+  }
+  if (ir_small_float_local(context, function, assignment->variable_name,
+                           target_name, assign_type)) {
+    int stored = ir_emit_small_float_home_store(
+        context, function, target_name, assign_type, value,
+        statement->location);
+    ir_operand_destroy(value);
+    return stored;
+  }
+
+  {
+    IRInstruction assign = {0};
+    assign.op = IR_OP_ASSIGN;
+    assign.location = statement->location;
+    assign.dest = ir_operand_symbol(target_name);
+    assign.lhs = *value;
+    /* Target float width for the narrowing/widening on store. A local's
+     * own binding is authoritative -- the symbol table is keyed by source
+     * name, so a shadowed local resolves there to whichever declaration
+     * won. Otherwise the symbol table, then (for an inferred local, which
+     * has no declared type text) the emitted DECLARE_LOCAL. Gate that IR
+     * scan on a floating RHS so non-float assigns stay O(1). */
+    int target_float_bits =
+        binding ? ir_named_type_float_bits(context, binding->type_text)
+                : ir_symbol_float_bits(context, assignment->variable_name);
+    if (target_float_bits == 0 && assignment->value &&
+        assignment->value->resolved_type &&
+        (assignment->value->resolved_type->kind == TYPE_FLOAT32 ||
+         assignment->value->resolved_type->kind == TYPE_FLOAT64 ||
+         assignment->value->resolved_type->kind == TYPE_FLOAT16 ||
+         assignment->value->resolved_type->kind == TYPE_BFLOAT16)) {
+      target_float_bits = ir_local_declared_float_bits(
+          context, function, target_name);
+    }
+    ir_assign_apply_float_bits(&assign, &assign.lhs, target_float_bits);
+    if (!assign.dest.name) {
+      ir_operand_destroy(value);
+      ir_set_error(context, "Out of memory while lowering assignment target");
+      return 0;
+    }
+
+    if (!ir_emit(context, function, &assign)) {
+      ir_operand_destroy(&assign.dest);
+      ir_operand_destroy(value);
+      return 0;
+    }
+
+    ir_operand_destroy(&assign.dest);
+    ir_operand_destroy(value);
+    return 1;
+  }
+  return -1;
+}
+
+static int ir_lower_assignment(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  Assignment *assignment = (Assignment *)statement->data;
+  if (!assignment || !assignment->value) {
+    ir_set_error(context, "Malformed assignment statement");
+    return 0;
+  }
+
+  if (assignment->target_count > 0) {
+    return ir_lower_multi_assignment(context, function, assignment,
+                                     statement->location);
+  }
+
+  /* An aggregate literal on the right is a folded constant, not something to
+   * evaluate: copy its image into the destination. */
+  if (assignment->value->type == AST_AGGREGATE_LITERAL) {
+    Type *literal_type = assignment->value->resolved_type;
+    if (assignment->variable_name) {
+      Type *assign_type =
+          ir_lookup_symbol_type(context, assignment->variable_name);
+      return ir_emit_aggregate_literal_copy_to_symbol(
+          context, function,
+          ir_local_ir_name(context, assignment->variable_name),
+          assignment->value,
+          assign_type ? assign_type : literal_type, statement->location);
+    }
+    if (!assignment->target) {
+      ir_set_error(context, "Assignment target is missing");
+      return 0;
+    }
+    IROperand literal_address = ir_operand_none();
+    Type *literal_target_type = NULL;
+    if (!ir_lower_lvalue_address(context, function, assignment->target,
+                                 &literal_address, &literal_target_type)) {
+      return 0;
+    }
+    int ok = ir_emit_aggregate_literal_copy(
+        context, function, &literal_address, assignment->value,
+        literal_target_type ? literal_target_type : literal_type,
+        statement->location);
+    ir_operand_destroy(&literal_address);
+    return ok;
+  }
+
+  IROperand value = ir_operand_none();
+  if (!ir_lower_expression(context, function, assignment->value, &value)) {
+    return 0;
+  }
+
+  if (assignment->variable_name) {
+    int handled = ir_lower_named_assignment(context, function, statement,
+                                            assignment, defers, &value);
+    if (handled >= 0) {
+      return handled;
+    }
+  }
+
+  if (!assignment->target) {
+    ir_operand_destroy(&value);
+    ir_set_error(context, "Assignment target is missing");
+    return 0;
+  }
+
+  IROperand address = ir_operand_none();
+  Type *target_type = NULL;
+  if (!ir_lower_lvalue_address(context, function, assignment->target,
+                               &address, &target_type)) {
+    ir_operand_destroy(&value);
+    return 0;
+  }
+
+  if (!target_type) {
+    ir_operand_destroy(&address);
+    ir_operand_destroy(&value);
+    ir_set_error(context, "Cannot assign to unknown target type");
+    return 0;
+  }
+
+  if (ir_should_build_slice_from_array(target_type, assignment->value) &&
+      !ir_build_slice_operand_from_array(
+          context, function, &value, assignment->value->resolved_type,
+          target_type, assignment->value->location)) {
+    ir_operand_destroy(&value);
+    return 0;
+  }
+  if (ir_should_decay_array_to_address(target_type, assignment->value) &&
+      !ir_decay_array_operand_to_address(context, function, &value,
+                                         assignment->value->location)) {
+    ir_operand_destroy(&address);
+    ir_operand_destroy(&value);
+    return 0;
+  }
+
+  if (ir_should_coerce_string_to_cstring(context, target_type,
+                                         assignment->value) &&
+      !ir_coerce_string_operand_to_cstring(
+          context, function, &value, assignment->value->location)) {
+    ir_operand_destroy(&address);
+    ir_operand_destroy(&value);
+    return 0;
+  }
+
+  /* Aggregate destinations (struct fields, indexed struct elements) must copy
+   * the whole struct. A plain IR_OP_STORE of an aggregate RHS only moves one
+   * word, silently dropping everything past the first 8 bytes. */
+  if (ir_try_emit_aggregate_address_memcpy(context, function, &address, &value,
+                                           target_type,
+                                           statement->location)) {
+    ir_operand_destroy(&address);
+    ir_operand_destroy(&value);
+    return 1;
+  }
+
+  IRInstruction store = {0};
+  store.op = IR_OP_STORE;
+  store.location = statement->location;
+  store.dest = address;
+  store.lhs = value;
+  store.rhs = ir_operand_int(ir_type_storage_size(target_type));
+  ir_access_apply_alias_class(&store, target_type);
+  if (target_type->kind == TYPE_FLOAT32 ||
+      target_type->kind == TYPE_FLOAT64 ||
+      target_type->kind == TYPE_FLOAT16 ||
+      target_type->kind == TYPE_BFLOAT16) {
+    ir_assign_apply_float_bits(&store, &store.lhs,
+                               ir_type_float_bits(target_type));
+  }
+  if (!ir_emit(context, function, &store)) {
+    ir_operand_destroy(&address);
+    ir_operand_destroy(&value);
+    return 0;
+  }
+
+  ir_operand_destroy(&address);
+  ir_operand_destroy(&value);
+  return 1;
+}
+
+static int ir_lower_for_statement(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  ForStatement *for_data = (ForStatement *)statement->data;
+  if (!for_data || !for_data->body) {
+    ir_set_error(context, "Malformed for statement");
+    return 0;
+  }
+
+  char *condition_label = ir_new_label_name(context, "for_cond");
+  char *step_label = ir_new_label_name(context, "for_step");
+  char *end_label = ir_new_label_name(context, "for_end");
+  if (!condition_label || !step_label || !end_label) {
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    ir_set_error(context, "Out of memory while allocating for-loop labels");
+    return 0;
+  }
+
+  int for_simd_mode = for_data->simd_mode != SIMD_ATTR_NONE
+                          ? for_data->simd_mode
+                          : context->current_function_simd_default;
+  if (for_simd_mode == SIMD_ATTR_NONE && g_ir_lowering_explain) {
+    for_simd_mode = SIMD_ATTR_REPORT;
+  }
+  int for_simd_id = -1;
+  if (for_simd_mode != SIMD_ATTR_NONE) {
+    for_simd_id = context->next_simd_request_id++;
+    if (!ir_emit_simd_marker(context, function, 'B', for_simd_id,
+                             for_simd_mode, statement->location)) {
+      free(condition_label);
+      free(step_label);
+      free(end_label);
+      return 0;
+    }
+  }
+
+  /* The initializer declares a variable scoped to the loop, so it needs
+   * a scope of its own: without one the loop variable stayed the live
+   * binding for its name after the loop ended, and a `for i in 0..3`
+   * beside an outer `i` left that outer name reading 3. */
+  ir_local_scope_enter(context);
+  if (!ir_lower_statement_or_expression(context, function,
+                                        for_data->initializer)) {
+    ir_local_scope_leave(context);
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    return 0;
+  }
+
+  if (for_data->unroll_factor > 1 &&
+      !ir_emit_unroll_marker(context, function, for_data->unroll_factor,
+                             statement->location)) {
+    ir_local_scope_leave(context);
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    return 0;
+  }
+
+  if (!ir_emit_label_instruction(context, function, condition_label,
+                                 statement->location)) {
+    ir_local_scope_leave(context);
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    return 0;
+  }
+
+  if (for_data->condition) {
+    size_t for_branch_before = function->instruction_count;
+    if (!ir_emit_condition_false_branch(context, function,
+                                        for_data->condition, end_label)) {
+      ir_local_scope_leave(context);
+      free(condition_label);
+      free(step_label);
+      free(end_label);
+      return 0;
+    }
+    if (for_data->uniform_mode == 3) {
+      ir_mark_branches_uniform(function, for_branch_before);
+    }
+  }
+
+  size_t for_body_before = function->instruction_count;
+  if (!ir_push_labeled_control_frame(context, end_label, step_label,
+                                     for_data->label, defers)) {
+    ir_local_scope_leave(context);
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    return 0;
+  }
+
+  int body_ok = ir_lower_statement_with_defers(context, function,
+                                               for_data->body, defers);
+  if (for_data->uniform_mode != 3) {
+    ir_mark_calls_divergent(function, for_body_before);
+  }
+  ir_pop_control_frame(context);
+  if (!body_ok) {
+    ir_local_scope_leave(context);
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    return 0;
+  }
+
+  if (!ir_emit_label_instruction(context, function, step_label,
+                                 statement->location)) {
+    ir_local_scope_leave(context);
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    return 0;
+  }
+
+  if (!ir_lower_statement_or_expression(context, function,
+                                        for_data->increment)) {
+    ir_local_scope_leave(context);
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    return 0;
+  }
+
+  if (!ir_emit_jump_instruction(context, function, condition_label,
+                                statement->location) ||
+      !ir_emit_label_instruction(context, function, end_label,
+                                 statement->location)) {
+    ir_local_scope_leave(context);
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    return 0;
+  }
+
+  if (for_simd_id >= 0 &&
+      !ir_emit_simd_marker(context, function, 'E', for_simd_id, 0,
+                           statement->location)) {
+    ir_local_scope_leave(context);
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    return 0;
+  }
+
+  ir_local_scope_leave(context);
+  free(condition_label);
+  free(step_label);
+  free(end_label);
+  return 1;
+}
+
+static int ir_lower_while_statement(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  WhileStatement *while_data = (WhileStatement *)statement->data;
+  if (!while_data || !while_data->condition || !while_data->body) {
+    ir_set_error(context, "Malformed while statement");
+    return 0;
+  }
+
+  char *loop_start = ir_new_label_name(context, "while");
+  char *loop_end = ir_new_label_name(context, "while_end");
+  if (!loop_start || !loop_end) {
+    free(loop_start);
+    free(loop_end);
+    ir_set_error(context, "Out of memory while allocating while labels");
+    return 0;
+  }
+
+  int while_simd_mode = while_data->simd_mode != SIMD_ATTR_NONE
+                            ? while_data->simd_mode
+                            : context->current_function_simd_default;
+  if (while_simd_mode == SIMD_ATTR_NONE && g_ir_lowering_explain) {
+    while_simd_mode = SIMD_ATTR_REPORT;
+  }
+  int while_simd_id = -1;
+  if (while_simd_mode != SIMD_ATTR_NONE) {
+    while_simd_id = context->next_simd_request_id++;
+    if (!ir_emit_simd_marker(context, function, 'B', while_simd_id,
+                             while_simd_mode, statement->location)) {
+      free(loop_start);
+      free(loop_end);
+      return 0;
+    }
+  }
+
+  if (while_data->unroll_factor > 1 &&
+      !ir_emit_unroll_marker(context, function, while_data->unroll_factor,
+                             statement->location)) {
+    free(loop_start);
+    free(loop_end);
+    return 0;
+  }
+
+  if (!ir_emit_label_instruction(context, function, loop_start,
+                                 statement->location)) {
+    free(loop_start);
+    free(loop_end);
+    return 0;
+  }
+
+  size_t while_branch_before = function->instruction_count;
+  if (!ir_emit_condition_false_branch(context, function,
+                                      while_data->condition, loop_end)) {
+    free(loop_start);
+    free(loop_end);
+    return 0;
+  }
+  if (while_data->uniform_mode == 3) {
+    ir_mark_branches_uniform(function, while_branch_before);
+  }
+
+  if (!ir_push_labeled_control_frame(context, loop_end, loop_start,
+                                     while_data->label, defers)) {
+    free(loop_start);
+    free(loop_end);
+    return 0;
+  }
+
+  size_t while_body_before = function->instruction_count;
+  int body_ok = ir_lower_statement_with_defers(context, function,
+                                               while_data->body, defers);
+  if (while_data->uniform_mode != 3) {
+    ir_mark_calls_divergent(function, while_body_before);
+  }
+  ir_pop_control_frame(context);
+  if (!body_ok) {
+    free(loop_start);
+    free(loop_end);
+    return 0;
+  }
+
+  if (!ir_emit_jump_instruction(context, function, loop_start,
+                                statement->location) ||
+      !ir_emit_label_instruction(context, function, loop_end,
+                                 statement->location)) {
+    free(loop_start);
+    free(loop_end);
+    return 0;
+  }
+
+  if (while_simd_id >= 0 &&
+      !ir_emit_simd_marker(context, function, 'E', while_simd_id, 0,
+                           statement->location)) {
+    free(loop_start);
+    free(loop_end);
+    return 0;
+  }
+
+  free(loop_start);
+  free(loop_end);
+  return 1;
+}
+
+static int ir_lower_if_statement(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  IfStatement *if_data = (IfStatement *)statement->data;
+  if (!if_data || !if_data->condition || !if_data->then_branch) {
+    ir_set_error(context, "Malformed if statement");
+    return 0;
+  }
+
+  char *end_label = ir_new_label_name(context, "if_end");
+  if (!end_label) {
+    ir_set_error(context, "Out of memory while allocating if labels");
+    return 0;
+  }
+
+  ASTNode *current_cond = if_data->condition;
+  ASTNode *current_body = if_data->then_branch;
+
+  for (size_t i = 0; i <= if_data->else_if_count; i++) {
+    char *next_label = ir_new_label_name(context, "if_next");
+    if (!next_label) {
+      free(end_label);
+      return 0;
+    }
+
+    size_t branches_before = function->instruction_count;
+    if (!ir_emit_condition_false_branch(context, function, current_cond,
+                                        next_label)) {
+      free(next_label);
+      free(end_label);
+      return 0;
+    }
+    /* A branch every work item of the group decides the same way is a group
+       decision, and a device backend takes the uniform form of it. */
+    if (if_data->uniform_mode == 3) {
+      ir_mark_branches_uniform(function, branches_before);
+    }
+
+    {
+      size_t arm_before = function->instruction_count;
+      if (!ir_lower_statement_with_defers(context, function, current_body,
+                                          defers)) {
+        free(next_label);
+        free(end_label);
+        return 0;
+      }
+      /* Inside an arm no work item agrees on, the group effects a kernel
+         provides do not reach: a collective there speaks to a group that is
+         not all here. */
+      if (if_data->uniform_mode != 3) {
+        ir_mark_calls_divergent(function, arm_before);
+      }
+    }
+
+    if (!ir_emit_jump_instruction(context, function, end_label,
+                                  current_cond->location)) {
+      free(next_label);
+      free(end_label);
+      return 0;
+    }
+
+    if (!ir_emit_label_instruction(context, function, next_label,
+                                   current_cond->location)) {
+      free(next_label);
+      free(end_label);
+      return 0;
+    }
+    free(next_label);
+
+    if (i < if_data->else_if_count) {
+      current_cond = if_data->else_ifs[i].condition;
+      current_body = if_data->else_ifs[i].body;
+    }
+  }
+
+  if (if_data->else_branch &&
+      !ir_lower_statement_with_defers(context, function, if_data->else_branch,
+                                      defers)) {
+    free(end_label);
+    return 0;
+  }
+
+  if (!ir_emit_label_instruction(context, function, end_label,
+                                 statement->location)) {
+    free(end_label);
+    return 0;
+  }
+
+  free(end_label);
+  return 1;
+}
+
+static int ir_lower_return_statement(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  ReturnStatement *ret = (ReturnStatement *)statement->data;
+  IROperand value = ir_operand_none();
+  if (ret && ret->value) {
+    if (ret->value_count > 1
+            ? !ir_lower_multi_return_value(context, function, ret, &value,
+                                           statement->location)
+            : !ir_lower_expression(context, function, ret->value, &value)) {
+      return 0;
+    }
+    Type *return_type =
+        ir_resolve_named_type(context, context->current_return_type_name);
+    if (ir_should_build_slice_from_array(return_type, ret->value) &&
+        !ir_build_slice_operand_from_array(context, function, &value,
+                                           ret->value->resolved_type,
+                                           return_type,
+                                           ret->value->location)) {
+      ir_operand_destroy(&value);
+      return 0;
+    }
+    if (ir_should_decay_array_to_address(return_type, ret->value) &&
+        !ir_decay_array_operand_to_address(context, function, &value,
+                                           ret->value->location)) {
+      ir_operand_destroy(&value);
+      return 0;
+    }
+    if (ir_should_coerce_string_to_cstring(context, return_type,
+                                           ret->value) &&
+        !ir_coerce_string_operand_to_cstring(context, function, &value,
+                                             ret->value->location)) {
+      ir_operand_destroy(&value);
+      return 0;
+    }
+  }
+  if (!ir_emit_return_with_defers(context, function, defers, &value,
+                                  statement->location)) {
+    ir_operand_destroy(&value);
+    return 0;
+  }
+  ir_operand_destroy(&value);
+  return 1;
+}
+
+static int ir_lower_block(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  Program *program = (Program *)statement->data;
+  if (!program) {
+    return 1;
+  }
+  /* A block the expander generated carries the note naming its iteration.
+   * Stamp it for the duration so `trace` can attribute the values, and
+   * restore afterwards so a sibling block is not credited to it. */
+  const char *saved_expansion_note = context->current_expansion_note;
+  const char *block_note =
+      context->type_checker
+          ? type_checker_expansion_note(context->type_checker, statement,
+                                        NULL)
+          : NULL;
+  if (block_note) {
+    context->current_expansion_note = block_note;
+  }
+  if (!defers) {
+    ir_local_scope_enter(context);
+    for (size_t i = 0; i < program->declaration_count; i++) {
+      context->block_statements = program->declarations;
+      context->block_statement_count = program->declaration_count;
+      context->block_statement_index = i;
+      if (!ir_lower_statement_with_defers(context, function,
+                                          program->declarations[i], NULL)) {
+        ir_local_scope_leave(context);
+        context->current_expansion_note = saved_expansion_note;
+        return 0;
+      }
+    }
+    ir_local_scope_leave(context);
+    context->current_expansion_note = saved_expansion_note;
+    return 1;
+  }
+
+  IRDeferScope block_scope = {0};
+  block_scope.parent = defers;
+  ir_local_scope_enter(context);
+  for (size_t i = 0; i < program->declaration_count; i++) {
+    context->block_statements = program->declarations;
+    context->block_statement_count = program->declaration_count;
+    context->block_statement_index = i;
+    if (!ir_lower_statement_with_defers(
+            context, function, program->declarations[i], &block_scope)) {
+      ir_defer_stack_free(&block_scope.stack);
+      ir_local_scope_leave(context);
+      context->current_expansion_note = saved_expansion_note;
+      return 0;
+    }
+  }
+
+  int ok =
+      ir_emit_deferred_calls_non_err(context, function, &block_scope.stack);
+  ir_defer_stack_free(&block_scope.stack);
+  ir_local_scope_leave(context);
+  context->current_expansion_note = saved_expansion_note;
+  return ok;
+}
+
+static int ir_lower_break_statement(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  LoopControlStatement *ctrl = (LoopControlStatement *)statement->data;
+  const char *user_label = ctrl ? ctrl->target_label : NULL;
+  const IRControlFrame *frame = ir_break_target_frame(context, user_label);
+  const char *target = frame ? frame->break_label : NULL;
+  if (!target) {
+    if (user_label) {
+      ir_set_error(context, "'break %s' has no matching labeled loop",
+                   user_label);
+    } else {
+      ir_set_error(context, "'break' used outside loop/switch");
+    }
+    return 0;
+  }
+  // The jump leaves every scope between here and the loop, so their
+  // deferred statements run before it.
+  if (!ir_emit_defers_until_scope(context, function, defers,
+                                  frame->defers)) {
+    return 0;
+  }
+  return ir_emit_jump_instruction(context, function, target,
+                                  statement->location);
+}
+
+static int ir_lower_continue_statement(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  LoopControlStatement *ctrl = (LoopControlStatement *)statement->data;
+  const char *user_label = ctrl ? ctrl->target_label : NULL;
+  const IRControlFrame *frame = ir_continue_target_frame(context, user_label);
+  const char *target = frame ? frame->continue_label : NULL;
+  if (!target) {
+    if (user_label) {
+      ir_set_error(context, "'continue %s' has no matching labeled loop",
+                   user_label);
+    } else {
+      ir_set_error(context, "'continue' used outside loop");
+    }
+    return 0;
+  }
+  // The iteration ends here, so the body's deferred statements run, exactly
+  // as they would on the path that falls off the end of the body.
+  if (!ir_emit_defers_until_scope(context, function, defers,
+                                  frame->defers)) {
+    return 0;
+  }
+  return ir_emit_jump_instruction(context, function, target,
+                                  statement->location);
+}
+
+static int ir_lower_defer_statement(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  if (!defers) {
+    return 1;
+  }
+  // Snapshot argument values now so the deferred call captures them by value
+  // rather than re-reading the variables at scope exit.
+  char *cap_name = NULL;
+  char **cap_temps = NULL;
+  size_t cap_count = 0;
+  int captured = ir_defer_capture_call(context, function, statement,
+                                       &cap_name, &cap_temps, &cap_count);
+  if (captured < 0) {
+    return 0;
+  }
+  if (!ir_defer_stack_push(context, &defers->stack, statement, 0)) {
+    for (size_t i = 0; i < cap_count; i++) {
+      free(cap_temps[i]);
+    }
+    free(cap_temps);
+    free(cap_name);
+    ir_set_error(context, "Out of memory while recording defer statement");
+    return 0;
+  }
+  if (captured > 0) {
+    size_t idx = defers->stack.count - 1;
+    defers->stack.entries[idx].capture_call_name = cap_name;
+    defers->stack.entries[idx].capture_arg_temps = cap_temps;
+    defers->stack.entries[idx].capture_arg_count = cap_count;
+  }
+  return 1;
+}
+
+static int ir_lower_fallthrough_statement(IRLoweringContext *context, IRFunction *function,
+                                   ASTNode *statement, IRDeferScope *defers) {
+  const IRControlFrame *frame = ir_current_fallthrough_frame(context);
+  if (!frame || !frame->fallthrough_label) {
+    ir_set_error(context, "'fallthrough' outside a switch case with a case "
+                          "after it");
+    return 0;
+  }
+  /* The case ends here, so its scopes' deferred statements run before the
+     next case begins, the same as on the path that leaves the switch. */
+  if (!ir_emit_defers_until_scope(context, function, defers,
+                                  frame->defers)) {
+    return 0;
+  }
+  return ir_emit_jump_instruction(context, function,
+                                  frame->fallthrough_label,
+                                  statement->location);
+}
+
 int ir_lower_statement_with_defers(IRLoweringContext *context,
                                           IRFunction *function,
                                           ASTNode *statement,
@@ -525,64 +1590,9 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
   }
 
   switch (statement->type) {
-  case AST_PROGRAM: {
-    Program *program = (Program *)statement->data;
-    if (!program) {
-      return 1;
-    }
-    /* A block the expander generated carries the note naming its iteration.
-     * Stamp it for the duration so `trace` can attribute the values, and
-     * restore afterwards so a sibling block is not credited to it. */
-    const char *saved_expansion_note = context->current_expansion_note;
-    const char *block_note =
-        context->type_checker
-            ? type_checker_expansion_note(context->type_checker, statement,
-                                          NULL)
-            : NULL;
-    if (block_note) {
-      context->current_expansion_note = block_note;
-    }
-    if (!defers) {
-      ir_local_scope_enter(context);
-      for (size_t i = 0; i < program->declaration_count; i++) {
-        context->block_statements = program->declarations;
-        context->block_statement_count = program->declaration_count;
-        context->block_statement_index = i;
-        if (!ir_lower_statement_with_defers(context, function,
-                                            program->declarations[i], NULL)) {
-          ir_local_scope_leave(context);
-          context->current_expansion_note = saved_expansion_note;
-          return 0;
-        }
-      }
-      ir_local_scope_leave(context);
-      context->current_expansion_note = saved_expansion_note;
-      return 1;
-    }
+  case AST_PROGRAM:
+    return ir_lower_block(context, function, statement, defers);
 
-    IRDeferScope block_scope = {0};
-    block_scope.parent = defers;
-    ir_local_scope_enter(context);
-    for (size_t i = 0; i < program->declaration_count; i++) {
-      context->block_statements = program->declarations;
-      context->block_statement_count = program->declaration_count;
-      context->block_statement_index = i;
-      if (!ir_lower_statement_with_defers(
-              context, function, program->declarations[i], &block_scope)) {
-        ir_defer_stack_free(&block_scope.stack);
-        ir_local_scope_leave(context);
-        context->current_expansion_note = saved_expansion_note;
-        return 0;
-      }
-    }
-
-    int ok =
-        ir_emit_deferred_calls_non_err(context, function, &block_scope.stack);
-    ir_defer_stack_free(&block_scope.stack);
-    ir_local_scope_leave(context);
-    context->current_expansion_note = saved_expansion_note;
-    return ok;
-  }
 
   /* The one place a staged swap is allowed to take effect. Applying it
    * anywhere else, or on a timer, or at a safepoint the compiler chose, would
@@ -601,468 +1611,13 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
     return ir_emit(context, function, &apply);
   }
 
-  case AST_VAR_DECLARATION: {
-    VarDeclaration *declaration = (VarDeclaration *)statement->data;
-    if (!declaration || !declaration->name) {
-      ir_set_error(context, "Malformed variable declaration");
-      return 0;
-    }
+  case AST_VAR_DECLARATION:
+    return ir_lower_var_declaration(context, function, statement, defers);
 
-    // Top-level `const` is folded at use sites (SYMBOL_CONSTANT) and never
-    // reaches this local-statement path. A local `const` is an immutable local
-    // variable: it gets normal storage and initialization here, and the type
-    // checker rejects reassignment.
-    //
-    // Type/Field consts are the exception: they have no runtime representation,
-    // so they must not become locals even inside a function.
-    if (declaration->is_const) {
-      Type *const_type = ir_resolve_named_type(context, declaration->type_name);
-      if (!const_type && declaration->initializer) {
-        const_type = declaration->initializer->resolved_type;
-      }
-      if (type_is_comptime_only(const_type)) {
-        return 1;
-      }
-    }
 
-    IRInstruction local = {0};
-    Type *decl_type = ir_resolve_named_type(context, declaration->type_name);
-    if (!decl_type && declaration->initializer) {
-      decl_type = declaration->initializer->resolved_type;
-    }
-    /* Bind before anything is emitted: a name already declared in this
-     * function at a different type gets one of its own, so the two do not
-     * share a frame slot (and a type) in the backends. */
-    const char *decl_type_text = ir_backend_type_name(declaration->type_name);
-    if (!decl_type_text && declaration->initializer &&
-        declaration->initializer->resolved_type) {
-      decl_type_text = ir_backend_type_name(
-          declaration->initializer->resolved_type->name);
-    }
-    const char *local_name =
-        ir_local_bind(context, declaration->name, decl_type_text);
-    local.op = IR_OP_DECLARE_LOCAL;
-    local.location = statement->location;
-    local.dest = ir_operand_symbol(local_name);
-    local.text = (char *)ir_backend_type_name(declaration->type_name);
-    {
-      double bound_lo = 0.0;
-      double bound_hi = 0.0;
-      double bound_err = 0.0;
-      if (declaration->type_name && decl_type &&
-          type_checker_float_bound(decl_type, &bound_lo, &bound_hi,
-                                   &bound_err)) {
-        ir_declare_float_bound(string_intern(declaration->type_name), bound_lo,
-                               bound_hi);
-      }
-      if (declaration->type_name && decl_type &&
-          type_checker_type_excludes_zero(decl_type)) {
-        ir_declare_nonzero_type(string_intern(declaration->type_name));
-      }
-    }
-    local.value_type = mtlc_type_from_frontend(decl_type);
-    if (declaration->address_space != AST_ADDRESS_SPACE_DEFAULT) {
-      int is_static_storage =
-          decl_type && decl_type->kind == TYPE_ARRAY && decl_type->base_type &&
-          decl_type->array_size > 0 && decl_type->array_size <= UINT32_MAX;
-      int is_dynamic_workgroup_view =
-          decl_type && decl_type->kind == TYPE_POINTER && decl_type->base_type &&
-          declaration->address_space == AST_ADDRESS_SPACE_WORKGROUP;
-      /* A view whose extents are in its type allocates their product. */
-      long long static_view_elements = 0;
-      if (decl_type && decl_type->kind == TYPE_SLICE && decl_type->base_type &&
-          decl_type->view_extents[0] > 0) {
-        static_view_elements = 1;
-        for (size_t e = 0; e < 4 && decl_type->view_extents[e]; e++) {
-          static_view_elements *= (long long)decl_type->view_extents[e];
-        }
-      }
-      if (!is_static_storage && !static_view_elements &&
-          !is_dynamic_workgroup_view) {
-        ir_operand_destroy(&local.dest);
-        ir_set_error(context,
-                     "Invalid GPU address-space declaration '%s' reached IR "
-                     "lowering",
-                     declaration->name);
-        return 0;
-      }
-      MtlcAddressSpace address_space =
-          declaration->address_space == AST_ADDRESS_SPACE_WORKGROUP
-              ? MTLC_ADDRESS_SPACE_WORKGROUP
-              : MTLC_ADDRESS_SPACE_PRIVATE;
-      MtlcType *element_type =
-          mtlc_type_from_frontend(decl_type->base_type);
-      const MtlcType *pointer_type =
-          mtlc_type_pointer_in(element_type, address_space);
-      if (!element_type || !pointer_type) {
-        ir_operand_destroy(&local.dest);
-        ir_set_error(context,
-                     "Unable to lower GPU address-space type for '%s'",
-                     declaration->name);
-        return 0;
-      }
-      local.op = IR_OP_ADDRESS_SPACE_ALLOC;
-      /* Zero is the neutral dynamic-workgroup-arena sentinel. It is never
-       * accepted for private storage or a fixed source array. */
-      local.rhs = ir_operand_int(
-          is_static_storage ? (long long)decl_type->array_size
-                            : static_view_elements);
-      local.text = decl_type->base_type->name;
-      local.value_type = (MtlcType *)pointer_type;
-      local.address_space = address_space;
-    }
-    // For inferred-type locals (`var x = expr;`) the declaration carries no
-    // type_name. The binary/direct-object backend resolves a local's type from
-    // this textual payload, so fall back to the name of the type the checker
-    // inferred for the initializer. The Type (and its name) outlives codegen,
-    // matching the lifetime of the type_name pointer used above, and `text` is
-    // never freed by the IR. Leaving it NULL is harmless for the asm backend.
-    if (!local.text && declaration->initializer &&
-        declaration->initializer->resolved_type) {
-      local.text = (char *)ir_backend_type_name(
-          declaration->initializer->resolved_type->name);
-    }
-    if (!local.dest.name) {
-      ir_set_error(context,
-                   "Out of memory while lowering variable declaration");
-      return 0;
-    }
-    if (!ir_emit(context, function, &local)) {
-      ir_operand_destroy(&local.dest);
-      return 0;
-    }
-    ir_operand_destroy(&local.dest);
+  case AST_ASSIGNMENT:
+    return ir_lower_assignment(context, function, statement, defers);
 
-    /* No initializer: an aggregate still has to start zeroed. `string` is in
-     * the list because the used-before-initialized check exempts it with the
-     * other aggregates, and an uninitialized one is a wild pointer carrying a
-     * garbage length -- zeroed, it is the empty string. GPU locals are left
-     * alone: their storage is not a host stack frame and the device paths have
-     * no memset to lower the fill to. */
-    if (!declaration->initializer && decl_type &&
-        (decl_type->kind == TYPE_ARRAY || decl_type->kind == TYPE_STRUCT ||
-         decl_type->kind == TYPE_SLICE || decl_type->kind == TYPE_STRING) &&
-        declaration->address_space == AST_ADDRESS_SPACE_DEFAULT &&
-        !function->is_kernel) {
-      /* The read-ahead is only valid when the tracked position really is this
-       * statement: a body lowered outside a block loop leaves the fields
-       * pointing at some enclosing list. */
-      int position_is_tracked =
-          context->block_statements &&
-          context->block_statement_index < context->block_statement_count &&
-          context->block_statements[context->block_statement_index] == statement;
-      if (!(position_is_tracked &&
-            ir_zero_fill_is_dead(context, declaration->name, decl_type)) &&
-          !ir_emit_zero_fill_local(context, function, local_name, decl_type,
-                                   statement->location)) {
-        return 0;
-      }
-    }
-
-    if (declaration->initializer &&
-        declaration->initializer->type == AST_AGGREGATE_LITERAL) {
-      /* The literal was folded to a constant image at type-check time; copy it
-       * in wholesale rather than lowering it as an expression. */
-      return ir_emit_aggregate_literal_copy_to_symbol(
-          context, function, local_name, declaration->initializer,
-          decl_type, statement->location);
-    }
-
-    if (declaration->initializer) {
-      IROperand value = ir_operand_none();
-      if (!ir_lower_expression(context, function, declaration->initializer,
-                               &value)) {
-        return 0;
-      }
-      if (ir_should_decay_array_to_address(decl_type,
-                                           declaration->initializer) &&
-          !ir_decay_array_operand_to_address(
-              context, function, &value, declaration->initializer->location)) {
-        ir_operand_destroy(&value);
-        return 0;
-      }
-      if (ir_should_build_slice_from_array(decl_type,
-                                           declaration->initializer) &&
-          !ir_build_slice_operand_from_array(
-              context, function, &value,
-              declaration->initializer->resolved_type, decl_type,
-              declaration->initializer->location)) {
-        ir_operand_destroy(&value);
-        return 0;
-      }
-      if (ir_should_coerce_string_to_cstring(context, decl_type,
-                                             declaration->initializer) &&
-          !ir_coerce_string_operand_to_cstring(
-              context, function, &value, declaration->initializer->location)) {
-        ir_operand_destroy(&value);
-        return 0;
-      }
-      if (ir_try_emit_aggregate_symbol_memcpy(context, function,
-                                              local_name, &value,
-                                              decl_type, statement->location)) {
-        ir_operand_destroy(&value);
-      } else if (ir_small_float_local(context, function, declaration->name,
-                                      local_name, decl_type)) {
-        int stored = ir_emit_small_float_home_store(
-            context, function, local_name, decl_type, &value,
-            statement->location);
-        ir_operand_destroy(&value);
-        if (!stored) {
-          return 0;
-        }
-      } else {
-        IRInstruction assign = {0};
-        assign.op = IR_OP_ASSIGN;
-        assign.location = statement->location;
-        assign.dest = ir_operand_symbol(local_name);
-        assign.lhs = value;
-        ir_assign_apply_float_bits(
-            &assign, &assign.lhs,
-            ir_named_type_float_bits(context, declaration->type_name));
-        if (!assign.dest.name) {
-          ir_operand_destroy(&value);
-          ir_set_error(context,
-                       "Out of memory while lowering variable initializer");
-          return 0;
-        }
-        if (!ir_emit(context, function, &assign)) {
-          ir_operand_destroy(&assign.dest);
-          ir_operand_destroy(&value);
-          return 0;
-        }
-        ir_operand_destroy(&assign.dest);
-        ir_operand_destroy(&value);
-      }
-    }
-    return 1;
-  }
-
-  case AST_ASSIGNMENT: {
-    Assignment *assignment = (Assignment *)statement->data;
-    if (!assignment || !assignment->value) {
-      ir_set_error(context, "Malformed assignment statement");
-      return 0;
-    }
-
-    if (assignment->target_count > 0) {
-      return ir_lower_multi_assignment(context, function, assignment,
-                                       statement->location);
-    }
-
-    /* An aggregate literal on the right is a folded constant, not something to
-     * evaluate: copy its image into the destination. */
-    if (assignment->value->type == AST_AGGREGATE_LITERAL) {
-      Type *literal_type = assignment->value->resolved_type;
-      if (assignment->variable_name) {
-        Type *assign_type =
-            ir_lookup_symbol_type(context, assignment->variable_name);
-        return ir_emit_aggregate_literal_copy_to_symbol(
-            context, function,
-            ir_local_ir_name(context, assignment->variable_name),
-            assignment->value,
-            assign_type ? assign_type : literal_type, statement->location);
-      }
-      if (!assignment->target) {
-        ir_set_error(context, "Assignment target is missing");
-        return 0;
-      }
-      IROperand literal_address = ir_operand_none();
-      Type *literal_target_type = NULL;
-      if (!ir_lower_lvalue_address(context, function, assignment->target,
-                                   &literal_address, &literal_target_type)) {
-        return 0;
-      }
-      int ok = ir_emit_aggregate_literal_copy(
-          context, function, &literal_address, assignment->value,
-          literal_target_type ? literal_target_type : literal_type,
-          statement->location);
-      ir_operand_destroy(&literal_address);
-      return ok;
-    }
-
-    IROperand value = ir_operand_none();
-    if (!ir_lower_expression(context, function, assignment->value, &value)) {
-      return 0;
-    }
-
-    if (assignment->variable_name) {
-      const IRLocalBinding *binding =
-          ir_local_binding_find(context, assignment->variable_name);
-      const char *target_name =
-          binding ? binding->ir_name : assignment->variable_name;
-      Type *assign_type =
-          ir_lookup_symbol_type(context, assignment->variable_name);
-      if (!assign_type && assignment->value) {
-        assign_type = assignment->value->resolved_type;
-      }
-      /* The decay reads the target's DECLARED type, which the fallback above
-       * cannot supply: a local's scope is gone by lowering time, so the symbol
-       * lookup misses and `assign_type` becomes the value's own type, which
-       * for an array is the array and would hide the decay. The binding keeps
-       * the declared spelling. */
-      Type *decay_target =
-          ir_lookup_symbol_type(context, assignment->variable_name);
-      if (!decay_target && binding) {
-        decay_target = ir_resolve_named_type(context, binding->type_text);
-      }
-      if (ir_should_build_slice_from_array(decay_target, assignment->value) &&
-          !ir_build_slice_operand_from_array(
-              context, function, &value, assignment->value->resolved_type,
-              decay_target, assignment->value->location)) {
-        ir_operand_destroy(&value);
-        return 0;
-      }
-      if (ir_should_decay_array_to_address(decay_target, assignment->value) &&
-          !ir_decay_array_operand_to_address(context, function, &value,
-                                             assignment->value->location)) {
-        ir_operand_destroy(&value);
-        return 0;
-      }
-      if (ir_should_coerce_string_to_cstring(context, assign_type,
-                                             assignment->value) &&
-          !ir_coerce_string_operand_to_cstring(
-              context, function, &value, assignment->value->location)) {
-        ir_operand_destroy(&value);
-        return 0;
-      }
-      if (ir_try_emit_aggregate_symbol_memcpy(
-              context, function, target_name, &value,
-              assign_type, statement->location)) {
-        ir_operand_destroy(&value);
-        return 1;
-      }
-      if (ir_small_float_local(context, function, assignment->variable_name,
-                               target_name, assign_type)) {
-        int stored = ir_emit_small_float_home_store(
-            context, function, target_name, assign_type, &value,
-            statement->location);
-        ir_operand_destroy(&value);
-        return stored;
-      }
-
-      {
-        IRInstruction assign = {0};
-        assign.op = IR_OP_ASSIGN;
-        assign.location = statement->location;
-        assign.dest = ir_operand_symbol(target_name);
-        assign.lhs = value;
-        /* Target float width for the narrowing/widening on store. A local's
-         * own binding is authoritative -- the symbol table is keyed by source
-         * name, so a shadowed local resolves there to whichever declaration
-         * won. Otherwise the symbol table, then (for an inferred local, which
-         * has no declared type text) the emitted DECLARE_LOCAL. Gate that IR
-         * scan on a floating RHS so non-float assigns stay O(1). */
-        int target_float_bits =
-            binding ? ir_named_type_float_bits(context, binding->type_text)
-                    : ir_symbol_float_bits(context, assignment->variable_name);
-        if (target_float_bits == 0 && assignment->value &&
-            assignment->value->resolved_type &&
-            (assignment->value->resolved_type->kind == TYPE_FLOAT32 ||
-             assignment->value->resolved_type->kind == TYPE_FLOAT64 ||
-             assignment->value->resolved_type->kind == TYPE_FLOAT16 ||
-             assignment->value->resolved_type->kind == TYPE_BFLOAT16)) {
-          target_float_bits = ir_local_declared_float_bits(
-              context, function, target_name);
-        }
-        ir_assign_apply_float_bits(&assign, &assign.lhs, target_float_bits);
-        if (!assign.dest.name) {
-          ir_operand_destroy(&value);
-          ir_set_error(context, "Out of memory while lowering assignment target");
-          return 0;
-        }
-
-        if (!ir_emit(context, function, &assign)) {
-          ir_operand_destroy(&assign.dest);
-          ir_operand_destroy(&value);
-          return 0;
-        }
-
-        ir_operand_destroy(&assign.dest);
-        ir_operand_destroy(&value);
-        return 1;
-      }
-    }
-
-    if (!assignment->target) {
-      ir_operand_destroy(&value);
-      ir_set_error(context, "Assignment target is missing");
-      return 0;
-    }
-
-    IROperand address = ir_operand_none();
-    Type *target_type = NULL;
-    if (!ir_lower_lvalue_address(context, function, assignment->target,
-                                 &address, &target_type)) {
-      ir_operand_destroy(&value);
-      return 0;
-    }
-
-    if (!target_type) {
-      ir_operand_destroy(&address);
-      ir_operand_destroy(&value);
-      ir_set_error(context, "Cannot assign to unknown target type");
-      return 0;
-    }
-
-    if (ir_should_build_slice_from_array(target_type, assignment->value) &&
-        !ir_build_slice_operand_from_array(
-            context, function, &value, assignment->value->resolved_type,
-            target_type, assignment->value->location)) {
-      ir_operand_destroy(&value);
-      return 0;
-    }
-    if (ir_should_decay_array_to_address(target_type, assignment->value) &&
-        !ir_decay_array_operand_to_address(context, function, &value,
-                                           assignment->value->location)) {
-      ir_operand_destroy(&address);
-      ir_operand_destroy(&value);
-      return 0;
-    }
-
-    if (ir_should_coerce_string_to_cstring(context, target_type,
-                                           assignment->value) &&
-        !ir_coerce_string_operand_to_cstring(
-            context, function, &value, assignment->value->location)) {
-      ir_operand_destroy(&address);
-      ir_operand_destroy(&value);
-      return 0;
-    }
-
-    /* Aggregate destinations (struct fields, indexed struct elements) must copy
-     * the whole struct. A plain IR_OP_STORE of an aggregate RHS only moves one
-     * word, silently dropping everything past the first 8 bytes. */
-    if (ir_try_emit_aggregate_address_memcpy(context, function, &address, &value,
-                                             target_type,
-                                             statement->location)) {
-      ir_operand_destroy(&address);
-      ir_operand_destroy(&value);
-      return 1;
-    }
-
-    IRInstruction store = {0};
-    store.op = IR_OP_STORE;
-    store.location = statement->location;
-    store.dest = address;
-    store.lhs = value;
-    store.rhs = ir_operand_int(ir_type_storage_size(target_type));
-    ir_access_apply_alias_class(&store, target_type);
-    if (target_type->kind == TYPE_FLOAT32 ||
-        target_type->kind == TYPE_FLOAT64 ||
-        target_type->kind == TYPE_FLOAT16 ||
-        target_type->kind == TYPE_BFLOAT16) {
-      ir_assign_apply_float_bits(&store, &store.lhs,
-                                 ir_type_float_bits(target_type));
-    }
-    if (!ir_emit(context, function, &store)) {
-      ir_operand_destroy(&address);
-      ir_operand_destroy(&value);
-      return 0;
-    }
-
-    ir_operand_destroy(&address);
-    ir_operand_destroy(&value);
-    return 1;
-  }
 
   case AST_FUNCTION_CALL: {
     IROperand ignored = ir_operand_none();
@@ -1108,48 +1663,9 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
   case AST_GPU_LAUNCH:
     return ir_lower_gpu_launch(context, function, statement);
 
-  case AST_RETURN_STATEMENT: {
-    ReturnStatement *ret = (ReturnStatement *)statement->data;
-    IROperand value = ir_operand_none();
-    if (ret && ret->value) {
-      if (ret->value_count > 1
-              ? !ir_lower_multi_return_value(context, function, ret, &value,
-                                             statement->location)
-              : !ir_lower_expression(context, function, ret->value, &value)) {
-        return 0;
-      }
-      Type *return_type =
-          ir_resolve_named_type(context, context->current_return_type_name);
-      if (ir_should_build_slice_from_array(return_type, ret->value) &&
-          !ir_build_slice_operand_from_array(context, function, &value,
-                                             ret->value->resolved_type,
-                                             return_type,
-                                             ret->value->location)) {
-        ir_operand_destroy(&value);
-        return 0;
-      }
-      if (ir_should_decay_array_to_address(return_type, ret->value) &&
-          !ir_decay_array_operand_to_address(context, function, &value,
-                                             ret->value->location)) {
-        ir_operand_destroy(&value);
-        return 0;
-      }
-      if (ir_should_coerce_string_to_cstring(context, return_type,
-                                             ret->value) &&
-          !ir_coerce_string_operand_to_cstring(context, function, &value,
-                                               ret->value->location)) {
-        ir_operand_destroy(&value);
-        return 0;
-      }
-    }
-    if (!ir_emit_return_with_defers(context, function, defers, &value,
-                                    statement->location)) {
-      ir_operand_destroy(&value);
-      return 0;
-    }
-    ir_operand_destroy(&value);
-    return 1;
-  }
+  case AST_RETURN_STATEMENT:
+    return ir_lower_return_statement(context, function, statement, defers);
+
 
   case AST_INLINE_ASM: {
     InlineAsm *inline_asm = (InlineAsm *)statement->data;
@@ -1164,350 +1680,17 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
     return ir_emit(context, function, &instruction);
   }
 
-  case AST_IF_STATEMENT: {
-    IfStatement *if_data = (IfStatement *)statement->data;
-    if (!if_data || !if_data->condition || !if_data->then_branch) {
-      ir_set_error(context, "Malformed if statement");
-      return 0;
-    }
+  case AST_IF_STATEMENT:
+    return ir_lower_if_statement(context, function, statement, defers);
 
-    char *end_label = ir_new_label_name(context, "if_end");
-    if (!end_label) {
-      ir_set_error(context, "Out of memory while allocating if labels");
-      return 0;
-    }
 
-    ASTNode *current_cond = if_data->condition;
-    ASTNode *current_body = if_data->then_branch;
+  case AST_WHILE_STATEMENT:
+    return ir_lower_while_statement(context, function, statement, defers);
 
-    for (size_t i = 0; i <= if_data->else_if_count; i++) {
-      char *next_label = ir_new_label_name(context, "if_next");
-      if (!next_label) {
-        free(end_label);
-        return 0;
-      }
 
-      size_t branches_before = function->instruction_count;
-      if (!ir_emit_condition_false_branch(context, function, current_cond,
-                                          next_label)) {
-        free(next_label);
-        free(end_label);
-        return 0;
-      }
-      /* A branch every work item of the group decides the same way is a group
-         decision, and a device backend takes the uniform form of it. */
-      if (if_data->uniform_mode == 3) {
-        ir_mark_branches_uniform(function, branches_before);
-      }
+  case AST_FOR_STATEMENT:
+    return ir_lower_for_statement(context, function, statement, defers);
 
-      {
-        size_t arm_before = function->instruction_count;
-        if (!ir_lower_statement_with_defers(context, function, current_body,
-                                            defers)) {
-          free(next_label);
-          free(end_label);
-          return 0;
-        }
-        /* Inside an arm no work item agrees on, the group effects a kernel
-           provides do not reach: a collective there speaks to a group that is
-           not all here. */
-        if (if_data->uniform_mode != 3) {
-          ir_mark_calls_divergent(function, arm_before);
-        }
-      }
-
-      if (!ir_emit_jump_instruction(context, function, end_label,
-                                    current_cond->location)) {
-        free(next_label);
-        free(end_label);
-        return 0;
-      }
-
-      if (!ir_emit_label_instruction(context, function, next_label,
-                                     current_cond->location)) {
-        free(next_label);
-        free(end_label);
-        return 0;
-      }
-      free(next_label);
-
-      if (i < if_data->else_if_count) {
-        current_cond = if_data->else_ifs[i].condition;
-        current_body = if_data->else_ifs[i].body;
-      }
-    }
-
-    if (if_data->else_branch &&
-        !ir_lower_statement_with_defers(context, function, if_data->else_branch,
-                                        defers)) {
-      free(end_label);
-      return 0;
-    }
-
-    if (!ir_emit_label_instruction(context, function, end_label,
-                                   statement->location)) {
-      free(end_label);
-      return 0;
-    }
-
-    free(end_label);
-    return 1;
-  }
-
-  case AST_WHILE_STATEMENT: {
-    WhileStatement *while_data = (WhileStatement *)statement->data;
-    if (!while_data || !while_data->condition || !while_data->body) {
-      ir_set_error(context, "Malformed while statement");
-      return 0;
-    }
-
-    char *loop_start = ir_new_label_name(context, "while");
-    char *loop_end = ir_new_label_name(context, "while_end");
-    if (!loop_start || !loop_end) {
-      free(loop_start);
-      free(loop_end);
-      ir_set_error(context, "Out of memory while allocating while labels");
-      return 0;
-    }
-
-    int while_simd_mode = while_data->simd_mode != SIMD_ATTR_NONE
-                              ? while_data->simd_mode
-                              : context->current_function_simd_default;
-    if (while_simd_mode == SIMD_ATTR_NONE && g_ir_lowering_explain) {
-      while_simd_mode = SIMD_ATTR_REPORT;
-    }
-    int while_simd_id = -1;
-    if (while_simd_mode != SIMD_ATTR_NONE) {
-      while_simd_id = context->next_simd_request_id++;
-      if (!ir_emit_simd_marker(context, function, 'B', while_simd_id,
-                               while_simd_mode, statement->location)) {
-        free(loop_start);
-        free(loop_end);
-        return 0;
-      }
-    }
-
-    if (while_data->unroll_factor > 1 &&
-        !ir_emit_unroll_marker(context, function, while_data->unroll_factor,
-                               statement->location)) {
-      free(loop_start);
-      free(loop_end);
-      return 0;
-    }
-
-    if (!ir_emit_label_instruction(context, function, loop_start,
-                                   statement->location)) {
-      free(loop_start);
-      free(loop_end);
-      return 0;
-    }
-
-    size_t while_branch_before = function->instruction_count;
-    if (!ir_emit_condition_false_branch(context, function,
-                                        while_data->condition, loop_end)) {
-      free(loop_start);
-      free(loop_end);
-      return 0;
-    }
-    if (while_data->uniform_mode == 3) {
-      ir_mark_branches_uniform(function, while_branch_before);
-    }
-
-    if (!ir_push_labeled_control_frame(context, loop_end, loop_start,
-                                       while_data->label, defers)) {
-      free(loop_start);
-      free(loop_end);
-      return 0;
-    }
-
-    size_t while_body_before = function->instruction_count;
-    int body_ok = ir_lower_statement_with_defers(context, function,
-                                                 while_data->body, defers);
-    if (while_data->uniform_mode != 3) {
-      ir_mark_calls_divergent(function, while_body_before);
-    }
-    ir_pop_control_frame(context);
-    if (!body_ok) {
-      free(loop_start);
-      free(loop_end);
-      return 0;
-    }
-
-    if (!ir_emit_jump_instruction(context, function, loop_start,
-                                  statement->location) ||
-        !ir_emit_label_instruction(context, function, loop_end,
-                                   statement->location)) {
-      free(loop_start);
-      free(loop_end);
-      return 0;
-    }
-
-    if (while_simd_id >= 0 &&
-        !ir_emit_simd_marker(context, function, 'E', while_simd_id, 0,
-                             statement->location)) {
-      free(loop_start);
-      free(loop_end);
-      return 0;
-    }
-
-    free(loop_start);
-    free(loop_end);
-    return 1;
-  }
-
-  case AST_FOR_STATEMENT: {
-    ForStatement *for_data = (ForStatement *)statement->data;
-    if (!for_data || !for_data->body) {
-      ir_set_error(context, "Malformed for statement");
-      return 0;
-    }
-
-    char *condition_label = ir_new_label_name(context, "for_cond");
-    char *step_label = ir_new_label_name(context, "for_step");
-    char *end_label = ir_new_label_name(context, "for_end");
-    if (!condition_label || !step_label || !end_label) {
-      free(condition_label);
-      free(step_label);
-      free(end_label);
-      ir_set_error(context, "Out of memory while allocating for-loop labels");
-      return 0;
-    }
-
-    int for_simd_mode = for_data->simd_mode != SIMD_ATTR_NONE
-                            ? for_data->simd_mode
-                            : context->current_function_simd_default;
-    if (for_simd_mode == SIMD_ATTR_NONE && g_ir_lowering_explain) {
-      for_simd_mode = SIMD_ATTR_REPORT;
-    }
-    int for_simd_id = -1;
-    if (for_simd_mode != SIMD_ATTR_NONE) {
-      for_simd_id = context->next_simd_request_id++;
-      if (!ir_emit_simd_marker(context, function, 'B', for_simd_id,
-                               for_simd_mode, statement->location)) {
-        free(condition_label);
-        free(step_label);
-        free(end_label);
-        return 0;
-      }
-    }
-
-    /* The initializer declares a variable scoped to the loop, so it needs
-     * a scope of its own: without one the loop variable stayed the live
-     * binding for its name after the loop ended, and a `for i in 0..3`
-     * beside an outer `i` left that outer name reading 3. */
-    ir_local_scope_enter(context);
-    if (!ir_lower_statement_or_expression(context, function,
-                                          for_data->initializer)) {
-      ir_local_scope_leave(context);
-      free(condition_label);
-      free(step_label);
-      free(end_label);
-      return 0;
-    }
-
-    if (for_data->unroll_factor > 1 &&
-        !ir_emit_unroll_marker(context, function, for_data->unroll_factor,
-                               statement->location)) {
-      ir_local_scope_leave(context);
-      free(condition_label);
-      free(step_label);
-      free(end_label);
-      return 0;
-    }
-
-    if (!ir_emit_label_instruction(context, function, condition_label,
-                                   statement->location)) {
-      ir_local_scope_leave(context);
-      free(condition_label);
-      free(step_label);
-      free(end_label);
-      return 0;
-    }
-
-    if (for_data->condition) {
-      size_t for_branch_before = function->instruction_count;
-      if (!ir_emit_condition_false_branch(context, function,
-                                          for_data->condition, end_label)) {
-        ir_local_scope_leave(context);
-        free(condition_label);
-        free(step_label);
-        free(end_label);
-        return 0;
-      }
-      if (for_data->uniform_mode == 3) {
-        ir_mark_branches_uniform(function, for_branch_before);
-      }
-    }
-
-    size_t for_body_before = function->instruction_count;
-    if (!ir_push_labeled_control_frame(context, end_label, step_label,
-                                       for_data->label, defers)) {
-      ir_local_scope_leave(context);
-      free(condition_label);
-      free(step_label);
-      free(end_label);
-      return 0;
-    }
-
-    int body_ok = ir_lower_statement_with_defers(context, function,
-                                                 for_data->body, defers);
-    if (for_data->uniform_mode != 3) {
-      ir_mark_calls_divergent(function, for_body_before);
-    }
-    ir_pop_control_frame(context);
-    if (!body_ok) {
-      ir_local_scope_leave(context);
-      free(condition_label);
-      free(step_label);
-      free(end_label);
-      return 0;
-    }
-
-    if (!ir_emit_label_instruction(context, function, step_label,
-                                   statement->location)) {
-      ir_local_scope_leave(context);
-      free(condition_label);
-      free(step_label);
-      free(end_label);
-      return 0;
-    }
-
-    if (!ir_lower_statement_or_expression(context, function,
-                                          for_data->increment)) {
-      ir_local_scope_leave(context);
-      free(condition_label);
-      free(step_label);
-      free(end_label);
-      return 0;
-    }
-
-    if (!ir_emit_jump_instruction(context, function, condition_label,
-                                  statement->location) ||
-        !ir_emit_label_instruction(context, function, end_label,
-                                   statement->location)) {
-      ir_local_scope_leave(context);
-      free(condition_label);
-      free(step_label);
-      free(end_label);
-      return 0;
-    }
-
-    if (for_simd_id >= 0 &&
-        !ir_emit_simd_marker(context, function, 'E', for_simd_id, 0,
-                             statement->location)) {
-      ir_local_scope_leave(context);
-      free(condition_label);
-      free(step_label);
-      free(end_label);
-      return 0;
-    }
-
-    ir_local_scope_leave(context);
-    free(condition_label);
-    free(step_label);
-    free(end_label);
-    return 1;
-  }
 
   case AST_SWITCH_STATEMENT:
     return ir_lower_switch_statement(context, function, statement, defers);
@@ -1525,103 +1708,21 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
     return ir_lower_match_statement(context, function, statement, defers);
   }
 
-  case AST_FALLTHROUGH_STATEMENT: {
-    const IRControlFrame *frame = ir_current_fallthrough_frame(context);
-    if (!frame || !frame->fallthrough_label) {
-      ir_set_error(context, "'fallthrough' outside a switch case with a case "
-                            "after it");
-      return 0;
-    }
-    /* The case ends here, so its scopes' deferred statements run before the
-       next case begins, the same as on the path that leaves the switch. */
-    if (!ir_emit_defers_until_scope(context, function, defers,
-                                    frame->defers)) {
-      return 0;
-    }
-    return ir_emit_jump_instruction(context, function,
-                                    frame->fallthrough_label,
-                                    statement->location);
-  }
+  case AST_FALLTHROUGH_STATEMENT:
+    return ir_lower_fallthrough_statement(context, function, statement, defers);
 
-  case AST_BREAK_STATEMENT: {
-    LoopControlStatement *ctrl = (LoopControlStatement *)statement->data;
-    const char *user_label = ctrl ? ctrl->target_label : NULL;
-    const IRControlFrame *frame = ir_break_target_frame(context, user_label);
-    const char *target = frame ? frame->break_label : NULL;
-    if (!target) {
-      if (user_label) {
-        ir_set_error(context, "'break %s' has no matching labeled loop",
-                     user_label);
-      } else {
-        ir_set_error(context, "'break' used outside loop/switch");
-      }
-      return 0;
-    }
-    // The jump leaves every scope between here and the loop, so their
-    // deferred statements run before it.
-    if (!ir_emit_defers_until_scope(context, function, defers,
-                                    frame->defers)) {
-      return 0;
-    }
-    return ir_emit_jump_instruction(context, function, target,
-                                    statement->location);
-  }
 
-  case AST_CONTINUE_STATEMENT: {
-    LoopControlStatement *ctrl = (LoopControlStatement *)statement->data;
-    const char *user_label = ctrl ? ctrl->target_label : NULL;
-    const IRControlFrame *frame = ir_continue_target_frame(context, user_label);
-    const char *target = frame ? frame->continue_label : NULL;
-    if (!target) {
-      if (user_label) {
-        ir_set_error(context, "'continue %s' has no matching labeled loop",
-                     user_label);
-      } else {
-        ir_set_error(context, "'continue' used outside loop");
-      }
-      return 0;
-    }
-    // The iteration ends here, so the body's deferred statements run, exactly
-    // as they would on the path that falls off the end of the body.
-    if (!ir_emit_defers_until_scope(context, function, defers,
-                                    frame->defers)) {
-      return 0;
-    }
-    return ir_emit_jump_instruction(context, function, target,
-                                    statement->location);
-  }
+  case AST_BREAK_STATEMENT:
+    return ir_lower_break_statement(context, function, statement, defers);
 
-  case AST_DEFER_STATEMENT: {
-    if (!defers) {
-      return 1;
-    }
-    // Snapshot argument values now so the deferred call captures them by value
-    // rather than re-reading the variables at scope exit.
-    char *cap_name = NULL;
-    char **cap_temps = NULL;
-    size_t cap_count = 0;
-    int captured = ir_defer_capture_call(context, function, statement,
-                                         &cap_name, &cap_temps, &cap_count);
-    if (captured < 0) {
-      return 0;
-    }
-    if (!ir_defer_stack_push(context, &defers->stack, statement, 0)) {
-      for (size_t i = 0; i < cap_count; i++) {
-        free(cap_temps[i]);
-      }
-      free(cap_temps);
-      free(cap_name);
-      ir_set_error(context, "Out of memory while recording defer statement");
-      return 0;
-    }
-    if (captured > 0) {
-      size_t idx = defers->stack.count - 1;
-      defers->stack.entries[idx].capture_call_name = cap_name;
-      defers->stack.entries[idx].capture_arg_temps = cap_temps;
-      defers->stack.entries[idx].capture_arg_count = cap_count;
-    }
-    return 1;
-  }
+
+  case AST_CONTINUE_STATEMENT:
+    return ir_lower_continue_statement(context, function, statement, defers);
+
+
+  case AST_DEFER_STATEMENT:
+    return ir_lower_defer_statement(context, function, statement, defers);
+
 
   case AST_ERRDEFER_STATEMENT: {
     if (!defers) {
