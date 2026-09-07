@@ -1148,6 +1148,75 @@ int code_generator_binary_emit_simd_clamp_i32(
                                                       BINARY_GP_RAX);
 }
 
+static int simd_dot_i32_prologue(CodeGenerator *generator,
+                                 BinaryFunctionContext *context,
+                                 const IRInstruction *instruction) {
+  BinaryCodeBuffer *b = &context->code;
+  return code_generator_binary_emit_operand_load(generator, context,
+                                                 &instruction->lhs,
+                                                 BINARY_GP_RCX) &&
+         code_generator_binary_emit_operand_load(generator, context,
+                                                 &instruction->rhs,
+                                                 BINARY_GP_RDX) &&
+         code_generator_binary_emit_operand_load(generator, context,
+                                                 &instruction->arguments[0],
+                                                 BINARY_GP_R8) &&
+         binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, 0) &&
+         wcs_avx_vpxor_ymm(b, 2, 2, 2) && wcs_avx_vpxor_ymm(b, 5, 5, 5) &&
+         binary_emit_mov_reg_reg(b, BINARY_GP_R11, BINARY_GP_R8) &&
+         binary_emit_shift_reg_imm8(b, 4, BINARY_GP_R11, 2) &&
+         wcs_add_reg_reg64(b, BINARY_GP_R11, BINARY_GP_RCX);
+}
+
+static int simd_dot_i32_vector_step(BinaryCodeBuffer *b, int displacement) {
+  return wcs_avx_vmovdqu_ymm_mem(b, 0, BINARY_GP_RCX, displacement) &&
+         wcs_avx_vmovdqu_ymm_mem(b, 1, BINARY_GP_RDX, displacement) &&
+         wcs_avx_vpmuldq_ymm(b, 3, 0, 1) &&
+         wcs_avx_vpsrlq_ymm_imm(b, 0, 0, 32) &&
+         wcs_avx_vpsrlq_ymm_imm(b, 1, 1, 32) &&
+         wcs_avx_vpmuldq_ymm(b, 4, 0, 1) && wcs_avx_vpaddq_ymm(b, 2, 2, 3) &&
+         wcs_avx_vpaddq_ymm(b, 5, 5, 4);
+}
+
+static int simd_dot_i32_vector_body(BinaryCodeBuffer *b) {
+  int displacement = 0;
+  for (displacement = 0; displacement < 128; displacement += 32) {
+    if (!simd_dot_i32_vector_step(b, displacement)) {
+      return 0;
+    }
+  }
+  return wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 64) &&
+         wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 64) &&
+         wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 64) &&
+         wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 64);
+}
+
+static int simd_dot_i32_scalar_step(BinaryCodeBuffer *b) {
+  return binary_emit_mov_reg_mem32(b, BINARY_GP_R10, BINARY_GP_RCX, 0) &&
+         binary_emit_movsxd_reg_reg32(b, BINARY_GP_R10, BINARY_GP_R10) &&
+         binary_emit_mov_reg_mem32(b, BINARY_GP_R9, BINARY_GP_RDX, 0) &&
+         binary_emit_movsxd_reg_reg32(b, BINARY_GP_R9, BINARY_GP_R9) &&
+         binary_emit_imul_reg_reg(b, BINARY_GP_R10, BINARY_GP_R9) &&
+         wcs_add_reg_reg64(b, BINARY_GP_RAX, BINARY_GP_R10) &&
+         wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 4) &&
+         wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 4);
+}
+
+static int simd_dot_i32_reduce(BinaryCodeBuffer *b) {
+  return wcs_avx_vpaddq_ymm(b, 2, 2, 5) && wcs_avx_vextracti128(b, 3, 2, 1) &&
+         wcs_avx_vzeroupper(b) && wcs_paddq(b, 2, 3) &&
+         binary_emit_movq_reg_xmm(b, BINARY_GP_R10, BINARY_XMM2) &&
+         wcs_add_reg_reg64(b, BINARY_GP_RAX, BINARY_GP_R10) &&
+         wcs_pshufd(b, 3, 2, 0xEE) &&
+         binary_emit_movq_reg_xmm(b, BINARY_GP_R10, BINARY_XMM3) &&
+         wcs_add_reg_reg64(b, BINARY_GP_RAX, BINARY_GP_R10);
+}
+
+static int simd_loop_back_to(BinaryCodeBuffer *b, size_t target) {
+  size_t j_back = 0;
+  return wcs_jcc(b, 0, &j_back) && wcs_patch_to(b, j_back, target);
+}
+
 int code_generator_binary_emit_simd_dot_i32(
     CodeGenerator *generator, BinaryFunctionContext *context,
     const IRInstruction *instruction) {
@@ -1164,115 +1233,33 @@ int code_generator_binary_emit_simd_dot_i32(
   }
   b = &context->code;
 
-  if (!code_generator_binary_emit_operand_load(generator, context,
-                                               &instruction->lhs,
-                                               BINARY_GP_RCX) ||
-      !code_generator_binary_emit_operand_load(generator, context,
-                                               &instruction->rhs,
-                                               BINARY_GP_RDX) ||
-      !code_generator_binary_emit_operand_load(generator, context,
-                                               &instruction->arguments[0],
-                                               BINARY_GP_R8) ||
-      !binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, 0) ||
-      !wcs_avx_vpxor_ymm(b, 2, 2, 2) ||
-      !wcs_avx_vpxor_ymm(b, 5, 5, 5) ||
-      !binary_emit_mov_reg_reg(b, BINARY_GP_R11, BINARY_GP_R8) ||
-      !binary_emit_shift_reg_imm8(b, 4, BINARY_GP_R11, 2) ||
-      !wcs_add_reg_reg64(b, BINARY_GP_R11, BINARY_GP_RCX)) {
+  if (!simd_dot_i32_prologue(generator, context, instruction)) {
     return 0;
   }
 
   loop_top = b->size;
   if (!binary_emit_cmp_reg_reg(b, BINARY_GP_RCX, BINARY_GP_R11) ||
-      !wcs_jcc(b, 0x83 , &j_done)) {
+      !wcs_jcc(b, 0x83, &j_done)) {
     return 0;
   }
-
   if (!binary_emit_mov_reg_reg(b, BINARY_GP_R9, BINARY_GP_R11) ||
       !binary_emit_alu_reg_reg(b, 0x29, BINARY_GP_R9, BINARY_GP_RCX) ||
       !wcs_cmp_reg_imm32(b, BINARY_GP_R9, 128) ||
-      !wcs_jcc(b, 0x83 , &j_vec) ||
-      !wcs_jcc(b, 0, &j_scalar)) {
+      !wcs_jcc(b, 0x83, &j_vec) || !wcs_jcc(b, 0, &j_scalar)) {
     return 0;
   }
 
-  if (!wcs_patch_here(b, j_vec) ||
-      !wcs_avx_vmovdqu_ymm_mem(b, 0, BINARY_GP_RCX, 0) ||
-      !wcs_avx_vmovdqu_ymm_mem(b, 1, BINARY_GP_RDX, 0) ||
-      !wcs_avx_vpmuldq_ymm(b, 3, 0, 1) ||
-      !wcs_avx_vpsrlq_ymm_imm(b, 0, 0, 32) ||
-      !wcs_avx_vpsrlq_ymm_imm(b, 1, 1, 32) ||
-      !wcs_avx_vpmuldq_ymm(b, 4, 0, 1) ||
-      !wcs_avx_vpaddq_ymm(b, 2, 2, 3) ||
-      !wcs_avx_vpaddq_ymm(b, 5, 5, 4) ||
-      !wcs_avx_vmovdqu_ymm_mem(b, 0, BINARY_GP_RCX, 32) ||
-      !wcs_avx_vmovdqu_ymm_mem(b, 1, BINARY_GP_RDX, 32) ||
-      !wcs_avx_vpmuldq_ymm(b, 3, 0, 1) ||
-      !wcs_avx_vpsrlq_ymm_imm(b, 0, 0, 32) ||
-      !wcs_avx_vpsrlq_ymm_imm(b, 1, 1, 32) ||
-      !wcs_avx_vpmuldq_ymm(b, 4, 0, 1) ||
-      !wcs_avx_vpaddq_ymm(b, 2, 2, 3) ||
-      !wcs_avx_vpaddq_ymm(b, 5, 5, 4) ||
-      !wcs_avx_vmovdqu_ymm_mem(b, 0, BINARY_GP_RCX, 64) ||
-      !wcs_avx_vmovdqu_ymm_mem(b, 1, BINARY_GP_RDX, 64) ||
-      !wcs_avx_vpmuldq_ymm(b, 3, 0, 1) ||
-      !wcs_avx_vpsrlq_ymm_imm(b, 0, 0, 32) ||
-      !wcs_avx_vpsrlq_ymm_imm(b, 1, 1, 32) ||
-      !wcs_avx_vpmuldq_ymm(b, 4, 0, 1) ||
-      !wcs_avx_vpaddq_ymm(b, 2, 2, 3) ||
-      !wcs_avx_vpaddq_ymm(b, 5, 5, 4) ||
-      !wcs_avx_vmovdqu_ymm_mem(b, 0, BINARY_GP_RCX, 96) ||
-      !wcs_avx_vmovdqu_ymm_mem(b, 1, BINARY_GP_RDX, 96) ||
-      !wcs_avx_vpmuldq_ymm(b, 3, 0, 1) ||
-      !wcs_avx_vpsrlq_ymm_imm(b, 0, 0, 32) ||
-      !wcs_avx_vpsrlq_ymm_imm(b, 1, 1, 32) ||
-      !wcs_avx_vpmuldq_ymm(b, 4, 0, 1) ||
-      !wcs_avx_vpaddq_ymm(b, 2, 2, 3) ||
-      !wcs_avx_vpaddq_ymm(b, 5, 5, 4) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 64) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 64) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 64) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 64)) {
+  if (!wcs_patch_here(b, j_vec) || !simd_dot_i32_vector_body(b) ||
+      !simd_loop_back_to(b, loop_top)) {
     return 0;
   }
-  {
-    size_t j_back = 0;
-    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, loop_top)) {
-      return 0;
-    }
-  }
-
-  if (!wcs_patch_here(b, j_scalar) ||
-      !binary_emit_mov_reg_mem32(b, BINARY_GP_R10, BINARY_GP_RCX, 0) ||
-      !binary_emit_movsxd_reg_reg32(b, BINARY_GP_R10, BINARY_GP_R10) ||
-      !binary_emit_mov_reg_mem32(b, BINARY_GP_R9, BINARY_GP_RDX, 0) ||
-      !binary_emit_movsxd_reg_reg32(b, BINARY_GP_R9, BINARY_GP_R9) ||
-      !binary_emit_imul_reg_reg(b, BINARY_GP_R10, BINARY_GP_R9) ||
-      !wcs_add_reg_reg64(b, BINARY_GP_RAX, BINARY_GP_R10) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 4) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 4)) {
+  if (!wcs_patch_here(b, j_scalar) || !simd_dot_i32_scalar_step(b) ||
+      !simd_loop_back_to(b, loop_top)) {
     return 0;
   }
-  {
-    size_t j_back = 0;
-    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, loop_top)) {
-      return 0;
-    }
-  }
-
-  if (!wcs_patch_here(b, j_done) ||
-      !wcs_avx_vpaddq_ymm(b, 2, 2, 5) ||
-      !wcs_avx_vextracti128(b, 3, 2, 1) ||
-      !wcs_avx_vzeroupper(b) ||
-      !wcs_paddq(b, 2, 3) ||
-      !binary_emit_movq_reg_xmm(b, BINARY_GP_R10, BINARY_XMM2) ||
-      !wcs_add_reg_reg64(b, BINARY_GP_RAX, BINARY_GP_R10) ||
-      !wcs_pshufd(b, 3, 2, 0xEE) ||
-      !binary_emit_movq_reg_xmm(b, BINARY_GP_R10, BINARY_XMM3) ||
-      !wcs_add_reg_reg64(b, BINARY_GP_RAX, BINARY_GP_R10)) {
+  if (!wcs_patch_here(b, j_done) || !simd_dot_i32_reduce(b)) {
     return 0;
   }
-
   return code_generator_binary_emit_destination_store(generator, context,
                                                       &instruction->dest,
                                                       BINARY_GP_RAX);
@@ -1840,10 +1827,191 @@ static int code_generator_binary_emit_simd_find_ascii_ident(
   return 1;
 }
 
+typedef struct {
+  CodeGenerator *generator;
+  BinaryFunctionContext *context;
+  const IRInstruction *instruction;
+  BinaryCodeBuffer *b;
+  const IROperand *rhs;
+  int pred;
+  int u8;
+  int rhs_kind;
+  int lanes;
+  int esz;
+  int two_arrays;
+  int invert_mask;
+  uint32_t full_mask;
+  size_t to_done[3];
+  size_t n_done;
+} SimdFind;
+
+static int simd_find_decode(SimdFind *f, CodeGenerator *generator,
+                            BinaryFunctionContext *context,
+                            const IRInstruction *instruction) {
+  const IROperand *args = instruction->arguments;
+  f->generator = generator;
+  f->context = context;
+  f->instruction = instruction;
+  f->b = &context->code;
+  f->pred = (int)args[0].int_value;
+  f->u8 = (int)args[1].int_value == 1;
+  f->rhs_kind = (int)args[2].int_value;
+  f->rhs = &args[3];
+  if (instruction->argument_count != 4 ||
+      instruction->rhs.kind != IR_OPERAND_SYMBOL || f->pred < VFIND_EQ ||
+      f->pred > VFIND_GE) {
+    code_generator_set_error(generator, "Bad simd_find encoding");
+    return 0;
+  }
+  f->lanes = f->u8 ? 32 : 8;
+  f->esz = f->u8 ? 1 : 4;
+  f->two_arrays = (f->rhs_kind == 2);
+  f->invert_mask = (f->pred == VFIND_NE || f->pred == VFIND_LE ||
+                    f->pred == VFIND_GE);
+  f->full_mask = f->u8 ? 0xFFFFFFFFu : 0xFFu;
+  if (f->rhs_kind < 0 || f->rhs_kind > 2 ||
+      (f->u8 && f->pred != VFIND_EQ && f->pred != VFIND_NE)) {
+    code_generator_set_error(generator, "Bad simd_find encoding");
+    return 0;
+  }
+  return 1;
+}
+
+static int simd_find_load_operands(SimdFind *f) {
+  BinaryCodeBuffer *b = f->b;
+  if (!code_generator_binary_emit_operand_load(f->generator, f->context,
+                                               &f->instruction->lhs,
+                                               BINARY_GP_R10) ||
+      !code_generator_binary_emit_operand_load(f->generator, f->context,
+                                               &f->instruction->rhs,
+                                               BINARY_GP_RCX)) {
+    return 0;
+  }
+  if (f->two_arrays) {
+    return code_generator_binary_emit_operand_load(f->generator, f->context,
+                                                   f->rhs, BINARY_GP_RDX);
+  }
+  if (f->rhs_kind == 0) {
+    return binary_emit_mov_reg_imm64(b, BINARY_GP_R8,
+                                     (uint64_t)f->rhs->int_value);
+  }
+  return code_generator_binary_emit_operand_load(f->generator, f->context,
+                                                 f->rhs, BINARY_GP_R8);
+}
+
+static int simd_find_broadcast_needle(SimdFind *f) {
+  BinaryCodeBuffer *b = f->b;
+  if (f->two_arrays) {
+    return 1;
+  }
+  if (f->u8) {
+    return wcs_avx_vmovd_xmm_reg(b, 1, BINARY_GP_R8) &&
+           wcs_avx_vpbroadcastb_ymm(b, 1, 1);
+  }
+  return wcs_broadcast_i32_to_ymm(b, 1, BINARY_GP_R8);
+}
+
+static int simd_find_load_element(SimdFind *f, BinaryGpRegister address,
+                                  BinaryGpRegister into) {
+  if (f->u8) {
+    return wcs_movzx_reg_byte_mem(f->b, into, address);
+  }
+  return code_generator_binary_emit_load_from_address(f->generator, f->context,
+                                                      address, 4, into);
+}
+
+static int simd_find_head_step(SimdFind *f) {
+  BinaryCodeBuffer *b = f->b;
+  if (!wcs_cmp_reg_reg64(b, BINARY_GP_R11, BINARY_GP_R10) ||
+      !wcs_jcc(b, 0x8D, &f->to_done[f->n_done])) {
+    return 0;
+  }
+  f->n_done++;
+  if (!simd_find_load_element(f, BINARY_GP_RCX, BINARY_GP_R9)) {
+    return 0;
+  }
+  if (f->two_arrays) {
+    if (!simd_find_load_element(f, BINARY_GP_RDX, BINARY_GP_RAX) ||
+        !wcs_cmp_reg_reg32(b, BINARY_GP_R9, BINARY_GP_RAX)) {
+      return 0;
+    }
+  } else if (!wcs_cmp_reg_reg32(b, BINARY_GP_R9, BINARY_GP_R8)) {
+    return 0;
+  }
+  if (!wcs_jcc(b, vfind_hit_cc(f->pred), &f->to_done[f->n_done])) {
+    return 0;
+  }
+  f->n_done++;
+  return wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, (unsigned char)f->esz) &&
+         (!f->two_arrays ||
+          wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, (unsigned char)f->esz)) &&
+         wcs_addsub_reg_imm8(b, BINARY_GP_R11, 0, 1);
+}
+
+static int simd_find_compare_lanes(SimdFind *f) {
+  BinaryCodeBuffer *b = f->b;
+  int src2 = f->two_arrays ? 2 : 1;
+  switch (f->pred) {
+  case VFIND_EQ:
+  case VFIND_NE:
+    return f->u8 ? wcs_avx_vpcmpeqb_ymm(b, 0, 0, src2)
+                 : wcs_avx_vpcmpeqd_ymm(b, 0, 0, src2);
+  case VFIND_GT:
+  case VFIND_LE:
+    return wcs_avx_vpcmpgtd_ymm(b, 0, 0, src2);
+  default:
+    return wcs_avx_vpcmpgtd_ymm(b, 0, src2, 0);
+  }
+}
+
+static int simd_find_vector_step(SimdFind *f, size_t *j_hit) {
+  BinaryCodeBuffer *b = f->b;
+  if (!binary_emit_mov_reg_reg(b, BINARY_GP_RAX, BINARY_GP_R10) ||
+      !wcs_sub_reg_reg64(b, BINARY_GP_RAX, BINARY_GP_R11) ||
+      !wcs_cmp_reg_imm8(b, BINARY_GP_RAX, (unsigned char)f->lanes) ||
+      !wcs_jcc(b, 0x8C, &f->to_done[f->n_done])) {
+    return 0;
+  }
+  f->n_done++;
+  if (!wcs_avx_vmovups_ymm_mem(b, 0, BINARY_GP_RCX, 0)) {
+    return 0;
+  }
+  if (f->two_arrays && !wcs_avx_vmovups_ymm_mem(b, 2, BINARY_GP_RDX, 0)) {
+    return 0;
+  }
+  if (!simd_find_compare_lanes(f)) {
+    return 0;
+  }
+  if (!(f->u8 ? wcs_avx_vpmovmskb_reg_ymm(b, BINARY_GP_RAX, 0)
+              : wcs_avx_vmovmskps_reg_ymm(b, BINARY_GP_RAX, 0))) {
+    return 0;
+  }
+  if (f->invert_mask && !wcs_xor_reg_imm32(b, BINARY_GP_RAX, f->full_mask)) {
+    return 0;
+  }
+  if (!wcs_test_reg_reg32(b, BINARY_GP_RAX) || !wcs_jcc(b, 0x85, j_hit)) {
+    return 0;
+  }
+  return wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 32) &&
+         (!f->two_arrays || wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 32)) &&
+         wcs_addsub_reg_imm8(b, BINARY_GP_R11, 0, (unsigned char)f->lanes);
+}
+
+static int simd_find_is_ascii_class(const IRInstruction *instruction) {
+  return (int)instruction->arguments[0].int_value == VFIND_ASCII_IDENT_END;
+}
+
 int code_generator_binary_emit_simd_find(CodeGenerator *generator,
                                          BinaryFunctionContext *context,
                                          const IRInstruction *instruction) {
+  SimdFind f = {0};
   BinaryCodeBuffer *b = NULL;
+  size_t head_top = 0;
+  size_t vec_top = 0;
+  size_t j_vec = 0;
+  size_t j_hit = 0;
+  size_t k = 0;
+
   if (!generator || !context || !instruction ||
       (instruction->argument_count != 4 && instruction->argument_count != 5) ||
       !instruction->arguments ||
@@ -1853,198 +2021,42 @@ int code_generator_binary_emit_simd_find(CodeGenerator *generator,
     code_generator_set_error(generator, "Malformed simd_find");
     return 0;
   }
-  b = &context->code;
-  const IROperand *args = instruction->arguments;
-  int pred = (int)args[0].int_value;
-  int u8 = (int)args[1].int_value == 1;
-  int rhs_kind = (int)args[2].int_value;
-  const IROperand *rhs = &args[3];
-  if (pred == VFIND_ASCII_IDENT_END) {
-    if (!u8 || rhs_kind != 0 || instruction->argument_count != 5 ||
-        args[3].kind != IR_OPERAND_INT) {
+  if (simd_find_is_ascii_class(instruction)) {
+    const IROperand *args = instruction->arguments;
+    if ((int)args[1].int_value != 1 || (int)args[2].int_value != 0 ||
+        instruction->argument_count != 5 || args[3].kind != IR_OPERAND_INT) {
       code_generator_set_error(generator, "Bad ASCII class simd_find encoding");
       return 0;
     }
-    return code_generator_binary_emit_simd_find_ascii_ident(
-        generator, context, instruction);
+    return code_generator_binary_emit_simd_find_ascii_ident(generator, context,
+                                                            instruction);
   }
-  if (instruction->argument_count != 4 ||
-      instruction->rhs.kind != IR_OPERAND_SYMBOL || pred < VFIND_EQ ||
-      pred > VFIND_GE) {
-    code_generator_set_error(generator, "Bad simd_find encoding");
+  if (!simd_find_decode(&f, generator, context, instruction)) {
     return 0;
   }
-  const int lanes = u8 ? 32 : 8;
-  const int esz = u8 ? 1 : 4;
-  const int two_arrays = (rhs_kind == 2);
-  const int invert_mask = (pred == VFIND_NE || pred == VFIND_LE ||
-                           pred == VFIND_GE);
-  const uint32_t full_mask = u8 ? 0xFFFFFFFFu : 0xFFu;
-  if (pred < VFIND_EQ || pred > VFIND_GE || rhs_kind < 0 || rhs_kind > 2 ||
-      (u8 && pred != VFIND_EQ && pred != VFIND_NE)) {
-    code_generator_set_error(generator, "Bad simd_find encoding");
+  b = f.b;
+  if (!simd_find_load_operands(&f) || !simd_find_broadcast_needle(&f) ||
+      !binary_emit_mov_reg_imm64(b, BINARY_GP_R11, 0)) {
     return 0;
   }
 
-  if (!code_generator_binary_emit_operand_load(generator, context,
-                                               &instruction->lhs,
-                                               BINARY_GP_R10) ||
-      !code_generator_binary_emit_operand_load(generator, context,
-                                               &instruction->rhs,
-                                               BINARY_GP_RCX)) {
-    return 0;
-  }
-  if (two_arrays) {
-    if (!code_generator_binary_emit_operand_load(generator, context, rhs,
-                                                 BINARY_GP_RDX)) {
-      return 0;
-    }
-  } else if (rhs_kind == 0) {
-    if (!binary_emit_mov_reg_imm64(b, BINARY_GP_R8,
-                                   (uint64_t)rhs->int_value)) {
-      return 0;
-    }
-  } else {
-    if (!code_generator_binary_emit_operand_load(generator, context, rhs,
-                                                 BINARY_GP_R8)) {
-      return 0;
-    }
-  }
-  if (!two_arrays) {
-    if (u8) {
-      if (!wcs_avx_vmovd_xmm_reg(b, 1, BINARY_GP_R8) ||
-          !wcs_avx_vpbroadcastb_ymm(b, 1, 1)) {
-        return 0;
-      }
-    } else if (!wcs_broadcast_i32_to_ymm(b, 1, BINARY_GP_R8)) {
-      return 0;
-    }
-  }
-  if (!binary_emit_mov_reg_imm64(b, BINARY_GP_R11, 0)) {
-    return 0;
-  }
-
-  size_t to_done[3];
-  size_t n_done = 0;
-
-  size_t head_top = b->size;
-  size_t j_vec = 0;
+  head_top = b->size;
   if (!binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, 31) ||
       !wcs_and_reg_reg(b, BINARY_GP_RAX, BINARY_GP_RCX) ||
-      !wcs_jcc(b, 0x84 , &j_vec)) {
+      !wcs_jcc(b, 0x84, &j_vec) || !simd_find_head_step(&f) ||
+      !simd_loop_back_to(b, head_top) || !wcs_patch_here(b, j_vec)) {
     return 0;
-  }
-  if (!wcs_cmp_reg_reg64(b, BINARY_GP_R11, BINARY_GP_R10) ||
-      !wcs_jcc(b, 0x8D , &to_done[n_done])) {
-    return 0;
-  }
-  n_done++;
-  if (u8) {
-    if (!wcs_movzx_reg_byte_mem(b, BINARY_GP_R9, BINARY_GP_RCX)) {
-      return 0;
-    }
-  } else if (!code_generator_binary_emit_load_from_address(
-                 generator, context, BINARY_GP_RCX, 4, BINARY_GP_R9)) {
-    return 0;
-  }
-  if (two_arrays) {
-    int ok = u8 ? wcs_movzx_reg_byte_mem(b, BINARY_GP_RAX, BINARY_GP_RDX)
-                : code_generator_binary_emit_load_from_address(
-                      generator, context, BINARY_GP_RDX, 4, BINARY_GP_RAX);
-    if (!ok || !wcs_cmp_reg_reg32(b, BINARY_GP_R9, BINARY_GP_RAX)) {
-      return 0;
-    }
-  } else if (!wcs_cmp_reg_reg32(b, BINARY_GP_R9, BINARY_GP_R8)) {
-    return 0;
-  }
-  if (!wcs_jcc(b, vfind_hit_cc(pred), &to_done[n_done])) {
-    return 0;
-  }
-  n_done++;
-  if (!wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, (unsigned char)esz) ||
-      (two_arrays &&
-       !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, (unsigned char)esz)) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_R11, 0, 1)) {
-    return 0;
-  }
-  {
-    size_t j_back = 0;
-    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, head_top)) {
-      return 0;
-    }
   }
 
-  if (!wcs_patch_here(b, j_vec)) {
-    return 0;
-  }
-  size_t vec_top = b->size;
-  size_t j_hit = 0;
-  if (!binary_emit_mov_reg_reg(b, BINARY_GP_RAX, BINARY_GP_R10) ||
-      !wcs_sub_reg_reg64(b, BINARY_GP_RAX, BINARY_GP_R11) ||
-      !wcs_cmp_reg_imm8(b, BINARY_GP_RAX, (unsigned char)lanes) ||
-      !wcs_jcc(b, 0x8C ,
-               &to_done[n_done])) {
-    return 0;
-  }
-  n_done++;
-  if (!wcs_avx_vmovups_ymm_mem(b, 0, BINARY_GP_RCX, 0)) {
-    return 0;
-  }
-  if (two_arrays && !wcs_avx_vmovups_ymm_mem(b, 2, BINARY_GP_RDX, 0)) {
-    return 0;
-  }
-  {
-    int src2 = two_arrays ? 2 : 1;
-    int ok = 0;
-    switch (pred) {
-    case VFIND_EQ:
-    case VFIND_NE:
-      ok = u8 ? wcs_avx_vpcmpeqb_ymm(b, 0, 0, src2)
-              : wcs_avx_vpcmpeqd_ymm(b, 0, 0, src2);
-      break;
-    case VFIND_GT:
-    case VFIND_LE:
-      ok = wcs_avx_vpcmpgtd_ymm(b, 0, 0, src2);
-      break;
-    default:
-      ok = wcs_avx_vpcmpgtd_ymm(b, 0, src2, 0);
-      break;
-    }
-    if (!ok) {
-      return 0;
-    }
-  }
-  if (!(u8 ? wcs_avx_vpmovmskb_reg_ymm(b, BINARY_GP_RAX, 0)
-           : wcs_avx_vmovmskps_reg_ymm(b, BINARY_GP_RAX, 0))) {
-    return 0;
-  }
-  if (invert_mask && !wcs_xor_reg_imm32(b, BINARY_GP_RAX, full_mask)) {
-    return 0;
-  }
-  if (!wcs_test_reg_reg32(b, BINARY_GP_RAX) ||
-      !wcs_jcc(b, 0x85 , &j_hit)) {
-    return 0;
-  }
-  if (!wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 32) ||
-      (two_arrays && !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 32)) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_R11, 0, (unsigned char)lanes)) {
-    return 0;
-  }
-  {
-    size_t j_back = 0;
-    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, vec_top)) {
-      return 0;
-    }
-  }
-
-  if (!wcs_patch_here(b, j_hit) ||
+  vec_top = b->size;
+  if (!simd_find_vector_step(&f, &j_hit) ||
+      !simd_loop_back_to(b, vec_top) || !wcs_patch_here(b, j_hit) ||
       !wcs_bsf_reg_reg32(b, BINARY_GP_RAX, BINARY_GP_RAX) ||
       !wcs_add_reg_reg64(b, BINARY_GP_R11, BINARY_GP_RAX)) {
     return 0;
   }
-
-  for (size_t k = 0; k < n_done; k++) {
-    if (!wcs_patch_here(b, to_done[k])) {
+  for (k = 0; k < f.n_done; k++) {
+    if (!wcs_patch_here(b, f.to_done[k])) {
       return 0;
     }
   }
