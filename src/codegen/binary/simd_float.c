@@ -810,149 +810,228 @@ int code_generator_binary_emit_simd_vloop_unmarshaled(
                                                    instruction, 0);
 }
 
-int code_generator_binary_emit_simd_vloop_f64(
-    CodeGenerator *generator, BinaryFunctionContext *context,
-    const IRInstruction *instruction, int operands_marshaled) {
-  BinaryCodeBuffer *b = NULL;
-  static const int kPoolReduce[3] = {0, 1, 4};
-  static const BinaryGpRegister kGp[VLOOP_KERNEL_MAX_BASES] = {
-      BINARY_GP_RCX, BINARY_GP_RDX, BINARY_GP_R8, BINARY_GP_R9};
-  const int IOTA_CONST = 5;
-  const int BYTE_MASK = 3;
+enum { VLOOP_IOTA_CONST = 5, VLOOP_BYTE_MASK = 3 };
 
-  if (!generator || !context || !instruction || instruction->argument_count < 7 ||
-      !instruction->arguments || instruction->dest.kind != IR_OPERAND_SYMBOL) {
+static const BinaryGpRegister VLOOP_GP[VLOOP_KERNEL_MAX_BASES] = {
+    BINARY_GP_RCX, BINARY_GP_RDX, BINARY_GP_R8, BINARY_GP_R9};
+
+typedef struct {
+  CodeGenerator *generator;
+  BinaryFunctionContext *context;
+  const IRInstruction *instruction;
+  BinaryCodeBuffer *b;
+  const IROperand *args;
+  size_t scalars_off;
+  size_t nodes_off;
+  size_t consts_off;
+  int operands_marshaled;
+  int i32;
+  int f32;
+  int elem8;
+  int elem8_unsigned;
+  int lanes;
+  int elem_bytes;
+  int vec_stride;
+  int n_nodes;
+  int n_consts;
+  int n_scalars;
+  int n_dist;
+  int is_reduce;
+  int is_minmax;
+  int is_max;
+  int has_iota;
+  int pool_n;
+  int pool_src[VLOOP_KERNEL_POOL_MAX];
+  int arr_reg[VLOOP_KERNEL_MAX_BASES];
+  int dst_reg;
+  uint32_t cbytes;
+  const IROperand *dist_src[VLOOP_KERNEL_MAX_BASES];
+} VloopKernel;
+
+typedef struct {
+  int pool[VLOOP_KERNEL_POOL_MAX];
+  int nfree;
+  int vstk[VLOOP_KERNEL_MAX_NODES];
+  int nv;
+} VloopStack;
+
+static int vloop_build_pool(VloopKernel *k, int depth) {
+  static const int kPoolReduce[3] = {0, 1, 4};
+  int map_pool[VLOOP_KERNEL_POOL_MAX] = {0, 1, 2, 4, 0, 0};
+  int map_pool_n = 4;
+  int i = 0;
+  if (!k->elem8) {
+    map_pool[map_pool_n++] = VLOOP_BYTE_MASK;
+  }
+  if (!k->has_iota) {
+    map_pool[map_pool_n++] = VLOOP_IOTA_CONST;
+  }
+  k->pool_n = k->is_reduce ? 3 : map_pool_n;
+  for (i = 0; i < k->pool_n; i++) {
+    k->pool_src[i] = k->is_reduce ? kPoolReduce[i] : map_pool[i];
+  }
+  if (k->pool_n !=
+          (k->is_reduce ? 3
+                        : code_generator_vloop_pool_size(k->elem8,
+                                                         k->has_iota)) ||
+      depth > k->pool_n) {
+    code_generator_set_error(k->generator, "simd_vloop depth over pool");
+    return 0;
+  }
+  return 1;
+}
+
+static int vloop_decode_shape(VloopKernel *k) {
+  const IRInstruction *instruction = k->instruction;
+  k->i32 = (instruction->op == IR_OP_SIMD_VLOOP_I32);
+  if (!k->i32 && instruction->float_bits != 32 &&
+      instruction->float_bits != 64) {
+    code_generator_set_error(k->generator, "simd_vloop bad float width");
+    return 0;
+  }
+  k->elem8 = k->i32 && instruction->float_bits == 8;
+  k->elem8_unsigned = k->elem8 && instruction->is_unsigned;
+  if (k->i32 && instruction->float_bits != 32 &&
+      instruction->float_bits != 8) {
+    code_generator_set_error(k->generator, "simd_vloop bad int element width");
+    return 0;
+  }
+  k->b = &k->context->code;
+  k->f32 = k->i32 || (instruction->float_bits == 32);
+  k->lanes = k->f32 ? 8 : 4;
+  k->elem_bytes = k->elem8 ? 1 : (k->f32 ? 4 : 8);
+  k->vec_stride = k->elem_bytes * k->lanes;
+  return 1;
+}
+
+static int vloop_decode(VloopKernel *k, CodeGenerator *generator,
+                        BinaryFunctionContext *context,
+                        const IRInstruction *instruction,
+                        int operands_marshaled) {
+  const char *dist_name[VLOOP_KERNEL_MAX_BASES];
+  const IROperand *args = NULL;
+  long long reduce_op = 0;
+  size_t expect = 0;
+  int n_arrays = 0;
+  int n_nodes = 0;
+  int root = 0;
+  int depth = 0;
+  int i = 0;
+
+  if (!generator || !context || !instruction ||
+      instruction->argument_count < 7 || !instruction->arguments ||
+      instruction->dest.kind != IR_OPERAND_SYMBOL) {
     code_generator_set_error(generator, "Malformed simd_vloop");
     return 0;
   }
-  const int i32 = (instruction->op == IR_OP_SIMD_VLOOP_I32);
-  if (!i32 && instruction->float_bits != 32 && instruction->float_bits != 64) {
-    code_generator_set_error(generator, "simd_vloop bad float width");
+  k->generator = generator;
+  k->context = context;
+  k->instruction = instruction;
+  k->operands_marshaled = operands_marshaled;
+  if (!vloop_decode_shape(k)) {
     return 0;
   }
-  const int elem8 = i32 && instruction->float_bits == 8;
-  const int elem8_unsigned = elem8 && instruction->is_unsigned;
-  if (i32 && instruction->float_bits != 32 && instruction->float_bits != 8) {
-    code_generator_set_error(generator, "simd_vloop bad int element width");
-    return 0;
-  }
-  b = &context->code;
-  const int f32 = i32 || (instruction->float_bits == 32);
-  const int lanes = f32 ? 8 : 4;
-  const int elem_bytes = elem8 ? 1 : (f32 ? 4 : 8);
-  const int vec_stride = elem_bytes * lanes;
 
-  const IROperand *args = instruction->arguments;
-  long long reduce_op = args[0].int_value;
-  int n_arrays = (int)args[1].int_value;
-  int n_nodes = (int)args[2].int_value;
-  int root = (int)args[3].int_value;
-  int n_consts = (int)args[4].int_value;
-  int n_scalars = (int)args[5].int_value;
-  int depth = (int)args[6].int_value;
-  const int is_minmax = (reduce_op == 2 || reduce_op == 3);
-  const int is_max = (reduce_op == 2);
-  int is_reduce = (reduce_op == 1) || is_minmax;
-  size_t expect =
-      (size_t)(7 + n_arrays + n_scalars + 3 * n_nodes + n_consts);
+  args = instruction->arguments;
+  k->args = args;
+  reduce_op = args[0].int_value;
+  n_arrays = (int)args[1].int_value;
+  n_nodes = (int)args[2].int_value;
+  root = (int)args[3].int_value;
+  k->n_nodes = n_nodes;
+  k->n_consts = (int)args[4].int_value;
+  k->n_scalars = (int)args[5].int_value;
+  depth = (int)args[6].int_value;
+  k->is_minmax = (reduce_op == 2 || reduce_op == 3);
+  k->is_max = (reduce_op == 2);
+  k->is_reduce = (reduce_op == 1) || k->is_minmax;
+  expect = (size_t)(7 + n_arrays + k->n_scalars + 3 * n_nodes + k->n_consts);
   if ((reduce_op < 0 || reduce_op > 3) || n_arrays < 0 ||
       n_arrays > VLOOP_KERNEL_MAX_BASES || n_nodes <= 0 ||
-      n_nodes > VLOOP_KERNEL_MAX_NODES || n_consts < 0 || n_scalars < 0 ||
-      root < 0 || root >= n_nodes ||
+      n_nodes > VLOOP_KERNEL_MAX_NODES || k->n_consts < 0 ||
+      k->n_scalars < 0 || root < 0 || root >= n_nodes ||
       instruction->argument_count != expect) {
     code_generator_set_error(generator, "Bad simd_vloop encoding");
     return 0;
   }
+  k->scalars_off = (size_t)(7 + n_arrays);
+  k->nodes_off = k->scalars_off + (size_t)k->n_scalars;
+  k->consts_off = k->nodes_off + (size_t)(3 * n_nodes);
+  k->cbytes = (uint32_t)(32 * (k->n_consts + k->n_scalars));
 
-  size_t scalars_off = (size_t)(7 + n_arrays);
-  size_t nodes_off = scalars_off + (size_t)n_scalars;
-  size_t consts_off = nodes_off + (size_t)(3 * n_nodes);
-  int n_slots = n_consts + n_scalars;
-
-  const char *dist_name[VLOOP_KERNEL_MAX_BASES];
-  const IROperand *dist_src[VLOOP_KERNEL_MAX_BASES];
-  int n_dist = 0;
-  if (code_generator_vloop_collect_dist(instruction, is_reduce, dist_name,
-                                        dist_src, &n_dist) < 0) {
+  if (code_generator_vloop_collect_dist(instruction, k->is_reduce, dist_name,
+                                        k->dist_src, &k->n_dist) < 0) {
     code_generator_set_error(generator, "simd_vloop_f64 too many bases");
     return 0;
   }
-  int has_iota = 0;
-  for (int i = 0; i < n_nodes; i++) {
-    if ((int)args[nodes_off + 3 * i].int_value == VLOOP_K_IOTA) {
-      has_iota = 1;
+  for (i = 0; i < n_nodes; i++) {
+    if ((int)args[k->nodes_off + 3 * i].int_value == VLOOP_K_IOTA) {
+      k->has_iota = 1;
     }
   }
-  int map_pool[VLOOP_KERNEL_POOL_MAX] = {0, 1, 2, 4, 0, 0};
-  int map_pool_n = 4;
-  if (!elem8) {
-    map_pool[map_pool_n++] = BYTE_MASK;
-  }
-  if (!has_iota) {
-    map_pool[map_pool_n++] = IOTA_CONST;
-  }
-  const int *kPool = is_reduce ? kPoolReduce : map_pool;
-  int pool_n = is_reduce ? 3 : map_pool_n;
-  if (pool_n != (is_reduce ? 3 : code_generator_vloop_pool_size(elem8,
-                                                                has_iota)) ||
-      depth > pool_n) {
-    code_generator_set_error(generator, "simd_vloop depth over pool");
+  if (!vloop_build_pool(k, depth)) {
     return 0;
   }
-  int arr_reg[VLOOP_KERNEL_MAX_BASES];
-  for (int k = 0; k < n_arrays; k++) {
-    const char *nm = args[7 + k].name;
+  for (i = 0; i < n_arrays; i++) {
+    const char *nm = args[7 + i].name;
     int found = 0;
-    for (int j = 0; j < n_dist; j++) {
+    for (int j = 0; j < k->n_dist; j++) {
       if (dist_name[j] && nm && strcmp(dist_name[j], nm) == 0) {
         found = j;
         break;
       }
     }
-    arr_reg[k] = kGp[found];
+    k->arr_reg[i] = VLOOP_GP[found];
   }
-  int dst_reg = kGp[0];
+  k->dst_reg = VLOOP_GP[0];
+  return 1;
+}
 
-  uint32_t cbytes = (uint32_t)(32 * n_slots);
-  if (cbytes && !binary_emit_sub_rsp_imm32(b, cbytes)) {
+static int vloop_emit_bases(VloopKernel *k) {
+  BinaryCodeBuffer *b = k->b;
+  int j = 0;
+  if (k->cbytes && !binary_emit_sub_rsp_imm32(b, k->cbytes)) {
     return 0;
   }
-
-  if (operands_marshaled) {
-    if (!binary_emit_mov_reg_reg(b, BINARY_GP_R10, kGp[n_dist])) {
-      return 0;
-    }
-  } else {
-    for (int j = 0; j < n_dist; j++) {
-      if (!code_generator_binary_emit_operand_load(generator, context,
-                                                   dist_src[j], kGp[j])) {
-        return 0;
-      }
-    }
-    if (!code_generator_binary_emit_operand_load(generator, context,
-                                                 &instruction->lhs,
-                                                 BINARY_GP_R10)) {
+  if (k->operands_marshaled) {
+    return binary_emit_mov_reg_reg(b, BINARY_GP_R10, VLOOP_GP[k->n_dist]);
+  }
+  for (j = 0; j < k->n_dist; j++) {
+    if (!code_generator_binary_emit_operand_load(k->generator, k->context,
+                                                 k->dist_src[j],
+                                                 VLOOP_GP[j])) {
       return 0;
     }
   }
-  if (has_iota && !binary_emit_mov_reg_imm64(b, BINARY_GP_R11, 0)) {
-    return 0;
-  }
+  return code_generator_binary_emit_operand_load(
+      k->generator, k->context, &k->instruction->lhs, BINARY_GP_R10);
+}
 
-  for (int c = 0; c < n_consts; c++) {
-    uint64_t bits = 0;
-    if (i32) {
-      uint32_t iv = (uint32_t)(uint64_t)args[consts_off + c].int_value;
-      bits = (uint64_t)iv | ((uint64_t)iv << 32);
-    } else if (f32) {
-      float fv = (float)args[consts_off + c].float_value;
-      uint32_t fb = 0;
-      memcpy(&fb, &fv, sizeof(fb));
-      bits = (uint64_t)fb | ((uint64_t)fb << 32);
-    } else {
-      double dv = args[consts_off + c].float_value;
-      memcpy(&bits, &dv, sizeof(bits));
-    }
+static uint64_t vloop_const_bits(const VloopKernel *k, const IROperand *op) {
+  uint64_t bits = 0;
+  if (k->i32) {
+    uint32_t iv = (uint32_t)(uint64_t)op->int_value;
+    return (uint64_t)iv | ((uint64_t)iv << 32);
+  }
+  if (k->f32) {
+    float fv = (float)op->float_value;
+    uint32_t fb = 0;
+    memcpy(&fb, &fv, sizeof(fb));
+    return (uint64_t)fb | ((uint64_t)fb << 32);
+  }
+  {
+    double dv = op->float_value;
+    memcpy(&bits, &dv, sizeof(bits));
+  }
+  return bits;
+}
+
+static int vloop_emit_slots(VloopKernel *k) {
+  BinaryCodeBuffer *b = k->b;
+  int c = 0;
+  int s = 0;
+  for (c = 0; c < k->n_consts; c++) {
+    uint64_t bits = vloop_const_bits(k, &k->args[k->consts_off + c]);
     if (!binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, bits) ||
         !binary_emit_movq_xmm_reg(b, BINARY_XMM0, BINARY_GP_RAX) ||
         !wcs_avx_vbroadcastsd_ymm_xmm(b, 0, 0) ||
@@ -960,13 +1039,13 @@ int code_generator_binary_emit_simd_vloop_f64(
       return 0;
     }
   }
-  for (int s = 0; s < n_scalars; s++) {
-    if (!code_generator_binary_emit_operand_load(generator, context,
-                                                 &args[scalars_off + s],
-                                                 BINARY_GP_RAX)) {
+  for (s = 0; s < k->n_scalars; s++) {
+    if (!code_generator_binary_emit_operand_load(
+            k->generator, k->context, &k->args[k->scalars_off + s],
+            BINARY_GP_RAX)) {
       return 0;
     }
-    if (f32) {
+    if (k->f32) {
       if (!wcs_broadcast_i32_to_ymm(b, 0, BINARY_GP_RAX)) {
         return 0;
       }
@@ -974,532 +1053,582 @@ int code_generator_binary_emit_simd_vloop_f64(
                !wcs_avx_vbroadcastsd_ymm_xmm(b, 0, 0)) {
       return 0;
     }
-    if (!wcs_avx_vmovups_mem_ymm(b, BINARY_GP_RSP, 32 * (n_consts + s), 0)) {
+    if (!wcs_avx_vmovups_mem_ymm(b, BINARY_GP_RSP, 32 * (k->n_consts + s),
+                                 0)) {
       return 0;
     }
   }
-  if (has_iota) {
-    if (f32) {
-      if (!binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, 0x0000000100000000ULL) ||
-          !binary_emit_movq_xmm_reg(b, BINARY_XMM0, BINARY_GP_RAX) ||
-          !binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, 0x0000000300000002ULL) ||
-          !binary_emit_movq_xmm_reg(b, BINARY_XMM2, BINARY_GP_RAX) ||
-          !wcs_avx_vpunpcklqdq_xmm(b, 0, 0, 2) ||
-          !binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, 0x0000000500000004ULL) ||
-          !binary_emit_movq_xmm_reg(b, BINARY_XMM1, BINARY_GP_RAX) ||
-          !binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, 0x0000000700000006ULL) ||
-          !binary_emit_movq_xmm_reg(b, BINARY_XMM2, BINARY_GP_RAX) ||
-          !wcs_avx_vpunpcklqdq_xmm(b, 1, 1, 2) ||
-          !wcs_avx_vperm2i128(b, IOTA_CONST, 0, 1, 0x20)) {
-        return 0;
-      }
-    } else if (!binary_emit_mov_reg_imm64(b, BINARY_GP_RAX,
-                                          0x0000000100000000ULL) ||
-               !binary_emit_movq_xmm_reg(b, BINARY_XMM0, BINARY_GP_RAX) ||
-               !binary_emit_mov_reg_imm64(b, BINARY_GP_RAX,
-                                          0x0000000300000002ULL) ||
-               !binary_emit_movq_xmm_reg(b, BINARY_XMM1, BINARY_GP_RAX) ||
-               !wcs_avx_vpunpcklqdq_xmm(b, IOTA_CONST, 0, 1)) {
-      return 0;
-    }
-  }
+  return 1;
+}
 
-  if (elem8 && !is_reduce &&
+static int vloop_emit_iota_vector(VloopKernel *k) {
+  BinaryCodeBuffer *b = k->b;
+  if (!k->has_iota) {
+    return 1;
+  }
+  if (k->f32) {
+    return binary_emit_mov_reg_imm64(b, BINARY_GP_RAX,
+                                     0x0000000100000000ULL) &&
+           binary_emit_movq_xmm_reg(b, BINARY_XMM0, BINARY_GP_RAX) &&
+           binary_emit_mov_reg_imm64(b, BINARY_GP_RAX,
+                                     0x0000000300000002ULL) &&
+           binary_emit_movq_xmm_reg(b, BINARY_XMM2, BINARY_GP_RAX) &&
+           wcs_avx_vpunpcklqdq_xmm(b, 0, 0, 2) &&
+           binary_emit_mov_reg_imm64(b, BINARY_GP_RAX,
+                                     0x0000000500000004ULL) &&
+           binary_emit_movq_xmm_reg(b, BINARY_XMM1, BINARY_GP_RAX) &&
+           binary_emit_mov_reg_imm64(b, BINARY_GP_RAX,
+                                     0x0000000700000006ULL) &&
+           binary_emit_movq_xmm_reg(b, BINARY_XMM2, BINARY_GP_RAX) &&
+           wcs_avx_vpunpcklqdq_xmm(b, 1, 1, 2) &&
+           wcs_avx_vperm2i128(b, VLOOP_IOTA_CONST, 0, 1, 0x20);
+  }
+  return binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, 0x0000000100000000ULL) &&
+         binary_emit_movq_xmm_reg(b, BINARY_XMM0, BINARY_GP_RAX) &&
+         binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, 0x0000000300000002ULL) &&
+         binary_emit_movq_xmm_reg(b, BINARY_XMM1, BINARY_GP_RAX) &&
+         wcs_avx_vpunpcklqdq_xmm(b, VLOOP_IOTA_CONST, 0, 1);
+}
+
+static int vloop_emit_accumulator(VloopKernel *k) {
+  BinaryCodeBuffer *b = k->b;
+  if (k->elem8 && !k->is_reduce &&
       (!binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, 0x000000FF000000FFULL) ||
        !binary_emit_movq_xmm_reg(b, BINARY_XMM0, BINARY_GP_RAX) ||
-       !wcs_avx_vbroadcastsd_ymm_xmm(b, BYTE_MASK, 0))) {
+       !wcs_avx_vbroadcastsd_ymm_xmm(b, VLOOP_BYTE_MASK, 0))) {
     return 0;
   }
-  if (is_minmax) {
-    if (!code_generator_binary_emit_operand_load(generator, context,
-                                                 &instruction->dest,
+  if (k->is_minmax) {
+    if (!code_generator_binary_emit_operand_load(k->generator, k->context,
+                                                 &k->instruction->dest,
                                                  BINARY_GP_RAX)) {
       return 0;
     }
-    if (f32) {
-      if (!wcs_broadcast_i32_to_ymm(b, 2, BINARY_GP_RAX)) {
-        return 0;
-      }
-    } else if (!binary_emit_movq_xmm_reg(b, BINARY_XMM2, BINARY_GP_RAX) ||
-               !wcs_avx_vbroadcastsd_ymm_xmm(b, 2, 2)) {
-      return 0;
+    if (k->f32) {
+      return wcs_broadcast_i32_to_ymm(b, 2, BINARY_GP_RAX);
     }
-  } else if (is_reduce) {
-    if (i32) {
-      if (!wcs_avx_vpxor_ymm(b, 2, 2, 2)) {
-        return 0;
-      }
-    } else if (!code_generator_binary_emit_operand_load(generator, context,
-                                                        &instruction->dest,
-                                                        BINARY_GP_RAX) ||
-               !(f32 ? binary_emit_movd_xmm_reg(b, BINARY_XMM3, BINARY_GP_RAX)
-                     : binary_emit_movq_xmm_reg(b, BINARY_XMM3, BINARY_GP_RAX)) ||
-               !wcs_avx_vpxor_ymm(b, 2, 2, 2)) {
-      return 0;
-    }
+    return binary_emit_movq_xmm_reg(b, BINARY_XMM2, BINARY_GP_RAX) &&
+           wcs_avx_vbroadcastsd_ymm_xmm(b, 2, 2);
   }
-
-  size_t j_overlap[2 * VLOOP_KERNEL_MAX_BASES];
-  int n_overlap = 0;
-  if (!is_reduce) {
-    int shift = 0;
-    while ((1 << shift) < elem_bytes) {
-      shift++;
-    }
-    for (int j = 1; j < n_dist; j++) {
-      for (int dir = 0; dir < 2; dir++) {
-        int lo = dir ? (int)kGp[j] : (int)dst_reg;
-        int hi = dir ? (int)dst_reg : (int)kGp[j];
-        if (!binary_emit_mov_reg_reg(b, BINARY_GP_RAX, (BinaryGpRegister)hi) ||
-            !wcs_sub_reg_reg64(b, BINARY_GP_RAX, lo)) {
-          return 0;
-        }
-        if (shift && !wcs_shift_reg_imm(b, BINARY_GP_RAX, 1,
-                                        (unsigned char)shift)) {
-          return 0;
-        }
-        if (!wcs_cmp_reg_reg64(b, BINARY_GP_RAX, BINARY_GP_R10) ||
-            !wcs_jcc(b, 0x82 , &j_overlap[n_overlap++])) {
-          return 0;
-        }
-      }
-    }
+  if (!k->is_reduce) {
+    return 1;
   }
+  if (k->i32) {
+    return wcs_avx_vpxor_ymm(b, 2, 2, 2);
+  }
+  return code_generator_binary_emit_operand_load(k->generator, k->context,
+                                                 &k->instruction->dest,
+                                                 BINARY_GP_RAX) &&
+         (k->f32 ? binary_emit_movd_xmm_reg(b, BINARY_XMM3, BINARY_GP_RAX)
+                 : binary_emit_movq_xmm_reg(b, BINARY_XMM3, BINARY_GP_RAX)) &&
+         wcs_avx_vpxor_ymm(b, 2, 2, 2);
+}
 
-  size_t vec_top = b->size;
-  size_t j_tail = 0;
-  if (!wcs_cmp_reg_imm8(b, BINARY_GP_R10, lanes) ||
-      !wcs_jcc(b, 0x82 , &j_tail)) {
+static int vloop_emit_prologue(VloopKernel *k) {
+  if (!vloop_emit_bases(k)) {
     return 0;
   }
-  {
-    int pool[VLOOP_KERNEL_POOL_MAX];
-    int nfree = pool_n;
-    for (int i = 0; i < pool_n; i++) {
-      pool[i] = kPool[i];
+  if (k->has_iota && !binary_emit_mov_reg_imm64(k->b, BINARY_GP_R11, 0)) {
+    return 0;
+  }
+  return vloop_emit_slots(k) && vloop_emit_iota_vector(k) &&
+         vloop_emit_accumulator(k);
+}
+
+static int vloop_emit_overlap_guards(VloopKernel *k, size_t *j_overlap,
+                                     int *n_overlap) {
+  BinaryCodeBuffer *b = k->b;
+  int shift = 0;
+  int j = 0;
+  if (k->is_reduce) {
+    return 1;
+  }
+  while ((1 << shift) < k->elem_bytes) {
+    shift++;
+  }
+  for (j = 1; j < k->n_dist; j++) {
+    for (int dir = 0; dir < 2; dir++) {
+      int lo = dir ? (int)VLOOP_GP[j] : (int)k->dst_reg;
+      int hi = dir ? (int)k->dst_reg : (int)VLOOP_GP[j];
+      if (!binary_emit_mov_reg_reg(b, BINARY_GP_RAX, (BinaryGpRegister)hi) ||
+          !wcs_sub_reg_reg64(b, BINARY_GP_RAX, lo)) {
+        return 0;
+      }
+      if (shift &&
+          !wcs_shift_reg_imm(b, BINARY_GP_RAX, 1, (unsigned char)shift)) {
+        return 0;
+      }
+      if (!wcs_cmp_reg_reg64(b, BINARY_GP_RAX, BINARY_GP_R10) ||
+          !wcs_jcc(b, 0x82, &j_overlap[(*n_overlap)++])) {
+        return 0;
+      }
     }
-    int vstk[VLOOP_KERNEL_MAX_NODES];
-    int nv = 0;
-    for (int i = 0; i < n_nodes; i++) {
-      int tag = (int)args[nodes_off + 3 * i].int_value;
-      int op0 = (int)args[nodes_off + 3 * i + 1].int_value;
-      int op1 = (int)args[nodes_off + 3 * i + 2].int_value;
-      if (vloop_kernel_tag_is_leaf(tag)) {
-        if (nfree <= 0) {
-          code_generator_set_error(generator, "vloop reg budget");
-          return 0;
-        }
-        int R = pool[--nfree];
-        int ok = 0;
-        if (tag == VLOOP_K_LOAD) {
-          ok = elem8 ? (elem8_unsigned
-                            ? wcs_avx_vpmovzxbd_ymm_mem(b, R, arr_reg[op0], 0)
-                            : wcs_avx_vpmovsxbd_ymm_mem(b, R, arr_reg[op0], 0))
-                     : wcs_avx_vmovups_ymm_mem(b, R, arr_reg[op0], 0);
-        } else if (tag == VLOOP_K_CONST) {
-          ok = wcs_avx_vmovups_ymm_mem(b, R, BINARY_GP_RSP, 32 * op0);
-        } else if (tag == VLOOP_K_SCALAR) {
-          ok = wcs_avx_vmovups_ymm_mem(b, R, BINARY_GP_RSP,
-                                       32 * (n_consts + op0));
-        } else {
-          ok = wcs_broadcast_i32_to_ymm(b, R, BINARY_GP_R11) &&
-               wcs_avx_vpaddd_ymm(b, R, R, IOTA_CONST) &&
-               (i32 ? 1
-                    : (f32 ? wcs_avx_vcvtdq2ps_ymm(b, R, R)
+  }
+  return 1;
+}
+
+static void vloop_stack_reset(const VloopKernel *k, VloopStack *st) {
+  int i = 0;
+  st->nfree = k->pool_n;
+  st->nv = 0;
+  for (i = 0; i < k->pool_n; i++) {
+    st->pool[i] = k->pool_src[i];
+  }
+}
+
+static int vloop_shift_emit(VloopKernel *k, int ra, int tag, int op1) {
+  BinaryCodeBuffer *b = k->b;
+  if (tag == VLOOP_K_SHL) {
+    return wcs_avx_vpslld_ymm_imm(b, ra, ra, (unsigned char)op1);
+  }
+  if (tag == VLOOP_K_SAR) {
+    return wcs_avx_vpsrad_ymm_imm(b, ra, ra, (unsigned char)op1);
+  }
+  return wcs_avx_vpsrld_ymm_imm(b, ra, ra, (unsigned char)op1);
+}
+
+static int vloop_select_emit(VloopKernel *k, VloopStack *st) {
+  BinaryCodeBuffer *b = k->b;
+  int relse = st->vstk[--st->nv];
+  int rthen = st->vstk[--st->nv];
+  int rmask = st->vstk[--st->nv];
+  if (!wcs_avx_vpxor_ymm(b, rthen, rthen, relse) ||
+      !wcs_avx_vpand_ymm(b, rthen, rthen, rmask) ||
+      !wcs_avx_vpxor_ymm(b, rthen, rthen, relse)) {
+    return 0;
+  }
+  st->pool[st->nfree++] = relse;
+  st->pool[st->nfree++] = rmask;
+  st->vstk[st->nv++] = rthen;
+  return 1;
+}
+
+static int vloop_tag_is_shift(int tag) {
+  return tag == VLOOP_K_SHL || tag == VLOOP_K_SAR || tag == VLOOP_K_SHR;
+}
+
+static int vloop_vec_leaf(VloopKernel *k, VloopStack *st, int tag, int op0) {
+  BinaryCodeBuffer *b = k->b;
+  int R = 0;
+  int ok = 0;
+  if (st->nfree <= 0) {
+    code_generator_set_error(k->generator, "vloop reg budget");
+    return 0;
+  }
+  R = st->pool[--st->nfree];
+  if (tag == VLOOP_K_LOAD) {
+    ok = k->elem8
+             ? (k->elem8_unsigned
+                    ? wcs_avx_vpmovzxbd_ymm_mem(b, R, k->arr_reg[op0], 0)
+                    : wcs_avx_vpmovsxbd_ymm_mem(b, R, k->arr_reg[op0], 0))
+             : wcs_avx_vmovups_ymm_mem(b, R, k->arr_reg[op0], 0);
+  } else if (tag == VLOOP_K_CONST) {
+    ok = wcs_avx_vmovups_ymm_mem(b, R, BINARY_GP_RSP, 32 * op0);
+  } else if (tag == VLOOP_K_SCALAR) {
+    ok = wcs_avx_vmovups_ymm_mem(b, R, BINARY_GP_RSP,
+                                 32 * (k->n_consts + op0));
+  } else {
+    ok = wcs_broadcast_i32_to_ymm(b, R, BINARY_GP_R11) &&
+         wcs_avx_vpaddd_ymm(b, R, R, VLOOP_IOTA_CONST) &&
+         (k->i32 ? 1
+                 : (k->f32 ? wcs_avx_vcvtdq2ps_ymm(b, R, R)
                            : wcs_avx_vcvtdq2pd_ymm_xmm(b, R, R)));
-        }
-        if (!ok) {
-          return 0;
-        }
-        vstk[nv++] = R;
-      } else if (tag == VLOOP_K_SHL || tag == VLOOP_K_SAR ||
-                 tag == VLOOP_K_SHR) {
-        if (nv < 1 || !i32) {
-          code_generator_set_error(generator, "vloop shift");
-          return 0;
-        }
-        int ra = vstk[nv - 1];
-        if (!(tag == VLOOP_K_SHL
-                  ? wcs_avx_vpslld_ymm_imm(b, ra, ra, (unsigned char)op1)
-                  : tag == VLOOP_K_SAR
-                        ? wcs_avx_vpsrad_ymm_imm(b, ra, ra, (unsigned char)op1)
-                        : wcs_avx_vpsrld_ymm_imm(b, ra, ra,
-                                                 (unsigned char)op1))) {
-          return 0;
-        }
-      } else if (tag == VLOOP_K_PAIR) {
-        if (nv < 2) {
-          code_generator_set_error(generator, "vloop pair");
-          return 0;
-        }
-      } else if (tag == VLOOP_K_SELECT) {
-        if (nv < 3 || !i32) {
-          code_generator_set_error(generator, "vloop select");
-          return 0;
-        }
-        int relse = vstk[--nv];
-        int rthen = vstk[--nv];
-        int rmask = vstk[--nv];
-        if (!wcs_avx_vpxor_ymm(b, rthen, rthen, relse) ||
-            !wcs_avx_vpand_ymm(b, rthen, rthen, rmask) ||
-            !wcs_avx_vpxor_ymm(b, rthen, rthen, relse)) {
-          return 0;
-        }
-        pool[nfree++] = relse;
-        pool[nfree++] = rmask;
-        vstk[nv++] = rthen;
-      } else {
-        if (nv < 2) {
-          code_generator_set_error(generator, "vloop stack");
-          return 0;
-        }
-        int rb = vstk[--nv];
-        int ra = vstk[--nv];
-        int ok = 0;
-        switch (tag) {
-        case VLOOP_K_ADD:
-          ok = i32 ? wcs_avx_vpaddd_ymm(b, ra, ra, rb)
-                   : (f32 ? wcs_avx_vaddps_ymm(b, ra, ra, rb)
-                          : wcs_avx_vaddpd_ymm(b, ra, ra, rb));
-          break;
-        case VLOOP_K_SUB:
-          ok = i32 ? wcs_avx_vpsubd_ymm(b, ra, ra, rb)
-                   : (f32 ? wcs_avx_vsubps_ymm(b, ra, ra, rb)
-                          : wcs_avx_vsubpd_ymm(b, ra, ra, rb));
-          break;
-        case VLOOP_K_MUL:
-          ok = i32 ? wcs_avx_vpmulld_ymm(b, ra, ra, rb)
-                   : (f32 ? wcs_avx_vmulps_ymm(b, ra, ra, rb)
-                          : wcs_avx_vmulpd_ymm(b, ra, ra, rb));
-          break;
-        case VLOOP_K_DIV:
-          if (i32) {
-            code_generator_set_error(generator, "vloop int div");
-            return 0;
-          }
-          ok = f32 ? wcs_avx_vdivps_ymm(b, ra, ra, rb)
-                   : wcs_avx_vdivpd_ymm(b, ra, ra, rb);
-          break;
-        case VLOOP_K_AND:
-        case VLOOP_K_OR:
-        case VLOOP_K_XOR:
-          if (!i32) {
-            code_generator_set_error(generator, "vloop float bitop");
-            return 0;
-          }
-          ok = tag == VLOOP_K_AND
-                   ? wcs_avx_vpand_ymm(b, ra, ra, rb)
-                   : (tag == VLOOP_K_OR ? wcs_avx_vpor_ymm(b, ra, ra, rb)
-                                        : wcs_avx_vpxor_ymm(b, ra, ra, rb));
-          break;
-        case VLOOP_K_MIN:
-        case VLOOP_K_MAX:
-        case VLOOP_K_CMPGT:
-        case VLOOP_K_CMPEQ:
-          if (!i32) {
-            code_generator_set_error(generator, "vloop float compare");
-            return 0;
-          }
-          ok = tag == VLOOP_K_MIN
-                   ? wcs_avx_vpminsd_ymm(b, ra, ra, rb)
-                   : tag == VLOOP_K_MAX
-                         ? wcs_avx_vpmaxsd_ymm(b, ra, ra, rb)
-                         : tag == VLOOP_K_CMPGT
-                               ? wcs_avx_vpcmpgtd_ymm(b, ra, ra, rb)
-                               : wcs_avx_vpcmpeqd_ymm(b, ra, ra, rb);
-          break;
-        default: code_generator_set_error(generator, "vloop op"); return 0;
-        }
-        if (!ok) {
-          return 0;
-        }
-        pool[nfree++] = rb;
-        vstk[nv++] = ra;
-        (void)op0;
-      }
-    }
-    if (nv != 1) {
-      code_generator_set_error(generator, "vloop root");
-      return 0;
-    }
-    if (is_minmax) {
-      if (!(i32 ? (is_max ? wcs_avx_vpmaxsd_ymm(b, 2, vstk[0], 2)
-                          : wcs_avx_vpminsd_ymm(b, 2, vstk[0], 2))
-                : (f32 ? (is_max ? wcs_avx_vmaxps_ymm(b, 2, vstk[0], 2)
-                                 : wcs_avx_vminps_ymm(b, 2, vstk[0], 2))
-                       : (is_max ? wcs_avx_vmaxpd_ymm(b, 2, vstk[0], 2)
-                                 : wcs_avx_vminpd_ymm(b, 2, vstk[0], 2))))) {
-        return 0;
-      }
-    } else if (is_reduce) {
-      if (!(i32 ? wcs_avx_vpaddd_ymm(b, 2, 2, vstk[0])
-                : (f32 ? wcs_avx_vaddps_ymm(b, 2, 2, vstk[0])
-                       : wcs_avx_vaddpd_ymm(b, 2, 2, vstk[0])))) {
-        return 0;
-      }
-    } else if (elem8) {
-      int R = vstk[0];
-      if (!wcs_avx_vpand_ymm(b, R, R, BYTE_MASK) ||
-          !wcs_avx_vpackusdw_ymm(b, R, R, R) ||
-          !wcs_avx_vpermq_ymm(b, R, R, 0x08) ||
-          !wcs_avx_vpackuswb_ymm(b, R, R, R) ||
-          !wcs_movsd_mem_xmm(b, dst_reg, 0, R)) {
-        return 0;
-      }
-    } else if (!wcs_avx_vmovups_mem_ymm(b, dst_reg, 0, vstk[0])) {
-      return 0;
-    }
   }
-  for (int j = 0; j < n_dist; j++) {
-    if (!wcs_addsub_reg_imm8(b, kGp[j], 0, vec_stride)) {
-      return 0;
-    }
-  }
-  if (has_iota && !wcs_addsub_reg_imm8(b, BINARY_GP_R11, 0, lanes)) {
+  if (!ok) {
     return 0;
   }
-  if (!wcs_addsub_reg_imm8(b, BINARY_GP_R10, 1, lanes)) {
-    return 0;
-  }
-  {
-    size_t j_back = 0;
-    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, vec_top)) {
+  st->vstk[st->nv++] = R;
+  return 1;
+}
+
+static int vloop_vec_binop(VloopKernel *k, int tag, int ra, int rb) {
+  BinaryCodeBuffer *b = k->b;
+  switch (tag) {
+  case VLOOP_K_ADD:
+    return k->i32 ? wcs_avx_vpaddd_ymm(b, ra, ra, rb)
+                  : (k->f32 ? wcs_avx_vaddps_ymm(b, ra, ra, rb)
+                            : wcs_avx_vaddpd_ymm(b, ra, ra, rb));
+  case VLOOP_K_SUB:
+    return k->i32 ? wcs_avx_vpsubd_ymm(b, ra, ra, rb)
+                  : (k->f32 ? wcs_avx_vsubps_ymm(b, ra, ra, rb)
+                            : wcs_avx_vsubpd_ymm(b, ra, ra, rb));
+  case VLOOP_K_MUL:
+    return k->i32 ? wcs_avx_vpmulld_ymm(b, ra, ra, rb)
+                  : (k->f32 ? wcs_avx_vmulps_ymm(b, ra, ra, rb)
+                            : wcs_avx_vmulpd_ymm(b, ra, ra, rb));
+  case VLOOP_K_DIV:
+    if (k->i32) {
+      code_generator_set_error(k->generator, "vloop int div");
       return 0;
     }
+    return k->f32 ? wcs_avx_vdivps_ymm(b, ra, ra, rb)
+                  : wcs_avx_vdivpd_ymm(b, ra, ra, rb);
+  case VLOOP_K_AND:
+  case VLOOP_K_OR:
+  case VLOOP_K_XOR:
+    if (!k->i32) {
+      code_generator_set_error(k->generator, "vloop float bitop");
+      return 0;
+    }
+    return tag == VLOOP_K_AND
+               ? wcs_avx_vpand_ymm(b, ra, ra, rb)
+               : (tag == VLOOP_K_OR ? wcs_avx_vpor_ymm(b, ra, ra, rb)
+                                    : wcs_avx_vpxor_ymm(b, ra, ra, rb));
+  case VLOOP_K_MIN:
+  case VLOOP_K_MAX:
+  case VLOOP_K_CMPGT:
+  case VLOOP_K_CMPEQ:
+    if (!k->i32) {
+      code_generator_set_error(k->generator, "vloop float compare");
+      return 0;
+    }
+    return tag == VLOOP_K_MIN
+               ? wcs_avx_vpminsd_ymm(b, ra, ra, rb)
+               : tag == VLOOP_K_MAX
+                     ? wcs_avx_vpmaxsd_ymm(b, ra, ra, rb)
+                     : tag == VLOOP_K_CMPGT
+                           ? wcs_avx_vpcmpgtd_ymm(b, ra, ra, rb)
+                           : wcs_avx_vpcmpeqd_ymm(b, ra, ra, rb);
+  default:
+    code_generator_set_error(k->generator, "vloop op");
+    return 0;
+  }
+}
+
+static int vloop_vec_node(VloopKernel *k, VloopStack *st, int index) {
+  const IROperand *node = &k->args[k->nodes_off + 3 * index];
+  int tag = (int)node[0].int_value;
+  int ra = 0;
+  int rb = 0;
+  if (vloop_kernel_tag_is_leaf(tag)) {
+    return vloop_vec_leaf(k, st, tag, (int)node[1].int_value);
+  }
+  if (vloop_tag_is_shift(tag)) {
+    if (st->nv < 1 || !k->i32) {
+      code_generator_set_error(k->generator, "vloop shift");
+      return 0;
+    }
+    return vloop_shift_emit(k, st->vstk[st->nv - 1], tag,
+                            (int)node[2].int_value);
+  }
+  if (tag == VLOOP_K_PAIR) {
+    if (st->nv < 2) {
+      code_generator_set_error(k->generator, "vloop pair");
+      return 0;
+    }
+    return 1;
+  }
+  if (tag == VLOOP_K_SELECT) {
+    if (st->nv < 3 || !k->i32) {
+      code_generator_set_error(k->generator, "vloop select");
+      return 0;
+    }
+    return vloop_select_emit(k, st);
+  }
+  if (st->nv < 2) {
+    code_generator_set_error(k->generator, "vloop stack");
+    return 0;
+  }
+  rb = st->vstk[--st->nv];
+  ra = st->vstk[--st->nv];
+  if (!vloop_vec_binop(k, tag, ra, rb)) {
+    return 0;
+  }
+  st->pool[st->nfree++] = rb;
+  st->vstk[st->nv++] = ra;
+  return 1;
+}
+
+static int vloop_vec_store(VloopKernel *k, int R) {
+  BinaryCodeBuffer *b = k->b;
+  if (k->is_minmax) {
+    return k->i32
+               ? (k->is_max ? wcs_avx_vpmaxsd_ymm(b, 2, R, 2)
+                            : wcs_avx_vpminsd_ymm(b, 2, R, 2))
+               : (k->f32 ? (k->is_max ? wcs_avx_vmaxps_ymm(b, 2, R, 2)
+                                      : wcs_avx_vminps_ymm(b, 2, R, 2))
+                         : (k->is_max ? wcs_avx_vmaxpd_ymm(b, 2, R, 2)
+                                      : wcs_avx_vminpd_ymm(b, 2, R, 2)));
+  }
+  if (k->is_reduce) {
+    return k->i32 ? wcs_avx_vpaddd_ymm(b, 2, 2, R)
+                  : (k->f32 ? wcs_avx_vaddps_ymm(b, 2, 2, R)
+                            : wcs_avx_vaddpd_ymm(b, 2, 2, R));
+  }
+  if (k->elem8) {
+    return wcs_avx_vpand_ymm(b, R, R, VLOOP_BYTE_MASK) &&
+           wcs_avx_vpackusdw_ymm(b, R, R, R) &&
+           wcs_avx_vpermq_ymm(b, R, R, 0x08) &&
+           wcs_avx_vpackuswb_ymm(b, R, R, R) &&
+           wcs_movsd_mem_xmm(b, k->dst_reg, 0, R);
+  }
+  return wcs_avx_vmovups_mem_ymm(b, k->dst_reg, 0, R);
+}
+
+static int vloop_emit_vector_body(VloopKernel *k) {
+  VloopStack st;
+  int i = 0;
+  vloop_stack_reset(k, &st);
+  for (i = 0; i < k->n_nodes; i++) {
+    if (!vloop_vec_node(k, &st, i)) {
+      return 0;
+    }
+  }
+  if (st.nv != 1) {
+    code_generator_set_error(k->generator, "vloop root");
+    return 0;
+  }
+  return vloop_vec_store(k, st.vstk[0]);
+}
+
+static int vloop_tail_leaf(VloopKernel *k, VloopStack *st, int tag, int op0) {
+  BinaryCodeBuffer *b = k->b;
+  int R = st->pool[--st->nfree];
+  int ok = 0;
+  if (tag == VLOOP_K_LOAD && k->elem8) {
+    ok = (k->elem8_unsigned
+              ? binary_emit_movzx_reg_mem8(
+                    b, BINARY_GP_RAX, (BinaryGpRegister)k->arr_reg[op0], 0)
+              : binary_emit_movsx_reg_mem8(
+                    b, BINARY_GP_RAX, (BinaryGpRegister)k->arr_reg[op0], 0)) &&
+         wcs_avx_vmovd_xmm_reg(b, R, BINARY_GP_RAX);
+  } else if (tag == VLOOP_K_LOAD) {
+    ok = k->i32 ? wcs_avx_vmovd_xmm_mem(b, R, k->arr_reg[op0], 0)
+                : (k->f32 ? wcs_movss_xmm_mem(b, R, k->arr_reg[op0], 0)
+                          : wcs_movsd_xmm_mem(b, R, k->arr_reg[op0], 0));
+  } else if (tag == VLOOP_K_CONST || tag == VLOOP_K_SCALAR) {
+    int disp = 32 * (tag == VLOOP_K_CONST ? op0 : k->n_consts + op0);
+    ok = k->i32 ? wcs_avx_vmovd_xmm_mem(b, R, BINARY_GP_RSP, disp)
+                : (k->f32 ? wcs_movss_xmm_mem(b, R, BINARY_GP_RSP, disp)
+                          : wcs_movsd_xmm_mem(b, R, BINARY_GP_RSP, disp));
+  } else {
+    ok = k->i32 ? wcs_avx_vmovd_xmm_reg(b, R, BINARY_GP_R11)
+                : (k->f32 ? binary_emit_cvtsi2ss_xmm_reg(
+                                b, (BinaryXmmRegister)R, BINARY_GP_R11)
+                          : binary_emit_cvtsi2sd_xmm_reg(
+                                b, (BinaryXmmRegister)R, BINARY_GP_R11));
+  }
+  if (!ok) {
+    return 0;
+  }
+  st->vstk[st->nv++] = R;
+  return 1;
+}
+
+static int vloop_tail_int_binop(VloopKernel *k, int tag, int ra, int rb) {
+  BinaryCodeBuffer *b = k->b;
+  switch (tag) {
+  case VLOOP_K_ADD: return wcs_avx_vpaddd_ymm(b, ra, ra, rb);
+  case VLOOP_K_SUB: return wcs_avx_vpsubd_ymm(b, ra, ra, rb);
+  case VLOOP_K_MUL: return wcs_avx_vpmulld_ymm(b, ra, ra, rb);
+  case VLOOP_K_AND: return wcs_avx_vpand_ymm(b, ra, ra, rb);
+  case VLOOP_K_OR: return wcs_avx_vpor_ymm(b, ra, ra, rb);
+  case VLOOP_K_XOR: return wcs_avx_vpxor_ymm(b, ra, ra, rb);
+  case VLOOP_K_MIN: return wcs_avx_vpminsd_ymm(b, ra, ra, rb);
+  case VLOOP_K_MAX: return wcs_avx_vpmaxsd_ymm(b, ra, ra, rb);
+  case VLOOP_K_CMPGT: return wcs_avx_vpcmpgtd_ymm(b, ra, ra, rb);
+  case VLOOP_K_CMPEQ: return wcs_avx_vpcmpeqd_ymm(b, ra, ra, rb);
+  default: return 0;
+  }
+}
+
+static int vloop_tail_float_binop(VloopKernel *k, int tag, int ra, int rb) {
+  BinaryCodeBuffer *b = k->b;
+  BinaryXmmRegister A = (BinaryXmmRegister)ra;
+  BinaryXmmRegister B = (BinaryXmmRegister)rb;
+  switch (tag) {
+  case VLOOP_K_ADD:
+    return k->f32 ? binary_emit_addss_xmm_xmm(b, A, B)
+                  : binary_emit_addsd_xmm_xmm(b, A, B);
+  case VLOOP_K_SUB:
+    return k->f32 ? binary_emit_subss_xmm_xmm(b, A, B)
+                  : binary_emit_subsd_xmm_xmm(b, A, B);
+  case VLOOP_K_MUL:
+    return k->f32 ? binary_emit_mulss_xmm_xmm(b, A, B)
+                  : binary_emit_mulsd_xmm_xmm(b, A, B);
+  case VLOOP_K_DIV:
+    return k->f32 ? binary_emit_divss_xmm_xmm(b, A, B)
+                  : binary_emit_divsd_xmm_xmm(b, A, B);
+  default: return 0;
+  }
+}
+
+static int vloop_tail_node(VloopKernel *k, VloopStack *st, int index) {
+  const IROperand *node = &k->args[k->nodes_off + 3 * index];
+  int tag = (int)node[0].int_value;
+  int ra = 0;
+  int rb = 0;
+  if (vloop_kernel_tag_is_leaf(tag)) {
+    return vloop_tail_leaf(k, st, tag, (int)node[1].int_value);
+  }
+  if (vloop_tag_is_shift(tag)) {
+    return k->i32 && vloop_shift_emit(k, st->vstk[st->nv - 1], tag,
+                                      (int)node[2].int_value);
+  }
+  if (tag == VLOOP_K_PAIR) {
+    return st->nv >= 2;
+  }
+  if (tag == VLOOP_K_SELECT) {
+    if (st->nv < 3 || !k->i32) {
+      return 0;
+    }
+    return vloop_select_emit(k, st);
+  }
+  rb = st->vstk[--st->nv];
+  ra = st->vstk[--st->nv];
+  if (!(k->i32 ? vloop_tail_int_binop(k, tag, ra, rb)
+               : vloop_tail_float_binop(k, tag, ra, rb))) {
+    return 0;
+  }
+  st->pool[st->nfree++] = rb;
+  st->vstk[st->nv++] = ra;
+  return 1;
+}
+
+static int vloop_tail_store(VloopKernel *k, int R) {
+  BinaryCodeBuffer *b = k->b;
+  if (k->is_minmax) {
+    if (!(k->f32 ? wcs_avx_vpbroadcastd_ymm(b, R, R)
+                 : wcs_avx_vbroadcastsd_ymm_xmm(b, R, R))) {
+      return 0;
+    }
+    return k->i32
+               ? (k->is_max ? wcs_avx_vpmaxsd_ymm(b, 2, R, 2)
+                            : wcs_avx_vpminsd_ymm(b, 2, R, 2))
+               : (k->f32 ? (k->is_max ? wcs_avx_vmaxps_ymm(b, 2, R, 2)
+                                      : wcs_avx_vminps_ymm(b, 2, R, 2))
+                         : (k->is_max ? wcs_avx_vmaxpd_ymm(b, 2, R, 2)
+                                      : wcs_avx_vminpd_ymm(b, 2, R, 2)));
+  }
+  if (k->is_reduce) {
+    if (k->i32) {
+      return wcs_avx_vpaddd_ymm(b, 2, 2, R);
+    }
+    return k->f32
+               ? binary_emit_addss_xmm_xmm(b, BINARY_XMM3, (BinaryXmmRegister)R)
+               : binary_emit_addsd_xmm_xmm(b, BINARY_XMM3,
+                                           (BinaryXmmRegister)R);
+  }
+  if (k->elem8) {
+    return wcs_avx_vpextrb_mem_xmm(b, k->dst_reg, 0, R);
+  }
+  return k->i32 ? wcs_avx_vmovd_mem_xmm(b, k->dst_reg, 0, R)
+                : (k->f32 ? wcs_movss_mem_xmm(b, k->dst_reg, 0, R)
+                          : wcs_movsd_mem_xmm(b, k->dst_reg, 0, R));
+}
+
+static int vloop_emit_tail_body(VloopKernel *k) {
+  VloopStack st;
+  int i = 0;
+  vloop_stack_reset(k, &st);
+  for (i = 0; i < k->n_nodes; i++) {
+    if (!vloop_tail_node(k, &st, i)) {
+      return 0;
+    }
+  }
+  return vloop_tail_store(k, st.vstk[0]);
+}
+
+static int vloop_emit_advance(VloopKernel *k, int stride, int step) {
+  BinaryCodeBuffer *b = k->b;
+  int j = 0;
+  for (j = 0; j < k->n_dist; j++) {
+    if (!wcs_addsub_reg_imm8(b, VLOOP_GP[j], 0, stride)) {
+      return 0;
+    }
+  }
+  if (k->has_iota && !wcs_addsub_reg_imm8(b, BINARY_GP_R11, 0, step)) {
+    return 0;
+  }
+  return wcs_addsub_reg_imm8(b, BINARY_GP_R10, 1, step);
+}
+
+static int vloop_emit_reduce_result(VloopKernel *k) {
+  BinaryCodeBuffer *b = k->b;
+  if (!k->is_minmax && k->i32 &&
+      !code_generator_binary_emit_operand_load(k->generator, k->context,
+                                               &k->instruction->dest,
+                                               BINARY_GP_RAX)) {
+    return 0;
+  }
+  if (k->is_minmax) {
+    if (!(k->i32 ? wcs_reduce_ymm_i32_minmax_to_rax(b, k->is_max)
+                 : (k->f32 ? wcs_reduce_ps_minmax_to_rax(b, k->is_max)
+                           : wcs_reduce_pd_minmax_to_rax(b, k->is_max)))) {
+      return 0;
+    }
+  } else if (!(k->i32 ? wcs_reduce_ymm_i32_sum_to_rax(b, 2)
+                      : (k->f32 ? wcs_reduce_ps_acc_to_rax(b)
+                                : wcs_reduce_pd_acc_to_rax(b)))) {
+    return 0;
+  }
+  if (k->i32 &&
+      !(k->instruction->is_unsigned
+            ? wcs_mov_reg_reg32(b, BINARY_GP_RAX, BINARY_GP_RAX)
+            : binary_emit_movsxd_reg_reg32(b, BINARY_GP_RAX,
+                                           BINARY_GP_RAX))) {
+    return 0;
+  }
+  if (k->cbytes && !binary_emit_add_rsp_imm32(b, k->cbytes)) {
+    return 0;
+  }
+  return code_generator_binary_emit_destination_store(
+      k->generator, k->context, &k->instruction->dest, BINARY_GP_RAX);
+}
+
+int code_generator_binary_emit_simd_vloop_f64(
+    CodeGenerator *generator, BinaryFunctionContext *context,
+    const IRInstruction *instruction, int operands_marshaled) {
+  VloopKernel k = {0};
+  BinaryCodeBuffer *b = NULL;
+  size_t j_overlap[2 * VLOOP_KERNEL_MAX_BASES];
+  size_t vec_top = 0;
+  size_t tail_top = 0;
+  size_t j_tail = 0;
+  size_t j_done = 0;
+  size_t j_back = 0;
+  int n_overlap = 0;
+  int j = 0;
+
+  if (!vloop_decode(&k, generator, context, instruction, operands_marshaled)) {
+    return 0;
+  }
+  b = k.b;
+  if (!vloop_emit_prologue(&k) ||
+      !vloop_emit_overlap_guards(&k, j_overlap, &n_overlap)) {
+    return 0;
   }
 
-  if (!wcs_patch_here(b, j_tail)) {
+  vec_top = b->size;
+  if (!wcs_cmp_reg_imm8(b, BINARY_GP_R10, k.lanes) ||
+      !wcs_jcc(b, 0x82, &j_tail) || !vloop_emit_vector_body(&k) ||
+      !vloop_emit_advance(&k, k.vec_stride, k.lanes) ||
+      !wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, vec_top) ||
+      !wcs_patch_here(b, j_tail)) {
     return 0;
   }
-  for (int j = 0; j < n_overlap; j++) {
+  for (j = 0; j < n_overlap; j++) {
     if (!wcs_patch_here(b, j_overlap[j])) {
       return 0;
     }
   }
-  size_t tail_top = b->size;
-  size_t j_done = 0;
-  if (!wcs_cmp_reg_imm8(b, BINARY_GP_R10, 0) || !wcs_jcc(b, 0x84 , &j_done)) {
+
+  tail_top = b->size;
+  j_back = 0;
+  if (!wcs_cmp_reg_imm8(b, BINARY_GP_R10, 0) || !wcs_jcc(b, 0x84, &j_done) ||
+      !vloop_emit_tail_body(&k) || !vloop_emit_advance(&k, k.elem_bytes, 1) ||
+      !wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, tail_top) ||
+      !wcs_patch_here(b, j_done)) {
     return 0;
-  }
-  {
-    int pool[VLOOP_KERNEL_POOL_MAX];
-    int nfree = pool_n;
-    for (int i = 0; i < pool_n; i++) {
-      pool[i] = kPool[i];
-    }
-    int vstk[VLOOP_KERNEL_MAX_NODES];
-    int nv = 0;
-    for (int i = 0; i < n_nodes; i++) {
-      int tag = (int)args[nodes_off + 3 * i].int_value;
-      int op0 = (int)args[nodes_off + 3 * i + 1].int_value;
-      int op1 = (int)args[nodes_off + 3 * i + 2].int_value;
-      if (vloop_kernel_tag_is_leaf(tag)) {
-        int R = pool[--nfree];
-        int ok = 0;
-        if (tag == VLOOP_K_LOAD && elem8) {
-          ok = (elem8_unsigned
-                    ? binary_emit_movzx_reg_mem8(b, BINARY_GP_RAX,
-                                                 (BinaryGpRegister)arr_reg[op0], 0)
-                    : binary_emit_movsx_reg_mem8(b, BINARY_GP_RAX,
-                                                 (BinaryGpRegister)arr_reg[op0], 0)) &&
-               wcs_avx_vmovd_xmm_reg(b, R, BINARY_GP_RAX);
-        } else if (tag == VLOOP_K_LOAD) {
-          ok = i32 ? wcs_avx_vmovd_xmm_mem(b, R, arr_reg[op0], 0)
-                   : (f32 ? wcs_movss_xmm_mem(b, R, arr_reg[op0], 0)
-                          : wcs_movsd_xmm_mem(b, R, arr_reg[op0], 0));
-        } else if (tag == VLOOP_K_CONST || tag == VLOOP_K_SCALAR) {
-          int disp = 32 * (tag == VLOOP_K_CONST ? op0 : n_consts + op0);
-          ok = i32 ? wcs_avx_vmovd_xmm_mem(b, R, BINARY_GP_RSP, disp)
-                   : (f32 ? wcs_movss_xmm_mem(b, R, BINARY_GP_RSP, disp)
-                          : wcs_movsd_xmm_mem(b, R, BINARY_GP_RSP, disp));
-        } else {
-          ok = i32 ? wcs_avx_vmovd_xmm_reg(b, R, BINARY_GP_R11)
-                   : (f32 ? binary_emit_cvtsi2ss_xmm_reg(b, (BinaryXmmRegister)R,
-                                                         BINARY_GP_R11)
-                          : binary_emit_cvtsi2sd_xmm_reg(b, (BinaryXmmRegister)R,
-                                                         BINARY_GP_R11));
-        }
-        if (!ok) {
-          return 0;
-        }
-        vstk[nv++] = R;
-      } else if (tag == VLOOP_K_SHL || tag == VLOOP_K_SAR ||
-                 tag == VLOOP_K_SHR) {
-        int ra = vstk[nv - 1];
-        if (!i32 ||
-            !(tag == VLOOP_K_SHL
-                  ? wcs_avx_vpslld_ymm_imm(b, ra, ra, (unsigned char)op1)
-                  : tag == VLOOP_K_SAR
-                        ? wcs_avx_vpsrad_ymm_imm(b, ra, ra, (unsigned char)op1)
-                        : wcs_avx_vpsrld_ymm_imm(b, ra, ra,
-                                                 (unsigned char)op1))) {
-          return 0;
-        }
-      } else if (tag == VLOOP_K_PAIR) {
-        if (nv < 2) {
-          return 0;
-        }
-      } else if (tag == VLOOP_K_SELECT) {
-        int relse, rthen, rmask;
-        if (nv < 3 || !i32) {
-          return 0;
-        }
-        relse = vstk[--nv];
-        rthen = vstk[--nv];
-        rmask = vstk[--nv];
-        if (!wcs_avx_vpxor_ymm(b, rthen, rthen, relse) ||
-            !wcs_avx_vpand_ymm(b, rthen, rthen, rmask) ||
-            !wcs_avx_vpxor_ymm(b, rthen, rthen, relse)) {
-          return 0;
-        }
-        pool[nfree++] = relse;
-        pool[nfree++] = rmask;
-        vstk[nv++] = rthen;
-      } else if (i32) {
-        int rb = vstk[--nv];
-        int ra = vstk[--nv];
-        int ok = 0;
-        switch (tag) {
-        case VLOOP_K_ADD: ok = wcs_avx_vpaddd_ymm(b, ra, ra, rb); break;
-        case VLOOP_K_SUB: ok = wcs_avx_vpsubd_ymm(b, ra, ra, rb); break;
-        case VLOOP_K_MUL: ok = wcs_avx_vpmulld_ymm(b, ra, ra, rb); break;
-        case VLOOP_K_AND: ok = wcs_avx_vpand_ymm(b, ra, ra, rb); break;
-        case VLOOP_K_OR: ok = wcs_avx_vpor_ymm(b, ra, ra, rb); break;
-        case VLOOP_K_XOR: ok = wcs_avx_vpxor_ymm(b, ra, ra, rb); break;
-        case VLOOP_K_MIN: ok = wcs_avx_vpminsd_ymm(b, ra, ra, rb); break;
-        case VLOOP_K_MAX: ok = wcs_avx_vpmaxsd_ymm(b, ra, ra, rb); break;
-        case VLOOP_K_CMPGT: ok = wcs_avx_vpcmpgtd_ymm(b, ra, ra, rb); break;
-        case VLOOP_K_CMPEQ: ok = wcs_avx_vpcmpeqd_ymm(b, ra, ra, rb); break;
-        default: return 0;
-        }
-        if (!ok) {
-          return 0;
-        }
-        pool[nfree++] = rb;
-        vstk[nv++] = ra;
-      } else {
-        int rb = vstk[--nv];
-        int ra = vstk[--nv];
-        int ok = 0;
-        BinaryXmmRegister A = (BinaryXmmRegister)ra;
-        BinaryXmmRegister B = (BinaryXmmRegister)rb;
-        switch (tag) {
-        case VLOOP_K_ADD:
-          ok = f32 ? binary_emit_addss_xmm_xmm(b, A, B)
-                   : binary_emit_addsd_xmm_xmm(b, A, B);
-          break;
-        case VLOOP_K_SUB:
-          ok = f32 ? binary_emit_subss_xmm_xmm(b, A, B)
-                   : binary_emit_subsd_xmm_xmm(b, A, B);
-          break;
-        case VLOOP_K_MUL:
-          ok = f32 ? binary_emit_mulss_xmm_xmm(b, A, B)
-                   : binary_emit_mulsd_xmm_xmm(b, A, B);
-          break;
-        case VLOOP_K_DIV:
-          ok = f32 ? binary_emit_divss_xmm_xmm(b, A, B)
-                   : binary_emit_divsd_xmm_xmm(b, A, B);
-          break;
-        default: return 0;
-        }
-        if (!ok) {
-          return 0;
-        }
-        pool[nfree++] = rb;
-        vstk[nv++] = ra;
-      }
-    }
-    if (is_minmax) {
-      int R = vstk[0];
-      if (!(f32 ? wcs_avx_vpbroadcastd_ymm(b, R, R)
-                : wcs_avx_vbroadcastsd_ymm_xmm(b, R, R))) {
-        return 0;
-      }
-      if (!(i32 ? (is_max ? wcs_avx_vpmaxsd_ymm(b, 2, R, 2)
-                          : wcs_avx_vpminsd_ymm(b, 2, R, 2))
-                : (f32 ? (is_max ? wcs_avx_vmaxps_ymm(b, 2, R, 2)
-                                 : wcs_avx_vminps_ymm(b, 2, R, 2))
-                       : (is_max ? wcs_avx_vmaxpd_ymm(b, 2, R, 2)
-                                 : wcs_avx_vminpd_ymm(b, 2, R, 2))))) {
-        return 0;
-      }
-    } else if (is_reduce) {
-      if (i32) {
-        if (!wcs_avx_vpaddd_ymm(b, 2, 2, vstk[0])) {
-          return 0;
-        }
-      } else if (!(f32 ? binary_emit_addss_xmm_xmm(b, BINARY_XMM3,
-                                                   (BinaryXmmRegister)vstk[0])
-                       : binary_emit_addsd_xmm_xmm(b, BINARY_XMM3,
-                                                   (BinaryXmmRegister)vstk[0]))) {
-        return 0;
-      }
-    } else if (elem8) {
-      if (!wcs_avx_vpextrb_mem_xmm(b, dst_reg, 0, vstk[0])) {
-        return 0;
-      }
-    } else if (!(i32 ? wcs_avx_vmovd_mem_xmm(b, dst_reg, 0, vstk[0])
-                     : (f32 ? wcs_movss_mem_xmm(b, dst_reg, 0, vstk[0])
-                            : wcs_movsd_mem_xmm(b, dst_reg, 0, vstk[0])))) {
-      return 0;
-    }
-  }
-  for (int j = 0; j < n_dist; j++) {
-    if (!wcs_addsub_reg_imm8(b, kGp[j], 0, elem_bytes)) {
-      return 0;
-    }
-  }
-  if (has_iota && !wcs_addsub_reg_imm8(b, BINARY_GP_R11, 0, 1)) {
-    return 0;
-  }
-  if (!wcs_addsub_reg_imm8(b, BINARY_GP_R10, 1, 1)) {
-    return 0;
-  }
-  {
-    size_t j_back = 0;
-    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, tail_top)) {
-      return 0;
-    }
   }
 
-  if (!wcs_patch_here(b, j_done)) {
-    return 0;
-  }
-  if (is_reduce) {
-    if (!is_minmax && i32 &&
-        !code_generator_binary_emit_operand_load(generator, context,
-                                                 &instruction->dest,
-                                                 BINARY_GP_RAX)) {
-      return 0;
-    }
-    if (is_minmax) {
-      if (!(i32 ? wcs_reduce_ymm_i32_minmax_to_rax(b, is_max)
-                : (f32 ? wcs_reduce_ps_minmax_to_rax(b, is_max)
-                       : wcs_reduce_pd_minmax_to_rax(b, is_max)))) {
-        return 0;
-      }
-    } else if (!(i32 ? wcs_reduce_ymm_i32_sum_to_rax(b, 2)
-                     : (f32 ? wcs_reduce_ps_acc_to_rax(b)
-                            : wcs_reduce_pd_acc_to_rax(b)))) {
-      return 0;
-    }
-    if (i32 &&
-        !(instruction->is_unsigned
-              ? wcs_mov_reg_reg32(b, BINARY_GP_RAX, BINARY_GP_RAX)
-              : binary_emit_movsxd_reg_reg32(b, BINARY_GP_RAX, BINARY_GP_RAX))) {
-      return 0;
-    }
-    if (cbytes && !binary_emit_add_rsp_imm32(b, cbytes)) {
-      return 0;
-    }
-    return code_generator_binary_emit_destination_store(generator, context,
-                                                        &instruction->dest,
-                                                        BINARY_GP_RAX);
+  if (k.is_reduce) {
+    return vloop_emit_reduce_result(&k);
   }
   if (!wcs_avx_vzeroupper(b)) {
     return 0;
   }
-  if (cbytes && !binary_emit_add_rsp_imm32(b, cbytes)) {
+  if (k.cbytes && !binary_emit_add_rsp_imm32(b, k.cbytes)) {
     return 0;
   }
   return 1;

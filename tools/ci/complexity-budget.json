@@ -40,7 +40,6 @@
     "src/codegen/binary/simd_float.c::code_generator_binary_emit_simd_silu_f32_inline": 65,
     "src/codegen/binary/simd_float.c::code_generator_binary_emit_simd_sum_f32": 45,
     "src/codegen/binary/simd_float.c::code_generator_binary_emit_simd_sum_f64": 45,
-    "src/codegen/binary/simd_float.c::code_generator_binary_emit_simd_vloop_f64": 309,
     "src/codegen/binary/simd_int.c::code_generator_binary_emit_prefix_sum_i32": 64,
     "src/codegen/binary/simd_int.c::code_generator_binary_emit_simd_byte_map": 47,
     "src/codegen/binary/simd_int.c::code_generator_binary_emit_simd_clamp_i32": 56,
