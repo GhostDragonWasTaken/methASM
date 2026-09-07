@@ -1,76 +1,8 @@
 #include "ir_optimize_internal.h"
-#include "../../common.h" // mettle_free_string
-
-/* ============================================================================
- * Integer value-range analysis, and the range-driven rewrites it enables.
- *
- * The point of this file: the optimizer used to learn "this value cannot be
- * negative" one loop shape at a time. `positive_loop_div2_to_shift` turned
- * `x / 2` into `x >> 1` -- but ONLY for a symbol tested by `while (x > 1)`,
- * only for the divisor 2, and only for the first division in the body.
- * `mod_even_bitcheck` turned `x % 2^k` into `x & (2^k-1)` -- but only when the
- * result was immediately compared against zero and used exactly once. Every
- * other `n / 8`, `i % 16`, or `if (x >= 0) ... x / 4` in the language paid for
- * a full signed divide (or, on x86, the four-instruction biased-shift sequence
- * the magic-number lowering emits for a signed power-of-two divisor).
- *
- * What replaces them is one question asked generically: what is the range of
- * this operand HERE? Answer it once and a whole family of rewrites falls out
- * of the same fact -- power-of-two divide and remainder, whole-operation folds
- * (`x % c` is `x` when `0 <= x < c`), redundant mask removal, decided
- * comparisons, and resolved branches. Widening what the optimizer can prove
- * means adding a case to vr_binary_range, and EVERY rewrite gets stronger at
- * once.
- *
- * The rewrites themselves live in two places, split by what they need. The
- * ones that are ordinary algebraic identities gated on a proof -- `x / 2^k`
- * into a shift, `x % 2^k` into a mask -- are ROWS in the identity table in
- * ir_optimize_rewrite.c, which reaches back here through its P_NONNEG
- * pattern. The ones that need the computed bounds themselves, and so cannot
- * be written as a pattern over operand shapes, are ir_value_range_simplify
- * below.
- *
- * The analysis is a bounded on-demand backward walk, not a dataflow fixpoint:
- * ranges are asked for at a handful of instructions per function (a divide, a
- * remainder, a mask, a comparison against a constant), so paying a capped
- * walk per question is far cheaper than maintaining a lattice over every
- * value. Both the recursion depth and the per-level instruction scan are
- * capped, which bounds the cost of a query to a constant.
- *
- * Where the facts come from:
- *   - integer literals, and the declared width/signedness of a local or
- *     parameter (a `uint16` local is [0, 65535] by construction);
- *   - the producing instruction of a temp, or the reaching definition of a
- *     symbol when it lies in the same straight-line region;
- *   - the operator itself: a comparison yields [0,1], `&` with a non-negative
- *     operand cannot exceed it, `%` by a positive constant is bounded by it,
- *     add, subtract, multiply, and shifts propagate bounds when they
- *     provably cannot overflow;
- *   - a select is bounded by the hull of its two arms, and a logical negation
- *     is `[0,1]`;
- *   - dominating guards, on BOTH sides of a branch: falling through
- *     `branch_zero %t, L` means the condition that produced `%t` held, and
- *     arriving at a label whose only entry is that branch means it did not.
- *     So `while (n > 0) { ... }`, `if (i <= 15) { ... }`, and
- *     `if (n < 0) { return; } ...` all bound their region. This is what
- *     subsumes the old loop-shaped pass -- the loop test is just one guard
- *     among all the guards a region can carry -- and the bound may itself be
- *     a value rather than a literal, so `i < n` bounds `i` by whatever bounds
- *     `n`;
- *   - monotone counters: a 64-bit signed local whose every definition is a
- *     non-negative constant or a step forward by a positive constant.
- *
- * Everything here is integer-only and signed-64 valued. `uint64` is
- * deliberately given the full range: its upper half does not fit a
- * `long long`, and every rewrite below would be wrong for a value the
- * analysis reported as negative.
- * ==========================================================================*/
+#include "../../common.h"
 
 #define VR_MIN LLONG_MIN
 #define VR_MAX LLONG_MAX
-/* Cost caps. A query costs at most VR_MAX_DEPTH levels of VR_MAX_SCAN
- * instructions each; both are generous for the straight-line regions real
- * definitions live in, and neither lets a query scale with function size. */
 #define VR_MAX_DEPTH 4
 #define VR_MAX_SCAN 192
 
@@ -83,9 +15,6 @@ static int vr_is_full(const IRIntRange *r) {
   return r->lo == VR_MIN && r->hi == VR_MAX;
 }
 
-/* Intersection, ignoring a contradictory result: an empty range means the
- * program point is unreachable, and reporting "unreachable" as a range would
- * let a rewrite claim anything. Keep the wider fact instead. */
 static void vr_intersect(IRIntRange *r, const IRIntRange *other) {
   long long lo = other->lo > r->lo ? other->lo : r->lo;
   long long hi = other->hi < r->hi ? other->hi : r->hi;
@@ -95,9 +24,6 @@ static void vr_intersect(IRIntRange *r, const IRIntRange *other) {
   }
 }
 
-/* A value stored into a slot of `limit`'s width wraps to that width. When the
- * computed range already fits, the wrap is a no-op and the sharper range
- * survives; otherwise all we know is the slot's own range. */
 static void vr_narrow_to(IRIntRange *r, const IRIntRange *limit) {
   if (vr_is_full(limit)) {
     return;
@@ -108,8 +34,6 @@ static void vr_narrow_to(IRIntRange *r, const IRIntRange *limit) {
   *r = *limit;
 }
 
-/* Range of a `bits`-wide integer type. uint64 is left unbounded: its upper
- * half is negative as a long long, which every consumer here would misread. */
 static void vr_of_int_type(int bits, int is_unsigned, IRIntRange *r) {
   if (bits <= 0 || bits > 64 || (bits == 64 && is_unsigned)) {
     vr_full(r);
@@ -169,12 +93,6 @@ int ir_int_type_name_info(const char *name, int *bits_out,
   return 1;
 }
 
-/* ---------------------------------------------------------------------------
- * Context: the per-function tables a query needs in O(1).
- * ------------------------------------------------------------------------- */
-
-/* Declared integer types are cached as one int per symbol so the O(n) scan
- * over DECLARE_LOCAL runs once per pass, not once per query. */
 #define VR_TYPE_ENCODE(bits, uns) (((long long)(bits) << 2) | ((uns) ? 2 : 0) | 1)
 #define VR_TYPE_BITS(enc) ((int)((enc) >> 2))
 #define VR_TYPE_UNSIGNED(enc) (((enc) & 2) != 0)
@@ -200,8 +118,6 @@ void ir_value_range_ctx_destroy(IRValueRangeCtx *ctx) {
   ctx->ok = 0;
 }
 
-/* Built on the first query, so a function the rewrites never ask about pays
- * nothing. */
 static int vr_ctx_populate(IRValueRangeCtx *ctx) {
   const IRFunction *fn = ctx->function;
 
@@ -249,8 +165,6 @@ static int vr_ctx_build(IRValueRangeCtx *ctx) {
       !ir_temp_value_map_init(&ctx->addr_taken) ||
       !ir_temp_value_map_init(&ctx->monotone) ||
       !ir_temp_value_map_init(&ctx->label_guard)) {
-    /* Destroying a map that init never touched is safe: init zeroes it before
-     * it can fail, and destroy on a zeroed map is a no-op. */
     ir_value_range_ctx_destroy(ctx);
     ctx->built = 1;
     return 0;
@@ -283,12 +197,6 @@ static int vr_symbol_address_taken(IRValueRangeCtx *ctx, const char *symbol) {
   return symbol && ir_temp_value_map_lookup(&ctx->addr_taken, symbol) != NULL;
 }
 
-/* A local or parameter of this function whose address never escapes. Only such
- * a symbol keeps its value across a call, a store through a pointer, or inline
- * assembly; anything else (a global, or a local someone took `&` of) can be
- * rewritten by code the walk cannot see. Getting this wrong is not a missed
- * optimization but a miscompile: `var x = 5; bump(&x); if (x != 6)` would fold
- * the test against the stale 5. */
 static int vr_symbol_is_private(IRValueRangeCtx *ctx, const char *symbol) {
   return symbol && ir_temp_value_map_lookup(&ctx->decl_types, symbol) != NULL &&
          !vr_symbol_address_taken(ctx, symbol);
@@ -299,19 +207,10 @@ static int vr_clobbers_memory(const IRInstruction *in) {
          in->op == IR_OP_STORE || in->op == IR_OP_INLINE_ASM;
 }
 
-/* ---------------------------------------------------------------------------
- * The walk.
- * ------------------------------------------------------------------------- */
-
 static void vr_operand_range(IRValueRangeCtx *ctx, size_t at,
                              const IROperand *operand, int depth,
                              IRIntRange *out);
 
-/* Nearest writer of `name` (of kind `kind`) strictly before `at` in the same
- * straight-line region. The scan stops at a LABEL, so a hit is the reaching
- * definition on every path that reaches `at`. `stop_at_clobber` additionally
- * gives up at anything that could write memory, which is what a symbol the
- * function does not privately own needs. */
 static int vr_find_block_writer(const IRFunction *fn, size_t at,
                                 IROperandKind kind, const char *name,
                                 int stop_at_clobber, size_t *out_index) {
@@ -339,11 +238,6 @@ static int vr_find_block_writer(const IRFunction *fn, size_t at,
   return 0;
 }
 
-/* Fold one relational fact `symbol <op> bound` (known TRUE) into `r`, where
- * `bound` is the range of whatever the symbol was compared against. A literal
- * is the degenerate case (`[c, c]`); comparing against another VALUE is just
- * as usable -- `i < n` with `n` a `uint16` still bounds `i` by 65534. Only the
- * endpoint that survives every value of the bound is taken. */
 static void vr_apply_relation(const char *op, int symbol_on_left,
                               const IRIntRange *bound, IRIntRange *r) {
   int gt = 0, ge = 0, lt = 0, le = 0, eq = 0;
@@ -363,7 +257,6 @@ static void vr_apply_relation(const char *op, int symbol_on_left,
   }
 
   if (!symbol_on_left) {
-    /* `c < x` is `x > c`, and so on. */
     int t;
     t = gt; gt = lt; lt = t;
     t = ge; ge = le; le = t;
@@ -401,15 +294,6 @@ static const char *vr_negate_relation(const char *op) {
   return NULL;
 }
 
-/* The branch that is the ONLY way into `label_index`, when that branch is a
- * `branch_zero`. Arriving through it means the condition that produced the
- * tested temp was FALSE, which is the other half of every `if`: the region
- * after `if (n < 0) { return ...; }` knows `n >= 0` even though no guard
- * appears in it. Returns the branch's instruction index, or SIZE_MAX.
- *
- * Both requirements are about there being no OTHER way in: the instruction
- * before the label must not fall through, and no jump or equality branch may
- * target it. Memoized per label -- the census is a whole-function scan. */
 static size_t vr_label_entry_branch(IRValueRangeCtx *ctx, size_t label_index) {
   const IRFunction *fn = ctx->function;
   const char *label = fn->instructions[label_index].text;
@@ -461,15 +345,6 @@ static size_t vr_label_entry_branch(IRValueRangeCtx *ctx, size_t label_index) {
   return result;
 }
 
-/* Fold the comparison behind a `branch_zero`'s tested temp into `r`. `arrived`
- * distinguishes the two edges out of the branch: 0 is the fall-through, where
- * the condition HELD, and 1 is the jump, where it did not (so the relation is
- * negated).
- *
- * Only a SIGNED comparison is read: an unsigned ordering proves an unsigned
- * fact, and reading it as a signed bound would invent facts for values above
- * LLONG_MAX. What the symbol is compared against may be any value, not just a
- * literal -- its own range supplies the bound. */
 static void vr_apply_branch_fact(IRValueRangeCtx *ctx, size_t branch_index,
                                  const char *symbol, int arrived, int depth,
                                  IRIntRange *r) {
@@ -489,8 +364,6 @@ static void vr_apply_branch_fact(IRValueRangeCtx *ctx, size_t branch_index,
       !cmp->text) {
     return;
   }
-  /* The comparison must still describe the value the branch tested: a write to
-   * the symbol between the two would make the bound describe a dead value. */
   for (size_t i = producer_index + 1; i < branch_index; i++) {
     const IRInstruction *in = &fn->instructions[i];
     if (ir_instruction_writes_destination(in) &&
@@ -524,10 +397,6 @@ static void vr_apply_branch_fact(IRValueRangeCtx *ctx, size_t branch_index,
   vr_apply_relation(op, symbol_on_left, &bound, r);
 }
 
-/* Guards on the straight-line path into `at`: every `branch_zero %t, L` we
- * walk back over was NOT taken, so the condition that produced `%t` held.
- * The scan stops at the region's LABEL, at any write to `symbol`, and at any
- * call/store that could reach `symbol` through its address. */
 static void vr_apply_guards(IRValueRangeCtx *ctx, size_t at, const char *symbol,
                             int depth, IRIntRange *r) {
   const IRFunction *fn = ctx->function;
@@ -542,9 +411,6 @@ static void vr_apply_guards(IRValueRangeCtx *ctx, size_t at, const char *symbol,
     }
     scanned++;
     if (in->op == IR_OP_LABEL) {
-      /* Start of the region. If the only way in is a branch that skipped to
-       * here, its condition was FALSE on that edge -- the `else` half of the
-       * fact the fall-through side gets for free. */
       size_t entry = vr_label_entry_branch(ctx, i);
       if (entry != (size_t)-1) {
         vr_apply_branch_fact(ctx, entry, symbol, 1, depth, r);
@@ -565,18 +431,6 @@ static void vr_apply_guards(IRValueRangeCtx *ctx, size_t at, const char *symbol,
   }
 }
 
-/* A monotone counter: every definition of `symbol` anywhere in the function is
- * either a non-negative constant or a step forward by a positive constant. Such
- * a value starts non-negative and only grows, so it is non-negative at every
- * program point -- the one escape being wraparound, which at 64 bits needs more
- * iterations than a machine can execute (a step of 1 would take on the order of
- * 2^63 of them). That is the ordinary no-overflow assumption every optimizer
- * makes about induction variables, and it is confined here to 64-bit signed
- * slots: a narrower slot wraps at its own width, which IS reachable, and a
- * narrower type is excluded below.
- *
- * The answer is memoized per symbol -- it is a whole-function property, so
- * recomputing it per query would make the walk quadratic. */
 #define VR_IV_MAX_STEP (1ll << 20)
 
 static int vr_symbol_is_monotone_counter(IRValueRangeCtx *ctx,
@@ -589,8 +443,6 @@ static int vr_symbol_is_monotone_counter(IRValueRangeCtx *ctx,
     return memo->int_value != 0;
   }
 
-  /* Only a 64-bit signed slot. An unsigned slot is already non-negative by
-   * type, and a narrow slot wraps at a reachable iteration count. */
   const IROperand *enc = ir_temp_value_map_lookup(&ctx->decl_types, symbol);
   int result = 0;
   if (enc && enc->kind == IR_OPERAND_INT && VR_TYPE_BITS(enc->int_value) == 64 &&
@@ -625,8 +477,6 @@ static int vr_symbol_is_monotone_counter(IRValueRangeCtx *ctx,
     if (!saw_init) {
       result = 0;
     }
-    /* A counter whose address escapes can be rewritten by a store we never
-     * see, so the write census above is not a census at all. */
     if (result && vr_symbol_address_taken(ctx, symbol)) {
       result = 0;
     }
@@ -645,15 +495,6 @@ static int vr_add_ok(long long a, long long b, long long *out) {
   return 1;
 }
 
-/* Multiply two NON-NEGATIVE bounds, refusing rather than overflowing.
- *
- * The check has to happen BEFORE the multiply. An after-the-fact `r / b != a`
- * test looks like it detects overflow and does not: signed overflow is
- * undefined, so an optimizing compiler may assume it did not happen and delete
- * the test outright -- which gcc did. The range that escaped was inverted
- * (`[0, -2199023255551]` for `acc * v17` over two 40-bit-masked values), and an
- * inverted range makes every comparison look decided, so `v17 < acc * v17`
- * folded to false and the program took the wrong branch. */
 static int vr_mul_nonneg_ok(long long a, long long b, long long *out) {
   if (a < 0 || b < 0) {
     return 0;
@@ -665,8 +506,6 @@ static int vr_mul_nonneg_ok(long long a, long long b, long long *out) {
   return 1;
 }
 
-/* An inverted range means a bound was computed wrong; it can only be believed
- * by claiming facts about a value that has none. Fall back to "unknown". */
 static void vr_normalize(IRIntRange *r) {
   if (r->lo > r->hi) {
     vr_full(r);
@@ -680,7 +519,6 @@ static int vr_is_comparison(const char *op) {
          strcmp(op, "&&") == 0 || strcmp(op, "||") == 0;
 }
 
-/* Smallest all-ones mask that covers every value in [0, hi]. */
 static unsigned long long vr_cover_mask(long long hi) {
   unsigned long long m = (unsigned long long)hi;
   m |= m >> 1;
@@ -711,8 +549,6 @@ static void vr_binary_range(IRValueRangeCtx *ctx, size_t index,
   vr_operand_range(ctx, index, &in->rhs, depth + 1, &b);
 
   if (strcmp(op, "&") == 0) {
-    /* Masking with a non-negative operand cannot produce more than that
-     * operand, nor set the sign bit. */
     if (a.lo >= 0) {
       out->lo = 0;
       out->hi = a.hi;
@@ -732,10 +568,6 @@ static void vr_binary_range(IRValueRangeCtx *ctx, size_t index,
     return;
   }
   if (strcmp(op, ">>") == 0) {
-    /* Shifting is monotone, so the endpoints shift with the range. A negative
-     * input is excluded because arithmetic and logical shift disagree there
-     * and the IR does not always mark which one this is; a variable count is
-     * excluded because `x >> n` with n unknown says nothing. */
     if (in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value >= 0 &&
         in->rhs.int_value < 64 && a.lo >= 0) {
       out->lo = a.lo >> in->rhs.int_value;
@@ -753,8 +585,6 @@ static void vr_binary_range(IRValueRangeCtx *ctx, size_t index,
     return;
   }
   if (strcmp(op, "%") == 0) {
-    /* Remainder of a non-negative dividend is non-negative and smaller than
-     * the divisor's magnitude. */
     if (a.lo >= 0 && b.lo > 0) {
       out->lo = 0;
       out->hi = b.hi - 1 < a.hi ? b.hi - 1 : a.hi;
@@ -810,9 +640,6 @@ static void vr_instruction_range(IRValueRangeCtx *ctx, size_t index, int depth,
     vr_operand_range(ctx, index, &in->lhs, depth + 1, out);
     break;
   case IR_OP_LOAD:
-    /* A narrow load lands in the register extended by the pointee's own sign,
-     * so the value is bounded by that type either way. rhs carries the access
-     * size in bytes; an 8-byte load bounds nothing. */
     if (in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value >= 1 &&
         in->rhs.int_value <= 4) {
       vr_of_int_type((int)(in->rhs.int_value * 8), in->is_unsigned, out);
@@ -838,8 +665,6 @@ static void vr_instruction_range(IRValueRangeCtx *ctx, size_t index, int depth,
     } else if (in->text && strcmp(in->text, "-") == 0) {
       IRIntRange a;
       vr_operand_range(ctx, index, &in->lhs, depth + 1, &a);
-      /* Negating VR_MIN wraps back to itself, so a range that can reach it
-       * says nothing. */
       if (a.lo > VR_MIN) {
         out->lo = -a.hi;
         out->hi = -a.lo;
@@ -847,8 +672,6 @@ static void vr_instruction_range(IRValueRangeCtx *ctx, size_t index, int depth,
     }
     break;
   case IR_OP_SELECT: {
-    /* dest = cond ? rhs : arguments[0] -- the result is one arm or the other,
-     * so the hull of the two arms bounds it. */
     if (in->argument_count != 1) {
       break;
     }
@@ -863,7 +686,6 @@ static void vr_instruction_range(IRValueRangeCtx *ctx, size_t index, int depth,
     break;
   }
 
-  /* Writing through a typed slot wraps the value to that slot's width. */
   if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name) {
     IRIntRange declared;
     vr_declared_range(ctx, in->dest.name, &declared);
@@ -915,8 +737,6 @@ static void vr_operand_range(IRValueRangeCtx *ctx, size_t at,
   }
 
   vr_apply_guards(ctx, at, operand->name, depth, out);
-  /* Normalizing at the shared recursion point stops a bad bound from
-   * propagating up a chain, not just from reaching a consumer. */
   vr_normalize(out);
 }
 
@@ -928,8 +748,6 @@ void ir_value_range_of(IRValueRangeCtx *ctx, size_t at, const IROperand *operand
     return;
   }
   vr_operand_range(ctx, at, operand, 0, out);
-  /* Last line of defence: no consumer may ever see an inverted range, which
-   * would read as "every fact holds". */
   vr_normalize(out);
 }
 
@@ -939,10 +757,6 @@ int ir_value_is_nonnegative(IRValueRangeCtx *ctx, size_t at,
   ir_value_range_of(ctx, at, operand, &r);
   return r.lo >= 0;
 }
-
-/* ---------------------------------------------------------------------------
- * The rewrites the ranges pay for.
- * ------------------------------------------------------------------------- */
 
 static int vr_pow2_shift(long long value, long long *shift) {
   if (value <= 0) {
@@ -961,9 +775,6 @@ static int vr_pow2_shift(long long value, long long *shift) {
   return 1;
 }
 
-/* Fold a comparison whose operands' ranges already decide it. Both ranges must
- * be non-negative: signed and unsigned orderings agree there, so the fold is
- * correct whichever the instruction turns out to be at lowering time. */
 static int vr_try_fold_comparison(IRValueRangeCtx *ctx, size_t at,
                                   IRInstruction *in, int *changed) {
   IRIntRange a, b;
@@ -997,19 +808,17 @@ static int vr_try_fold_comparison(IRValueRangeCtx *ctx, size_t at,
   return ir_rewrite_to_assign_int(in, result, changed);
 }
 
-/* A branch whose ranges already decide it. Zero-ness and equality are the same
- * question signed or unsigned, so the signed bounds settle both. */
 static int vr_try_resolve_branch(IRValueRangeCtx *ctx, size_t at,
                                  IRInstruction *in, int *changed) {
   IRIntRange a;
 
   if (in->op == IR_OP_BRANCH_ZERO) {
     if (in->lhs.kind == IR_OPERAND_INT) {
-      return 1; /* the constant path already handles this */
+      return 1;
     }
     ir_value_range_of(ctx, at, &in->lhs, &a);
     if (a.lo > 0 || a.hi < 0) {
-      ir_instruction_make_nop(in); /* never zero: always falls through */
+      ir_instruction_make_nop(in);
     } else if (a.lo == 0 && a.hi == 0) {
       ir_instruction_make_jump(in);
     } else {
@@ -1029,7 +838,7 @@ static int vr_try_resolve_branch(IRValueRangeCtx *ctx, size_t at,
     ir_value_range_of(ctx, at, &in->lhs, &a);
     ir_value_range_of(ctx, at, &in->rhs, &b);
     if (a.hi < b.lo || b.hi < a.lo) {
-      ir_instruction_make_nop(in); /* the values can never coincide */
+      ir_instruction_make_nop(in);
       if (changed) {
         *changed = 1;
       }
@@ -1057,10 +866,6 @@ int ir_value_range_simplify(IRValueRangeCtx *ctx, size_t at, IRInstruction *in,
   int is_and = strcmp(op, "&") == 0;
 
   if (is_div || is_mod) {
-    /* The power-of-two cases are rows in the identity table
-     * (ir_optimize_rewrite.c), which consults this analysis through the
-     * P_NONNEG pattern. What is left here is the fold no pattern can express:
-     * a divisor the dividend can never reach, whatever its shape. */
     if (in->rhs.kind != IR_OPERAND_INT || in->rhs.int_value <= 0) {
       return 1;
     }
@@ -1097,8 +902,6 @@ int ir_value_range_simplify(IRValueRangeCtx *ctx, size_t at, IRInstruction *in,
       return 1;
     }
     unsigned long long cover = vr_cover_mask(a.hi);
-    /* A mask covering every bit the value can carry does nothing; a mask
-     * sharing no bit with it produces nothing. */
     if ((cover & (unsigned long long)mask) == cover) {
       return ir_rewrite_to_assign_operand(in, value, changed);
     }
@@ -1110,7 +913,6 @@ int ir_value_range_simplify(IRValueRangeCtx *ctx, size_t at, IRInstruction *in,
 
   if (strcmp(op, ">>") == 0 && in->rhs.kind == IR_OPERAND_INT &&
       in->rhs.int_value > 0 && in->rhs.int_value < 64) {
-    /* Shifting every reachable bit off the bottom leaves zero. */
     IRIntRange a;
     ir_value_range_of(ctx, at, &in->lhs, &a);
     if (a.lo >= 0 && (a.hi >> in->rhs.int_value) == 0) {
@@ -1120,10 +922,8 @@ int ir_value_range_simplify(IRValueRangeCtx *ctx, size_t at, IRInstruction *in,
   }
 
   if (vr_is_comparison(op) && strcmp(op, "&&") != 0 && strcmp(op, "||") != 0) {
-    /* Only worth a query when one side is a constant or a typed slot; a
-     * comparison of two unbounded values can never be decided. */
     if (in->lhs.kind == IR_OPERAND_INT && in->rhs.kind == IR_OPERAND_INT) {
-      return 1; /* already folded by the constant evaluator */
+      return 1;
     }
     return vr_try_fold_comparison(ctx, at, in, changed);
   }
@@ -1131,20 +931,6 @@ int ir_value_range_simplify(IRValueRangeCtx *ctx, size_t at, IRInstruction *in,
   return 1;
 }
 
-/* ---------------------------------------------------------------------------
- * `x % 2^k` asked only whether it is zero.
- *
- * This one is a USE-context rewrite, not a value rewrite, and it is why the
- * range analysis above does not subsume it: `x % 8` and `x & 7` are DIFFERENT
- * values when x is negative (-9 % 8 is -1, -9 & 7 is 7) and agree only on the
- * question "are the low k bits clear?". So when the remainder's single
- * consumer is a test against zero -- an explicit `== 0` / `!= 0`, or the
- * `branch_zero` a bare `if (x % 4)` lowers to -- the mask answers it for any
- * sign of x, and nothing has to be proven about the dividend at all.
- * ------------------------------------------------------------------------- */
-
-/* Index of the temp operand that this instruction tests against zero, or NULL
- * when it is not a zero test. */
 static const IROperand *vr_zero_test_operand(const IRInstruction *in) {
   if (in->op == IR_OP_BRANCH_ZERO && in->lhs.kind == IR_OPERAND_TEMP &&
       in->lhs.name) {
@@ -1222,16 +1008,6 @@ int ir_remainder_zero_test_to_mask_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* ---- backend canonicalization oracle ------------------------------------ */
-/* The MIR lowering keeps every narrow integer home canonical (sign- or
- * zero-extended to 64 bits) by re-extending after each write, because MIR
- * computes in 64 bits and an int32 add may mathematically overflow its type.
- * When the ranges of the operands prove the exact 64-bit result already fits
- * the home's width, the wrap can never happen, the 64-bit bits ARE the
- * canonical form, and the re-extension is pure cost -- one instruction per
- * loop-counter step in every int32-indexed loop. The backend cannot see IR
- * ranges, so it borrows this oracle through an opaque handle. */
-
 void *ir_value_range_oracle_create(const IRFunction *function) {
   IRValueRangeCtx *ctx = (IRValueRangeCtx *)calloc(1, sizeof(IRValueRangeCtx));
   if (ctx) {
@@ -1285,8 +1061,6 @@ int ir_value_range_result_is_narrow(void *oracle, size_t at, int bits,
   }
   ir_value_range_of(ctx, at, &in->lhs, &a);
   ir_value_range_of(ctx, at, &in->rhs, &b);
-  /* Exact interval arithmetic; anything near the 64-bit edge is rejected so
-   * the bound computation itself cannot wrap. */
   const long long LIM = 1ll << 62;
   if (a.lo <= -LIM || a.hi >= LIM || b.lo <= -LIM || b.hi >= LIM) {
     return 0;

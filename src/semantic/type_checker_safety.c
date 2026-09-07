@@ -1,4 +1,3 @@
-// Type checker: constant evaluation, buffer-extent / alignment safety analysis.
 #include "type_checker_internal.h"
 
 int type_checker_is_lvalue_expression(ASTNode *expression) {
@@ -40,8 +39,6 @@ static void type_checker_constant_from_float(TypeCheckerConstant *value,
   value->float_value = float_value;
 }
 
-/* The width and signedness a cast to this type converts to, or 0 when the type
- * is not one an integer constant can land in. */
 static int type_checker_integer_type_shape(const Type *type, int *bits_out,
                                            int *is_signed_out) {
   int bits = 0;
@@ -69,14 +66,6 @@ static int type_checker_integer_type_shape(const Type *type, int *bits_out,
   return 1;
 }
 
-/* Fold the result of `expression` the way the machine would leave it.
- *
- * Arithmetic wraps at the expression's own type, and the constant evaluator
- * worked in 64 bits and never cut back, so a `const` and the same expression
- * written at run time gave different answers: `(uint8)2 - (uint8)249` is 9 on
- * the machine and folded to -247, `(int8)100 + (int8)100` is -56 and folded to
- * 200, and an untyped `2147483647 + 1`, which is int32 like every untyped
- * integer literal, folded to 2147483648. */
 static void type_checker_wrap_constant_to_expression_type(
     TypeChecker *checker, ASTNode *expression, TypeCheckerConstant *value);
 
@@ -119,11 +108,6 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
   }
 
   switch (expression->type) {
-  /* `(int8)(-51)` is as constant as `-51`, and writing the type is how a
-   * program says which one it means. Without this case every constant context
-   * -- a `const` initializer, an array size, a `case` label, static_assert --
-   * rejected a cast with "must be a compile-time integer constant
-   * expression", which is exactly what it is. */
   case AST_CAST_EXPRESSION: {
     CastExpression *cast = (CastExpression *)expression->data;
     TypeCheckerConstant operand = {0};
@@ -153,8 +137,6 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
       return 0;
     }
     {
-      /* A float to an integer rounds toward zero, the same direction the
-       * generated cast takes. */
       long long value = operand.is_float ? (long long)operand.float_value
                                          : operand.int_value;
       type_checker_constant_from_int(
@@ -243,8 +225,6 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
     return 1;
   }
 
-  /* `f.offset` and friends: a Field member is a compile-time integer, so it
-   * belongs in every constant context sizeof and offsetof already reach. */
   case AST_MEMBER_ACCESS: {
     ComptimeValue folded = comptime_none();
     if (!checker ||
@@ -309,11 +289,6 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
       return 0;
     }
 
-    /* Compile-time strings compare for equality. A `.name` read off the field
-     * table is how a metaprogram asks whether two declarations agree, so the
-     * comparison folds to 0 or 1 here instead of reaching the backend, which
-     * has no compile-time string to compare. Attempted before the numeric
-     * fold because a string operand is not a number and would fail it. */
     if (checker && (strcmp(binary_expr->operator, "==") == 0 ||
                     strcmp(binary_expr->operator, "!=") == 0)) {
       ComptimeValue left_string = comptime_none();
@@ -411,11 +386,6 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
     unsigned long long left_bits = (unsigned long long)left_value;
     unsigned long long right_bits = (unsigned long long)right_value;
     const char *operator = binary_expr->operator;
-    /* The width this expression's result lives in, when it can be worked out.
-     * Every arithmetic fold below wraps to it, because that is what the
-     * machine leaves behind and a `const` that says otherwise is a different
-     * program from the same expression written at run time. Without a shape
-     * the folds keep the guards they had, which decline rather than guess. */
     int bits = 0;
     int is_signed = 0;
     Type *result_type = checker ? type_checker_infer_type(checker, expression)
@@ -451,8 +421,6 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
         }
         quotient = (long long)(operator[0] == '/' ? l / r : l % r);
       } else {
-        /* The signed minimum over -1 has no result to fold; the machine
-         * faults on it. */
         if (left_value == LLONG_MIN && right_value == -1) {
           return 0;
         }
@@ -466,9 +434,6 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
       }
       return 1;
     }
-    /* Bitwise and shift folding. These are how a byte constant is usually
-     * written -- `1 << 7`, `0xF0 | 0x0F` -- so leaving them unfolded would
-     * make the range check refuse constants that plainly fit. */
     if (strcmp(operator, "&") == 0 || strcmp(operator, "|") == 0 ||
         strcmp(operator, "^") == 0) {
       unsigned long long folded = operator[0] == '&' ? left_bits & right_bits
@@ -485,8 +450,6 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
     if (strcmp(operator, "<<") == 0 || strcmp(operator, ">>") == 0) {
       int shift_left = operator[0] == '<';
       if (shaped) {
-        /* The hardware masks the count to the operand's width, and the
-         * language says so. `(uint8)1 << (uint8)9` is 2, not 0. */
         unsigned long long count =
             (unsigned long long)type_checker_wrap_integer(right_value, bits, 0)
             % (unsigned long long)bits;
@@ -506,8 +469,6 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
             out_value, type_checker_wrap_integer(folded, bits, is_signed));
         return 1;
       }
-      /* No shape to mask against: a count at or past the width has no value
-       * to fold, so decline and let the caller treat this as non-constant. */
       if (right_value < 0 || right_value > (shift_left ? 62 : 63)) {
         return 0;
       }
@@ -632,8 +593,6 @@ Type *type_checker_resolve_sizeof_argument(TypeChecker *checker,
   return type;
 }
 
-/* Name the fields a type does have, so a misspelling reads as a list rather
- * than as "no such field". Truncates rather than growing without bound. */
 static void append_field_names(const Type *owner, char *buffer, size_t size) {
   size_t used = 0;
   buffer[0] = '\0';
@@ -652,10 +611,6 @@ static void append_field_names(const Type *owner, char *buffer, size_t size) {
   }
 }
 
-/* FNV-1a over a canonical rendering of a layout. Only declared facts feed it:
- * kind, size, alignment, and each field's name, offset, width and own layout.
- * No address, no pointer, no ordering that depends on how the compiler was
- * built, so the digest is the same for the same declaration on every host. */
 static void layout_mix(uint64_t *hash, const void *bytes, size_t length) {
   const unsigned char *p = (const unsigned char *)bytes;
   for (size_t i = 0; i < length; i++) {
@@ -677,9 +632,6 @@ static void layout_mix_str(uint64_t *hash, const char *s) {
   layout_mix_u64(hash, 0x1F);
 }
 
-/* A pointer contributes that it is a pointer, never its pointee's layout: a
- * self-referential struct would not terminate, and what a pointer field costs
- * a layout is its width, which `size` already carries. */
 static void layout_digest(const Type *type, uint64_t *hash, int depth) {
   if (!type || depth > 8) {
     layout_mix_u64(hash, 0xDEAD);
@@ -740,8 +692,6 @@ int type_checker_eval_layoutof(TypeChecker *checker, CallExpression *call,
 
   uint64_t hash = 14695981039346656037ULL;
   layout_digest(type, &hash, 0);
-  /* Clear the top bit so the digest is a positive int64 and compares the way
-   * a programmer writes it, without a sign surprise at the boundary. */
   *out_digest = (long long)(hash & 0x7FFFFFFFFFFFFFFFULL);
   return 1;
 }
@@ -944,13 +894,6 @@ static int type_checker_eval_comptime_member(TypeChecker *checker,
                                              ASTNode *expression,
                                              ComptimeValue *out_value);
 
-/* Compile-time text. A wire format has two ends, and the tag on the wire has
- * to be the same string in both; the only way to make that true by construction
- * is to build it once, while compiling, from the same table both ends read.
- *
- * The cost is on the same ledger as everything else the expansion spends: every
- * byte built is counted, and `--expansion-budget` bounds the total, so a
- * program cannot generate a megabyte of text without saying so. */
 #define COMPTIME_TEXT_MAX 65536
 
 static const char *comptime_text_of(TypeChecker *checker, ComptimeValue value) {
@@ -1223,9 +1166,6 @@ static int type_checker_eval_comptime_member(TypeChecker *checker,
   if (!referred) {
     return 0;
   }
-  /* `Color.Red` on a plain enum reads the member off the type table rather
-   * than the variant's bare global, so a compiler-registered enum that
-   * deliberately declares no bare globals still folds. */
   if (referred->kind == TYPE_ENUM) {
     for (size_t i = 0; i < referred->enum_member_count; i++) {
       if (referred->enum_member_names[i] &&
@@ -1234,11 +1174,7 @@ static int type_checker_eval_comptime_member(TypeChecker *checker,
         return 1;
       }
     }
-    /* Not a variant, so fall through: an enum type answers the same shape
-     * queries every other type does (`typeof(Color).kind`). */
   }
-  /* A struct field named the same as a query wins: the program's own
-   * declaration is never shadowed by the reflection surface. */
   int field_index = type_get_field_index(referred, member->member);
   if (field_index >= 0) {
     *out_value = comptime_field_ref(owner.as.type_ref.type_index,
@@ -1265,10 +1201,6 @@ int type_checker_validate_static_assert(TypeChecker *checker,
   long long value = 0;
   if (!type_checker_eval_integer_constant_with_checker(
           checker, call->arguments[0], &value)) {
-    /* Folding failed, which says the condition is not constant but not why.
-     * Type checking the condition first surfaces the real reason -- an unknown
-     * query, a sequence index out of range -- and only when that comes back
-     * clean is "not a constant" actually the whole story. */
     if (call->arguments[0] &&
         !type_checker_infer_type(checker, call->arguments[0])) {
       return 0;
@@ -1384,8 +1316,6 @@ int type_checker_buffer_extent_set(TypeChecker *checker, const char *name,
 }
 
 long long type_checker_default_heap_alignment(void) {
-  // Current backend target is 64-bit; model malloc/calloc as at least 8-byte
-  // aligned so we can reason about common scalar casts.
   return 8;
 }
 
@@ -1641,18 +1571,6 @@ void type_checker_warn_potential_misaligned_cast(TypeChecker *checker,
   }
 }
 
-/* `(T*)((int64)p)`, where p is already a pointer. The integer in the middle
- * carries nothing the pointer did not: it is the same address, spelled through
- * a type that says less. What it costs is real -- the borrow checker and the
- * translation validator both have to give up on a value whose provenance was
- * laundered through an integer, and every such cast is a hole in what they can
- * prove about the program around it.
- *
- * Reported, and then seen through: lowering keeps the pointer, so the analyses
- * are not blinded while the source is cleaned up. Going the other way, an
- * integer that really is an address (a handle from the operating system, a
- * device pointer) still casts to a pointer, and a pointer still casts to an
- * integer to be printed or hashed. Only the round trip is noise. */
 static ASTNode *type_checker_pointer_laundered_through_integer(
     TypeChecker *checker, ASTNode *operand) {
   CastExpression *inner = NULL;
@@ -1827,12 +1745,8 @@ int type_checker_statement_guarantees_termination(ASTNode *statement) {
   case AST_BREAK_STATEMENT:
   case AST_CONTINUE_STATEMENT:
     return 1;
-  /* `quiesce;` transfers control nowhere: it applies staged swaps and falls
-   * through to the next statement, so everything after it is reachable. */
   case AST_QUIESCE_STATEMENT:
     return 0;
-  /* `fallthrough;` leaves this case for the next one, so what follows it in
-   * the same case is unreachable, exactly as after a `break`. */
   case AST_FALLTHROUGH_STATEMENT:
     return 1;
   case AST_IF_STATEMENT: {

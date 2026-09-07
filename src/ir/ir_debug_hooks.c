@@ -6,32 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* --debug-hooks: source-level debugger instrumentation.
- *
- * Modeled on ir_profile.c, but for the interactive debugger runtime
- * (src/runtime/debug.c) instead of the profiler:
- *
- *   mettle_dbg_enter(fn_id)            function entry (shadow call stack push)
- *   mettle_dbg_exit()                  before every return (pop)
- *   mettle_dbg_line(line)              first instruction of each source line
- *                                      (breakpoint / step check)
- *   mettle_dbg_local(name, type, &sym, is_param)
- *                                      registers a LIVE POINTER to a local or
- *                                      parameter, so the paused runtime can
- *                                      read -- and write -- its current value
- *
- * The &sym argument is the whole trick: a real IR_OP_ADDRESS_OF forces the
- * backend to give the variable a memory home (MIR force-spills
- * address-taken locals), so values read through the pointer are always
- * current. No stack-layout plumbing, backend-agnostic by construction.
- *
- * Function identity reuses the profile registry (ir_profile_registry_add),
- * so the embedded mettle_profile_names/files/lines tables describe debug
- * functions too -- the runtime sends those tables to the adapter on connect.
- *
- * Designed for -O0 builds (the debugger never passes --release): no inlining,
- * source instruction order preserved. */
-
 static size_t g_dbg_temp_counter = 0;
 
 static int ir_dbg_should_instrument(const IRFunction *function) {
@@ -85,11 +59,6 @@ static void ir_dbg_destroy_instruction(IRInstruction *instruction) {
   instruction->text = NULL;
 }
 
-/* Register a variable's name/type in the program-level table the backend
- * embeds as mettle_dbg_local_names/types. The hook passes the returned
- * index -- string-literal call arguments are avoided entirely because their
- * ABI differs between the MIR and fallback backends. Returns the index, or
- * (size_t)-1 on failure. */
 static size_t ir_dbg_local_registry_add(IRProgram *program, const char *name,
                                         const char *type_name) {
   if (program->debug_local_entry_count >= program->debug_local_entry_capacity) {
@@ -117,10 +86,6 @@ static size_t ir_dbg_local_registry_add(IRProgram *program, const char *name,
   return program->debug_local_entry_count++;
 }
 
-/* Insert, at `index`:
- *   .dbgN <- &symbol
- *   call mettle_dbg_local(local_id, .dbgN, is_param)
- * Returns the number of instructions inserted (2), or 0 on failure. */
 static size_t ir_dbg_insert_local_registration(IRProgram *program,
                                                IRFunction *function,
                                                size_t index, const char *name,
@@ -215,7 +180,6 @@ static int ir_dbg_instrument_function(IRProgram *program,
   }
   function->profile_id = fn_id;
 
-  /* Entry hook + parameter registrations, in order, at the top. */
   size_t insert_at = 0;
   if (!ir_dbg_insert_simple_call(function, insert_at++, "mettle_dbg_enter",
                                  (long long)fn_id, 1, entry_location)) {
@@ -237,9 +201,6 @@ static int ir_dbg_instrument_function(IRProgram *program,
     insert_at += inserted;
   }
 
-  /* Walk the body: exit hooks before returns, registrations after local
-   * declarations, line hooks at each source-line change. The walk maintains
-   * its own index because every insertion shifts the remainder. */
   size_t last_hooked_line = 0;
   for (size_t i = insert_at; i < function->instruction_count; i++) {
     IRInstruction *instruction = &function->instructions[i];
@@ -248,10 +209,6 @@ static int ir_dbg_instrument_function(IRProgram *program,
       continue;
     }
 
-    /* Line hook first -- before the first non-label instruction of each new
-     * source line, INCLUDING returns and declarations, so `return x;` lines
-     * are breakable. Labels are skipped above so a hook never lands on the
-     * fall-through side of a jump target. */
     if (instruction->location.line > 0 &&
         instruction->location.line != last_hooked_line) {
       last_hooked_line = instruction->location.line;
@@ -260,8 +217,8 @@ static int ir_dbg_instrument_function(IRProgram *program,
                                      instruction->location)) {
         return 0;
       }
-      i++; /* past the inserted hook, back onto the original instruction */
-      instruction = &function->instructions[i]; /* array may have realloc'd */
+      i++;
+      instruction = &function->instructions[i];
     }
 
     if (instruction->op == IR_OP_RETURN) {
@@ -269,7 +226,7 @@ static int ir_dbg_instrument_function(IRProgram *program,
                                      instruction->location)) {
         return 0;
       }
-      i++; /* skip over the inserted call */
+      i++;
       continue;
     }
 

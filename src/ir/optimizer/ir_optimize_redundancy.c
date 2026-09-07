@@ -1,37 +1,9 @@
-/* Redundancy elimination over the dominator tree.
- *
- * The block-local CSE in ir_optimize_core clears its map at every label, call,
- * jump, branch and return, and never admits a LOAD. Every hot loop in an
- * application-shaped program is branchy, so field reads through a struct
- * pointer survive to codegen one per iteration: skip_ws reloaded p->pos,
- * p->len and p->text for every whitespace character it stepped over.
- *
- * This walks the dominator tree with a scoped table. Two rules keep it sound
- * without an SSA form and without an alias analysis:
- *
- *   - A value crosses a block boundary only when every name it depends on is
- *     one the function never writes (a parameter, or the address of a local).
- *     Nothing can invalidate such an entry, so the walk back up the tree needs
- *     no un-invalidation.
- *   - Every value read from memory carries the region it was read from, and
- *     every write appends the region it wrote to a kill log. A store through
- *     one base invalidates only what it can reach: same base and overlapping
- *     offsets, or a base that might alias. Entering a block with more than one
- *     predecessor accounts for the paths this walk never visits by requiring
- *     survivors to be untouched by ANY store the function makes.
- *
- * Addresses are canonicalized to (base, byte offset) through the `%t = base +
- * k` chains the frontend emits for field access, so two reads of one field
- * match whichever temporaries each spelled it through.
- */
 
 #include "ir_optimize_internal.h"
 
 #define RE_MAX_ADDR_DEPTH 8
 #define RE_KEY_MAX 224
 #define RE_NAME_MAX 128
-
-/* ---------------------------------------------------------------- name map */
 
 typedef struct {
   char **keys;
@@ -156,7 +128,6 @@ static int re_map_set(REMap *map, const char *key, long long value) {
   return 1;
 }
 
-/* A name lives in one of two spaces; the tag keeps `@i` and `%i` apart. */
 static int re_name_key(char *out, size_t size, IROperandKind kind,
                        const char *name) {
   if (!name) {
@@ -167,11 +138,9 @@ static int re_name_key(char *out, size_t size, IROperandKind kind,
   return written > 0 && (size_t)written < size;
 }
 
-/* ------------------------------------------------------------- def counting */
-
 typedef struct {
-  REMap defs;   /* name key -> number of instructions that write it */
-  REMap def_at; /* name key -> the writing instruction's index, plus one */
+  REMap defs;
+  REMap def_at;
   const IRFunction *function;
   const IRTempValueMap *addr_taken;
 } REDefs;
@@ -215,9 +184,6 @@ static int re_opcode_writes_through_arguments(IROpcode op) {
   return op != IR_OP_CALL && op != IR_OP_CALL_INDIRECT;
 }
 
-/* Count every write. The kernels outside the scalar set can name their
- * outputs in dest, lhs, or rhs, so all three count there: an over-counted
- * name simply stops crossing blocks. */
 static int re_collect_defs(const IRFunction *function, REDefs *defs) {
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *ins = &function->instructions[i];
@@ -251,14 +217,11 @@ static long long re_def_count(const REDefs *defs, IROperandKind kind,
                               const char *name) {
   char key[RE_NAME_MAX];
   if (!re_name_key(key, sizeof(key), kind, name)) {
-    return 2; /* unnameable: treat as written more than once */
+    return 2;
   }
   return re_map_get(&defs->defs, key);
 }
 
-/* A symbol a store can reach: a global (any callee may assign it) or a local
- * whose address escaped (a write through the pointer never names it). Its
- * value cannot be cached across anything that writes memory. */
 static int re_symbol_is_aliasable(const REDefs *defs, const char *name) {
   if (!name) {
     return 1;
@@ -270,8 +233,6 @@ static int re_symbol_is_aliasable(const REDefs *defs, const char *name) {
          ir_function_local_declared_type(defs->function, name) == NULL;
 }
 
-/* Stable means nothing in the program can change what this name holds, so an
- * entry built on it needs no invalidation at all. */
 static int re_name_is_stable(const REDefs *defs, IROperandKind kind,
                              const char *name) {
   if (!name || re_def_count(defs, kind, name) != 0) {
@@ -301,15 +262,13 @@ static const IRInstruction *re_unique_def(const IRFunction *function,
   return &function->instructions[at - 1];
 }
 
-/* ---------------------------------------------------------- address folding */
-
 typedef struct {
-  int is_address_of;   /* base is &@sym, a fixed stack slot */
-  IROperandKind kind;  /* when not an address-of: the base operand's kind */
+  int is_address_of;
+  IROperandKind kind;
   const char *name;
   long long offset;
-  int portable;  /* the base cannot change, so the entry can cross blocks */
-  int aliasable; /* the base itself is reachable by a store */
+  int portable;
+  int aliasable;
   int valid;
 } REAddr;
 
@@ -321,10 +280,6 @@ static void re_resolve_addr(const IRFunction *function, const REDefs *defs,
   }
 
   if (operand->kind == IR_OPERAND_SYMBOL && operand->name) {
-    /* A local written exactly once is as good as a temp: look through its one
-     * definition. Inlining rewrites every pointer parameter into this shape
-     * (`@__inl_N_param_p <- %t`), and stopping here made every inlined body
-     * opaque to the loop passes. */
     const IRInstruction *def =
         re_unique_def(function, defs, IR_OPERAND_SYMBOL, operand->name);
     if (def && !re_symbol_is_aliasable(defs, operand->name)) {
@@ -408,8 +363,6 @@ static void re_resolve_addr(const IRFunction *function, const REDefs *defs,
   out->aliasable = 0;
 }
 
-/* ------------------------------------------------------------------- keying */
-
 static int re_operand_key(char *out, size_t size, const IROperand *operand) {
   int written;
   switch (operand->kind) {
@@ -441,8 +394,6 @@ static int re_operand_key(char *out, size_t size, const IROperand *operand) {
   return written > 0 && (size_t)written < size;
 }
 
-/* An operand can appear in an entry that outlives its block only when nothing
- * can change what it names. */
 static int re_operand_portable(const REDefs *defs, const IROperand *operand) {
   switch (operand->kind) {
   case IR_OPERAND_INT:
@@ -458,7 +409,6 @@ static int re_operand_portable(const REDefs *defs, const IROperand *operand) {
   }
 }
 
-/* Reading this operand can give a different answer after a memory write. */
 static int re_operand_aliasable(const REDefs *defs, const IROperand *operand) {
   return operand->kind == IR_OPERAND_SYMBOL &&
          re_symbol_is_aliasable(defs, operand->name);
@@ -473,20 +423,12 @@ static const char *re_dep_name(const IROperand *operand) {
   return NULL;
 }
 
-/* ------------------------------------------------------------- entry tables */
-
 #define RE_MEM_WHOLE (1LL << 40)
 
-/* One byte range of memory, named by the base it is reached through: '&name'
- * is the storage of a variable, 's'/'t' + name is memory addressed by a
- * pointer-valued symbol or temp. Two '&' bases with different names are
- * distinct objects; every other pair may alias. */
 typedef struct {
-  char *base; /* NULL = every location */
+  char *base;
   long long off;
   long long size;
-  /* What class of value the access moves, so a store of one class can be told
-   * from a slot holding another. 0 when lowering did not record it. */
   unsigned char alias_class;
 } REMemRegion;
 
@@ -529,7 +471,6 @@ static int re_kills_append(REKillLog *log, const char *base, long long off,
   return 1;
 }
 
-/* Does a write to `kill` invalidate a value read from `mem`? */
 static int re_kill_hits(const IRFunction *function, const REMemRegion *kill,
                         const char *mem_base, long long mem_off,
                         long long mem_size, unsigned mem_class) {
@@ -540,15 +481,11 @@ static int re_kill_hits(const IRFunction *function, const REMemRegion *kill,
     return kill->off < mem_off + mem_size && mem_off < kill->off + kill->size;
   }
   if (kill->base[0] == '&' && mem_base[0] == '&') {
-    return 0; /* two distinct variables cannot overlap */
+    return 0;
   }
-  /* Different classes, in a program that never views one address as both. */
   if (ir_alias_classes_distinct(kill->alias_class, mem_class)) {
     return 0;
   }
-  /* Two pointers the whole program proves reach different allocations. This is
-   * the rule above carried across a call: the caller knew the arguments were
-   * distinct variables, and the callee sees only parameters. */
   if (ir_alias_bases_distinct(function, kill->base, mem_base)) {
     return 0;
   }
@@ -557,20 +494,18 @@ static int re_kill_hits(const IRFunction *function, const REMemRegion *kill,
 
 typedef struct {
   char *key;
-  char *value;    /* the temp that already holds this value */
-  char *dep[2];   /* names the entry reads, for block-local invalidation */
-  char *mem_base; /* what the value was read from; NULL = anywhere */
+  char *value;
+  char *dep[2];
+  char *mem_base;
   long long mem_off;
   long long mem_size;
   unsigned char mem_class;
-  size_t kill_pos;      /* kill-log length when recorded */
-  unsigned merge_epoch; /* merge count when recorded */
-  int survives_summary; /* no store anywhere in the function can change it */
-  int volatile_value;   /* a memory write can change it: load, aliasable read */
+  size_t kill_pos;
+  unsigned merge_epoch;
+  int survives_summary;
+  int volatile_value;
 } REEntry;
 
-/* Entries own their strings. A name borrowed from an operand dies the moment
- * this pass rewrites the instruction that held it. */
 static void re_entry_release(REEntry *entry) {
   free(entry->key);
   free(entry->value);
@@ -648,10 +583,6 @@ static int re_table_push(RETable *table, const char *key, const char *value,
   return 1;
 }
 
-/* A volatile entry still holds its value when nothing written since it was
- * recorded overlaps what it read: not one of the targeted kills behind it in
- * the log, and, if a merge has been crossed (a path this walk never visited
- * joins back in), nothing the whole function can store. */
 static int re_entry_valid(const IRFunction *function, const REEntry *entry,
                           const REKillLog *kills, unsigned merge_epoch) {
   if (!entry->volatile_value) {
@@ -685,8 +616,6 @@ static const char *re_table_lookup(const IRFunction *function,
   return NULL;
 }
 
-/* Drop the block-local entries that read `name`. Entries in the cross-block
- * table read nothing the function writes, so they never reach here. */
 static void re_table_kill_name(RETable *table, const char *name) {
   if (!name) {
     return;
@@ -709,14 +638,12 @@ static void re_table_kill_name(RETable *table, const char *name) {
   table->count = write;
 }
 
-/* ------------------------------------------------------------ dominator tree */
-
 typedef struct {
   size_t *idom;
   size_t *rpo_index;
-  size_t *order;      /* reverse postorder */
+  size_t *order;
   size_t order_count;
-  size_t *child_head; /* first child, or SIZE_MAX */
+  size_t *child_head;
   size_t *child_next;
 } REDom;
 
@@ -762,7 +689,6 @@ static int re_dom_build(const IRBasicBlock *blocks, size_t block_count,
     dom->child_next[i] = SIZE_MAX;
   }
 
-  /* Iterative DFS postorder from the entry. */
   size_t post_count = 0;
   size_t depth = 0;
   stack[depth] = entry;
@@ -833,7 +759,6 @@ static int re_dom_build(const IRBasicBlock *blocks, size_t block_count,
     }
   }
 
-  /* Children, in reverse so the walk visits them in block order. */
   for (size_t k = dom->order_count; k-- > 0;) {
     size_t block = dom->order[k];
     if (block == entry || dom->idom[block] == SIZE_MAX) {
@@ -846,8 +771,6 @@ static int re_dom_build(const IRBasicBlock *blocks, size_t block_count,
   return 1;
 }
 
-/* --------------------------------------------------------------- the walker */
-
 typedef struct {
   IRFunction *function;
   const REDefs *defs;
@@ -856,16 +779,14 @@ typedef struct {
   size_t block_count;
   RETable global;
   RETable local;
-  REKillLog kills;      /* every write the walk has passed, in order */
-  REKillLog summary;    /* every targeted write anywhere in the function */
-  int summary_unknown;  /* the function has a write no region describes */
+  REKillLog kills;
+  REKillLog summary;
+  int summary_unknown;
   unsigned merge_epoch;
   int *changed;
   int failed;
 } REWalk;
 
-/* What this instruction writes: 0 = nothing, 1 = the region in `out`
- * (base NULL when it could be anywhere). */
 static int re_instruction_write_region(const IRFunction *function,
                                        const REDefs *defs,
                                        const IRTempValueMap *addr_taken,
@@ -886,7 +807,7 @@ static int re_instruction_write_region(const IRFunction *function,
                      ? '&'
                      : (addr.kind == IR_OPERAND_SYMBOL ? 's' : 't'),
                  addr.name) >= (int)base_size) {
-      base[0] = '\0'; /* a store to somewhere: kill everything */
+      base[0] = '\0';
       return 1;
     }
     *off = addr.offset;
@@ -909,12 +830,7 @@ static int re_instruction_write_region(const IRFunction *function,
   case IR_OP_BINARY:
   case IR_OP_UNARY:
   case IR_OP_CAST:
-  /* A select writes its destination and nothing else, exactly like the
-   * binary it replaced. Falling through to the default below told every
-   * cached load that memory had changed. */
   case IR_OP_SELECT:
-    /* Writing a variable a pointer can reach (a global, or a local whose
-     * address escaped) is a store to that variable's storage. */
     if (ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
         (ir_temp_value_map_lookup(addr_taken, ins->dest.name) ||
          (!ir_function_symbol_is_parameter(function, ins->dest.name) &&
@@ -926,21 +842,14 @@ static int re_instruction_write_region(const IRFunction *function,
     }
     return 0;
   case IR_OP_PREFETCH:
-    /* A hint with no architectural effect. It was landing in the default
-     * arm and killing every cached load, so the prefetch pass made the loop
-     * it was meant to speed up reload each base it had already read: the
-     * string-hash loop in json_parse walk fetched p->text twice an
-     * iteration, once on each side of the hint. */
     return 0;
   default:
-    return 1; /* calls, kernels: anywhere */
+    return 1;
   }
 }
 
 static int re_load_key(const REWalk *walk, const IRInstruction *ins,
                        char *key, size_t size, REAddr *addr) {
-  /* No two volatile reads of the same address are the same read, so a volatile
-   * load never gets a key and is never served from a cached value. */
   if (ins->is_volatile) {
     return 0;
   }
@@ -1012,9 +921,6 @@ static int re_pure_key(const REWalk *walk, const IRInstruction *ins, char *key,
   return 1;
 }
 
-/* Rewrite a redundant computation to a copy of the value already in hand. The
- * result flags stay on the copy: an ASSIGN carries the width and signedness
- * the backend needs to pick a register class. */
 static void re_replace_with_copy(IRInstruction *ins, const char *value,
                                  int *changed) {
   int is_float = ins->is_float;
@@ -1031,8 +937,6 @@ static void re_replace_with_copy(IRInstruction *ins, const char *value,
   ins->is_unsigned = is_unsigned;
 }
 
-/* Would any store the function makes, anywhere, hit this region? Decides
- * whether an entry may outlive a merge point. */
 static int re_survives_summary(const REWalk *walk, const char *mem_base,
                                long long mem_off, long long mem_size,
                                unsigned mem_class) {
@@ -1057,9 +961,6 @@ static void re_process_block(REWalk *walk, size_t block_index,
   size_t global_mark = walk->global.count;
   re_table_truncate(&walk->local, 0);
 
-  /* A store on a path this walk never took has to reach a merge that dominates
-   * the use; the merge is here. Only entries no store in the whole function
-   * can touch may cross one. */
   if (block->predecessor_count != 1) {
     walk->merge_epoch++;
   }
@@ -1143,9 +1044,6 @@ static void re_process_block(REWalk *walk, size_t block_index,
             walk->failed = 1;
             return;
           }
-          /* Only loads cross a block boundary. Address arithmetic is one
-           * instruction to recompute and a live register to carry, and
-           * carrying it measured slower on the interpreter benchmark. */
           if (is_load && portable &&
               re_def_count(walk->defs, IR_OPERAND_TEMP, ins->dest.name) == 1 &&
               !re_table_push(&walk->global, key, ins->dest.name, NULL, NULL,
@@ -1195,9 +1093,6 @@ int ir_redundancy_elimination_pass(IRFunction *function, int *changed) {
     return 1;
   }
 
-  /* Rebuild rather than trust the cached graph: a pass that rewrites an
-   * instruction in place leaves cfg_valid set, and the block pointers go
-   * stale the moment one of them grows the instruction array. */
   ir_function_clear_cfg(function);
   size_t block_count = 0;
   const IRBasicBlock *blocks = ir_function_blocks(function, &block_count);
@@ -1229,8 +1124,6 @@ int ir_redundancy_elimination_pass(IRFunction *function, int *changed) {
     walk.blocks = blocks;
     walk.block_count = block_count;
     walk.changed = changed;
-    /* The function-wide write summary: what a value must survive to be
-     * trusted across a merge point. */
     for (size_t i = 0; i < function->instruction_count; i++) {
       char wbase[RE_NAME_MAX + 1];
       long long woff, wsize;
@@ -1265,24 +1158,6 @@ int ir_redundancy_elimination_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Selecting between two fields of one object                                  */
-/*                                                                             */
-/* A Huffman decoder walks its tree with                                       */
-/*     if (bit != 0) node = t[node].right; else node = t[node].left;           */
-/* and the bit is random by construction, so the branch mispredicts about half  */
-/* the time. Both arms compute the same address and read the same width; they   */
-/* differ in one constant, because the two fields are neighbours. Selecting the */
-/* constant in place of the path turns the pair into a single load at           */
-/* `base + else_offset + bit * (then_offset - else_offset)`, which is the form  */
-/* clang reaches through `bt` and `setb`.                                       */
-/*                                                                             */
-/* The match is structural: the two arms have to be isomorphic instruction for  */
-/* instruction, pure apart from the one value they both produce, and differ in  */
-/* exactly one integer operand. Nothing here reads a field offset or a type, so  */
-/* it fires on any two-way choice of a single constant.                         */
-/* -------------------------------------------------------------------------- */
-
 #define SEL_MAX_ARM 24
 
 typedef struct {
@@ -1306,7 +1181,6 @@ static int sel_collect(const IRFunction *function, size_t lo, size_t hi,
   return 1;
 }
 
-/* Pure, and free of anything that could be observed if the other arm ran. */
 static int sel_instruction_is_speculatable(const IRInstruction *ins) {
   switch (ins->op) {
   case IR_OP_LOAD:
@@ -1323,7 +1197,6 @@ static int sel_instruction_is_speculatable(const IRInstruction *ins) {
       (strcmp(ins->text, "*") == 0 || strcmp(ins->text, "&") == 0)) {
     return 0;
   }
-  /* Division traps, so the arm that would not have run must not divide. */
   if (ins->op == IR_OP_BINARY && ins->text &&
       (strcmp(ins->text, "/") == 0 || strcmp(ins->text, "%") == 0)) {
     return 0;
@@ -1331,7 +1204,6 @@ static int sel_instruction_is_speculatable(const IRInstruction *ins) {
   return 1;
 }
 
-/* Operand equality under a renaming of the temporaries each arm defines. */
 static int sel_operand_matches(const IROperand *a, const IROperand *b,
                                const REMap *rename) {
   if (a->kind != b->kind) {
@@ -1375,8 +1247,6 @@ static int sel_text_equal(const char *a, const char *b) {
   return a && b && strcmp(a, b) == 0;
 }
 
-/* True when the condition provably holds 0 or 1, so the select needs no
- * compare of its own. */
 static int sel_condition_is_boolean(const IRFunction *function,
                                     const REDefs *defs,
                                     const IROperand *cond) {
@@ -1411,7 +1281,6 @@ static int sel_label_index(const IRFunction *function, const char *label,
   return 0;
 }
 
-/* Any other reference to the label means the arm has a second entry. */
 static int sel_label_referenced_elsewhere(const IRFunction *function,
                                           const char *label, size_t except) {
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -1465,9 +1334,9 @@ typedef struct {
   size_t branch;
   size_t else_label;
   size_t end_label;
-  SelArm then_arm; /* without its trailing jump */
+  SelArm then_arm;
   SelArm else_arm;
-  size_t diff_at; /* position within each arm */
+  size_t diff_at;
   long long then_const;
   long long else_const;
 } SelMatch;
@@ -1506,7 +1375,7 @@ static int sel_match_at(const IRFunction *function, size_t branch,
   if (!sel_label_index(function, tail->text, else_label + 1, &end_label)) {
     return 0;
   }
-  then_arm.count--; /* drop the jump */
+  then_arm.count--;
 
   if (!sel_collect(function, else_label + 1, end_label, &else_arm) ||
       else_arm.count != then_arm.count) {
@@ -1556,8 +1425,6 @@ static int sel_match_at(const IRFunction *function, size_t branch,
         ok = 0;
       }
     } else if (a->dest.kind != IR_OPERAND_NONE) {
-      /* The one shared result, and it has to be the last thing either arm
-       * does. */
       if (!a->dest.name || !b->dest.name ||
           strcmp(a->dest.name, b->dest.name) != 0 || k + 1 != then_arm.count) {
         ok = 0;
@@ -1569,7 +1436,6 @@ static int sel_match_at(const IRFunction *function, size_t branch,
     return 0;
   }
 
-  /* The differing operand has to sit where a temporary can replace it. */
   diff_a = &function->instructions[then_arm.index[diff_at]];
   diff_b = &function->instructions[else_arm.index[diff_at]];
   if (diff_a->op != IR_OP_BINARY || diff_a->is_float || !diff_a->text ||
@@ -1606,14 +1472,6 @@ static int sel_match_at(const IRFunction *function, size_t branch,
   return 1;
 }
 
-/* The rewrite is written into the slots the diamond already occupies. When the
- * arms are tight there is no room for the three instructions that build the
- * selected constant, so open it here: the spare slots the matcher used to
- * insist on are only present when some earlier pass happened to retire
- * something nearby, which is not a property of the shape being matched.
- *
- * Every index the caller holds moves, `defs` included, so the caller is told
- * to stop and let the pass run again against a rebuilt one. */
 static int sel_open_room(IRFunction *function, SelMatch *m, size_t body_count) {
   size_t needed = body_count + 3;
   size_t have = m->else_label - m->branch;
@@ -1663,14 +1521,12 @@ static int sel_apply(IRFunction *function, const REDefs *defs, SelMatch *m,
   snprintf(offset_name, sizeof(offset_name), "__fselk_%d", counter);
   counter++;
 
-  /* Everything read out of `defs` above used the positions as they are now. */
   opened = sel_open_room(function, m, body_count);
   if (opened < 0) {
     ir_operand_destroy(&cond);
     return -1;
   }
 
-  /* Move the arm out before its slots are reused. */
   for (size_t k = 0; k < body_count; k++) {
     body[k] = function->instructions[m->then_arm.index[k]];
     memset(&function->instructions[m->then_arm.index[k]], 0,
@@ -1751,9 +1607,6 @@ int ir_select_adjacent_field_pass(IRFunction *function, int *changed) {
       }
       if (sel_match_at(function, i, &match)) {
         if (sel_apply(function, &defs, &match, changed) != 0) {
-          /* Positions moved under `defs`; every later match here would read
-           * the wrong definition. Stop, and the driver offers the pass the
-           * body again with a rebuilt one. */
           break;
         }
         i = match.end_label;
@@ -1766,18 +1619,6 @@ int ir_select_adjacent_field_pass(IRFunction *function, int *changed) {
   ir_temp_value_map_destroy(&addr_taken);
   return 1;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Widening a byte that is already wide                                        */
-/*                                                                             */
-/* A sub-word load zero-extends into the whole register, so `(int32)buf[i]` on  */
-/* a uint8 or uint16 buffer names a value the register already holds. The cast  */
-/* still lowered to a movsxd, one instruction per byte in every scanner in the  */
-/* suite. Rewriting it to a copy lets copy propagation retire it.               */
-/*                                                                             */
-/* Only unsigned sources qualify: a signed narrow element has to sign-extend    */
-/* from its own width, which is not what the register holds.                    */
-/* -------------------------------------------------------------------------- */
 
 static int subword_target_is_wider(const char *type_name, long long load_size) {
   if (!type_name) {
@@ -1838,25 +1679,6 @@ int ir_widen_subword_load_cast_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Hoisting loop-invariant loads                                               */
-/*                                                                             */
-/* skip_ws reads p->len and p->text every iteration, and no store in the loop   */
-/* can change either: the loop's one store goes to p->pos, a different offset   */
-/* off the same base. CSE cannot help -- there is only one load instruction,    */
-/* executed once per iteration -- so the load moves to the preheader.           */
-/*                                                                             */
-/* Soundness is the kill rule again: the load's region must survive every       */
-/* write between the header and the latch. Execution safety is separate: a      */
-/* hoisted load runs even when the loop body would not have, so the base must   */
-/* already be dereferenced by an access that runs unconditionally in the        */
-/* header's straight-line prefix, and the offset stays within a page of it.     */
-/* -------------------------------------------------------------------------- */
-
-
-/* The constant this operand holds where control reaches `before`, if it holds
- * one: a literal, or a name whose single write in the function put a literal
- * there. */
 static int re_operand_entry_constant(const IRFunction *function,
                                      const REDefs *defs, size_t before,
                                      const IROperand *op, long long *out) {
@@ -1872,11 +1694,6 @@ static int re_operand_entry_constant(const IRFunction *function,
     return 0;
   }
   (void)defs;
-  /* The write that reaches the header, not the only write in the function: a
-   * counter is written twice, once to start it and once to step it, and it is
-   * the first of those that says whether the loop is entered. Read from the
-   * straight-line block ahead of the header, which is the only run of
-   * instructions guaranteed to have executed. */
   for (size_t k = before; k-- > 0;) {
     const IRInstruction *ins = &function->instructions[k];
     if (ins->op == IR_OP_LABEL || ins->op == IR_OP_JUMP ||
@@ -1898,17 +1715,6 @@ static int re_operand_entry_constant(const IRFunction *function,
   return 0;
 }
 
-/* Does this loop run at least once, whatever else is true?
- *
- * `while (i < CONST)` entered with `i` a known constant is decided here, and
- * that settles a question the hoist keeps losing: a load in the body would
- * have been executed anyway, so lifting it above the loop dereferences
- * nothing the loop was not going to dereference. Buffer initialisation is
- * this shape every time -- `while (i < SLOTS) { l->slot[i] = -1; i += 1; }`
- * reloads `l->slot` per element and cannot reach the fill kernel without it.
- *
- * Only the compare the header itself branches on is read, and only against
- * constants; anything else answers no. */
 static int re_loop_runs_at_least_once(const IRFunction *function,
                                       const REDefs *defs, size_t header,
                                       size_t latch) {
@@ -1979,7 +1785,6 @@ static size_t re_loop_latch(const IRFunction *function, size_t header) {
   return latch;
 }
 
-/* The writes the loop makes, as kill regions. 0 = something unknowable. */
 static int re_collect_loop_writes(const IRFunction *function,
                                   const REDefs *defs,
                                   const IRTempValueMap *addr_taken, size_t lo,
@@ -2028,10 +1833,6 @@ static int re_access_reaches(const IRFunction *function, const REDefs *defs,
          pa.kind == addr->kind && strcmp(pa.name, addr->name) == 0 &&
          pa.offset >= 0 && pa.offset + ins->rhs.int_value >= reach;
 }
-
-/* One hoist per scan: an insertion moves every instruction behind it, which
- * stales the def-index map the address resolver walks, so the caller rebuilds
- * and rescans after each success. Returns 1 when a load moved. */
 
 static size_t re_straight_line_end(const IRFunction *function, size_t from,
                                    size_t limit, size_t fallback) {
@@ -2103,8 +1904,6 @@ static int re_hoist_base_is_dereferenceable(
   return at < body_prefix_end && runs_at_least_once;
 }
 
-/* Where the entry block ends. It runs before every loop in the function, so a
- * base it dereferences is dereferenceable at any header. */
 static size_t re_entry_block_end(const IRFunction *function) {
   size_t entry_end = 0;
   while (entry_end < function->instruction_count) {
@@ -2118,7 +1917,6 @@ static size_t re_entry_block_end(const IRFunction *function) {
   return entry_end;
 }
 
-/* Control has to fall into the header for a preheader to exist. */
 static int re_header_has_preheader(const IRFunction *function, size_t header) {
   const IRInstruction *prev;
   size_t p;
@@ -2248,8 +2046,6 @@ static int re_load_is_hoistable(const IRFunction *function, const REDefs *defs,
       prefix_end, body_prefix_end, entry_end, runs_at_least_once);
 }
 
-/* Preheader: %addr = base + off ; dest <- *%addr. The original load and its
- * in-loop address chain go to the cleanups behind this pass. */
 static int re_emit_hoist(IRFunction *function, size_t header, size_t index,
                          const REAddr *addr, const char *addr_name,
                          int *changed) {
@@ -2294,12 +2090,10 @@ static int re_emit_hoist(IRFunction *function, size_t header, size_t index,
     body.value_type = moved->value_type;
     body.alias_class = moved->alias_class;
     if (addr->offset != 0) {
-      /* fold the offset into the lead add */
       IRInstruction *lead_in = &function->instructions[header];
       if (lead_in->op == IR_OP_BINARY) {
         lead_in->rhs.int_value = addr->offset;
       } else {
-        /* address-of base: append the offset with a second add */
         IRInstruction add = {0};
         add.op = IR_OP_BINARY;
         add.text = mettle_strdup("+");
@@ -2358,13 +2152,8 @@ static int re_try_hoist_one_load(IRFunction *function, const REDefs *defs_in,
       continue;
     }
 
-    /* The header's straight-line prefix runs on every entry to the loop; a
-     * base it dereferences is a base a hoisted load may touch. */
     prefix_end = re_straight_line_end(function, header + 1, latch, latch);
 
-    /* How far into the body control gets without taking a branch, past the
-     * loop's own guard: a load before that runs on every iteration that runs
-     * at all. */
     body_prefix_end = re_straight_line_end(function, prefix_end + 1, latch,
                                            latch);
     runs_at_least_once =
@@ -2401,8 +2190,6 @@ int ir_hoist_invariant_loads_pass(IRFunction *function, int *changed) {
   if (!function || function->instruction_count == 0) {
     return 1;
   }
-  /* Bounded: every hoist moves one load out of at least one loop, and a load
-   * can only move outward as many times as loops enclose it. */
   for (;;) {
     REDefs defs = {0};
     IRTempValueMap addr_taken;
@@ -2426,26 +2213,8 @@ int ir_hoist_invariant_loads_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Promoting a loop-resident memory word to a local                            */
-/*                                                                             */
-/* Every parser in the suite walks `p->pos` through its loops: load it, test    */
-/* it, bump it, store it back, every iteration, because the counter lives in    */
-/* the Parser rather than in a register. When one region is the loop's only     */
-/* may-aliased traffic, the loop can run on a local instead: load once in the   */
-/* preheader, rewrite every load and store of the region to the local, and      */
-/* store back once on every exit edge.                                          */
-/*                                                                             */
-/* Sound when: the base is never reassigned; every write in the loop that       */
-/* could alias the region IS a store to exactly the region; no call or kernel   */
-/* sits in the loop; and the region is dereferenced unconditionally in the      */
-/* header prefix (the preheader load must be safe to execute when the loop      */
-/* body would never have run). Exit edges are split so the store-back runs      */
-/* once, on leaving, never per iteration.                                       */
-/* -------------------------------------------------------------------------- */
-
 typedef struct {
-  size_t at;      /* instruction index of the exiting branch/return */
+  size_t at;
   int is_return;
 } REExit;
 
@@ -2464,8 +2233,6 @@ static int re_label_index_of(const IRFunction *function, const char *label,
   return 0;
 }
 
-/* One promotion per scan, same discipline as the load hoister: insertions
- * stale the def-index map. Returns 1 when something moved. */
 typedef struct {
   size_t loads[RE_PROMOTE_MAX_SITES];
   size_t stores[RE_PROMOTE_MAX_SITES];
@@ -2614,7 +2381,6 @@ static void re_promote_collect_sites(const IRFunction *function,
       viable = 0;
       break;
     }
-    /* exits */
     if (ins->op == IR_OP_RETURN) {
       if (exit_count >= RE_PROMOTE_MAX_EXITS) {
         viable = 0;
@@ -2686,8 +2452,6 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
       }
     }
 
-    /* Candidate regions are the stores' targets. Try each stored region whose
-     * base is a stable symbol. */
     for (size_t s = header + 1; s < latch; s++) {
       const IRInstruction *seed = &function->instructions[s];
       REAddr region = {0};
@@ -2714,11 +2478,6 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
         continue;
       }
 
-      /* Sweep the loop: every access that could alias the region must be a
-       * load or store of exactly the region; nothing else may write memory in
-       * a way that reaches it, and the loop takes no calls at all (a call
-       * could read the region through an escaped pointer AND would clobber
-       * the promoted local's freshness for it). */
       REPromoteSites sites;
       re_promote_collect_sites(function, &defs, addr_taken, header, latch,
                                region_base, &region, size, seed, &sites);
@@ -2741,18 +2500,14 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
         fprintf(stderr, "[prom]   viable=%d strong=%d loads=%zu stores=%zu exits=%zu float=%d\n",
                 viable, strong, load_count, store_count, exit_count, is_float);
       }
-      /* One load and one store per iteration already pay: the load leaves
-       * the loop entirely and the store becomes a register move. */
       if (!viable || store_count == 0 || load_count == 0 || is_float) {
-        continue; /* float promotion left for later; int is the parser case */
+        continue;
       }
       if (exit_count == 0) {
         strong = 0;
       }
       (void)header_exit;
       {
-        /* Split edges append their tails at the end of the function, which
-         * must therefore be unreachable by fall-through. */
         size_t last = function->instruction_count;
         while (last > 0 && function->instructions[last - 1].op == IR_OP_NOP) {
           last--;
@@ -2767,8 +2522,6 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
         }
       }
 
-      /* Preheader safety: the region itself must be dereferenced
-       * unconditionally in the header prefix. */
       size_t prefix_end = latch;
       for (size_t i = header + 1; i <= latch; i++) {
         IROpcode op = function->instructions[i].op;
@@ -2792,9 +2545,6 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
         continue;
       }
 
-      /* Build the pieces. Local + address + initial load before the header;
-       * loads and stores in the loop become ASSIGNs; each exit edge gets a
-       * store-back (before a RETURN, or on a split edge for a branch). */
       char local_name[48];
       char addr_name[48];
       snprintf(local_name, sizeof(local_name), "__prom_%d", counter);
@@ -2874,7 +2624,6 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
         exits[k].at += inserted;
       }
 
-      /* Rewrite the in-loop accesses. */
       for (size_t k = 0; k < load_count; k++) {
         IRInstruction *ld = &function->instructions[loads[k]];
         IROperand dest = ir_operand_temp(ld->dest.name);
@@ -2922,9 +2671,6 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
         return 1;
       }
 
-      /* Store-backs. Returns take theirs inline; branch exits are split: the
-       * branch is retargeted to a fresh tail label that stores and jumps on.
-       * Inserting the tails at the end never disturbs loop indices. */
       for (size_t k = 0; k < exit_count; k++) {
         IRInstruction st = {0};
         st.op = IR_OP_STORE;
@@ -2941,7 +2687,6 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
           if (failed) {
             return 0;
           }
-          /* shift every later site */
           for (size_t m = 0; m < exit_count; m++) {
             if (exits[m].at >= exits[k].at) {
               exits[m].at++;
@@ -2973,7 +2718,7 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
         tail_label.op = IR_OP_LABEL;
         tail_label.text = mettle_strdup(tail_name);
         tail_jump.op = IR_OP_JUMP;
-        tail_jump.text = old_target; /* takes ownership */
+        tail_jump.text = old_target;
         size_t end = function->instruction_count;
         if (!tail_label.text ||
             !ir_function_insert_instruction(function, end, &tail_label) ||
@@ -3024,19 +2769,6 @@ int ir_promote_loop_memory_pass(IRFunction *function, int *changed) {
   }
   return 1;
 }
-
-/* -------------------------------------------------------------------------- */
-/* One spelling per inlined parameter                                          */
-/*                                                                             */
-/* The inliner materializes `local @p; @p <- %t`, and block-local copy         */
-/* propagation then rewrites the reads of @p that share the entry block back   */
-/* to %t while the loop keeps reading @p. The recognizers compare bases by     */
-/* name, so the split spelling hides the loop from every one of them: the      */
-/* pre-loop `minv <- arr[0]` init reads %t while the body reads @p, and the    */
-/* minmax kernel sees two different arrays. Rewriting every later read of %t   */
-/* to @p restores one name. Sound because @p holds %t's value from the copy    */
-/* onward and neither is ever written again.                                   */
-/* -------------------------------------------------------------------------- */
 
 static void re_rewrite_operand_temp_to_symbol(IROperand *operand,
                                               const char *temp,

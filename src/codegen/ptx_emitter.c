@@ -1,15 +1,3 @@
-/* IR -> NVIDIA PTX text emitter. See ptx_emitter.h.
- *
- * Strategy: PTX is a typed virtual ISA with unlimited registers, so there is no
- * register allocation. Each IR value (SSA temp or mutable local/param) is bound
- * to one PTX register of a class derived from its type:
- *   PC_PRED -> %p   PC_B32 -> %r   PC_B64 -> %rd (also pointers)
- *   PC_F32  -> %f   PC_F64 -> %fd
- * Types come from backend-owned module symbols/value_type descriptors, with
- * parameter/local names retained as a compatibility fallback, plus
- * per-instruction inference of temps. No frontend symbol table is consulted.
- * The function body is buffered so the .reg declarations (which need the final
- * per-class counts) can be emitted at the top. */
 #include "ptx_emitter.h"
 #include <ctype.h>
 #include <limits.h>
@@ -23,16 +11,11 @@ typedef enum { PC_NONE, PC_PRED, PC_B16, PC_B32, PC_B64, PC_F32, PC_F64 } PtxCla
 
 typedef struct {
   PtxClass cls;
-  int idx;         /* register index within its class */
-  int is_unsigned; /* integer signedness hint */
-  int is_ptr;      /* pointer value (still PC_B64) */
-  MtlcTypeKind elem;   /* pointed-to scalar kind, when is_ptr */
+  int idx;
+  int is_unsigned;
+  int is_ptr;
+  MtlcTypeKind elem;
   MtlcAddressSpace address_space;
-  /* A local whose home is per-thread `.local` storage rather than a register:
-   * either an aggregate (a struct, array, or tagged enum has no register form)
-   * or a scalar whose address is taken. `mem_addr` is the .b64 register holding
-   * its address; the remaining fields describe the *value* for a scalar, and
-   * `mem_aggregate` says there is no scalar value at all. */
   int mem_local;
   int mem_aggregate;
   int mem_addr;
@@ -56,7 +39,6 @@ typedef struct {
   const IRInstruction *consumed_epilogue;
 } PtxTensorResidency;
 
-/* growable text buffer */
 typedef struct {
   char *data;
   size_t len, cap;
@@ -65,7 +47,7 @@ typedef struct {
 typedef struct {
   Sb body;
   Sb declarations;
-  int count[8]; /* register counts indexed by PtxClass */
+  int count[8];
   PtxBinding *binds;
   size_t nbinds, capbinds;
   PtxTensorResidency *tensor_residencies;
@@ -76,7 +58,7 @@ typedef struct {
   PtxVal return_desc;
   size_t call_count;
   int target_arch;
-  char target_variant; /* '\0' compatible, 'a' architecture-, 'f' family-specific */
+  char target_variant;
   int isa_major;
   int isa_minor;
   int tensor_tuple_budget;
@@ -130,7 +112,6 @@ static void fn_error(PtxFn *fn, const char *fmt, ...) {
   fn->error = strdup(buf);
 }
 
-/* ---- register allocation (just bump a per-class counter) ---- */
 static const char *cls_prefix(PtxClass c) {
   switch (c) {
   case PC_PRED:
@@ -179,7 +160,6 @@ static void reg_name(PtxClass c, int idx, char *out) {
   snprintf(out, 24, "%s%d", cls_prefix(c), idx);
 }
 
-/* ---- value bindings ---- */
 static PtxBinding *find_binding(PtxFn *fn, const char *name) {
   for (size_t i = 0; i < fn->nbinds; i++) {
     if (strcmp(fn->binds[i].name, name) == 0) {
@@ -188,10 +168,6 @@ static PtxBinding *find_binding(PtxFn *fn, const char *name) {
   }
   return NULL;
 }
-/* Temps and mutable symbols share one binding table and differ only in operand
- * kind, so anything that asks "what is this operand bound to" has to accept
- * both. A record-valued call result is a temp; the local it lands in is a
- * symbol; the copy between them is the same copy. */
 static PtxBinding *named_binding(PtxFn *fn, const IROperand *op) {
   if (!op || !op->name ||
       (op->kind != IR_OPERAND_TEMP && op->kind != IR_OPERAND_SYMBOL)) {
@@ -203,10 +179,6 @@ static PtxBinding *named_binding(PtxFn *fn, const IROperand *op) {
 static PtxVal *bind_value(PtxFn *fn, const char *name, PtxVal v) {
   PtxBinding *b = find_binding(fn, name);
   if (b) {
-    /* A memory-homed local keeps its home. Producers write a scratch register
-     * (see destination_value) and land here, which is the one place every
-     * definition of a symbol passes through, so the store back is written
-     * once instead of at each producer. */
     if (b->val.mem_local && !v.mem_local) {
       if (!b->val.mem_aggregate) {
         int u = 0;
@@ -232,12 +204,6 @@ static PtxVal *bind_value(PtxFn *fn, const char *name, PtxVal v) {
   return &fn->binds[fn->nbinds++].val;
 }
 
-/* Mutable IR symbols have a stable register home. Most frontend-lowered IR
- * writes them through IR_OP_ASSIGN, but target-neutral coalescing may rewrite a
- * producer to write the symbol directly. Rebinding the name to a fresh PTX
- * register is not equivalent across a loop back-edge or a conditional merge:
- * paths that did not execute the producer would observe an undefined register.
- * Temps remain single-definition values and receive a fresh register. */
 static PtxVal destination_value(PtxFn *fn, const IROperand *dest,
                                 PtxVal computed) {
   if (dest && dest->kind == IR_OPERAND_SYMBOL && dest->name) {
@@ -260,7 +226,6 @@ static PtxVal destination_value(PtxFn *fn, const IROperand *dest,
   return computed;
 }
 
-/* ---- type-name parsing (no symbol table) ---- */
 static MtlcTypeKind base_kind_from_name(const char *s, int *is_unsigned) {
   *is_unsigned = (strstr(s, "uint") != NULL || strstr(s, "bool") != NULL);
   if (strstr(s, "float16")) {
@@ -332,8 +297,6 @@ static PtxClass class_of_kind(MtlcTypeKind k, int *is_unsigned) {
     return PC_B32;
   }
 }
-/* Build a PtxVal descriptor (class/ptr/elem) from a type-name string, without
- * allocating a register. */
 static PtxVal descriptor_from_typename(const char *name) {
   PtxVal v = {0};
   if (!name) {
@@ -350,7 +313,6 @@ static PtxVal descriptor_from_typename(const char *name) {
     v.cls = PC_B64;
     v.is_ptr = 1;
     v.is_unsigned = 1;
-    /* pointer-to-pointer (two or more '*') -> element is itself a pointer */
     const char *firstStar = strchr(name, '*');
     v.elem = (firstStar && strchr(firstStar + 1, '*')) ? MTLC_TYPE_POINTER : base;
     v.address_space = MTLC_ADDRESS_SPACE_GENERIC;
@@ -373,9 +335,6 @@ static PtxVal descriptor_from_type(const MtlcType *type) {
     v.is_ptr = 1;
     v.is_unsigned = 1;
     v.elem = type->base_type ? type->base_type->kind : MTLC_TYPE_VOID;
-    /* A pointer to an aggregate has no single element width or class. Reporting
-     * void makes each load and store take its type from the access's own size
-     * and float flag, which is what a field access carries. */
     if (ptx_type_is_aggregate(type->base_type)) {
       v.elem = MTLC_TYPE_VOID;
     }
@@ -391,8 +350,6 @@ static PtxVal descriptor_from_type(const MtlcType *type) {
   return v;
 }
 
-/* An aggregate has no register form: a struct, a fixed array, or a tagged enum
- * is only ever reached through its address. */
 static int ptx_type_is_aggregate(const MtlcType *type) {
   return type && (type->kind == MTLC_TYPE_STRUCT ||
                   type->kind == MTLC_TYPE_ARRAY ||
@@ -412,10 +369,6 @@ static size_t ptx_class_width(PtxClass cls) {
   return 0;
 }
 
-/* Copy `size` bytes between two addressed locations, each named by a state
- * space suffix (".local", ".param", or "" for generic) and a base that is either
- * a register or a symbol. Aggregates have static sizes, so the copy unrolls to
- * naturally aligned chunks and never needs a loop or a runtime length. */
 static void ptx_block_copy(PtxFn *fn, const char *dst_space,
                            const char *dst_base, const char *src_space,
                            const char *src_base, size_t size,
@@ -444,10 +397,6 @@ static void ptx_block_copy(PtxFn *fn, const char *dst_space,
   }
 }
 
-/* `.local` addresses are only meaningful to the thread's own local window. Once
- * one leaves the function -- as a call argument or stored into memory -- it has
- * to be a generic address, which is what the receiving side assumes. Rewrites
- * `reg` in place when a conversion is needed. */
 static void ptx_generic_address(PtxFn *fn, const IROperand *op, char *reg) {
   PtxVal v = operand_desc(fn, op);
   if (!v.is_ptr || v.address_space != MTLC_ADDRESS_SPACE_PRIVATE) {
@@ -477,10 +426,6 @@ static const char *ptx_memory_space(MtlcAddressSpace address_space) {
   switch (address_space) {
   case MTLC_ADDRESS_SPACE_GLOBAL: return ".global";
   case MTLC_ADDRESS_SPACE_WORKGROUP: return ".shared";
-  /* A `constant` pointer names device memory the launch allocated and the
-   * kernel only reads. The constant bank is not where that memory is, so the
-   * load takes the non-coherent path through the read-only cache instead:
-   * the same address, read without coherence traffic. */
   case MTLC_ADDRESS_SPACE_CONSTANT: return ".global";
   case MTLC_ADDRESS_SPACE_PRIVATE: return ".local";
   case MTLC_ADDRESS_SPACE_DEFAULT:
@@ -490,22 +435,12 @@ static const char *ptx_memory_space(MtlcAddressSpace address_space) {
   return NULL;
 }
 
-
-/* --- widening adjacent loads into one vector access ---------------------
- *
- * Four `ld.global.f32` from consecutive elements are one `ld.global.v4.f32`
- * when the first address is 16-byte aligned. Nothing in the arithmetic says
- * that; the pointer's declared `align(N)` does, which is why this reads the
- * type and refuses to guess. */
 typedef struct {
-  unsigned char width;    /* 2 or 4 on the load that heads a group */
-  unsigned char absorbed; /* this load is emitted by an earlier group */
-  size_t members[4];      /* instruction indices the group covers */
+  unsigned char width;
+  unsigned char absorbed;
+  size_t members[4];
 } PtxVectorPlan;
 
-/* Fold an operand to a constant by walking the producers that define it. Only
- * the shapes an address computation makes: an integer, a copy, a widening
- * cast, and a product or sum of constants. */
 static int ptx_fold_constant(const IRFunction *func, size_t before,
                              const IROperand *operand, long long *out,
                              unsigned depth) {
@@ -543,7 +478,6 @@ static int ptx_fold_constant(const IRFunction *func, size_t before,
   return 0;
 }
 
-/* Split a load address into a base value and a constant byte offset. */
 static void ptx_address_parts(const IRFunction *func, size_t index,
                               const IROperand *address,
                               const IROperand **base, long long *offset) {
@@ -569,9 +503,6 @@ static void ptx_address_parts(const IRFunction *func, size_t index,
   }
 }
 
-/* Whether an instruction between two loads keeps them adjacent. The list is
- * what is allowed rather than what is not: an unfamiliar opcode ends the group
- * instead of being assumed harmless. */
 static int ptx_vector_gap_is_safe(const IRInstruction *in) {
   switch (in->op) {
   case IR_OP_NOP:
@@ -594,7 +525,6 @@ static int ptx_vector_element_ok(MtlcTypeKind elem) {
          elem == MTLC_TYPE_INT64 || elem == MTLC_TYPE_UINT64;
 }
 
-/* The element type a load reads, from the pointer's own type. */
 static const MtlcType *ptx_load_pointer_type(const IRProgram *program,
                                              const IRFunction *func,
                                              const IROperand *base) {
@@ -627,9 +557,6 @@ static const MtlcType *ptx_load_pointer_type(const IRProgram *program,
   return NULL;
 }
 
-/* Plan the vector loads for one function. A group is a run of loads from one
- * base at consecutive element offsets, in one block, through a pointer whose
- * declared alignment covers the whole access. */
 static PtxVectorPlan *ptx_plan_vector_loads(const IRProgram *program,
                                             const IRFunction *func) {
   PtxVectorPlan *plan;
@@ -693,12 +620,6 @@ static PtxVectorPlan *ptx_plan_vector_loads(const IRProgram *program,
   return plan;
 }
 
-/* The space a load is issued in. A `constant` pointer adds `.nc`, which is
- * what makes it a read-only-cache load; every other space loads plainly. */
-/* --gpu-checks on a value whose type says it is uniform: ask the warp. Lane 0's
- * value is broadcast, every lane compares against it, and a vote that is not
- * unanimous traps. The check is 32-bit; a wider uniform value is left to the
- * grid runner, which compares whole values. */
 static void ptx_emit_uniform_check(PtxFn *fn, const IRInstruction *in,
                                    PtxVal value, int target_arch);
 
@@ -709,12 +630,10 @@ static const char *ptx_load_space(MtlcAddressSpace address_space) {
   return ptx_memory_space(address_space);
 }
 
-/* element class from a pointer value's elem kind */
 static PtxClass elem_class(MtlcTypeKind elem, int *is_unsigned) {
   return class_of_kind(elem, is_unsigned);
 }
 
-/* PTX ld/st type suffix for a load/store of element kind */
 static const char *mem_type_suffix(MtlcTypeKind elem) {
   switch (elem) {
   case MTLC_TYPE_INT8:
@@ -750,9 +669,6 @@ static const char *mem_type_suffix(MtlcTypeKind elem) {
   }
 }
 
-/* ---- conversions ---- */
-/* Coerce a value in register (src) of class scls to class want; emits cvt as
- * needed; writes the resulting register name into out. */
 static void coerce(PtxFn *fn, PtxClass scls, int s_unsigned, const char *srcreg,
                    PtxClass want, char *out) {
   if (scls == want) {
@@ -761,7 +677,6 @@ static void coerce(PtxFn *fn, PtxClass scls, int s_unsigned, const char *srcreg,
   }
   int idx = new_reg(fn, want);
   reg_name(want, idx, out);
-  /* integer width changes */
   if (scls == PC_B32 && want == PC_B64) {
     sb_printf(&fn->body, "\tcvt.%s.%s %s, %s;\n", s_unsigned ? "u64" : "s64",
               s_unsigned ? "u32" : "s32", out, srcreg);
@@ -812,8 +727,6 @@ static uint64_t f64_bits(double v) {
   return b;
 }
 
-/* Resolve a source operand into a register of class `want`, materializing
- * immediates and coercing as needed. Writes the register name into out. */
 static void use_as(PtxFn *fn, const IROperand *op, PtxClass want, char *out) {
   if (op->kind == IR_OPERAND_INT) {
     int idx = new_reg(fn, want);
@@ -851,7 +764,6 @@ static void use_as(PtxFn *fn, const IROperand *op, PtxClass want, char *out) {
     coerce(fn, fc, 0, tmp, want, out);
     return;
   }
-  /* temp or symbol */
   PtxBinding *b = (op->name) ? find_binding(fn, op->name) : NULL;
   if (!b) {
     fn_error(fn, "PTX: use of undefined value '%s'",
@@ -880,19 +792,11 @@ static void use_as(PtxFn *fn, const IROperand *op, PtxClass want, char *out) {
   coerce(fn, b->val.cls, b->val.is_unsigned, src, want, out);
 }
 
-/* class of an operand's current value (for result-type inference) */
-/* Module-scope string pool for kernel-side printf. PTX has no string operand
- * and requires a global byte array declared before any use, so every literal a
- * reachable kernel prints is collected up front, emitted once, and referenced
- * by index. Module state, not function state: the pool spans the file. */
 static char **g_ptx_strings = NULL;
 static size_t g_ptx_string_count = 0;
 static size_t g_ptx_string_capacity = 0;
 static int g_ptx_uses_vprintf = 0;
-/* --gpu-checks: whether `gpu_assert` emits its trap. */
 static int g_ptx_emit_checks = 0;
-/* --report-gpu-types: what the type-directed device analyses concluded, and
- * what they cost. Counted while the module is emitted and printed once. */
 static int g_ptx_report_types = 0;
 static long long g_ptx_spaced_accesses = 0;
 static long long g_ptx_generic_accesses = 0;
@@ -959,10 +863,6 @@ static void ptx_string_pool_reset(void) {
   g_ptx_uses_vprintf = 0;
 }
 
-/* A kernel's format string reaches the IR as a load from a string operand
- * (the frontend takes the char pointer out of the string value), so resolve a
- * temp back to the literal that produced it. Anything else is not a literal
- * and the print rejects it. */
 static const char *ptx_literal_string(const IRFunction *function,
                                       const IROperand *operand) {
   if (!operand) return NULL;
@@ -1025,7 +925,6 @@ static int sanitize_into(const char *s, char *out, size_t cap) {
   return (int)j;
 }
 
-/* ---- target-neutral GPU index intrinsics -> PTX special registers ---- */
 static const char *sreg_for_intrinsic(MtlcIntrinsic intrinsic) {
   switch (intrinsic) {
   case MTLC_INTRINSIC_GPU_LOCAL_ID_X: return "%tid.x";
@@ -1047,8 +946,6 @@ static const char *sreg_for_intrinsic(MtlcIntrinsic intrinsic) {
 
 static const char *ptx_atomic_scope(MtlcMemoryScope scope) {
   switch (scope) {
-  /* PTX has no warp- or thread-scoped atomic suffix. CTA is a safe
-   * strengthening for both narrower neutral scopes. */
   case MTLC_MEMORY_SCOPE_WORK_ITEM:
   case MTLC_MEMORY_SCOPE_SUBGROUP:
   case MTLC_MEMORY_SCOPE_WORKGROUP:
@@ -1068,8 +965,6 @@ static const char *ptx_atomic_order(MtlcMemoryOrder order) {
   case MTLC_MEMORY_ORDER_ACQUIRE: return "acquire";
   case MTLC_MEMORY_ORDER_RELEASE: return "release";
   case MTLC_MEMORY_ORDER_ACQ_REL: return "acq_rel";
-  /* Sequential consistency is a two-instruction ABI sequence. The RMW half
-   * uses acquire after a fence.sc, per NVIDIA's current PTX atomics ABI. */
   case MTLC_MEMORY_ORDER_SEQ_CST: return "acquire";
   }
   return NULL;
@@ -1081,9 +976,6 @@ static const char *ptx_atomic_space(MtlcAddressSpace address_space) {
   case MTLC_ADDRESS_SPACE_GLOBAL:
     return ".global";
   case MTLC_ADDRESS_SPACE_GENERIC: return "";
-  /* Legacy `.shared` is CTA/workgroup storage and remains valid back to the
-   * portable PTX 6.4 profile. The explicit `::cta` sub-qualifier would need
-   * PTX 7.8 and would needlessly break compute_75 output. */
   case MTLC_ADDRESS_SPACE_WORKGROUP: return ".shared";
   case MTLC_ADDRESS_SPACE_CONSTANT:
   case MTLC_ADDRESS_SPACE_PRIVATE:
@@ -1103,14 +995,12 @@ static int ptx_workgroup_barrier_contract(const IRInstruction *instruction) {
          (instruction->memory_regions & ~supported) == 0;
 }
 
-/* binary op classification */
 static int is_compare_op(const char *t) {
   return !strcmp(t, "<") || !strcmp(t, ">") || !strcmp(t, "<=") ||
          !strcmp(t, ">=") || !strcmp(t, "==") || !strcmp(t, "!=");
 }
 
 static const char *setp_cmp(const char *t, int is_float, int is_unsigned) {
-  /* returns the comparison mnemonic component */
   if (!strcmp(t, "==")) return "eq";
   if (!strcmp(t, "!=")) return "ne";
   if (!strcmp(t, "<")) return is_float ? "lt" : (is_unsigned ? "lo" : "lt");
@@ -1179,10 +1069,6 @@ typedef enum {
   PTX_MMA_SPARSE_BF16
 } PtxMmaKind;
 
-/* A direct warp-level MMA profile. Unlike PtxWmmaProfile, this describes one
- * or more logical m16n8 subtiles whose register fragments are populated from
- * the backend-neutral whole-tile memory contract. Fragment layouts remain a
- * PTX backend detail; neither source syntax nor shared IR exposes them. */
 typedef struct {
   PtxMmaKind kind;
   const char *shape;
@@ -1297,8 +1183,6 @@ static void ptx_emit_async_copy(PtxFn *fn, const IRInstruction *in) {
     return;
   }
 
-  /* Portable replay. Four-byte scalar transfers preserve the exact byte span
-   * and make commit/wait no-ops without pretending older targets are async. */
   sb_printf(&fn->body,
             "\t// mtlc.async_copy %ssynchronous-fallback bytes=%llu transaction=%llu\n",
             in->async_copy_generated ? "auto-promoted " : "",
@@ -1619,9 +1503,6 @@ static void ptx_emit_tensor_transfer(PtxFn *fn, const IRInstruction *in) {
     sb_printf(&fn->body, "\t@%s bra mtlc_tensor_transfer_%llu_fallback;\n",
               no_view, (unsigned long long)label_id);
 
-    /* CUtensorMap is a 128-byte opaque value with 64-byte alignment.  Avoid
-     * issuing even the tensor-map acquire fence for a detectably malformed
-     * provider handle; the raw geometry remains sufficient for replay. */
     int r_map_misalignment = new_reg(fn, PC_B64);
     int p_map_unaligned = new_reg(fn, PC_PRED);
     char map_misalignment[24], map_unaligned[24];
@@ -1634,9 +1515,6 @@ static void ptx_emit_tensor_transfer(PtxFn *fn, const IRInstruction *in) {
               map_misalignment, map, map_unaligned, map_misalignment,
               map_unaligned, (unsigned long long)label_id);
 
-    /* TMA requires a 16-byte-aligned shared-memory address.  The neutral IR
-     * intentionally permits arbitrary workgroup pointer expressions, so keep
-     * alignment as a dynamic native-path precondition and replay otherwise. */
     const char *shared_address =
         desc->direction == MTLC_TENSOR_TRANSFER_GLOBAL_TO_WORKGROUP
             ? destination
@@ -1709,10 +1587,6 @@ static void ptx_emit_tensor_transfer(PtxFn *fn, const IRInstruction *in) {
       sb_printf(&fn->body,
                 "\tmov.u32 %s, %s;\n"
                 "\t@%s mbarrier.init.shared::cta.b64 [%s], 1;\n"
-                /* mbarrier.init is a generic-proxy write.  TMA accesses the
-                 * barrier through the async proxy, so NVIDIA requires this
-                 * fence before the bulk tensor request can legally observe
-                 * the initialized object. */
                 "\t@%s fence.proxy.async.shared::cta;\n"
                 "\tbar.sync 0;\n"
                 "\t@%s cp.async.bulk.tensor.%ud.shared::cta.global.tile.mbarrier::complete_tx::bytes [%s], [%s, {%s}], [%s];\n"
@@ -1732,9 +1606,6 @@ static void ptx_emit_tensor_transfer(PtxFn *fn, const IRInstruction *in) {
                 (unsigned long long)label_id, elected, barrier);
     } else {
       sb_printf(&fn->body,
-                /* Each producer must order its own shared-memory writes into
-                 * the async proxy before the workgroup rendezvous.  A fence
-                 * issued only by the elected TMA thread is not transitive. */
                 "\tfence.proxy.async.shared::cta;\n"
                 "\tbar.sync 0;\n"
                 "\t@%s cp.async.bulk.tensor.%ud.global.shared::cta.tile.bulk_group [%s, {%s}], [%s];\n"
@@ -1834,10 +1705,6 @@ static const char *ptx_mma_fp8_type(MtlcTensorElement element) {
   }
 }
 
-/* PTX's block-scaled mxf8f6f4 family admits FP8, FP6, and FP4 operands in
- * any documented A/B combination. The neutral descriptor carries the
- * semantic element kind and packing; this helper is deliberately confined to
- * the PTX backend's instruction spelling and register-container width. */
 static const char *ptx_mma_mxf8f6f4_type(MtlcTensorElement element,
                                          int *bits) {
   if (bits) *bits = 0;
@@ -2355,9 +2222,6 @@ typedef struct {
   int dense_contiguous[2];
 } PtxMmaTileMemory;
 
-/* PTX's sparse A fragment and metadata selector depend on M and K, but not N.
- * Keep them live while walking adjacent N subtiles so a wider logical tile
- * does not reload and re-encode identical sparse data for every m16n8 MMA. */
 typedef struct {
   int a_base;
   int metadata_register;
@@ -2417,10 +2281,6 @@ static void ptx_mma_emit_address(PtxFn *fn, const char *base,
             byte_offset);
 }
 
-/* Address one element in a densely nibble-packed logical matrix. Descriptor
- * strides remain logical element counts; the division by two is exclusively a
- * backend storage operation and therefore cannot leak a PTX fragment layout
- * into shared IR. linear_out is retained for selecting the low/high nibble. */
 static void ptx_mma_emit_nibble_address(
     PtxFn *fn, const char *base, const char *leading_dimension,
     MtlcTensorLayout layout, int transpose, PtxMmaCoordinate logical_row,
@@ -2567,11 +2427,6 @@ static void ptx_mma_load_packed_bytes(
   }
 }
 
-/* Load four logical subbyte elements into PTX's four byte containers. Dense
- * storage is a least-significant-bit-first bitstream over the logical matrix,
- * including logical leading-dimension padding. A six-bit value can straddle a
- * byte boundary; the second byte is predicated so a non-straddling final
- * element never performs an out-of-bounds speculative load. */
 static void ptx_mma_load_dense_subbytes(
     PtxFn *fn, const char *base, const char *leading_dimension,
     MtlcTensorLayout layout, int transpose, const char *space,
@@ -2645,10 +2500,6 @@ static void ptx_mma_load_dense_subbytes(
   }
 }
 
-/* Canonical row-A/column-B fragments begin on a byte boundary and contain
- * four consecutive logical values. Load the exact two (FP4) or three (FP6)
- * bytes and expand locally, avoiding both over-read and the general gather's
- * predicate/address pressure. */
 static void ptx_mma_load_contiguous_dense_subbytes(
     PtxFn *fn, const char *base, const char *leading_dimension,
     MtlcTensorLayout layout, const char *space, PtxMmaCoordinate row,
@@ -2841,8 +2692,6 @@ static int ptx_mma_prepare_tile_memory(PtxFn *fn,
   } else if (profile->kind == PTX_MMA_MXF8F6F4 ||
              profile->kind == PTX_MMA_MXFP4 ||
              profile->kind == PTX_MMA_NVFP4) {
-    /* Profile selection guarantees dense operands with both scale pointers,
-     * whose neutral-IR order is A/B/C/D, scale_A, scale_B, strides. */
     for (size_t scale = 0; scale < 2; scale++) {
       size_t argument = base + 4 + scale;
       PtxVal value = operand_desc(fn, &in->arguments[argument]);
@@ -2939,8 +2788,6 @@ static void ptx_emit_mma_byte_subtile(
         thread, (unsigned)profile->b_bits, b_base + reg, direct_b);
   }
   if (profile->kind == PTX_MMA_MXF8F6F4) {
-    /* scale_vec::1X uses scale_A[M,1] and scale_B[1,N]. Selector {0,0}
-     * chooses the lower A thread pair and thread zero's B byte in each quad. */
     char thread_low[24];
     reg_name(PC_B32, new_reg(fn, PC_B32), thread_low);
     sb_printf(&fn->body, "\tand.b32 %s, %s, 1;\n", thread_low, thread);
@@ -3054,11 +2901,6 @@ static void ptx_emit_mma_fp4_subtile(
         direct_b);
   }
 
-  /* With selector {0,0}, threads 0/1 of each quad contribute the A scale
-   * vector and thread 0 contributes the B vector. MXFP4 supplies two UE8M0
-   * bytes (block32); NVFP4 supplies four UE4M3 bytes (block16). Duplicating
-   * safe loads in non-contributing lanes keeps the instruction converged and
-   * branch-free. */
   char thread_low[24];
   reg_name(PC_B32, new_reg(fn, PC_B32), thread_low);
   sb_printf(&fn->body, "\tand.b32 %s, %s, 1;\n", thread_low, thread);
@@ -3140,20 +2982,9 @@ static void ptx_emit_mma_fp4_subtile(
   }
 }
 
-/* Translate the neutral uint8 2-of-4 group masks into one PTX metadata word.
- * Canonical A stores the selected values in increasing logical-index order, so
- * the ordered-metadata instruction is legal when available. Invalid dynamic
- * masks violate the source contract; clamp them to the safe {0,1} encoding so
- * malformed input cannot feed an architecturally undefined metadata value to
- * the tensor instruction. */
 static void ptx_mma_load_sparse_2_to_4_metadata(
     PtxFn *fn, const PtxMmaTileMemory *memory, const char *group,
     unsigned m_offset, int metadata_register) {
-  /* PTX Figure 119 for m16n8k16 maps selector-0's contributing thread as:
-   * bits  0..15 = four K groups for row groupID,
-   * bits 16..31 = four K groups for row groupID + 8.
-   * Emitting the same word in every lane of the quad is harmless; selector 0
-   * consumes the first lane and avoids divergent metadata preparation. */
   char metadata[24];
   reg_name(PC_B32, metadata_register, metadata);
   sb_printf(&fn->body, "\tmov.u32 %s, 0;\n", metadata);
@@ -3182,7 +3013,6 @@ static void ptx_mma_load_sparse_2_to_4_metadata(
               memory->spaces[4], mask, address, mask, mask, count, mask,
               predicate, count, mask, mask, predicate);
 
-    /* first = lowest set bit index, second = highest set bit index. */
     sb_printf(&fn->body,
               "\tand.b32 %s, %s, 2;\n"
               "\tsetp.ne.u32 %s, %s, 0;\n"
@@ -3474,9 +3304,6 @@ static unsigned ptx_wmma_element_bytes(MtlcTensorElement element) {
   }
 }
 
-/* Compute a physical subtile base from the neutral logical row/column
- * coordinates. Leading dimensions remain logical element counts; only this
- * PTX helper turns the selected element format into a byte address. */
 static int ptx_wmma_offset_pointer(PtxFn *fn, const char *base,
                                    const char *stride,
                                    MtlcTensorLayout layout,
@@ -3565,9 +3392,6 @@ static int ptx_emit_wmma_tiled_subtile(
   return 1;
 }
 
-/* Emit one logical tile as a grid of stable WMMA tiles. The larger logical
- * shape is shared IR; physical tile selection, pointer offsets, and operand
- * fragment reuse remain entirely inside the PTX backend. */
 static int ptx_emit_wmma_tiled_tile(
     PtxFn *fn, const IRInstruction *in, const PtxWmmaProfile *profile,
     size_t base, size_t per_tile, int accumulator_base,
@@ -4529,17 +4353,6 @@ static const IRInstruction *ptx_following_tensor_epilogue(
   return NULL;
 }
 
-/* A loop residency commit is emitted in its own edge block:
- *
- *   tensor_commit
- *   jump original_exit
- * original_exit:
- *   tensor_epilogue
- *
- * The epilogue may consume the resident accumulator before the jump only when
- * that jump is the label's sole control-flow predecessor and the label has no
- * fallthrough predecessor. An outer guard targeting original_exit makes the
- * predecessor count exceed one and deliberately selects memory replay. */
 static const IRInstruction *ptx_loop_exit_tensor_epilogue(
     const IRFunction *function, size_t commit_index,
     size_t *epilogue_index) {
@@ -4617,7 +4430,7 @@ static int ptx_prepare_resident_epilogue(PtxFn *fn,
   state->compute_class =
       state->desc->element == MTLC_TENSOR_ELEMENT_FLOAT64 ? PC_F64 : PC_F32;
   state->compute_type = state->compute_class == PC_F64 ? "f64" : "f32";
-  size_t argument = 1u; /* The compatible MMA/commit already owns D. */
+  size_t argument = 1u;
   if (state->desc->bias_mode != MTLC_TENSOR_BIAS_NONE) {
     PtxVal bias_desc = operand_desc(fn, &epilogue->arguments[argument]);
     state->bias_space = ptx_wmma_space(bias_desc);
@@ -5368,10 +5181,6 @@ static void ptx_tensor_matmul_load_input(PtxFn *fn,
                                          const char *address,
                                          const char *value);
 
-/* A logical sub-byte matrix is either byte-addressable or a target-neutral
- * least-significant-bit-first stream. Native MMA helpers consume a rebased
- * byte pointer, so dense streams additionally return a uniform alignment
- * predicate. Misaligned region origins fail over to exact scalar replay. */
 static int ptx_tensor_matmul_storage_address(
     PtxFn *fn, const char *base, const char *row, const char *column,
     const char *leading_dimension, MtlcTensorLayout layout,
@@ -5565,11 +5374,6 @@ static int ptx_tensor_matmul_load_operand(
   return !fn->error;
 }
 
-/* Exact sparse-edge replay consumes the target-neutral representation directly:
- * one uint8 2-of-4 mask per logical A row/group and two stored A values in
- * increasing selected-index order.  Backend metadata words are never exposed
- * here.  Invalid masks violate the source contract; match the native path by
- * clamping them to the safe {0,1} mask before selecting/ranking a value. */
 static int ptx_tensor_matmul_load_sparse_a(
     PtxFn *fn, const MtlcTensorMmaDesc *desc, const char *a_base,
     const char *a_space, const char *metadata_base,
@@ -6056,11 +5860,6 @@ static void ptx_emit_tensor_matmul(PtxFn *fn,
             participants, mask, mask);
 
   unsigned long long label_id = (unsigned long long)fn->call_count++;
-  /* A logical transpose needs no physical staging for stable WMMA: viewing a
-   * stored row-major matrix as column-major (or the inverse) gives the exact
-   * transposed logical coordinates with the same leading dimension. Keep this
-   * normalization backend-local; scalar replay continues to use the original
-   * descriptor and explicit coordinate swaps. */
   MtlcTensorMmaDesc native_desc = IR_TENSOR_MMA(in);
   if (native_desc.transpose_a) {
     native_desc.a_layout =
@@ -6201,9 +6000,6 @@ static void ptx_emit_tensor_matmul(PtxFn *fn,
     tile_arguments[i].name = pointer_names[i];
   }
   IRInstruction tile = *in;
-  /* `tile` borrows `in`'s tensor block, so the substituted descriptor goes into a
-   * private stack block rather than through the shared pointer -- writing there
-   * would rewrite the instruction we are reading from. */
   IRTensorAux tile_tensor;
   ir_instruction_tensor_borrow(&tile, &tile_tensor, in);
   tile_tensor.mma = native_desc;
@@ -6639,9 +6435,6 @@ int ptx_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
   fprintf(out, ".version %d.%d\n.target %s\n.address_size 64\n\n",
           isa_major, isa_minor, target);
 
-  /* Kernel-side printf needs its format strings at module scope, declared
-   * before the functions that reference them. Collect every literal a
-   * reachable function prints, then emit the pool and the vprintf import. */
   ptx_string_pool_reset();
   for (size_t oi = 0; oi < graph.count; oi++) {
     IRFunction *function = program->functions[graph.order[oi]];
@@ -6680,9 +6473,6 @@ int ptx_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
     }
     fputc('\n', out);
   }
-  /* PTX requires external shared arrays at module scope. Emit one unique arena
-   * symbol per kernel before any function definitions; function lowering binds
-   * every zero-extent workgroup view to that symbol. */
   for (size_t oi = 0; oi < graph.count; oi++) {
     IRFunction *function = program->functions[graph.order[oi]];
     size_t alignment = 0;
@@ -6696,10 +6486,6 @@ int ptx_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
         continue;
       }
       size_t candidate = mtlc_type_alignment(in->value_type->base_type);
-      /* The compiler owns dynamic shared-storage placement. Guarantee the
-       * strongest alignment required by neutral 16-byte async transactions
-       * and PTX WMMA tile loads instead of inheriting scalar element
-       * alignment and relying on an accidental launch-time address. */
       if (candidate < 32) candidate = 32;
       if (candidate > alignment) alignment = candidate;
     }
@@ -6747,7 +6533,6 @@ int ptx_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
   return 1;
 }
 
-/* Map a parameter/local type-name to the PTX .param storage type. */
 static const char *param_storage_type(PtxVal value) {
   if (value.is_ptr) {
     return "u64";
@@ -6782,10 +6567,6 @@ static const char *param_storage_type(PtxVal value) {
   }
 }
 
-/* PTX's device-function ABI does not permit predicate, 8-bit, or 16-bit
- * formal parameters. Promote integer call slots to the register-sized bit
- * representation; kernel entry parameters intentionally keep their natural
- * widths because the host launch ABI passes exact-sized value cells. */
 static const char *device_param_storage_type(PtxVal value) {
   switch (value.cls) {
   case PC_PRED:
@@ -6846,8 +6627,6 @@ static void ptx_emit_device(IRProgram *program, IRFunction *func, PtxFn *fn,
   case IR_OP_ADDRESS_SPACE_ALLOC:
   case IR_OP_DECLARE_LOCAL: {
     if (in->op == IR_OP_DECLARE_LOCAL && in->dest.name) {
-      /* pre-allocate a register for the local so refs resolve; aggregates or
-       * address-taken locals are unsupported and will surface as errors. */
       PtxVal d = in->value_type ? descriptor_from_type(in->value_type)
                                 : descriptor_from_typename(in->text);
       if (d.cls == PC_NONE) {
@@ -6866,9 +6645,6 @@ static void ptx_emit_device(IRProgram *program, IRFunction *func, PtxFn *fn,
     if (!ptx_workgroup_barrier_contract(in)) {
       fn_error(fn, "PTX: invalid workgroup barrier memory contract");
     } else {
-      /* bar.sync is a full CTA execution/memory barrier. It safely
-       * strengthens acquire/release-only contracts and covers both shared
-       * and global accesses made by participating work-items. */
       sb_puts(&fn->body, "\tbar.sync 0;\n");
     }
     break;
@@ -6970,9 +6746,6 @@ static void ptx_emit_control(IRProgram *program, IRFunction *func, PtxFn *fn,
     reg_name(PC_PRED, p, pn);
     if (cv.cls == PC_F32 || cv.cls == PC_F64) {
       use_as(fn, &in->lhs, cv.cls, r);
-      /* Zero immediate as a hex bit-pattern: f32 needs 0f + 8 digits, f64
-       * needs 0d + 16. (Hand-written literals are an easy off-by-one;
-       * formatting from the bits is not.) */
       if (cv.cls == PC_F32) {
         sb_printf(&fn->body, "\tsetp.eq.f32 %s, %s, 0f%08X;\n", pn, r, 0u);
       } else {
@@ -7039,13 +6812,9 @@ static void ptx_emit_assign(IRProgram *program, IRFunction *func, PtxFn *fn,
       fn_error(fn, "PTX: assign with no dest");
       break;
     }
-    /* destination class: reuse if symbol already bound, else infer from src */
     PtxBinding *db = find_binding(fn, in->dest.name);
     PtxBinding *agg = named_binding(fn, &in->lhs);
     if (agg && agg->val.mem_aggregate) {
-      /* A whole-record assignment. An unbound destination is a temp standing
-       * in for the same record, so it aliases the storage; a destination with
-       * storage of its own receives a copy, which is what by-value means. */
       if (!db) {
         bind_value(fn, in->dest.name, agg->val);
         break;
@@ -7075,9 +6844,6 @@ static void ptx_emit_assign(IRProgram *program, IRFunction *func, PtxFn *fn,
     use_as(fn, &in->lhs, dc, src);
     PtxVal dv;
     if (db && db->val.mem_local) {
-      /* The home is memory, so the value lands in a scratch register and
-       * bind_value writes it through. Reusing the binding here would carry
-       * mem_local into the store-back check and drop the write. */
       dv = (PtxVal){0};
       dv.cls = dc;
       dv.is_unsigned = db->val.is_unsigned;
@@ -7120,15 +6886,9 @@ static void ptx_emit_memory(IRProgram *program, IRFunction *func, PtxFn *fn,
   (void)error;
   switch (in->op) {
   case IR_OP_LOAD: {
-    /* A load from a string literal is the frontend taking a format string's
-     * character pointer. PTX has no string value; the print intrinsic reads
-     * the literal directly, so this produces nothing. A temp bound this way
-     * and used for anything else stays undefined, which is the right
-     * diagnostic: kernels have no strings beyond print formats. */
     if (in->lhs.kind == IR_OPERAND_STRING) {
       break;
     }
-    /* dest <- *lhs [rhs size] */
     PtxVal addr = operand_desc(fn, &in->lhs);
     MtlcTypeKind elem = addr.is_ptr ? addr.elem : MTLC_TYPE_VOID;
     if (elem == MTLC_TYPE_VOID) {
@@ -7184,7 +6944,6 @@ static void ptx_emit_memory(IRProgram *program, IRFunction *func, PtxFn *fn,
     break;
   }
   case IR_OP_STORE: {
-    /* *dest <- lhs [rhs size] */
     PtxVal addr = operand_desc(fn, &in->dest);
     if (in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value > 8) {
       long long total = in->rhs.int_value;
@@ -7330,7 +7089,6 @@ static void ptx_emit_arith(IRProgram *program, IRFunction *func, PtxFn *fn,
     break;
   }
   case IR_OP_CAST: {
-    /* dest = (text) lhs */
     PtxVal target = in->value_type ? descriptor_from_type(in->value_type)
                                    : descriptor_from_typename(in->text);
     MtlcTypeKind target_elem = target.is_ptr ? MTLC_TYPE_VOID : target.elem;
@@ -7565,9 +7323,6 @@ static void ptx_emit_atomic_intrinsic(IRProgram *program, IRFunction *func,
     if (ir_intrinsic_is_atomic(intrinsic) &&
                in->argument_count >=
                    (size_t)ir_intrinsic_arity(intrinsic)) {
-      /* Full unsigned atomic load/store/RMW/CAS family. Element indices stay
-       * 64-bit all the way into address generation; large buffers must not
-       * silently wrap at 2^31/2^32 elements. */
       int is64 =
           ir_intrinsic_atomic_value_kind(intrinsic) == MTLC_TYPE_UINT64;
       int is_cas = ir_intrinsic_is_compare_exchange(intrinsic);
@@ -7681,8 +7436,6 @@ static void ptx_emit_atomic_intrinsic(IRProgram *program, IRFunction *func,
         } else if (is_cas) {
           char desired[24];
           use_as(fn, &in->arguments[3], vc, desired);
-          /* PTX takes comparator then desired value. Its single qualifier
-           * strengthens a weaker failure order to the success order. */
           sb_printf(&fn->body,
                     "\tatom.%s.%s%s.%s.%s %s, [%s], %s, %s;\n",
                     sem, scope, space, opn, type, dn, an, valr, desired);
@@ -7711,10 +7464,6 @@ static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
   (void)handled;
     if (ptx_intrinsic_is_print(intrinsic) &&
                in->argument_count >= 1) {
-      /* vprintf(format, argument_buffer). The format is a module-scope byte
-       * array interned in the pool; the arguments go through a per-call
-       * local buffer laid out to the C varargs rules the device runtime
-       * reads them back with (4-byte ints, doubles for floats). */
       const char *format = ptx_literal_string(fn->function, &in->arguments[0]);
       if (!format) {
         fn_error(fn, "PTX: a kernel print needs a literal format string");
@@ -7754,8 +7503,6 @@ static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
               use_as(fn, &in->arguments[1], PC_B32, value);
               sb_printf(&fn->body, "\tst.u32 [%s], %s;\n", args_name, value);
             } else if (intrinsic == MTLC_INTRINSIC_GPU_PRINT_F32) {
-              /* C varargs promote float to double before the callee reads
-               * it, so %f in the format string expects eight bytes. */
               char value[24];
               use_as(fn, &in->arguments[1], PC_F32, value);
               int widened = new_reg(fn, PC_F64);
@@ -7796,8 +7543,6 @@ static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
                 intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
                 intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32) &&
                in->argument_count >= 3) {
-      /* dp2a: two 16-bit halves of a against two bytes of b (low or high
-       * pair), accumulated into c. The mixed-width sibling of dp4a. */
       int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_S32 ||
                       intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32;
       int is_high = intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
@@ -7819,9 +7564,6 @@ static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
         bind_value(fn, in->dest.name, dv);
     } else if (intrinsic == MTLC_INTRINSIC_GPU_PRMT_B32 &&
                in->argument_count >= 3) {
-      /* prmt(a, b, selector): gather four bytes out of the {b:a} byte octet,
-       * one selector nibble each. One instruction for the byte shuffling
-       * that nibble-quant decode otherwise spends shifts and masks on. */
       char a[24];
       char b[24];
       char sel[24];
@@ -7840,19 +7582,12 @@ static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
                 intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32 ||
                 intrinsic == MTLC_INTRINSIC_GPU_STORE4_U32) &&
                in->argument_count >= 2) {
-      /* One 128-bit transaction for four consecutive 32-bit elements. The
-       * scalar side is four ordinary accesses against the other pointer,
-       * which ptxas keeps in registers when that pointer is a small
-       * constant-indexed private array. Both addresses must be 16-byte
-       * aligned; that is a source contract, as it is for async copies. */
       int is_load = intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
                     intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32;
       int is_float = intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
                      intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32;
       PtxClass cls = is_float ? PC_F32 : PC_B32;
       const char *suffix = is_float ? "f32" : "u32";
-      /* Argument order is always (vector side, scalar side): load4 reads the
-       * vector pointer, store4 writes it. */
       const IROperand *vector_operand = &in->arguments[0];
       const IROperand *scalar_operand = &in->arguments[1];
       PtxVal vector_desc = operand_desc(fn, vector_operand);
@@ -7893,8 +7628,6 @@ static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
     } else if (intrinsic >= MTLC_INTRINSIC_GPU_SQRT_F32 &&
                intrinsic <= MTLC_INTRINSIC_GPU_EXP_F32 &&
                in->argument_count >= 1) {
-      /* single-arg f32 math -> PTX approximations (inference-grade, mirrors
-       * the fast CPU approximations the engine already uses). */
       char a[24];
       use_as(fn, &in->arguments[0], PC_F32, a);
       PtxVal dv = {.cls = PC_F32};
@@ -7912,13 +7645,12 @@ static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
       } else if (intrinsic == MTLC_INTRINSIC_GPU_COS_F32) {
         sb_printf(&fn->body, "\tcos.approx.f32 %s, %s;\n", dn, a);
       } else if (intrinsic == MTLC_INTRINSIC_GPU_LOG_F32) {
-        /* ln(x) = lg2(x) / log2(e) = lg2(x) * 0.6931471805599453 */
         int t = new_reg(fn, PC_F32);
         char tn[24];
         reg_name(PC_F32, t, tn);
         sb_printf(&fn->body, "\tlg2.approx.f32 %s, %s;\n", tn, a);
         sb_printf(&fn->body, "\tmul.f32 %s, %s, 0f3F317218;\n", dn, tn);
-      } else { /* expf: exp(x) = 2^(x * log2(e)), log2(e)=1.4426950408 */
+      } else {
         int t = new_reg(fn, PC_F32);
         char tn[24];
         reg_name(PC_F32, t, tn);
@@ -7931,7 +7663,6 @@ static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
       ptx_emit_atomic_intrinsic(program, func, fn, in, error, ename, handled);
     }
 }
-
 
 static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
                                        PtxFn *fn, const IRInstruction *in,
@@ -7948,10 +7679,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
       sb_puts(&fn->body, "\tbar.sync 0;\n");
     } else if (intrinsic == MTLC_INTRINSIC_GPU_F16_BITS_TO_F32 &&
                in->argument_count >= 1) {
-      /* h2f(bits): reinterpret a uint16 fp16 bit-pattern as float32. The arg
-       * arrives as a 32-bit int (zero-extended u16 load); truncate to .b16 and
-       * cvt.f32.f16. Lets prefill keep fp16-resident weights and convert on
-       * the fly with one PTX instruction. */
       char a[24];
       use_as(fn, &in->arguments[0], PC_B32, a);
       int hidx = new_reg(fn, PC_B16);
@@ -7967,8 +7694,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
         bind_value(fn, in->dest.name, dv);
     } else if (intrinsic == MTLC_INTRINSIC_GPU_F32_TO_F16_BITS &&
                in->argument_count >= 1) {
-      /* f2h(x): float32 -> uint16 fp16 bit-pattern (cvt.rn.f16.f32), returned
-       * zero-extended in a 32-bit int so a uint16 store writes the low 16. */
       char a[24];
       use_as(fn, &in->arguments[0], PC_F32, a);
       int hidx = new_reg(fn, PC_B16);
@@ -7984,8 +7709,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
         bind_value(fn, in->dest.name, dv);
     } else if (intrinsic == MTLC_INTRINSIC_GPU_F32_FROM_BITS &&
                in->argument_count >= 1) {
-      /* f32_from_bits(u32): reinterpret an IEEE-754 bit pattern as float32.
-       * One mov.b32 across register files; no arithmetic reconstruction. */
       char a[24];
       use_as(fn, &in->arguments[0], PC_B32, a);
       PtxVal dv = {.cls = PC_F32};
@@ -7997,7 +7720,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
         bind_value(fn, in->dest.name, dv);
     } else if (intrinsic == MTLC_INTRINSIC_GPU_F32_TO_BITS &&
                in->argument_count >= 1) {
-      /* bits_from_f32(x): the float32's IEEE-754 encoding as uint32. */
       char a[24];
       use_as(fn, &in->arguments[0], PC_F32, a);
       PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
@@ -8010,9 +7732,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
     } else if ((intrinsic == MTLC_INTRINSIC_GPU_DP4A_U32 ||
                 intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32) &&
                in->argument_count >= 3) {
-      /* dp4a(a, b, c): four-way packed-byte dot product with 32-bit
-       * accumulate. Collapses the shift/mask/convert/FMA chain of quantized
-       * decode to one instruction (sm_61+; every supported target qualifies). */
       int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32;
       char a[24];
       char b[24];
@@ -8032,9 +7751,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
                 intrinsic == MTLC_INTRINSIC_GPU_HMUL2 ||
                 intrinsic == MTLC_INTRINSIC_GPU_HFMA2) &&
                in->argument_count >= 2) {
-      /* Two fp16 lanes per instruction. The carrier is a 32-bit value
-       * holding {hi, lo}; f16x2 arithmetic is the reason to keep
-       * activations packed rather than widening every element to f32. */
       int is_fma = intrinsic == MTLC_INTRINSIC_GPU_HFMA2;
       char a[24];
       char b[24];
@@ -8060,7 +7776,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
     } else if ((intrinsic == MTLC_INTRINSIC_GPU_H2F_LO ||
                 intrinsic == MTLC_INTRINSIC_GPU_H2F_HI) &&
                in->argument_count >= 1) {
-      /* Widen one lane of a packed pair to f32. */
       char a[24];
       use_as(fn, &in->arguments[0], PC_B32, a);
       const char *source = a;
@@ -8084,7 +7799,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
         bind_value(fn, in->dest.name, dv);
     } else if (intrinsic == MTLC_INTRINSIC_GPU_F2H2 &&
                in->argument_count >= 2) {
-      /* Pack two f32 values into one f16 pair, low lane first. */
       char lo[24];
       char hi[24];
       use_as(fn, &in->arguments[0], PC_F32, lo);
@@ -8106,8 +7820,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
         bind_value(fn, in->dest.name, dv);
     } else if (intrinsic == MTLC_INTRINSIC_GPU_BF2F &&
                in->argument_count >= 1) {
-      /* bfloat16 is the top half of an f32, so widening is exact and needs
-       * no conversion instruction or architecture floor. */
       char a[24];
       use_as(fn, &in->arguments[0], PC_B32, a);
       int shifted = new_reg(fn, PC_B32);
@@ -8123,10 +7835,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
         bind_value(fn, in->dest.name, dv);
     } else if (intrinsic == MTLC_INTRINSIC_GPU_F2BF &&
                in->argument_count >= 1) {
-      /* Round-to-nearest-even down to bfloat16, in integer arithmetic so it
-       * holds on every target rather than only where cvt.rn.bf16.f32 does:
-       * add half an ulp plus the low bit of the kept mantissa, then drop
-       * the low half. */
       char a[24];
       use_as(fn, &in->arguments[0], PC_F32, a);
       int bits = new_reg(fn, PC_B32);
@@ -8154,10 +7862,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
         bind_value(fn, in->dest.name, dv);
     } else if (intrinsic == MTLC_INTRINSIC_GPU_ASSERT &&
                in->argument_count >= 1) {
-      /* A false condition traps the launch at the offending lane, which is
-       * what turns "the numbers are wrong somewhere" into a located fault.
-       * Only under --gpu-checks: an assertion left in shipped source must
-       * cost nothing. */
       if (g_ptx_emit_checks) {
         char condition[24];
         use_as(fn, &in->arguments[0], PC_B32, condition);
@@ -8176,7 +7880,6 @@ static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
       ptx_emit_wide_intrinsic(program, func, fn, in, error, ename, handled);
     }
 }
-
 
 static void ptx_emit_call(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
@@ -8206,8 +7909,6 @@ static void ptx_emit_call(IRProgram *program, IRFunction *func, PtxFn *fn,
       dv = destination_value(fn, &in->dest, dv);
       char dn[24];
       reg_name(PC_B32, dv.idx, dn);
-      /* A PTX execution subgroup is an NVIDIA warp. This backend-specific
-       * width never leaks into the semantic IR or SPIR-V lowering. */
       sb_printf(&fn->body, "\tmov.u32 %s, 32;\n", dn);
       if (in->dest.name) bind_value(fn, in->dest.name, dv);
     } else if ((intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_U32 ||
@@ -8347,10 +8048,6 @@ static void ptx_emit_call(IRProgram *program, IRFunction *func, PtxFn *fn,
       sb_printf(&fn->body, "\tactivemask.b32 %s;\n", mask);
       sb_printf(&fn->body, "\tmov.u32 %s, %%laneid;\n", lane);
 
-      /* Uniform collectives may end in a partial final warp. A plain
-       * butterfly reduction would read inactive lanes for non-power-of-two
-       * sizes, so each tree edge is guarded by the captured active mask.
-       * Lane zero then broadcasts the complete sum to every participant. */
       static const unsigned offsets[] = {16, 8, 4, 2, 1};
       for (size_t oi = 0; oi < sizeof(offsets) / sizeof(offsets[0]); oi++) {
         unsigned offset = offsets[oi];
@@ -8634,7 +8331,6 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
   char ename[256];
   sanitize_into(func->name ? func->name : "kernel", ename, sizeof(ename));
 
-  /* --- signature --- */
   Sb sig = {0};
   if (func->is_kernel) {
     sb_printf(&sig, ".visible .entry %s(", ename);
@@ -8647,7 +8343,6 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
     sb_printf(&sig, ".func (.param .%s %s_ret) %s(",
               device_param_storage_type(fn.return_desc), ename, ename);
   }
-  /* pre-bind parameters; load them at the top of the body */
   PtxVal *param_descs = calloc(func->parameter_count + 1, sizeof(PtxVal));
   for (size_t p = 0; p < func->parameter_count; p++) {
     const char *tn = func->parameter_types ? func->parameter_types[p] : NULL;
@@ -8657,9 +8352,6 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
                              ? function_symbol->param_types[p]
                              : NULL;
     PtxVal d = pt ? descriptor_from_type(pt) : descriptor_from_typename(tn);
-    /* A kernel's pointer parameters come from the launch and are device global.
-     * A device helper's can be anything the caller had, including the address
-     * of one of its own locals, so an unstated space stays generic. */
     if (!func->is_kernel && d.is_ptr &&
         (!pt || pt->address_space == MTLC_ADDRESS_SPACE_DEFAULT)) {
       d.address_space = MTLC_ADDRESS_SPACE_GENERIC;
@@ -8689,9 +8381,6 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
                 ename, p, d.mem_size);
     } else if (func->is_kernel && d.is_ptr) {
       const char *space = ptx_memory_space(d.address_space);
-      /* A declared `align(N)` is a proven fact about the address the launch
-       * passes, so the parameter says so and the driver holds the launch to
-       * it. Without one the element's own alignment is all that is known. */
       size_t alignment = pt && pt->pointee_align ? pt->pointee_align
                          : pt && pt->base_type && pt->base_type->alignment
                              ? pt->base_type->alignment
@@ -8712,19 +8401,11 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
   }
   sb_puts(&sig, "\n)\n");
   if (func->is_kernel && func->kernel_block[0] > 0) {
-    /* `kernel(block = ...)`: the driver refuses a mismatched launch geometry
-     * at cuLaunchKernel instead of running 7/8 of the block with a garbage
-     * lane mapping. */
     sb_printf(&sig, ".reqntid %d, %d, %d\n", func->kernel_block[0],
               func->kernel_block[1] > 0 ? func->kernel_block[1] : 1,
               func->kernel_block[2] > 0 ? func->kernel_block[2] : 1);
   }
 
-  /* Address-space allocations are declarations, so emit them before
-   * executable instructions and bind each semantic pointer to a .b64 register.
-   * A zero extent is the one launch-provided dynamic workgroup arena. Multiple
-   * typed views deliberately alias its base. The spelling is PTX-specific; the
-   * IR only carries address space, element type, and static/dynamic extent. */
   size_t dynamic_workgroup_alignment = 0;
   char dynamic_workgroup_storage[512] = {0};
   for (size_t i = 0; i < func->instruction_count && !fn.error; i++) {
@@ -8796,10 +8477,6 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
     bind_value(&fn, in->dest.name, pointer);
   }
 
-  /* Rank-aware global->workgroup TMA completes through one compiler-owned
-   * transaction barrier. Transfer operations are synchronous at the neutral
-   * boundary, so a single barrier can be safely reinitialized and reused by
-   * sequential operations in the function. */
   int needs_tensor_transfer_barrier = 0;
   for (size_t i = 0; i < func->instruction_count; i++) {
     const IRInstruction *in = &func->instructions[i];
@@ -8820,12 +8497,9 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
     sb_printf(&fn.body, "\t.shared .align 8 .b8 %s[8];\n", barrier_name);
   }
 
-  /* body: load params into registers and bind by name */
   for (size_t p = 0; p < func->parameter_count && !fn.error; p++) {
     PtxVal d = param_descs[p];
     if (d.mem_aggregate) {
-      /* A record parameter arrives by value, so it gets storage of its own and
-       * a copy: writing through it must not reach the caller's copy. */
       char raw[512], storage[512], pointer[24], source[512];
       snprintf(raw, sizeof(raw), "%s_p%zu_local", ename, p);
       sanitize_into(raw, storage, sizeof(storage));
@@ -8882,10 +8556,6 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
     sb_printf(&fn.body, "\tmov.u64 %s, %s;\n", pointer, storage);
   }
 
-  /* Locals with no register form get per-thread `.local` storage: aggregates
-   * always, and scalars whose address the function takes. Declaring them here,
-   * ahead of the instruction walk, means a use that precedes the declaration
-   * in a rotated or threaded CFG still resolves. */
   for (size_t i = 0; i < func->instruction_count && !fn.error; i++) {
     const IRInstruction *in = &func->instructions[i];
     if (in->op != IR_OP_DECLARE_LOCAL || !in->dest.name) continue;
@@ -8930,7 +8600,6 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
     bind_value(&fn, in->dest.name, v);
   }
 
-  /* --- walk instructions --- */
   clock_t analysis_start = clock();
   PtxVectorPlan *vector_plan = ptx_plan_vector_loads(program, func);
   g_ptx_analysis_seconds +=
@@ -9029,7 +8698,6 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
     } else {
       free(fn.error);
     }
-    /* cleanup */
     free(sig.data);
     free(fn.body.data);
     free(fn.declarations.data);
@@ -9042,7 +8710,6 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
     return;
   }
 
-  /* --- assemble: signature { reg-decls body } --- */
   fputs(sig.data, out);
   fputs("{\n", out);
   static const PtxClass classes[6] = {PC_PRED, PC_B16, PC_B32,
@@ -9056,8 +8723,6 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
   }
   fputs(fn.declarations.data ? fn.declarations.data : "", out);
   fputs(fn.body.data ? fn.body.data : "", out);
-  /* Kernel entry points may legally fall through. Non-void helpers were already
-   * checked by semantic analysis and must not gain a value-less return here. */
   fputs(func->is_kernel ? "\tret;\n}\n\n" : "}\n\n", out);
 
   free(sig.data);
@@ -9071,14 +8736,12 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
   free(fn.tensor_residencies);
 }
 
-/* ---- BINARY ---- */
 static void emit_binary(PtxFn *fn, const IRInstruction *in) {
   const char *t = in->text ? in->text : "+";
   PtxVal la = operand_desc(fn, &in->lhs);
   PtxVal ra = operand_desc(fn, &in->rhs);
 
   if (is_compare_op(t)) {
-    /* operand compare class */
     PtxClass c = PC_B32;
     int is_float = 0, is_unsigned = 0;
     if (la.cls == PC_F32 || ra.cls == PC_F32 || in->is_float) {
@@ -9093,9 +8756,6 @@ static void emit_binary(PtxFn *fn, const IRInstruction *in) {
       c = PC_B64;
     }
     if (!is_float) {
-      /* C "usual arithmetic conversions": if either operand is unsigned the
-       * comparison is unsigned. (Integer literals carry is_unsigned=0, so `&&`
-       * here would wrongly make `unsigned_var < 10` a signed compare.) */
       is_unsigned = la.is_unsigned || ra.is_unsigned;
     }
     char a[24], b[24];
@@ -9118,15 +8778,12 @@ static void emit_binary(PtxFn *fn, const IRInstruction *in) {
     return;
   }
 
-  /* logical && / || : treat as bitwise on 0/1 ints */
   int is_logical = (!strcmp(t, "&&") || !strcmp(t, "||"));
 
-  /* result class */
   PtxVal dv = {0};
   if (in->is_float) {
     dv.cls = (in->float_bits == 32) ? PC_F32 : PC_F64;
   } else if (la.is_ptr || ra.is_ptr) {
-    /* pointer arithmetic: result is a pointer, element from whichever side */
     dv.cls = PC_B64;
     dv.is_ptr = 1;
     dv.is_unsigned = 1;
@@ -9135,10 +8792,6 @@ static void emit_binary(PtxFn *fn, const IRInstruction *in) {
         la.is_ptr ? la.address_space : ra.address_space;
   } else {
     dv.cls = (la.cls == PC_B64 || ra.cls == PC_B64) ? PC_B64 : PC_B32;
-    /* Unsigned if either operand is unsigned (C usual arithmetic conversions).
-     * `&&` is wrong: integer literals are is_unsigned=0, so `unsigned_var / 7`
-     * or `unsigned_var >> 3` would emit signed div/shr and miscompute for
-     * high-bit-set values. */
     dv.is_unsigned = la.is_unsigned || ra.is_unsigned;
   }
 
@@ -9179,13 +8832,10 @@ static void emit_binary(PtxFn *fn, const IRInstruction *in) {
   } else if (!strcmp(t, "^")) {
     sb_printf(&fn->body, "\txor.%s %s, %s, %s;\n", bts, dn, a, b);
   } else if (!strcmp(t, "<<")) {
-    /* shift amount is a .u32 in PTX */
     char sh[24];
     use_as(fn, &in->rhs, PC_B32, sh);
     sb_printf(&fn->body, "\tshl.%s %s, %s, %s;\n", bts, dn, a, sh);
   } else if (!strcmp(t, ">>")) {
-    /* Arithmetic (signed) vs logical (unsigned) shift is decided by the value
-     * being shifted -- the left operand -- not the shift count. */
     char sh[24];
     use_as(fn, &in->rhs, PC_B32, sh);
     sb_printf(&fn->body, "\tshr.%s %s, %s, %s;\n",

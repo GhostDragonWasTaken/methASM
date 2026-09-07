@@ -878,7 +878,6 @@ static int link_resolution_record_global_symbol(
     const LinkedInputObject *holder =
         &resolution->objects[global_symbol->defining_object_index];
     if (holder->is_runtime_default && !input->is_runtime_default) {
-      /* fall through and let the program definition take over */
     } else if (!holder->is_runtime_default && input->is_runtime_default) {
       return 1;
     } else {

@@ -1,37 +1,19 @@
-/* mtlc_type_from_frontend.c - translate the Mettle frontend's Type into MtlcType.
- *
- * FRONTEND-side adapter (compiles into the mettle driver, NOT into libmtlc). This
- * is the single translation unit permitted to include both the frontend `Type`
- * (semantic/symbol_table.h) and the backend `MtlcType` (mtlc/type.h). Keeping the
- * translation here is what lets libmtlc stay free of any frontend's type system.
- *
- * The mapping is structural and 1:1 on the kind enum (TypeKind and MtlcTypeKind
- * intentionally share order and membership). Results are memoized by frontend
- * Type pointer so shared/recursive types translate once and cycles terminate. */
 #include "frontend/mtlc_frontend.h"
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Process-lifetime memo of (frontend Type* -> backend MtlcType*). A one-shot
- * compile never frees these; the arena leaks intentionally at exit.
- *
- * Open-addressing hash keyed on the frontend Type pointer. The memo used to be
- * a linear array scanned per call; a frontend that allocates a Type per
- * declaration pushes the memo into the hundreds of thousands, and the scan made
- * translation quadratic across a module's globals. */
 typedef struct {
-  const Type *from; /* NULL = empty slot */
+  const Type *from;
   MtlcType *to;
 } TypeMemoEntry;
 
 static TypeMemoEntry *g_memo = NULL;
 static size_t g_memo_count = 0;
-static size_t g_memo_slots = 0; /* power of two */
+static size_t g_memo_slots = 0;
 
 static size_t memo_hash(const Type *from) {
-  /* Fibonacci hashing spreads pointer-aligned keys across the table. */
   return (size_t)(((uintptr_t)from >> 4) * (uintptr_t)11400714819323198485ull);
 }
 
@@ -56,7 +38,7 @@ static void memo_insert(const Type *from, MtlcType *to) {
     TypeMemoEntry *grown =
         (TypeMemoEntry *)calloc(next, sizeof(TypeMemoEntry));
     if (!grown) {
-      return; /* out of memory: skip memoization; translation still proceeds */
+      return;
     }
     for (size_t i = 0; i < g_memo_slots; i++) {
       if (!g_memo[i].from) {
@@ -104,10 +86,6 @@ static MtlcTypeKind translate_kind(TypeKind kind) {
     return MTLC_TYPE_UINT64;
   case TYPE_BOOL:
     return MTLC_TYPE_BOOL;
-  /* A char is a byte below this line. Everything the backend does with one --
-   * its load and store width, its register class, how it crosses an ABI
-   * boundary -- is what it does with a uint8; only interpolation, which is
-   * decided in the frontend, tells them apart. */
   case TYPE_CHAR:
     return MTLC_TYPE_UINT8;
   case TYPE_FLOAT32:
@@ -135,16 +113,10 @@ static MtlcTypeKind translate_kind(TypeKind kind) {
   case TYPE_VOID:
     return MTLC_TYPE_VOID;
   case TYPE_SLICE:
-    /* Frontend slice descriptor; backend sees the 16-byte {ptr,len} image
-     * via the frontend-computed size, not a distinct MtlcTypeKind. */
     return MTLC_TYPE_STRUCT;
   case TYPE_TYPE:
   case TYPE_FIELD:
   case TYPE_SEQUENCE:
-    /* Frontend-only; these have no backend representation. A sequence is the
-     * comptime iteration surface and never reaches a value the backend lays
-     * out. Listed rather than left to the fallthrough so -Wswitch reports the
-     * next kind somebody adds. */
     return MTLC_TYPE_VOID;
   }
   return MTLC_TYPE_VOID;
@@ -192,7 +164,6 @@ static MtlcViewLayout translate_layout(unsigned char layout) {
   }
 }
 
-/* Duplicate an array of frontend Type* into an array of translated MtlcType*. */
 static MtlcType **translate_type_array(struct Type **in, size_t count) {
   if (!in || count == 0) {
     return NULL;
@@ -220,18 +191,13 @@ MtlcType *mtlc_type_from_frontend(const Type *type) {
   if (!out) {
     return NULL;
   }
-  /* Register BEFORE recursing so a type reachable from itself resolves to this
-   * same node instead of recursing forever. */
   memo_insert(type, out);
 
   out->kind = translate_kind(type->kind);
-  /* A view whose extents are in its type is one pointer: the shape travels in
-     the type, so the backend sees an address and nothing else. The extents and
-     the layout ride along on the descriptor for the emitters and the report. */
   if (type->kind == TYPE_SLICE && type->view_extents[0]) {
     out->kind = MTLC_TYPE_POINTER;
   }
-  out->name = type->name; /* borrow the frontend's interned name */
+  out->name = type->name;
   out->size = type->size;
   out->alignment = type->alignment;
   out->array_size = type->array_size;
@@ -253,14 +219,12 @@ MtlcType *mtlc_type_from_frontend(const Type *type) {
   out->fn_param_types =
       translate_type_array(type->fn_param_types, type->fn_param_count);
 
-  /* Struct layout: names/offsets are borrowed; field types are translated. */
   out->field_count = type->field_count;
   out->field_names = (const char **)type->field_names;
   out->field_offsets = type->field_offsets;
   out->field_types =
       translate_type_array(type->field_types, type->field_count);
 
-  /* Tagged-enum layout. */
   out->tagged_variant_count = type->tagged_variant_count;
   out->tagged_variant_names = (const char **)type->tagged_variant_names;
   out->tagged_variant_tags = type->tagged_variant_tags;

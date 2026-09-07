@@ -1,13 +1,5 @@
-// AST->IR lowering: switch, match, and tagged-enum construction.
 #include "ir_lowering_internal.h"
 
-// Emit the dispatch test for a range case `lo..hi`: if the switch value lies
-// in [lo, hi], jump to case_label; otherwise fall through to the next test.
-// Lowered with the existing comparison/branch primitives:
-//   ge = (sv >= lo); if (!ge) goto skip;
-//   le = (sv <= hi); if (!le) goto skip;
-//   goto case_label;
-//   skip:
 int ir_emit_switch_range_dispatch(IRLoweringContext *context,
                                          IRFunction *function,
                                          const IROperand *switch_value,
@@ -87,8 +79,6 @@ done:
   return ok;
 }
 
-/* The statements of a block, or nothing when the node is not one. A case body
- * is a block; an empty one is how several case values share a body. */
 static const ASTNode *ir_block_last_statement(const ASTNode *body,
                                               size_t *out_count) {
   const Program *block = NULL;
@@ -108,14 +98,9 @@ static const ASTNode *ir_block_last_statement(const ASTNode *body,
   return block->declarations[block->declaration_count - 1];
 }
 
-/* Does this case body already leave the switch by itself? The jump to the end
- * is emitted after every other one, and emitting it after a `return` would
- * leave a branch nothing can reach. */
 static int ir_case_body_transfers_control(const ASTNode *body) {
   const ASTNode *last = body;
   size_t count = 0;
-  /* A braced body is one statement holding the real ones, so the last
-     statement of the case is the last statement of the innermost block. */
   while (last && last->type == AST_PROGRAM) {
     last = ir_block_last_statement(last, &count);
   }
@@ -208,7 +193,6 @@ int ir_lower_switch_statement(IRLoweringContext *context,
   char *default_label =
       ir_find_switch_default_label(switch_data, case_labels, end_label);
 
-  // Dispatch chain: if (switch_value == case_value) jump case label.
   for (size_t i = 0; i < switch_data->case_count; i++) {
     ASTNode *case_node = switch_data->cases[i];
     CaseClause *clause = case_node ? (CaseClause *)case_node->data : NULL;
@@ -222,7 +206,6 @@ int ir_lower_switch_statement(IRLoweringContext *context,
       continue;
     }
 
-    // Range case `lo..hi`: emit a two-sided bounds test instead of equality.
     if (clause->value_high) {
       if (!ir_emit_switch_range_dispatch(context, function, &switch_value,
                                          clause->value, clause->value_high,
@@ -268,7 +251,6 @@ int ir_lower_switch_statement(IRLoweringContext *context,
     ir_operand_destroy(&case_value);
   }
 
-  // No match.
   if (!ir_emit_jump_instruction(context, function, default_label,
                                 statement->location)) {
     for (size_t j = 0; j < switch_data->case_count; j++) {
@@ -280,7 +262,6 @@ int ir_lower_switch_statement(IRLoweringContext *context,
     return 0;
   }
 
-  // Emit cases.
   if (!ir_push_control_frame(context, end_label, NULL, defers)) {
     for (size_t j = 0; j < switch_data->case_count; j++) {
       free(case_labels[j]);
@@ -310,14 +291,9 @@ int ir_lower_switch_statement(IRLoweringContext *context,
       return 0;
     }
 
-    /* Where a `fallthrough` written in this case goes. The last case has
-       nowhere to go, which the checker has already reported. */
     ir_set_fallthrough_label(
         context, i + 1 < switch_data->case_count ? case_labels[i + 1] : NULL);
 
-    // The case body is a scope of its own. Passing the live defer chain lets
-    // a `defer` written inside a case run when that case ends, whether it
-    // falls through to the next label or breaks out.
     if (clause->body && !ir_lower_statement_with_defers(context, function,
                                                         clause->body, defers)) {
       ir_pop_control_frame(context);
@@ -330,10 +306,6 @@ int ir_lower_switch_statement(IRLoweringContext *context,
       return 0;
     }
 
-    /* A case ends where the next one begins. An empty body is the exception,
-       and the only way several case values share one: with no statements of
-       its own there is nothing for the case to do but continue into the next.
-       `fallthrough;` is what asks for that from a case that does have a body. */
     {
       size_t statement_count = 0;
       ir_block_last_statement(clause->body, &statement_count);
@@ -610,9 +582,6 @@ int ir_lower_match_statement(IRLoweringContext *context,
         load.dest = payload_value;
         load.lhs = payload_address;
         load.rhs = ir_operand_int(payload_size);
-        /* Type the load like every other load: a float payload read without
-         * is_float travels the integer paths, and a float64 binding returned
-         * from the arm went out in RAX while the caller read XMM0. */
         ir_load_apply_float_type(&load, payload_type);
         ir_load_apply_unsigned(&load, payload_type);
         ir_access_apply_alias_class(&load, payload_type);
@@ -670,9 +639,6 @@ cleanup:
   return ok;
 }
 
-// Lower a match used in expression position. Mirrors ir_lower_match_statement
-// but allocates a result local; each arm lowers its body *expression* and
-// stores the value into that local, which becomes the value of the match.
 int ir_lower_match_expression(IRLoweringContext *context,
                                      IRFunction *function,
                                      ASTNode *expression,
@@ -930,7 +896,6 @@ int ir_lower_match_expression(IRLoweringContext *context,
         load.dest = payload_value;
         load.lhs = payload_address;
         load.rhs = ir_operand_int(payload_size);
-        /* Same typing as the statement form above; see that comment. */
         ir_load_apply_float_type(&load, payload_type);
         ir_load_apply_unsigned(&load, payload_type);
         ir_access_apply_alias_class(&load, payload_type);
@@ -1027,9 +992,6 @@ int ir_emit_tagged_enum_construct(IRLoweringContext *context,
     return 0;
   }
 
-  /* Nullary constructor referenced bare (e.g. `var x: Option = None`) reaches
-   * here with payload_arg == NULL and payload_type == NULL; that is valid. A
-   * payload_arg without a payload_type, or vice versa, is a type-checker bug. */
   if ((payload_type != NULL) != (payload_arg != NULL)) {
     ir_set_error(context,
                  "Tagged-enum constructor arity mismatch (variant '%s')",

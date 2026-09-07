@@ -10,8 +10,6 @@ const BinaryGpRegister BINARY_WIN64_INT_PARAM_REGISTERS[] = {
 const BinaryXmmRegister BINARY_WIN64_FLOAT_PARAM_REGISTERS[] = {
     BINARY_XMM0, BINARY_XMM1, BINARY_XMM2, BINARY_XMM3};
 
-/* SYSCALL (0F 05): invoke a kernel system call on x86-64. Used by the Linux
- * self-contained _start to call exit() without libc. */
 int binary_emit_syscall(BinaryCodeBuffer *buffer) {
   if (!buffer) {
     return 0;
@@ -96,20 +94,6 @@ int binary_emit_mov_reg_reg32(BinaryCodeBuffer *buffer,
   return binary_emit_movzx_reg_reg32(buffer, destination, source);
 }
 
-/* 32-bit reg-reg mov that ALWAYS emits, even for destination == source.
- * `mov r32, r32` zero-extends into the upper half, so the same-register form
- * is the canonical uint32 zero-extension, callers relying on that zeroing
- * must use this, not binary_emit_mov_reg_reg32 (whose same-register no-op
- * would silently skip it). */
-/* 32-bit-operand-size forms of the ALU and unary encoders below. On x86-64 a
- * 32-bit result is zero-extended to the full register for free, so computing a
- * uint32 expression at operand size 32 makes the truncation the language
- * requires implicit -- no separate zero-extend instruction, and no cycle for it
- * on the dependence chain. Widening to 32-bit immediates also becomes free:
- * `and eax, 0xedb88320` is one instruction, where the 64-bit form has to
- * materialize the constant into a register first because it cannot be
- * expressed as a sign-extended imm32. */
-
 int binary_emit_alu_reg_reg32(BinaryCodeBuffer *buffer, unsigned char opcode,
                               BinaryGpRegister destination,
                               BinaryGpRegister source) {
@@ -126,9 +110,6 @@ int binary_emit_alu_reg_reg32(BinaryCodeBuffer *buffer, unsigned char opcode,
   return 1;
 }
 
-/* Unlike the 64-bit form this never elides a no-op immediate (`add r,0` and
- * friends): at operand size 32 the instruction still performs the zero-extend
- * that the caller is relying on. */
 int binary_emit_alu_reg_imm_w32(BinaryCodeBuffer *buffer,
                                 unsigned char subopcode, BinaryGpRegister reg,
                                 uint32_t immediate) {
@@ -358,10 +339,6 @@ int binary_emit_cmp_reg_imm32(BinaryCodeBuffer *buffer,
   return binary_emit_alu_reg_imm32(buffer, 7, reg, immediate);
 }
 
-/* 32-bit `cmp r/m32, imm` (no REX.W), so a 4-byte int32/uint32 value is compared
- * against an immediate without the 64-bit sign-extension of the W=1 form -- and
- * without staging the constant through a scratch register. Uses the imm8 short
- * form (0x83 /7) when the value fits, else the imm32 form (0x81 /7). */
 int binary_emit_cmp_reg_imm_w32(BinaryCodeBuffer *buffer, BinaryGpRegister reg,
                                 uint32_t immediate) {
   if (!buffer) {
@@ -389,8 +366,6 @@ int binary_emit_mov_reg_imm64(BinaryCodeBuffer *buffer,
     return 0;
   }
   if (immediate == 0) {
-    /* mov, not xor: xor sets ZF and breaks cmov/cc sequences that load a
-     * zero immediate between compare and conditional move. */
     return binary_emit_mov_reg_imm32_zero_extend(buffer, destination, 0);
   }
   if (immediate <= UINT32_MAX) {
@@ -473,9 +448,6 @@ int binary_emit_memory_access_ex(BinaryCodeBuffer *buffer,
       base, displacement, 0);
 }
 
-/* Like binary_emit_memory_access_ex, but forcing an (empty) REX prefix. A byte
- * op whose register operand encodes as 4..7 means SPL/BPL/SIL/DIL only under a
- * REX prefix; without one those encodings name AH/CH/DH/BH. */
 int binary_emit_memory_access_ex_forced(BinaryCodeBuffer *buffer,
                                         int operand_size_prefix, int rex_w,
                                         unsigned char opcode1, int has_opcode2,
@@ -488,17 +460,12 @@ int binary_emit_memory_access_ex_forced(BinaryCodeBuffer *buffer,
       base, displacement, 1);
 }
 
-/* prefetcht0 [base + disp]: 0F 18 /1. Advisory -- never faults, so a bad
- * (speculative, out-of-range) address costs nothing but the hint. */
 int binary_emit_prefetcht0_mem(BinaryCodeBuffer *buffer,
                                BinaryGpRegister base, int displacement) {
   return binary_emit_memory_access_ex(buffer, 0, 0, 0x0F, 1, 0x18, 1, base,
                                       displacement);
 }
 
-/* Like binary_emit_memory_access_ex but with a scaled-index SIB address
- * [base + index*scale + disp]. `reg` is the ModRM.reg operand (load dest or
- * store source). scale must be 1/2/4/8 and index must not be RSP. */
 static int binary_emit_memory_access_sib_internal(
     BinaryCodeBuffer *buffer, int operand_size_prefix, int rex_w,
     unsigned char opcode1, int has_opcode2, unsigned char opcode2,
@@ -515,7 +482,6 @@ static int binary_emit_memory_access_sib_internal(
   case 8: scale_bits = 3; break;
   default: return 0;
   }
-  /* mod==00 has no displacement, but base low-3 == 5 (RBP/R13) forces disp8. */
   int use_disp8 = displacement >= -128 && displacement <= 127;
   unsigned char mod;
   if (displacement == 0 && (base & 7) != (BINARY_GP_RBP & 7)) {
@@ -593,9 +559,6 @@ int binary_emit_memory_access_sib(BinaryCodeBuffer *buffer,
       base, index, scale, displacement, 0);
 }
 
-/* Forced-REX variant: a byte op whose register operand encodes as 4..7 means
- * SPL/BPL/SIL/DIL only under a REX prefix; without one those encodings name
- * AH/CH/DH/BH. */
 int binary_emit_memory_access_sib_forced(
     BinaryCodeBuffer *buffer, int operand_size_prefix, int rex_w,
     unsigned char opcode1, int has_opcode2, unsigned char opcode2,
@@ -627,16 +590,6 @@ int binary_emit_mov_mem_reg(BinaryCodeBuffer *buffer,
   return binary_emit_memory_access(buffer, 0x89, source, base, displacement);
 }
 
-/* Pad the code buffer up to a `boundary`-byte alignment with NOPs.
- *
- * Uses the canonical multi-byte NOP forms rather than a run of 0x90: a 15-byte
- * gap is then two instructions instead of fifteen. That matters because
- * alignment padding sits on the fall-through path into a loop, so it is
- * decoded (once) rather than jumped over.
- *
- * `max_pad` caps how far the buffer will be pushed; a gap wider than that is
- * left alone, since the padding would cost more instruction bytes than the
- * alignment is worth. boundary must be a power of two. */
 int binary_emit_align_code(BinaryCodeBuffer *buffer, size_t boundary,
                            size_t max_pad) {
   static const unsigned char kNops[10][9] = {
@@ -671,14 +624,8 @@ int binary_emit_align_code(BinaryCodeBuffer *buffer, size_t boundary,
   return 1;
 }
 
-/* mov qword [base+disp], imm32 (sign-extended to 64) : REX.W C7 /0 id.
- *
- * Only the sign-extending form exists, so the caller must have checked the
- * immediate fits in a signed 32-bit field. Storing a constant to a stack slot
- * would otherwise cost a scratch register plus two instructions. */
 int binary_emit_mov_mem_imm32(BinaryCodeBuffer *buffer, BinaryGpRegister base,
                               int displacement, int32_t immediate) {
-  /* ModRM.reg carries the /0 sub-opcode, not a register. */
   return binary_emit_memory_access_ex(buffer, 0, 1, 0xC7, 0, 0,
                                       (BinaryGpRegister)0, base,
                                       displacement) &&
@@ -708,7 +655,6 @@ int binary_emit_mov_reg_mem32(BinaryCodeBuffer *buffer,
                                       base, displacement);
 }
 
-/* movsx r64, byte [base+disp] : REX.W 0F BE /r */
 int binary_emit_movsx_reg_mem8(BinaryCodeBuffer *buffer,
                                       BinaryGpRegister destination,
                                       BinaryGpRegister base,
@@ -717,7 +663,6 @@ int binary_emit_movsx_reg_mem8(BinaryCodeBuffer *buffer,
                                       destination, base, displacement);
 }
 
-/* movsx r64, word [base+disp] : REX.W 0F BF /r */
 int binary_emit_movsx_reg_mem16(BinaryCodeBuffer *buffer,
                                        BinaryGpRegister destination,
                                        BinaryGpRegister base,
@@ -726,7 +671,6 @@ int binary_emit_movsx_reg_mem16(BinaryCodeBuffer *buffer,
                                       destination, base, displacement);
 }
 
-/* movsxd r64, dword [base+disp] : REX.W 63 /r */
 int binary_emit_movsxd_reg_mem(BinaryCodeBuffer *buffer,
                                       BinaryGpRegister destination,
                                       BinaryGpRegister base,
@@ -738,8 +682,6 @@ int binary_emit_movsxd_reg_mem(BinaryCodeBuffer *buffer,
 int binary_emit_mov_mem_reg8(BinaryCodeBuffer *buffer,
                                      BinaryGpRegister base, int displacement,
                                      BinaryGpRegister source) {
-  /* REX is mandatory for SPL/BPL/SIL/DIL; without it ModRM reg codes 4..7
-   * name AH/CH/DH/BH instead. */
   int force_rex = source >= BINARY_GP_RSP && source <= BINARY_GP_RDI;
   return binary_emit_memory_access_ex_internal(
       buffer, 0, 0, 0x88, 0, 0, source, base, displacement, force_rex);
@@ -1327,14 +1269,6 @@ static int binary_emit_imul_imm_scratch_width(BinaryCodeBuffer *buffer,
            emit_shl_w(buffer, destination, shift, w) &&
            emit_neg_w(buffer, destination, w);
   }
-  /* C = 2^k + 1 (3,5,9,17,33,...): source*(2^k+1) = (source<<k) + source. For
-   * k<=3 a single LEA does it (scale 2/4/8), valid even when dst==src (LEA reads
-   * both inputs before writing). For larger k, mov+shl+add: the mov is
-   * register-renamed to zero latency, so the dependency chain is shl+add -- two
-   * cycles, shorter than imul's 3-cycle latency and off the single multiply
-   * port. The result is bit-identical to imul (both are mod 2^width; the narrow
-   * canonicalization that follows is unchanged). mov+shl+add needs dst != src so
-   * `source` survives the final add. */
   if (signed_immediate >= 3 &&
       binary_immediate_positive_power_of_two_i32(signed_immediate - 1, &shift)) {
     if (shift >= 1 && shift <= 3 && source != BINARY_GP_RSP) {
@@ -1345,23 +1279,12 @@ static int binary_emit_imul_imm_scratch_width(BinaryCodeBuffer *buffer,
              emit_shl_w(buffer, destination, shift, w) &&
              emit_alu_w(buffer, 0x01, destination, source, w);
     }
-    /* dst == src: shift a COPY instead, so the original survives the add. The
-     * chain is still shl+add, and the caller's scratch is free here. Without
-     * this an in-place `h = h * 33` -- the shape a hash loop's recurrence takes
-     * once its temp is folded into its destination -- falls back to imul and
-     * pays a 3-cycle loop-carried latency instead of 2. */
     if (have_scratch && scratch != destination && scratch != BINARY_GP_RSP) {
       return emit_mov_w(buffer, scratch, source, w) &&
              emit_shl_w(buffer, scratch, shift, w) &&
              emit_alu_w(buffer, 0x01, destination, scratch, w);
     }
   }
-  /* C = 2^k - 1 (7,15,31,63,...): source*(2^k-1) = (source<<k) - source. Same
-   * rationale and constraints (C==3 is already handled above as 2^1+1).
-   *
-   * There is no dst==src form here. SUB does not commute, so the scratch would
-   * have to hold the result and be moved back -- four instructions to save one
-   * cycle of latency, past the point where the trade is worth making. */
   if (signed_immediate >= 7 && destination != source &&
       binary_immediate_positive_power_of_two_i32(signed_immediate + 1,
                                                  &shift)) {
@@ -1375,10 +1298,6 @@ static int binary_emit_imul_imm_scratch_width(BinaryCodeBuffer *buffer,
     return 1;
   }
 
-  /* C = (3|5|9) * 2^k (6,10,12,18,20,24,36,40,...): lea [src+src*(C'-1)] then
-   * shl by k. LEA reads both inputs before writing, so dst==src is fine; the
-   * chain is lea+shl (~1.5 cycles) vs imul's 3-cycle latency, and stays off
-   * the multiply port. Negative C appends a neg. */
   {
     int32_t magnitude = signed_immediate;
     int negate = 0;
@@ -1485,22 +1404,14 @@ int binary_emit_idiv_reg(BinaryCodeBuffer *buffer,
   return binary_emit_unary_reg(buffer, 7, divisor);
 }
 
-/* Signed division with the one case x86 traps on folded out. IDIV raises #DE
- * when the quotient does not fit, which for a 64-bit divide means exactly
- * INT64_MIN / -1. The narrower widths never reach it (they divide sign-extended
- * at 64 bits and truncate after), so trapping there made one width of the same
- * expression kill the process. Dividing by -1 is a negation and leaves no
- * remainder, and negation wraps INT64_MIN to itself, so the guarded path is the
- * wrapping answer the other widths already give. Division by zero still traps.
- * RAX = dividend on entry; RAX = quotient, RDX = remainder on exit. */
 int binary_emit_idiv_wrapping(BinaryCodeBuffer *buffer,
                               BinaryGpRegister divisor) {
   size_t to_wrap = 0;
   size_t to_done = 0;
   if (!binary_emit_cmp_reg_imm32(buffer, divisor, 0xFFFFFFFFu) ||
-      !wcs_jcc(buffer, 0x84 /* je */, &to_wrap) || !binary_emit_cqo(buffer) ||
+      !wcs_jcc(buffer, 0x84 , &to_wrap) || !binary_emit_cqo(buffer) ||
       !binary_emit_idiv_reg(buffer, divisor) ||
-      !wcs_jcc(buffer, 0 /* jmp */, &to_done)) {
+      !wcs_jcc(buffer, 0 , &to_done)) {
     return 0;
   }
   if (!wcs_patch_here(buffer, to_wrap) ||
@@ -1511,8 +1422,6 @@ int binary_emit_idiv_wrapping(BinaryCodeBuffer *buffer,
   return wcs_patch_here(buffer, to_done);
 }
 
-/* Unsigned one-operand DIV (F7 /6): RAX = RDX:RAX / src, RDX = remainder.
- * Caller must zero RDX (xor edx,edx) first. */
 int binary_emit_div_reg(BinaryCodeBuffer *buffer, BinaryGpRegister divisor) {
   return binary_emit_unary_reg(buffer, 6, divisor);
 }
@@ -1641,7 +1550,6 @@ int binary_emit_movsx_reg_reg16(BinaryCodeBuffer *buffer,
   return 1;
 }
 
-/* dst(64) <- zero-extend(low byte of source). 0F B6 /r with REX.W. */
 int binary_emit_movzx_reg_reg8(BinaryCodeBuffer *buffer,
                                BinaryGpRegister destination,
                                BinaryGpRegister source) {
@@ -1659,7 +1567,6 @@ int binary_emit_movzx_reg_reg8(BinaryCodeBuffer *buffer,
   return 1;
 }
 
-/* dst(64) <- zero-extend(low word of source). 0F B7 /r with REX.W. */
 int binary_emit_movzx_reg_reg16(BinaryCodeBuffer *buffer,
                                 BinaryGpRegister destination,
                                 BinaryGpRegister source) {
@@ -1895,13 +1802,6 @@ int binary_emit_cvtsi2sd_xmm_reg(BinaryCodeBuffer *buffer,
   return 1;
 }
 
-/* ---- Single-precision (float32) SSE encoders ----
- * These mirror the double-precision encoders above but use the F3 scalar-
- * single prefix / 32-bit operand forms. They exist so float32 values are
- * computed and converted at single precision instead of being silently
- * widened to double (which corrupts struct layout and ABI). */
-
-/* movd xmm, r32 : 66 0F 6E /r  (no REX.W -> 32-bit GP source) */
 int binary_emit_movd_xmm_reg(BinaryCodeBuffer *buffer,
                                     BinaryXmmRegister destination,
                                     BinaryGpRegister source) {
@@ -1922,7 +1822,6 @@ int binary_emit_movd_xmm_reg(BinaryCodeBuffer *buffer,
   return 1;
 }
 
-/* movd r32, xmm : 66 0F 7E /r  (no REX.W -> 32-bit GP destination) */
 int binary_emit_movd_reg_xmm(BinaryCodeBuffer *buffer,
                                     BinaryGpRegister destination,
                                     BinaryXmmRegister source) {
@@ -1971,8 +1870,6 @@ int binary_emit_divss_xmm_xmm(BinaryCodeBuffer *buffer,
                                  source);
 }
 
-/* ucomiss xmm, xmm : NP 0F 2E /r  (no mandatory prefix, so cannot use
- * binary_emit_sse_reg_reg which always emits one). */
 int binary_emit_ucomiss_xmm_xmm(BinaryCodeBuffer *buffer,
                                        BinaryXmmRegister lhs,
                                        BinaryXmmRegister rhs) {
@@ -1991,7 +1888,6 @@ int binary_emit_ucomiss_xmm_xmm(BinaryCodeBuffer *buffer,
   return 1;
 }
 
-/* cvttss2si r64, xmm : F3 REX.W 0F 2C /r  (truncating float32 -> int64) */
 int binary_emit_cvttss2si_reg_xmm(BinaryCodeBuffer *buffer,
                                          BinaryGpRegister destination,
                                          BinaryXmmRegister source) {
@@ -2012,7 +1908,6 @@ int binary_emit_cvttss2si_reg_xmm(BinaryCodeBuffer *buffer,
   return 1;
 }
 
-/* cvtsi2ss xmm, r64 : F3 REX.W 0F 2A /r  (int64 -> float32) */
 int binary_emit_cvtsi2ss_xmm_reg(BinaryCodeBuffer *buffer,
                                         BinaryXmmRegister destination,
                                         BinaryGpRegister source) {
@@ -2033,7 +1928,6 @@ int binary_emit_cvtsi2ss_xmm_reg(BinaryCodeBuffer *buffer,
   return 1;
 }
 
-/* cvtss2sd xmm, xmm : F3 0F 5A /r  (widen float32 -> float64) */
 int binary_emit_cvtss2sd_xmm_xmm(BinaryCodeBuffer *buffer,
                                         BinaryXmmRegister destination,
                                         BinaryXmmRegister source) {
@@ -2041,7 +1935,6 @@ int binary_emit_cvtss2sd_xmm_xmm(BinaryCodeBuffer *buffer,
                                  source);
 }
 
-/* cvtsd2ss xmm, xmm : F2 0F 5A /r  (narrow float64 -> float32) */
 int binary_emit_cvtsd2ss_xmm_xmm(BinaryCodeBuffer *buffer,
                                         BinaryXmmRegister destination,
                                         BinaryXmmRegister source) {

@@ -1,8 +1,6 @@
 #include "codegen/binary/mir.h"
 #include "ir/ir_machine.h"
 
-/* What the last encoded function spilled, read by the caller that knows the
-   function's name. Set only while a machine rule is collecting. */
 long long mir_encode_last_spills = 0;
 #include "codegen/binary/mir_annotate.h"
 #include "codegen/binary/simd_internal.h"
@@ -11,23 +9,8 @@ long long mir_encode_last_spills = 0;
 #include <stdlib.h>
 #include <string.h>
 
-/* MIR (post-allocation) -> machine bytes in fn->context->code.
- *
- * Compute model: RAX is the primary scratch/accumulator and RCX the secondary;
- * RDX is reserved (future divide). Operand values come from their ALLOCATED
- * registers (or are materialized from a spill slot / immediate into a scratch),
- * never from per-temp stack homes, that is the whole point. Each MIR op
- * computes into RAX and writes the destination's register (or spill slot). The
- * extra reg-reg moves vs an optimal in-place scheme are cheap and removable
- * later; correctness first. */
-
-/* Encoder scratch registers. R10/R11 are pure scratch, not allocatable, and
- * not ABI argument registers on EITHER Win64 or SysV, so RAX/RCX/RDX are freed
- * for the register allocator. Ops that need a HARDWARE register (divide's
- * RDX:RAX, variable shift's CL, setcc's byte target) name it explicitly. */
 #define SCRATCH_A BINARY_GP_R10
 #define SCRATCH_B BINARY_GP_R11
-/* Float scratch (see MIR_XMM_POOL): XMM4 primary, XMM5 secondary. */
 #define FSCRATCH_A mir_xmm_scratch_a()
 #define FSCRATCH_B mir_xmm_scratch_b()
 
@@ -42,25 +25,8 @@ static int enc_err(MirFunction *fn, const char *msg) {
   return 0;
 }
 
-/* rbp-relative offset of a spilled vreg (mem = [rbp - offset]). */
 static int spill_off(const MirVreg *v) { return v->spill_offset; }
 
-/* Spill-home forwarding.
- *
- * A spilled value that is written and then immediately read back costs two
- * memory operations to move a value that is already sitting in the register
- * that just wrote it. The allocator produces long runs of this whenever a
- * chain of instructions shares one coalesced slot: the counter update in a
- * pressured loop stores, reloads, stores and reloads the same word.
- *
- * The only thing that makes forwarding unsound is something happening between
- * the store and the load, and the code buffer answers that exactly: if its
- * size has not moved, no instruction was emitted in between, so the register
- * still holds what the slot holds. A label emits no bytes and would slip
- * through that test, so control flow clears the record explicitly.
- *
- * An address-taken home is never forwarded: a pointer can write those bytes
- * without going through this path at all. */
 typedef struct {
   int valid;
   int disp;
@@ -72,9 +38,6 @@ static MirHomeForward g_home_fwd;
 
 static void home_fwd_clear(void) { g_home_fwd.valid = 0; }
 
-/* A label emits no bytes, so the code-size invariant cannot see that control
- * can arrive here from a branch with a different register state. Anything that
- * transfers control ends a forwarding window. */
 static void home_fwd_note_boundary(MirOpcode op) {
   if (op == MIR_LABEL || op == MIR_JMP || op == MIR_JCC || op == MIR_CMPBR ||
       op == MIR_FCMPBR || op == MIR_CALL || op == MIR_RET ||
@@ -97,24 +60,15 @@ static int home_fwd_has(const BinaryCodeBuffer *code, int disp,
          g_home_fwd.reg == reg && g_home_fwd.code_size == code->size;
 }
 
-/* Frame base register for stack slots: RSP when the frame pointer is omitted
- * (rbp is then free for allocation), otherwise RBP. */
 static BinaryGpRegister frame_base(const MirFunction *fn) {
   return fn->context->omit_frame_pointer ? BINARY_GP_RSP : BINARY_GP_RBP;
 }
 
-/* Translate an rbp-relative displacement to the active frame base. With the
- * frame pointer omitted, rsp sits frame_size below where rbp would point, so
- * [rbp+d] == [rsp+frame_size+d]. */
 static int frame_disp(const MirFunction *fn, int rbp_disp) {
   return fn->context->omit_frame_pointer ? rbp_disp + fn->context->frame_size
                                          : rbp_disp;
 }
 
-/* Load a GP vreg's spilled home into `dst`. An address-taken narrow scalar
- * (home_width 1/2/4) is authoritative only at its declared width: an
- * aliasing pointer writes exactly those bytes, so the load extends from them
- * instead of scooping whatever the rest of the 8-byte slot last held. */
 static int gp_home_load(MirFunction *fn, const MirVreg *v,
                         BinaryGpRegister dst) {
   BinaryCodeBuffer *code = &fn->context->code;
@@ -169,7 +123,6 @@ static int gp_home_mem(MirFunction *fn, const MirOperand *op,
   return 1;
 }
 
-/* Emit: target <- value of `op`. */
 static int materialize_into(MirFunction *fn, const MirOperand *op,
                             BinaryGpRegister target) {
   BinaryCodeBuffer *code = &fn->context->code;
@@ -208,12 +161,6 @@ static int mir_reg_in(BinaryGpRegister r, const BinaryGpRegister *set, int n) {
   return 0;
 }
 
-/* The register `op` already sits in, if any, without emitting anything.
- *
- * Staging picks have to know this up front. An operand resolved LATER may
- * already be resident somewhere, and staging an earlier spilled operand into
- * that register would destroy it before it is read. RDX is the case that bites:
- * it is in the allocator's pool and is also the preferred index scratch. */
 static int mir_operand_fixed_reg(const MirFunction *fn, const MirOperand *op,
                                  BinaryGpRegister *out) {
   if (op->kind == MIR_OPK_VREG && op->vreg >= 0 &&
@@ -228,7 +175,6 @@ static int mir_operand_fixed_reg(const MirFunction *fn, const MirOperand *op,
   return 0;
 }
 
-/* Append `op`'s resident register to `set` if it has one. */
 static void mir_note_fixed_reg(const MirFunction *fn, const MirOperand *op,
                                BinaryGpRegister *set, int *n) {
   BinaryGpRegister r;
@@ -237,9 +183,6 @@ static void mir_note_fixed_reg(const MirFunction *fn, const MirOperand *op,
   }
 }
 
-/* True when some allocated value sitting in `phys` is live at instruction
- * `idx`. Only meaningful for allocatable registers: R10/R11 are outside the
- * pool, so nothing is ever live in them. */
 static int mir_phys_live_at(const MirFunction *fn, BinaryGpRegister phys,
                             size_t idx) {
   for (size_t v = 0; v < fn->vreg_count; v++) {
@@ -255,31 +198,6 @@ static int mir_phys_live_at(const MirFunction *fn, BinaryGpRegister phys,
   return 0;
 }
 
-/* Pick a scratch register for staging a spilled operand: `preferred` unless it
- * is already holding one of `avoid`.
- *
- * A [base + index*scale] access stages each spilled operand through a scratch,
- * and two of them landing in the SAME register does not fail loudly: it encodes
- * base and index as one register, so `[base + index*4]` silently becomes
- * `[r11 + r11*4]` and the access reads the wrong address.
- *
- * The candidates are the reserved encoder scratches R10/R11, which are outside
- * the allocator's pool and so can never hold a live value. RDX is allowed only
- * as a last resort AND only when no live value occupies it at this instruction:
- * it is allocatable, and staging over a live one is silent corruption of a
- * value this instruction never mentions. A loop counter in RDX was overwritten
- * by the index staging of a byte load, and the loop then ran until it walked
- * off its array -- `avoid` cannot see that, because the clobbered value is not
- * an operand of the access doing the clobbering.
- *
- * `extra` names registers the caller has vouched for -- an address-forming
- * instruction's own destination, which it writes only after reading the whole
- * address, so staging into it is safe once the operands' resident registers are
- * in `avoid`. Those skip the liveness gate: the destination is defined here, so
- * a scan would always see it as live.
- *
- * Returns 0 (and leaves *out untouched) when nothing is safe, so the caller
- * raises an encoder error rather than emitting a wrong address. */
 static int mir_pick_scratch(const MirFunction *fn, size_t idx,
                             BinaryGpRegister preferred,
                             const BinaryGpRegister *avoid, int avoid_n,
@@ -315,11 +233,6 @@ static int mir_pick_scratch(const MirFunction *fn, size_t idx,
   return 0;
 }
 
-/* Force every scaled store down the form-the-address-first path, which a
- * scaled store only takes when the three-scratch staging runs dry. That needs
- * register pressure deep self-recursion expansion produces and the default
- * inlining caps do not, so the path would otherwise ship untested. getenv is
- * slow on Windows and this sits in the encoder, so snapshot it once. */
 static int mir_env_addr_store(void) {
   static int cached = -1;
   if (cached < 0) {
@@ -328,8 +241,6 @@ static int mir_env_addr_store(void) {
   return cached;
 }
 
-/* Return the physical register currently holding `op`'s value, materializing
- * into `scratch` when the operand is a spill/immediate/home. */
 static BinaryGpRegister value_reg(MirFunction *fn, const MirOperand *op,
                                   BinaryGpRegister scratch, int *ok) {
   *ok = 1;
@@ -337,11 +248,6 @@ static BinaryGpRegister value_reg(MirFunction *fn, const MirOperand *op,
   case MIR_OPK_VREG: {
     const MirVreg *v = &fn->vregs[op->vreg];
     if (v->in_register) {
-      /* A vreg's phys number means nothing without its bank: XMM0 and RAX
-       * are both 0. Reading a float's bits into a GP register is a real
-       * request -- interpolation hands mettle_string_from_f64 the raw bits
-       * -- and it has to cross with movq. Casting the number straight to a
-       * GP register silently read RAX instead. */
       if (v->rclass == MIR_RC_XMM) {
         *ok = binary_emit_movq_reg_xmm(&fn->context->code, scratch,
                                        (BinaryXmmRegister)v->phys);
@@ -356,18 +262,12 @@ static BinaryGpRegister value_reg(MirFunction *fn, const MirOperand *op,
       }
       return (BinaryGpRegister)v->phys;
     }
-    /* Spilled: the home slot holds the bits either way, so a GP load of the
-     * slot is the same value whichever bank wrote it. */
     *ok = gp_home_load(fn, v, scratch);
     return scratch;
   }
   case MIR_OPK_PHYS:
     return (BinaryGpRegister)op->phys;
   case MIR_OPK_IMM:
-  /* A float immediate as a raw VALUE is its IEEE-754 bits (that is the FIMM
-   * contract), so a GP materialization is the bits themselves. This is what a
-   * memory store of a float constant needs; anything arithmetic goes through
-   * the XMM staging path and never lands here. */
   case MIR_OPK_FIMM:
     *ok = binary_emit_mov_reg_imm64(&fn->context->code, scratch,
                                     (uint64_t)op->imm);
@@ -382,7 +282,6 @@ static BinaryGpRegister value_reg(MirFunction *fn, const MirOperand *op,
   }
 }
 
-/* Emit: dst <- value in src_phys. */
 static int store_from(MirFunction *fn, const MirOperand *dst,
                       BinaryGpRegister src_phys) {
   BinaryCodeBuffer *code = &fn->context->code;
@@ -390,7 +289,6 @@ static int store_from(MirFunction *fn, const MirOperand *dst,
   case MIR_OPK_VREG: {
     const MirVreg *v = &fn->vregs[dst->vreg];
     if (v->in_register) {
-      /* Same bank confusion as value_reg, in the other direction. */
       if (v->rclass == MIR_RC_XMM) {
         return binary_emit_movq_xmm_reg(code, (BinaryXmmRegister)v->phys,
                                         src_phys);
@@ -407,8 +305,6 @@ static int store_from(MirFunction *fn, const MirOperand *dst,
     {
       int disp = frame_disp(fn, -spill_off(v));
       if (!v->address_taken && home_fwd_has(code, disp, src_phys)) {
-        /* The slot already holds this register's value and nothing has run
-         * since it was put there. */
         return 1;
       }
       if (!binary_emit_mov_mem_reg(code, frame_base(fn), disp, src_phys)) {
@@ -430,7 +326,6 @@ static int store_from(MirFunction *fn, const MirOperand *dst,
   }
 }
 
-/* ALU r/m,reg opcode bytes for the reg-reg ALU forms. */
 static int alu_opcode(MirOpcode op, unsigned char *out) {
   switch (op) {
   case MIR_ADD: *out = 0x01; return 1;
@@ -442,7 +337,6 @@ static int alu_opcode(MirOpcode op, unsigned char *out) {
   }
 }
 
-/* ALU /digit sub-opcodes for the reg,imm forms. */
 static int alu_imm_subopcode(MirOpcode op, unsigned char *out) {
   switch (op) {
   case MIR_ADD: *out = 0; return 1;
@@ -475,8 +369,6 @@ static int alu_imm(MirFunction *fn, MirOpcode op, BinaryGpRegister reg,
   }
 }
 
-/* Does `op` currently resolve to physical register D? (A register-resident
- * vreg or a fixed PHYS operand.) Immediates/spills/memory never alias D. */
 static int operand_in_phys(MirFunction *fn, const MirOperand *op,
                            BinaryGpRegister D) {
   if (op->kind == MIR_OPK_VREG) {
@@ -489,8 +381,6 @@ static int operand_in_phys(MirFunction *fn, const MirOperand *op,
   return 0;
 }
 
-/* True (filling *reg) when `op` is already resident in a GP register, with no
- * spill reload or immediate materialization needed. */
 static int operand_gp_reg(MirFunction *fn, const MirOperand *op,
                           BinaryGpRegister *reg) {
   if (op->kind == MIR_OPK_VREG) {
@@ -508,14 +398,12 @@ static int operand_gp_reg(MirFunction *fn, const MirOperand *op,
   return 0;
 }
 
-/* If `dst` is register-resident, write its physical register and return 1;
- * otherwise (spilled) return 0. */
 static int dst_is_reg(MirFunction *fn, const MirOperand *dst,
                       BinaryGpRegister *D_out) {
   if (dst->kind == MIR_OPK_VREG) {
     const MirVreg *v = &fn->vregs[dst->vreg];
     if (v->rclass != MIR_RC_GP) {
-      return 0; /* not a GP register; store_from crosses the bank */
+      return 0;
     }
     if (v->in_register) {
       *D_out = (BinaryGpRegister)v->phys;
@@ -530,22 +418,9 @@ static int dst_is_reg(MirFunction *fn, const MirOperand *dst,
   return 0;
 }
 
-/* Emit `target OP= x` for an integer ALU op. `x` must not alias `target` unless
- * the op is commutative (callers guarantee this). Uses the scratch register
- * that is not `target` to stage a spilled/wide-immediate `x`. */
 static int emit_op_eq(MirFunction *fn, MirOpcode mop, unsigned char opc,
                       BinaryGpRegister target, const MirOperand *x, int width) {
   BinaryCodeBuffer *code = &fn->context->code;
-  /* At operand size 32 the immediate is not sign-extended, so ANY 32-bit
-   * constant folds into the instruction -- including the ones (0x80000000 and
-   * up) that the 64-bit form has to stage through a register.
-   *
-   * A 64-bit AND joins that: the immediate's upper half is zero, so the
-   * result's upper half is zero whichever operand size the instruction uses,
-   * and operand size 32 zeroes it for free. That rescues the masking constants
-   * -- 0xEDB88320, 0xFFFFFF00, 0x9E3779B9 -- which otherwise burn a register
-   * and an instruction at every use. OR and XOR do NOT join: they would have
-   * preserved the operand's upper half, which operand size 32 discards. */
   if (x->kind == MIR_OPK_IMM &&
       (code_generator_binary_immediate_fits_signed_32(x->imm) ||
        (width == 4 && (unsigned long long)x->imm <= 0xFFFFFFFFULL))) {
@@ -581,12 +456,9 @@ static int emit_op_eq(MirFunction *fn, MirOpcode mop, unsigned char opc,
   return emitted ? 1 : enc_err(fn, "out of memory in ALU");
 }
 
-/* dst = -a (MIR_NEG) or dst = ~a (MIR_NOT). One-source two-address: stage a in
- * the destination register (or RAX scratch for a spilled dst), then neg/not in
- * place. */
 static int encode_neg_not(MirFunction *fn, const MirInst *in) {
   BinaryCodeBuffer *code = &fn->context->code;
-  int w32 = (in->width == 4); /* see encode_alu */
+  int w32 = (in->width == 4);
   BinaryGpRegister D;
   if (dst_is_reg(fn, &in->dst, &D)) {
     if (!operand_in_phys(fn, &in->a, D) && !materialize_into(fn, &in->a, D)) {
@@ -620,22 +492,10 @@ static int encode_alu(MirFunction *fn, const MirInst *in) {
     return enc_err(fn, "bad ALU opcode");
   }
   int is_sub = (in->op == MIR_SUB);
-  /* Width 4 means the result is defined to be the low 32 bits zero-extended,
-   * which is exactly what a 32-bit-operand-size instruction produces for free
-   * (see mir_narrow_zero_extended_ops). Staging an operand may still use a
-   * 64-bit move: the narrow op reads only the low half and rewrites the top. */
   int w32 = (in->width == 4);
   BinaryGpRegister D;
 
   if (dst_is_reg(fn, &in->dst, &D)) {
-    /* `D = a + b` with neither operand already in D would otherwise be
-     * `mov D, a; add D, b` (two instructions). When both operands are live in
-     * GP registers, `lea D, [a + b]` does it in one and -- unlike register
-     * coalescing -- changes nothing about allocation (D stays D), so it cannot
-     * lengthen a live range or cause a spill. ADD only (LEA can't subtract);
-     * the SIB index can't be RSP, so swap operands if needed (ADD commutes).
-     * MIR consumes condition flags only through explicit CMP, so LEA not
-     * setting flags is fine. */
     if (in->op == MIR_ADD && !operand_in_phys(fn, &in->a, D) &&
         !operand_in_phys(fn, &in->b, D)) {
       BinaryGpRegister ra, rb;
@@ -666,9 +526,7 @@ static int encode_alu(MirFunction *fn, const MirInst *in) {
       }
     }
     if (operand_in_phys(fn, &in->b, D)) {
-      /* b already occupies the destination register. */
       if (is_sub) {
-        /* dst = a - b, b in D: stage a in RAX, subtract D, write back. */
         if (!materialize_into(fn, &in->a, SCRATCH_A)) {
           return 0;
         }
@@ -678,10 +536,8 @@ static int encode_alu(MirFunction *fn, const MirInst *in) {
         }
         return store_from(fn, &in->dst, SCRATCH_A);
       }
-      /* commutative: D = D OP a == a OP b. */
       return emit_op_eq(fn, in->op, opc, D, &in->a, in->width);
     }
-    /* b does not alias D: place a in D, then D OP= b. */
     if (!operand_in_phys(fn, &in->a, D) &&
         !materialize_into(fn, &in->a, D)) {
       return 0;
@@ -689,7 +545,6 @@ static int encode_alu(MirFunction *fn, const MirInst *in) {
     return emit_op_eq(fn, in->op, opc, D, &in->b, in->width);
   }
 
-  /* Spilled destination: compute in RAX (no allocatable reg aliases it), store. */
   if (!materialize_into(fn, &in->a, SCRATCH_A) ||
       !emit_op_eq(fn, in->op, opc, SCRATCH_A, &in->b, in->width)) {
     return 0;
@@ -743,9 +598,6 @@ static int encode_imul(MirFunction *fn, const MirInst *in) {
   if (dst_is_reg(fn, &in->dst, &D)) {
     int ok;
     if (b_imm32) {
-      /* D = a * imm: three-operand imul reads a, writes D (a may equal D).
-       * Hand over the scratch that staging `a` did not use, so the shift-and-add
-       * expansions stay available when D and a are the same register. */
       BinaryGpRegister areg = value_reg(fn, &in->a, SCRATCH_A, &ok);
       BinaryGpRegister scratch = (areg == SCRATCH_A) ? SCRATCH_B : SCRATCH_A;
       if (!ok || !binary_emit_imul_reg_reg_imm32_scratch(
@@ -755,7 +607,6 @@ static int encode_imul(MirFunction *fn, const MirInst *in) {
       return 1;
     }
     if (operand_in_phys(fn, &in->b, D)) {
-      /* D holds b; D *= a (imul is commutative). */
       BinaryGpRegister areg = value_reg(fn, &in->a, SCRATCH_A, &ok);
       if (!ok || !binary_emit_imul_reg_reg(code, D, areg)) {
         return enc_err(fn, "out of memory in imul");
@@ -773,7 +624,6 @@ static int encode_imul(MirFunction *fn, const MirInst *in) {
     return 1;
   }
 
-  /* Spilled destination. */
   if (!materialize_into(fn, &in->a, SCRATCH_A)) {
     return 0;
   }
@@ -792,17 +642,9 @@ static int encode_imul(MirFunction *fn, const MirInst *in) {
   return store_from(fn, &in->dst, SCRATCH_A);
 }
 
-/* dst = a / b (quotient) or a % b (remainder when in->cc != 0). Signedness is
- * in->is_unsigned (the dividend's type): signed uses CQO + IDIV, unsigned uses
- * XOR(RDX) + DIV. Always 64-bit on the sign/zero-extended operands, which gives
- * the same result as a narrower divide. The dividend goes in RAX, RDX is the
- * high half, so the divisor must be staged out of RAX/RDX (now allocatable)
- * into a scratch register BEFORE the dividend is loaded into RAX. */
 static int encode_div(MirFunction *fn, const MirInst *in) {
   BinaryCodeBuffer *code = &fn->context->code;
   int rok;
-  /* Resolve the divisor first (it might currently live in RAX or RDX, which the
-   * dividend/high-half are about to overwrite); force it into SCRATCH_B then. */
   BinaryGpRegister divisor = value_reg(fn, &in->b, SCRATCH_B, &rok);
   if (!rok) {
     return 0;
@@ -822,8 +664,6 @@ static int encode_div(MirFunction *fn, const MirInst *in) {
       return enc_err(fn, "out of memory in div");
     }
   } else {
-    /* A constant divisor that is not -1 cannot reach the overflow case, so it
-     * keeps the bare IDIV; anything else takes the guarded form. */
     int needs_guard = !(in->b.kind == MIR_OPK_IMM && in->b.imm != -1);
     if (needs_guard) {
       if (!binary_emit_idiv_wrapping(code, divisor)) {
@@ -837,10 +677,6 @@ static int encode_div(MirFunction *fn, const MirInst *in) {
   return store_from(fn, &in->dst, result);
 }
 
-/* dst = high 64 bits of (a * b). The multiplicand goes in RAX; the one-operand
- * mul/imul writes the full 128-bit product to RDX:RAX and we keep RDX. b is the
- * magic constant (IMM) or a register staged out of RAX/RDX (now allocatable)
- * into SCRATCH_B before RAX is loaded. is_unsigned selects mul. */
 static int encode_mulhi(MirFunction *fn, const MirInst *in) {
   BinaryCodeBuffer *code = &fn->context->code;
   BinaryGpRegister mreg;
@@ -891,11 +727,6 @@ static int encode_shift(MirFunction *fn, const MirInst *in) {
     }
     return dst_reg ? 1 : store_from(fn, &in->dst, work);
   }
-  /* Variable count: it must end up in CL (RCX). RCX is now allocatable, so the
-   * value `a` may itself live in RCX, and the count may live anywhere. Stage the
-   * value into SCRATCH_A first (reading it from wherever, RCX included), then
-   * move the count into RCX (the value is already safe in SCRATCH_A), shift, and
-   * store. The MIR layer marks a variable shift as an RCX clobber. */
   int ok;
   BinaryGpRegister cnt = value_reg(fn, &in->b, SCRATCH_B, &ok);
   if (!ok) {
@@ -916,9 +747,6 @@ static int encode_shift(MirFunction *fn, const MirInst *in) {
 
 static int encode_setcc(MirFunction *fn, const MirInst *in) {
   BinaryCodeBuffer *code = &fn->context->code;
-  /* The compare reads a and b without modifying them, so use their own
-   * registers directly. setcc requires an 8-bit-addressable low reg, so it
-   * always targets AL and the result is zero-extended into RAX, then stored. */
   int ok;
   BinaryGpRegister cbase;
   int cdisp;
@@ -926,13 +754,7 @@ static int encode_setcc(MirFunction *fn, const MirInst *in) {
   if (!ok) {
     return 0;
   }
-  /* A 4-byte (int32/uint32) compare must be 32-bit: MIR computes in 64-bit, so a
-   * narrow operand can carry garbage in its high 32 bits; a 32-bit cmp ignores
-   * them (the low 32 bits are the true value). An immediate is staged into a
-   * register first since the 64-bit cmp-imm would sign-extend it. */
   if (in->width == 4) {
-    /* A 32-bit immediate folds straight into the 32-bit cmp (no scratch reg);
-     * the low 32 bits are the int32/uint32 constant being compared. */
     if (in->b.kind == MIR_OPK_IMM) {
       if (!binary_emit_cmp_reg_imm_w32(code, areg, (uint32_t)in->b.imm)) {
         return enc_err(fn, "out of memory in cmp32 imm");
@@ -966,16 +788,9 @@ static int encode_setcc(MirFunction *fn, const MirInst *in) {
       !binary_emit_movzx_eax_al(code)) {
     return enc_err(fn, "out of memory in setcc");
   }
-  /* setcc/movzx target AL/EAX specifically; the allocator marks SETCC as an RAX
-   * clobber so no live value sits in RAX across it. */
   return store_from(fn, &in->dst, BINARY_GP_RAX);
 }
 
-/* dst <- extend(low `width` bytes of a) per signedness. Signed extensions emit
- * directly into the destination register (the reg-reg encoders always emit and
- * are correct in place). Unsigned narrowings and spilled destinations use the
- * RAX path with the dedicated AL/AX/EAX encoders (which always emit, unlike
- * mov_reg_reg32 which is a no-op when dst==src and would skip the zeroing). */
 static int encode_extend(MirFunction *fn, const MirInst *in) {
   BinaryCodeBuffer *code = &fn->context->code;
   int signed_ext = (in->op == MIR_MOVSX);
@@ -988,9 +803,6 @@ static int encode_extend(MirFunction *fn, const MirInst *in) {
       return 0;
     }
     int done = 1;
-    /* The width-4 unsigned form must be the ALWAYS-emitting 32-bit mov: the
-     * canonicalizing `mov D32, D32` has dst == src, and the skip-when-equal
-     * mov_reg_reg32 would silently drop the zero-extension. */
     switch (in->width) {
     case 4:
       done = signed_ext ? binary_emit_movsxd_reg_reg32(code, D, areg)
@@ -1009,8 +821,6 @@ static int encode_extend(MirFunction *fn, const MirInst *in) {
     return done ? 1 : enc_err(fn, "out of memory in extend");
   }
 
-  /* Scratch path (spilled destination): extend in SCRATCH_A using the general
-   * reg-reg forms (no RAX dependency), then store. */
   if (!materialize_into(fn, &in->a, SCRATCH_A)) {
     return 0;
   }
@@ -1038,14 +848,12 @@ static int encode_extend(MirFunction *fn, const MirInst *in) {
   return store_from(fn, &in->dst, S);
 }
 
-/* ---- float (XMM) operand plumbing -------------------------------------- */
-
 static int dst_is_xmm_reg(MirFunction *fn, const MirOperand *dst,
                           BinaryXmmRegister *D_out) {
   if (dst->kind == MIR_OPK_VREG) {
     const MirVreg *v = &fn->vregs[dst->vreg];
     if (v->rclass == MIR_RC_GP) {
-      return 0; /* not an XMM register; xmm_store crosses the bank */
+      return 0;
     }
     if (v->in_register) {
       *D_out = (BinaryXmmRegister)v->phys;
@@ -1060,17 +868,11 @@ static int dst_is_xmm_reg(MirFunction *fn, const MirOperand *dst,
   return 0;
 }
 
-/* xmm dst <- xmm src, scalar (movss for width 4, movsd for width 8). */
 static int xmm_mov(BinaryCodeBuffer *code, BinaryXmmRegister dst,
                    BinaryXmmRegister src, int width) {
   if (dst == src) {
     return 1;
   }
-  /* movaps dst, src (0F 28 /r). A reg-reg movss/movsd MERGES into the
-   * destination's upper lanes, creating a false dependency on its prior value
-   * and defeating the rename-stage move-elimination; movaps copies the whole
-   * register, so the copy is dependency-free and typically eliminated. We only
-   * use the low lane, so copying all 128 bits is semantically irrelevant. */
   (void)width;
   return binary_emit_rex(code, 0, dst >> 3, 0, src >> 3) &&
          binary_code_buffer_append_u8(code, 0x0F) &&
@@ -1079,14 +881,9 @@ static int xmm_mov(BinaryCodeBuffer *code, BinaryXmmRegister dst,
              code, (unsigned char)(0xC0 | ((dst & 7) << 3) | (src & 7)));
 }
 
-/* Load a float immediate's raw bits into an XMM register via a GP staging reg. */
 static int xmm_load_fimm(MirFunction *fn, uint64_t bits,
                          BinaryXmmRegister target, int width) {
   BinaryCodeBuffer *code = &fn->context->code;
-  /* +0.0 is the one constant with no bits to move: pxor is shorter, needs no
-   * general register, and breaks the dependence on the target's old value.
-   * Comparing against zero and zero-initializing an accumulator are the two
-   * places it turns up, and both are common in float code. */
   if (bits == 0) {
     return binary_emit_pxor_xmm_xmm(code, target, target);
   }
@@ -1099,16 +896,6 @@ static int xmm_load_fimm(MirFunction *fn, uint64_t bits,
          binary_emit_movq_xmm_reg(code, target, SCRATCH_A);
 }
 
-/* Park (save=1) or recover (save=0) the registers a preserving call promises to
- * leave alone: RAX and the volatile XMM lanes. These are the registers the
- * allocator hands to values that span only such calls, which is what lets a
- * checked inner loop keep its working set, the loaded element, the float
- * accumulator, out of memory. The cost lands entirely on a path a correct
- * program does not take.
- *
- * Frame slots rather than pushes: the call's stack arguments and shadow space
- * are addressed off rsp, and moving rsp between writing them and making the
- * call would put both in the wrong place. */
 static int mir_emit_preserve_volatiles(MirFunction *fn, const MirInst *in,
                                        int save) {
   BinaryCodeBuffer *code = &fn->context->code;
@@ -1130,7 +917,6 @@ static int mir_emit_preserve_volatiles(MirFunction *fn, const MirInst *in,
   }
   for (size_t i = 0; i < MIR_XMM_POOL_COUNT; i++) {
     int disp = frame_disp(fn, -fn->preserve_xmm_slot + (int)i * 8);
-    /* movsd, the widest scalar MIR keeps in an XMM lane. */
     if (!simd_emit_prefixed_xmm_mem_disp(code, 0xF2, save ? 0x11 : 0x10,
                                          MIR_XMM_POOL[i], base, disp)) {
       return 0;
@@ -1139,8 +925,6 @@ static int mir_emit_preserve_volatiles(MirFunction *fn, const MirInst *in,
   return 1;
 }
 
-/* Float spill slots are GP-width stack homes; reload/store via a GP reg so no
- * scalar-memory SSE encoders are needed. */
 static int xmm_spill_load(MirFunction *fn, const MirVreg *v,
                           BinaryXmmRegister target) {
   unsigned char prefix =
@@ -1159,8 +943,6 @@ static int xmm_spill_store(MirFunction *fn, const MirVreg *v,
                                          frame_disp(fn, -v->spill_offset));
 }
 
-/* Resolve a float operand to the XMM register holding its value, materializing
- * a spill/immediate into `scratch`. */
 static BinaryXmmRegister xmm_value(MirFunction *fn, const MirOperand *op,
                                    BinaryXmmRegister scratch, int width,
                                    int *ok) {
@@ -1202,13 +984,6 @@ static int xmm_store(MirFunction *fn, const MirOperand *dst,
   }
 }
 
-/* Scalar float arithmetic in the VEX 3-operand form: v<op>s{s,d} D, A, B.
- * The legacy SSE forms are two-address (addsd D,b computes D = D OP b), which
- * forced a movaps copy of A into D whenever the allocator could not coalesce
- * them; the VEX form names all three registers, so no copy exists to elide.
- * VEX.128/LIG writes zero the upper lanes, so mixing with the surrounding
- * legacy-SSE code carries no transition penalty. */
-/* One VEX.128 xmm three-operand instruction: reg = dst, vvvv = a, rm = b. */
 static int vex_xmm_3op(MirFunction *fn, int pp, unsigned char opcode,
                        BinaryXmmRegister dst, BinaryXmmRegister a,
                        BinaryXmmRegister b) {
@@ -1228,14 +1003,10 @@ static int vex_scalar_arith(MirFunction *fn, MirOpcode op, int width,
   case MIR_FSUB: opcode = 0x5C; break;
   case MIR_FMUL: opcode = 0x59; break;
   case MIR_FDIV: opcode = 0x5E; break;
-  /* There is no scalar form of a bitwise op, so this one takes the packed
-   * encoding at every width. Only the low lane is ever read back, and the
-   * mask's other lanes are zero. */
   case MIR_FXOR:
     return vex_xmm_3op(fn, 1, 0x57, dst, a, b);
   default: return 0;
   }
-  /* pp: F3 (ss) at width 4, F2 (sd) at width 8, 66 (pd, both lanes) at 16. */
   return vex_xmm_3op(fn, width == 16 ? 1 : (width == 4 ? 2 : 3), opcode, dst,
                      a, b);
 }
@@ -1260,7 +1031,6 @@ static int encode_fbinop(MirFunction *fn, const MirInst *in) {
   return dst_in_reg ? 1 : xmm_store(fn, &in->dst, FSCRATCH_A, w);
 }
 
-/* int -> float: dst(xmm) = cvtsi2sd/ss(a gp). in->width is the float width. */
 static int encode_cvtsi2f(MirFunction *fn, const MirInst *in) {
   BinaryCodeBuffer *code = &fn->context->code;
   int ok;
@@ -1272,8 +1042,6 @@ static int encode_cvtsi2f(MirFunction *fn, const MirInst *in) {
   BinaryXmmRegister target = dst_is_xmm_reg(fn, &in->dst, &D) ? D : FSCRATCH_A;
   int done;
   if (in->is_unsigned) {
-    /* Unsigned source: the machine's conversion is signed, so a value with bit
-     * 63 set has to be halved, converted, and doubled. */
     done = code_generator_binary_emit_unsigned_int_to_float(
         fn->context, in->width == 4 ? 32 : 64, target, areg, SCRATCH_A,
         SCRATCH_B);
@@ -1288,7 +1056,6 @@ static int encode_cvtsi2f(MirFunction *fn, const MirInst *in) {
                                 : 1;
 }
 
-/* float -> int (truncating): dst(gp) = cvtt(a xmm). in->width is float width. */
 static int encode_cvtf2si(MirFunction *fn, const MirInst *in) {
   BinaryCodeBuffer *code = &fn->context->code;
   int ok;
@@ -1300,8 +1067,6 @@ static int encode_cvtf2si(MirFunction *fn, const MirInst *in) {
   BinaryGpRegister target = dst_is_reg(fn, &in->dst, &D) ? D : SCRATCH_A;
   int done;
   if (in->is_unsigned) {
-    /* uint64 target: signed truncation answers its sentinel from 2^63 up, so
-     * bias the value down, truncate, and put the top bit back. */
     done = code_generator_binary_emit_float_to_unsigned_int(
         fn->context, in->width == 4 ? 32 : 64, target, xval, SCRATCH_B,
         FSCRATCH_B);
@@ -1316,7 +1081,6 @@ static int encode_cvtf2si(MirFunction *fn, const MirInst *in) {
   return (target == SCRATCH_A) ? store_from(fn, &in->dst, SCRATCH_A) : 1;
 }
 
-/* float -> float width change: in->width is the destination float width. */
 static int encode_cvtf2f(MirFunction *fn, const MirInst *in) {
   BinaryCodeBuffer *code = &fn->context->code;
   int ok;
@@ -1370,11 +1134,6 @@ static int encode_cvtps2ph(MirFunction *fn, const MirInst *in) {
                                 : 1;
 }
 
-/* Load `size` bytes from [base (+ index*scale) + disp] straight into `target`,
- * sign/zero-extending to 64 bits in the SAME instruction (movsxd/movsx/movzx
- * from memory, or a plain mov for 8 bytes / unsigned 4). This is the general
- * shape win: every signed sub-word array read drops a separate movsx, and any
- * load whose destination already has a register skips the scratch bounce. */
 static int emit_ext_load(BinaryCodeBuffer *code, BinaryGpRegister target,
                          BinaryGpRegister base, int has_index,
                          BinaryGpRegister index, int scale, int disp, int size,
@@ -1386,25 +1145,25 @@ static int emit_ext_load(BinaryCodeBuffer *code, BinaryGpRegister target,
     rexw = 1;
     has2 = 1;
     op1 = 0x0F;
-    op2 = is_signed ? 0xBE : 0xB6; /* movsx/movzx r64, m8 */
+    op2 = is_signed ? 0xBE : 0xB6;
     break;
   case 2:
     rexw = 1;
     has2 = 1;
     op1 = 0x0F;
-    op2 = is_signed ? 0xBF : 0xB7; /* movsx/movzx r64, m16 */
+    op2 = is_signed ? 0xBF : 0xB7;
     break;
   case 4:
     if (is_signed) {
       rexw = 1;
-      op1 = 0x63; /* movsxd r64, m32 */
+      op1 = 0x63;
     } else {
-      op1 = 0x8B; /* mov r32, m32 (zero-extends to 64) */
+      op1 = 0x8B;
     }
     break;
   case 8:
     rexw = 1;
-    op1 = 0x8B; /* mov r64, m64 */
+    op1 = 0x8B;
     break;
   default:
     return 0;
@@ -1421,17 +1180,11 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
   CodeGenerator *g = fn->generator;
   BinaryFunctionContext *ctx = fn->context;
 
-  /* Float moves: load/store via a GP staging reg (mov [mem]->RAX, movq/movd to
-   * xmm and back), and reg-reg / float-immediate copies. */
   if (in->is_float) {
     int ok;
     int w = in->width;
-    /* movss / movsd; movupd for a 16-byte pair (unaligned-safe). */
     unsigned char prefix = (w == 16) ? 0x66 : ((w == 4) ? 0xF3 : 0xF2);
     if (in->a.kind == MIR_OPK_MEM) {
-      /* float LOAD: movss/movsd dst <- [base + disp], straight into dst's
-       * register. This path has no scaled-index form; the lowering never builds
-       * one, and mir_fold_address_offsets refuses to create one. */
       if (in->a.mem.index != MIR_VREG_NONE) {
         return enc_err(fn, "scaled index in a float load");
       }
@@ -1452,7 +1205,6 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
       return direct ? 1 : xmm_store(fn, &in->dst, FSCRATCH_A, w);
     }
     if (in->dst.kind == MIR_OPK_MEM) {
-      /* float STORE: movss/movsd [base + disp] <- a. */
       if (in->dst.mem.index != MIR_VREG_NONE) {
         return enc_err(fn, "scaled index in a float store");
       }
@@ -1478,9 +1230,6 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
     return xmm_store(fn, &in->dst, sval, w);
   }
 
-  /* LOAD: dst <- [base (+ index*scale + disp)], width bytes. Load straight into
-   * dst's register (extending in the same instruction); only bounce through
-   * SCRATCH_A when dst is spilled. */
   if (in->a.kind == MIR_OPK_MEM) {
     int ok;
     int is_signed = !in->is_unsigned;
@@ -1490,17 +1239,10 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
     if (in->a.mem.index != MIR_VREG_NONE) {
       MirOperand bop = mir_op_vreg(in->a.mem.base);
       MirOperand iop = mir_op_vreg(in->a.mem.index);
-      /* Stage the spilled operands clear of the load target, of each other, and
-       * of whatever register the other one is already resident in. Avoiding
-       * only the target was not enough: a spilled base stages into SCRATCH_B,
-       * and a target in RDX then sent the index to SCRATCH_B as well, so base
-       * and index read one register. */
       BinaryGpRegister taken[4];
       int tn = 0;
       mir_note_fixed_reg(fn, &bop, taken, &tn);
       mir_note_fixed_reg(fn, &iop, taken, &tn);
-      /* The load writes `target` only after reading base and index, so it is a
-       * legal staging register once neither operand is resident in it. */
       BinaryGpRegister vouch[1];
       int vn = mir_reg_in(target, taken, tn) ? 0 : 1;
       vouch[0] = target;
@@ -1545,7 +1287,6 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
     return 1;
   }
 
-  /* STORE: [base (+ index*scale + disp)] <- a, width bytes. */
   if (in->dst.kind == MIR_OPK_MEM) {
     int ok1, ok2;
     int scalar_w = (in->width == 1 || in->width == 2 || in->width == 4 ||
@@ -1573,17 +1314,8 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
       }
     }
     if (in->dst.mem.index != MIR_VREG_NONE) {
-      /* One direct SIB `mov [base+idx*scale+disp], val` at every width. A
-       * byte store whose value register encodes as 4..7 needs a forced REX so
-       * the operand reads SPL..DIL rather than AH..BH.
-       * Spilled operands stage through SCRATCH_B / RDX / SCRATCH_A. */
       MirOperand bop = mir_op_vreg(in->dst.mem.base);
       MirOperand iop = mir_op_vreg(in->dst.mem.index);
-      /* Three operands stage through three scratches here, so every pick has to
-       * clear both the scratches already handed out AND the registers the other
-       * operands are already resident in -- staging over a resident value
-       * destroys it before its read. Seed the set from all three up front,
-       * since base is staged before the value is even looked at. */
       BinaryGpRegister taken[6];
       int tn = 0;
       mir_note_fixed_reg(fn, &bop, taken, &tn);
@@ -1611,20 +1343,12 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
       int scalar_width = (in->width == 1 || in->width == 2 ||
                           in->width == 4 || in->width == 8);
       if (!scalar_width) {
-        /* The aggregate path below leas the address into SCRATCH_B after
-         * reading base and index, so the value may not live there. */
         taken[tn++] = SCRATCH_B;
       }
       BinaryGpRegister val;
       if (mir_env_addr_store() ||
           !mir_pick_scratch(fn, idx, SCRATCH_A, taken, tn, NULL, 0,
                             &val_scratch)) {
-        /* Three operands, two encoder scratches: base and index each took one
-         * and RDX was unavailable, so nothing is left to stage the value in.
-         * Form the address first instead. lea reads base and index and writes
-         * afterwards, so once it retires both staging registers are dead and
-         * one of them carries the value; the store drops its index and becomes
-         * a plain [addr]. Deep self-recursion expansion reaches this. */
         BinaryGpRegister addr = SCRATCH_B;
         BinaryGpRegister val_stage = SCRATCH_A;
         BinaryGpRegister val_fixed;
@@ -1706,8 +1430,6 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
       return 0;
     }
     if (in->width == 1 || in->width == 2 || in->width == 4 || in->width == 8) {
-      /* Direct `mov [addr+disp], val` at scalar widths; the displacement folds
-       * into the store itself, with no lea detour. */
       int prefix66 = in->width == 2;
       int rexw = in->width == 8;
       unsigned char op = in->width == 1 ? 0x88 : 0x89;
@@ -1724,9 +1446,6 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
       return 1;
     }
     if (in->dst.mem.disp != 0) {
-      /* Aggregate-width store: fold the displacement with a lea and hand the
-       * copy to the width-general helper. lea into SCRATCH_B so a base held in
-       * a live vreg register is preserved. */
       if (!binary_emit_lea_reg_mem(&ctx->code, SCRATCH_B, addr,
                                    in->dst.mem.disp)) {
         return enc_err(fn, "out of memory in store address");
@@ -1740,12 +1459,6 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
     return 1;
   }
 
-  /* Plain register/immediate move.
-   *
-   * An immediate goes straight to its destination. Routing it through the
-   * scratch register the way the general path does costs an extra instruction
-   * at every single constant, and constants are everywhere: loop bounds, zero
-   * initializers, small call arguments. */
   if (in->a.kind == MIR_OPK_IMM) {
     BinaryGpRegister D;
     if (dst_is_reg(fn, &in->dst, &D)) {
@@ -1755,8 +1468,6 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
       return 1;
     }
     if (in->dst.kind == MIR_OPK_VREG) {
-      /* Spilled destination: store the constant into its home directly, when
-       * it fits the sign-extended imm32 the C7 /0 form carries. */
       const MirVreg *v = &fn->vregs[in->dst.vreg];
       if (in->a.imm >= INT32_MIN && in->a.imm <= INT32_MAX) {
         if (!binary_emit_mov_mem_imm32(&ctx->code, frame_base(fn),
@@ -1777,12 +1488,8 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
   return store_from(fn, &in->dst, src);
 }
 
-/* ---- prologue / epilogue ------------------------------------------------ */
-
 static int mir_has_calls(const MirFunction *fn) {
   for (size_t i = 0; i < fn->insn_count; i++) {
-    /* MIR_TRAP also emits calls (puts/exit), so it needs outgoing shadow space
-     * reserved at the bottom of the frame just like a MIR_CALL. */
     if (fn->insns[i].op == MIR_CALL ||
         fn->insns[i].op == MIR_CALL_INDIRECT ||
         fn->insns[i].op == MIR_SYSCALL ||
@@ -1795,27 +1502,17 @@ static int mir_has_calls(const MirFunction *fn) {
 }
 
 static int mir_layout_frame(MirFunction *fn) {
-  /* Spill slots occupy [rbp-8 .. rbp-spill_bytes]; saved nonvolatiles sit
-   * below them. If the function makes calls, 32 bytes of Win64 shadow space are
-   * reserved at the very bottom of the frame (where rsp points), so an outgoing
-   * call has shadow space and a 16-aligned rsp without adjusting rsp in-body.
-   * frame_size is 16-aligned. */
   BinaryFunctionContext *ctx = fn->context;
   int spill = fn->spill_bytes;
   for (size_t i = 0; i < ctx->saved_register_count; i++) {
     ctx->saved_register_offsets[i] = spill + (int)((i + 1) * 8);
   }
   int after_gp = spill + (int)(ctx->saved_register_count * 8);
-  /* Saved XMM nonvolatiles sit below the GP saves, 16 bytes (full movdqu) each. */
   for (size_t i = 0; i < ctx->saved_xmm_count; i++) {
     ctx->saved_xmm_offsets[i] = after_gp + (int)((i + 1) * 16);
   }
   int raw = after_gp + (int)(ctx->saved_xmm_count * 16);
   if (mir_has_calls(fn)) {
-    /* Outgoing call region at the very bottom of the frame: the INDIRECT
-     * struct-argument copy region (lowest, rsp-relative), then 32B Win64 shadow
-     * space, then any outgoing stack-argument bytes (calls with more GP args
-     * than argument registers). Spills/saves sit above and never reach it. */
     raw += fn->outgoing_indirect_bytes + 32 + fn->outgoing_stack_bytes;
   }
   if (!binary_align_up_int(raw, 16, &ctx->frame_size)) {
@@ -1834,8 +1531,6 @@ static int mir_layout_frame(MirFunction *fn) {
   return 1;
 }
 
-/* Home one GP parameter from its incoming argument register into its vreg,
- * extending narrow signed/unsigned values to 64 bits. */
 static int mir_home_gp_param(MirFunction *fn, const MirParam *p,
                              BinaryGpRegister arg) {
   BinaryCodeBuffer *code = &fn->context->code;
@@ -1847,9 +1542,6 @@ static int mir_home_gp_param(MirFunction *fn, const MirParam *p,
   if (dst_is_reg(fn, &dst, &D)) {
     int ok = 1;
     if (p->width == 4) {
-      /* movzx_reg_reg32: must emit even when D == arg (the regalloc often
-       * coalesces a param into its incoming register), the skip-when-equal
-       * mov would silently drop the uint32 canonicalization. */
       ok = p->is_signed ? binary_emit_movsxd_reg_reg32(code, D, arg)
                         : binary_emit_movzx_reg_reg32(code, D, arg);
     } else if (p->width == 2 && p->is_signed) {
@@ -1862,8 +1554,6 @@ static int mir_home_gp_param(MirFunction *fn, const MirParam *p,
     }
     return ok ? 1 : enc_err(fn, "out of memory extending parameter");
   }
-  /* Spilled destination: extend arg into SCRATCH_A (general reg-reg forms), then
-   * store. */
   BinaryGpRegister S = SCRATCH_A;
   int ok = 1;
   if (p->width == 4) {
@@ -1882,10 +1572,6 @@ static int mir_home_gp_param(MirFunction *fn, const MirParam *p,
   return 1;
 }
 
-/* Home one GP parameter passed on the caller's stack into its vreg. The slot is
- * a full 8-byte slot above saved-rbp+return-address (16) and the callee's shadow
- * space; the caller stored the (already-extended) value there, so an 8-byte load
- * matches the fallback emitter exactly. */
 static int mir_home_gp_stack_param(MirFunction *fn, const MirParam *p,
                                    int rbp_offset) {
   BinaryCodeBuffer *code = &fn->context->code;
@@ -1904,24 +1590,16 @@ static int mir_home_gp_stack_param(MirFunction *fn, const MirParam *p,
   return store_from(fn, &dst, SCRATCH_A);
 }
 
-/* A pending XMM->home move for float-parameter homing. */
 typedef struct {
   BinaryXmmRegister src;
   int is_spill;
-  int dst; /* xmm register (is_spill==0) or rbp-relative spill offset */
+  int dst;
   int width;
   int done;
 } MirXmmMove;
 
-/* Home float parameters: incoming XMM arg registers -> param vregs. The arg
- * registers (XMM0..XMM3) are themselves allocatable, so this is a parallel
- * move: spill destinations are emitted first (they only read sources), then the
- * register->register permutation is resolved, breaking any cycle with the XMM
- * scratch register. All copies use movsd (low 64 bits) which preserves a scalar
- * float of either width. */
 static int mir_home_float_params(MirFunction *fn, MirXmmMove *mv, int n) {
   BinaryCodeBuffer *code = &fn->context->code;
-  /* Spill destinations first, while every source register is still intact. */
   for (int i = 0; i < n; i++) {
     if (!mv[i].is_spill) {
       continue;
@@ -1940,11 +1618,10 @@ static int mir_home_float_params(MirFunction *fn, MirXmmMove *mv, int n) {
     }
     mv[i].done = 1;
   }
-  /* Register->register permutation. */
   int remaining = 0;
   for (int i = 0; i < n; i++) {
     if (!mv[i].done && (BinaryXmmRegister)mv[i].dst == mv[i].src) {
-      mv[i].done = 1; /* already in place */
+      mv[i].done = 1;
     }
     if (!mv[i].done) {
       remaining++;
@@ -1976,8 +1653,6 @@ static int mir_home_float_params(MirFunction *fn, MirXmmMove *mv, int n) {
     if (progressed) {
       continue;
     }
-    /* Pure cycle: save one destination's current value into the scratch XMM,
-     * then redirect the move that consumes it to read the scratch. */
     int i;
     for (i = 0; i < n; i++) {
       if (!mv[i].done) {
@@ -2003,7 +1678,6 @@ static int mir_home_float_params(MirFunction *fn, MirXmmMove *mv, int n) {
   return 1;
 }
 
-/* Home all parameters from their ABI incoming locations into their vregs. */
 static int mir_home_indirect_return(MirFunction *fn, const BinaryAbi *abi) {
   MirOperand dst;
 
@@ -2197,12 +1871,6 @@ static int mir_home_parameters(MirFunction *fn) {
   return 1;
 }
 
-/* Same operand, and reading it emits nothing: a vreg already in a register,
- * or an immediate. A spilled operand would be staged with instructions of its
- * own before the compare, which is exactly what must not happen between the
- * compare whose flags are being reused and the branch reusing them. */
-/* A label no branch names is a fall-through marker, not a join: control
- * cannot arrive there carrying different flags. */
 static int mir_label_is_branch_target(const MirFunction *fn,
                                       const char *name) {
   if (!name) {
@@ -2210,8 +1878,6 @@ static int mir_label_is_branch_target(const MirFunction *fn,
   }
   for (size_t k = 0; k < fn->insn_count; k++) {
     const MirInst *b = &fn->insns[k];
-    /* A switch case is named by the jump table rather than by a branch, and
-     * control reaching one carries whatever flags the dispatch left. */
     if (b->op == MIR_JMP_TABLE) {
       const MirJumpTable *tbl = (const MirJumpTable *)b->aux;
       if (tbl) {
@@ -2235,9 +1901,6 @@ static int mir_label_is_branch_target(const MirFunction *fn,
   return 0;
 }
 
-/* Can this sit between a compare and a branch reusing its flags? Only if it
- * emits nothing at all: a nop, a fall-through label, or a register copy the
- * allocator already collapsed by giving both ends the same register. */
 static int mir_cmp_gap_is_empty(const MirFunction *fn, const MirInst *in) {
   if (in->op == MIR_NOP) {
     return 1;
@@ -2443,11 +2106,6 @@ static int mir_emit_prologue(MirFunction *fn) {
     return 0;
   }
   if (ctx->omit_frame_pointer) {
-    /* No rbp frame: fold the 8 bytes the saved-rbp slot used to occupy into the
-     * allocation so rsp stays 16-aligned at calls (entry rsp == 8 mod 16, and
-     * frame_size is 16-aligned, so +8 realigns to 0). rbp is now an ordinary
-     * allocatable callee-saved register; if the allocator used it, the saved-
-     * register loop below preserves it (caller's value is still intact here). */
     if (!binary_emit_frame_allocation(code, ctx->frame_size + 8)) {
       return enc_err(fn, "out of memory allocating frame");
     }
@@ -2483,9 +2141,6 @@ static int mir_emit_prologue(MirFunction *fn) {
 static int mir_emit_epilogue(MirFunction *fn) {
   BinaryFunctionContext *ctx = fn->context;
   BinaryCodeBuffer *code = &ctx->code;
-  /* An inline vector kernel (e.g. MIR_SIMD_SLP_MAC) left the YMM upper halves
-   * dirty; clear them once here so a caller running legacy SSE pays no AVX->SSE
-   * transition penalty. Emitted per RET, but functions typically have one. */
   if (fn->used_inline_vector && !code_generator_binary_emit_vzeroupper(code)) {
     return enc_err(fn, "out of memory emitting epilogue vzeroupper");
   }
@@ -2506,8 +2161,6 @@ static int mir_emit_epilogue(MirFunction *fn) {
     }
   }
   if (ctx->omit_frame_pointer) {
-    /* Slots are addressed off rsp, which is still at the frame bottom here, so
-     * tear the frame down (the saved-rbp +8) and return. No pop rbp. */
     if (!binary_emit_add_rsp_imm32(code, (uint32_t)(ctx->frame_size + 8)) ||
         !binary_emit_ret(code)) {
       return enc_err(fn, "out of memory in epilogue");
@@ -2547,9 +2200,6 @@ static int mir_encode_inline_asm(MirFunction *fn, const MirInst *in) {
   return code_generator_binary_emit_inline_asm(fn->generator, ctx, aux->ir);
 }
 
-/* MIR_LOAD_GLOBAL: dst <- value of the read-only global named by in->a (SYMBOL).
- * Uses the const-table immediate when the global folds to a constant, otherwise
- * a RIP-relative load (which sign/zero-extends to the dst register width). */
 static int encode_load_global(MirFunction *fn, const MirInst *in) {
   CodeGenerator *g = fn->generator;
   BinaryFunctionContext *ctx = fn->context;
@@ -2558,10 +2208,6 @@ static int encode_load_global(MirFunction *fn, const MirInst *in) {
     return enc_err(fn, "MIR_LOAD_GLOBAL without a symbol");
   }
 
-  /* A float global is cached in an XMM vreg: load its raw bits into a GP scratch
-   * (the RIP-relative load helper is GP-only) then movd/movq them into the XMM
-   * lane. Float globals are never const-folded (see globals.c), so no immediate
-   * branch is needed here. */
   if (in->dst.kind == MIR_OPK_VREG &&
       fn->vregs[in->dst.vreg].rclass == MIR_RC_XMM) {
     int width = fn->vregs[in->dst.vreg].width;
@@ -2634,9 +2280,6 @@ static int encode_load_global(MirFunction *fn, const MirInst *in) {
   return 1;
 }
 
-/* MIR_STORE_GLOBAL: global named by in->a (SYMBOL) <- value in in->b (vreg).
- * Writes a register-promoted global back to memory via a RIP-relative store of
- * the low `width` bytes. Symmetric to encode_load_global. */
 static int encode_store_global(MirFunction *fn, const MirInst *in) {
   CodeGenerator *g = fn->generator;
   BinaryFunctionContext *ctx = fn->context;
@@ -2645,9 +2288,6 @@ static int encode_store_global(MirFunction *fn, const MirInst *in) {
     return enc_err(fn, "MIR_STORE_GLOBAL without a symbol");
   }
   BinaryGpRegister src;
-  /* A float global is cached in an XMM vreg: pull its bits out of the XMM lane
-   * into a GP scratch, then the RIP-relative store writes the low `size` bytes
-   * (the GP store helper is GP-only). */
   if (in->b.kind == MIR_OPK_VREG &&
       fn->vregs[in->b.vreg].rclass == MIR_RC_XMM) {
     int width = fn->vregs[in->b.vreg].width;
@@ -2722,7 +2362,6 @@ static int encode_store_global(MirFunction *fn, const MirInst *in) {
   return 1;
 }
 
-/* MIR index of the MIR_LABEL defining `name`, or -1. */
 static int mir_encode_label_index(const MirFunction *fn, const char *name) {
   if (!name) {
     return -1;
@@ -2737,12 +2376,6 @@ static int mir_encode_label_index(const MirFunction *fn, const char *name) {
   return -1;
 }
 
-/* Is the MIR_JMP at `index` a jump to the code that immediately follows it?
- *
- * Only NOPs and labels may sit in between: both emit no bytes, so control
- * reaches the target either way. Alignment padding before a loop label is NOPs
- * too -- skipping it by falling through instead of branching over it is
- * harmless, since NOPs do nothing whichever way they are reached. */
 static int mir_vreg_is_byte_load(const MirFunction *fn, size_t before,
                                  MirVregId v) {
   size_t limit = before > 16 ? before - 16 : 0;
@@ -2855,8 +2488,6 @@ static int mir_jump_is_fallthrough(const MirFunction *fn, size_t index) {
         strcmp(in->dst.sym, jmp->dst.sym) == 0) {
       return 1;
     }
-    /* A different label: keep looking. Falling through it reaches the same
-     * place a branch past it would. */
   }
   return 0;
 }
@@ -3008,8 +2639,6 @@ static int mir_encode_float_arith(MirEncodeState *st, const MirInst *in) {
   switch (in->op) {
     case MIR_FDUP:
     case MIR_FEXTHI: {
-      /* vmovddup dst,a / vunpckhpd dst,a,a: whole-register writes, so a
-       * spilled destination stages through FSCRATCH_A like any float op. */
       int lok;
       BinaryXmmRegister D;
       int dst_in_reg = dst_is_xmm_reg(fn, &in->dst, &D);
@@ -3134,7 +2763,7 @@ static int mir_encode_float_compare(MirEncodeState *st, const MirInst *in) {
         ok = enc_err(fn, "out of memory in fsetcc");
         break;
       }
-      ok = store_from(fn, &in->dst, BINARY_GP_RAX); /* result in RAX (movzx) */
+      ok = store_from(fn, &in->dst, BINARY_GP_RAX);
       break;
     }
     case MIR_FCMPBR: {
@@ -3175,11 +2804,6 @@ static int mir_encode_branch(MirEncodeState *st, const MirInst *in) {
       }
       break;
     case MIR_JMP: {
-      /* A jump whose target is the very next thing emitted is the fall-through
-       * it would have taken anyway. The lowering produces these wherever a
-       * structured statement ends by branching to its own exit label -- an
-       * if/else arm, a loop body, a short-circuit -- and each one costs five
-       * bytes of instruction fetch for nothing. */
       if (mir_jump_is_fallthrough(fn, i)) {
         break;
       }
@@ -3191,8 +2815,6 @@ static int mir_encode_branch(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_JCC: {
-      /* test cond; je/jcc label. The test only reads the condition, so use its
-       * own register directly (staging into RAX only when spilled/immediate). */
       int rok;
       BinaryGpRegister creg = value_reg(fn, &in->a, SCRATCH_A, &rok);
       if (!rok || !binary_emit_test_reg_reg(&ctx->code, creg)) {
@@ -3222,18 +2844,9 @@ static int mir_encode_call(MirEncodeState *st, const MirInst *in) {
   (void)i;
   switch (in->op) {
     case MIR_CALL: {
-      /* rsp already points at the reserved shadow space (set by the prologue),
-       * so just emit the relocated call. Arguments were moved into ABI
-       * registers by preceding MIR_MOVs; the return value is consumed by the
-       * following MIR_MOV from RAX/XMM0. */
       const char *link =
           code_generator_get_link_symbol_name(fn->generator, in->dst.sym);
       size_t off = 0;
-      /* A preserving call parks RAX in its frame slot and puts it back, so a
-       * value the allocator placed there survives (MirInst::preserves_rax). The
-       * arguments are already marshalled and none of them is RAX, and the slot
-       * is addressed off the frame rather than pushed, because the call's stack
-       * arguments and shadow space are measured from rsp. */
       int keep = in->preserves_rax || in->preserves_xmm;
       if (keep && !mir_emit_preserve_volatiles(fn, in, 1)) {
         ok = enc_err(fn, "out of memory saving registers across a checked call");
@@ -3251,11 +2864,6 @@ static int mir_encode_call(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_HEAP_NEW: {
-      /* Zeroed Win64 heap allocation (IR_OP_NEW): the byte size arrived in R8
-       * via a preceding MIR_MOV. Self-contained rsp bubble: 48 bytes keeps the
-       * statement-point 16-alignment, gives both calls fresh shadow space at
-       * [rsp,32), and parks the size at [rsp+40] across GetProcessHeap. The
-       * result pointer lands in RAX for the following MIR_MOV to consume. */
       size_t d1 = 0;
       size_t d2 = 0;
       if (!code_generator_binary_declare_external_symbol(fn->generator,
@@ -3270,7 +2878,7 @@ static int mir_encode_call(MirEncodeState *st, const MirInst *in) {
                                             "GetProcessHeap", d1) ||
           !binary_emit_mov_reg_reg(&ctx->code, BINARY_GP_RCX, BINARY_GP_RAX) ||
           !binary_emit_mov_reg_imm64(&ctx->code, BINARY_GP_RDX,
-                                     8 /* HEAP_ZERO_MEMORY */) ||
+                                     8 ) ||
           !binary_emit_mov_reg_mem(&ctx->code, BINARY_GP_R8, BINARY_GP_RSP,
                                    40) ||
           !binary_emit_call_placeholder(&ctx->code, &d2) ||
@@ -3287,9 +2895,6 @@ static int mir_encode_call(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_CALL_INDIRECT: {
-      /* Same frame contract as MIR_CALL: the prologue reserved shadow/stack
-       * argument space, and regalloc kept the target out of any argument
-       * register clobbered by the preceding marshalling moves. */
       int rok;
       BinaryGpRegister target = value_reg(fn, &in->a, SCRATCH_A, &rok);
       if (!rok || !binary_emit_call_reg(&ctx->code, target)) {
@@ -3314,19 +2919,6 @@ static int mir_encode_string_op(MirEncodeState *st, const MirInst *in) {
   switch (in->op) {
     case MIR_REP_MOVSB:
     case MIR_REP_STOSB: {
-      /* The argument marshalling ran already, so the first three integer
-       * argument registers of the ACTIVE convention hold
-       * destination/source-or-fill/count exactly as for the call this replaces:
-       * RCX/RDX/R8 under Win64, RDI/RSI/RDX under SysV. Naming them literally
-       * would copy a SysV memset's fill byte in as its destination.
-       *
-       * Take the destination into RAX first (it is the return value, and the
-       * register holding it is about to become the counter or the fill), then
-       * run the string operation with RSI and RDI saved around it -- the
-       * allocator may be holding live values in both, since they are
-       * nonvolatile under Win64. RDI and RSI are loaded before the counter,
-       * which is an argument register under neither convention, so no move
-       * overwrites a source another still has to read. */
       BinaryCodeBuffer *code = &ctx->code;
       const BinaryAbi *rep_abi = code_generator_binary_active_abi();
       if (!rep_abi || rep_abi->int_param_count < 3) {
@@ -3343,21 +2935,18 @@ static int mir_encode_string_op(MirEncodeState *st, const MirInst *in) {
                  binary_emit_mov_reg_reg(code, BINARY_GP_RDI, rep_dst) &&
                  binary_emit_mov_reg_reg(code, BINARY_GP_RSI, rep_src) &&
                  binary_emit_mov_reg_reg(code, BINARY_GP_RCX, rep_count) &&
-                 binary_code_buffer_append_u8(code, 0xFC) &&  /* cld */
-                 binary_code_buffer_append_u8(code, 0xF3) &&  /* rep  */
-                 binary_code_buffer_append_u8(code, 0xA4) &&  /* movsb */
+                 binary_code_buffer_append_u8(code, 0xFC) &&
+                 binary_code_buffer_append_u8(code, 0xF3) &&
+                 binary_code_buffer_append_u8(code, 0xA4) &&
                  binary_emit_pop_reg(code, BINARY_GP_RSI);
       } else if (rep_ok) {
-        /* stosb fills from AL, and RAX currently holds the destination, so the
-         * fill byte goes in through RAX only after the destination is safe in
-         * RDI -- and RAX has to be put back afterwards to return it. */
         rep_ok = binary_emit_mov_reg_reg(code, BINARY_GP_RDI, rep_dst) &&
                  binary_emit_mov_reg_reg(code, BINARY_GP_RCX, rep_count) &&
                  binary_emit_push_reg(code, BINARY_GP_RAX) &&
                  binary_emit_mov_reg_reg(code, BINARY_GP_RAX, rep_src) &&
-                 binary_code_buffer_append_u8(code, 0xFC) &&  /* cld */
-                 binary_code_buffer_append_u8(code, 0xF3) &&  /* rep  */
-                 binary_code_buffer_append_u8(code, 0xAA) &&  /* stosb */
+                 binary_code_buffer_append_u8(code, 0xFC) &&
+                 binary_code_buffer_append_u8(code, 0xF3) &&
+                 binary_code_buffer_append_u8(code, 0xAA) &&
                  binary_emit_pop_reg(code, BINARY_GP_RAX);
       }
       if (!rep_ok || !binary_emit_pop_reg(code, BINARY_GP_RDI)) {
@@ -3381,11 +2970,6 @@ static int mir_encode_kernel(MirEncodeState *st, const MirInst *in) {
   (void)i;
   switch (in->op) {
     case MIR_SIMD_SLP_MAC: {
-      /* Inline SLP MAC kernel. The preceding MIR_MOVs marshalled a/b/out element
-       * pointers into RCX/RDX/R8, the k count into R9, and the byte row stride
-       * into RAX; emit the pure inner loop (no operand loads, so it needs no
-       * coherent fallback stack homes). dst.imm = K (4/8); width = b's element
-       * size (1 = int8-widening kernel, 4 = int32 kernel). */
       if (in->width == 1
               ? !code_generator_binary_emit_simd_slp_mac_i8_loop(&ctx->code,
                                                                  in->dst.imm)
@@ -3397,18 +2981,9 @@ static int mir_encode_kernel(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_SIMD_FILL: {
-      /* Inline fill kernel. The preceding MIR_MOVs marshalled the base pointer
-       * into RCX, the element count (mode 0) or end pointer (mode 1) into R8, and
-       * the fill value into RAX; emit the splat-build + 16-byte-store loop +
-       * scalar tail (no operand loads, no live-iv write-back). dst.imm = element
-       * size (1/2/4/8); a.imm = mode (0 element-counted, 1 byte-walk). The kernel
-       * uses VEX.128 stores (upper YMM lanes zeroed), so no vzeroupper is needed
-       * and used_inline_vector stays unset. */
       int fok = code_generator_binary_emit_simd_fill_splat(&ctx->code,
                                                            in->dst.imm);
       if (fok) {
-        /* Mode 1 computes the byte length as R8-RCX inside the kernel; mode 2
-         * arrives with R8 = byte length precomputed by the lowering. */
         fok = (in->a.imm == 0)
                   ? code_generator_binary_emit_simd_fill_loop_mode0(&ctx->code,
                                                                     in->dst.imm)
@@ -3421,10 +2996,6 @@ static int mir_encode_kernel(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_SIMD_AFFINE_MAP_F32: {
-      /* Inline float32 affine map. The preceding MIR_MOVs marshalled src->RCX,
-       * dst->RDX, count->R8; dst.imm/a.imm/b.imm hold the a/b/c coefficient float
-       * bits and cc holds b_is_one|b_is_zero<<1|c_is_zero<<2. The kernel emits
-       * its own closing vzeroupper, so used_inline_vector stays unset. */
       if (!code_generator_binary_emit_simd_affine_map_f32_inline(
               &ctx->code, (unsigned)in->dst.imm, (unsigned)in->a.imm,
               (unsigned)in->b.imm, (in->cc & 1) != 0, (in->cc & 2) != 0,
@@ -3434,10 +3005,6 @@ static int mir_encode_kernel(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_SIMD_AFFINE_MAP_F64: {
-      /* Inline float64 affine map. The preceding MIR_MOVs marshalled src->RCX,
-       * dst->RDX, count->R8; dst.imm/a.imm/b.imm hold the a/b/c coefficient
-       * double bits and cc holds b_is_one|b_is_zero<<1|c_is_zero<<2. The kernel
-       * emits its own closing vzeroupper, so used_inline_vector stays unset. */
       if (!code_generator_binary_emit_simd_affine_map_f64_inline(
               &ctx->code, (unsigned long long)in->dst.imm,
               (unsigned long long)in->a.imm, (unsigned long long)in->b.imm,
@@ -3448,10 +3015,6 @@ static int mir_encode_kernel(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_SIMD_VLOOP: {
-      /* Inline general vloop (float64 map). The preceding MIR_MOVs marshalled the
-       * base pointers + count into the ABI arg registers; the DAG comes from the
-       * borrowed IRInstruction in `aux`. operands_marshaled=1 makes the kernel
-       * read them from registers instead of the operands' stack homes. */
       const IRInstruction *vir = (const IRInstruction *)in->aux;
       if (!vir || !code_generator_binary_emit_simd_vloop_f64(
                       fn->generator, fn->context, vir, 1)) {
@@ -3460,17 +3023,6 @@ static int mir_encode_kernel(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_IR_KERNEL: {
-      /* Generic inline kernel. The preceding MIR_MOVs staged each by-name
-       * operand into its own frame slot; publish those slot addresses on the
-       * context so the kernel's own emit_operand_load / emit_destination_store
-       * calls resolve to them, run the unmodified fallback emitter, then take
-       * the map back down. The MIR_MOVs that follow read the slots back.
-       *
-       * The slot address is the frame base plus the staging vreg's spill
-       * offset, both final by now. Some kernels borrow stack below rsp
-       * (a balanced sub/add) or push a register, so the base has to be rbp --
-       * mir_regalloc keeps the frame pointer for any function containing one of
-       * these. */
       const MirKernelAux *ka = (const MirKernelAux *)in->aux;
       const MirIrKernel *kern = ka ? mir_ir_kernel_at(ka->kernel_index) : NULL;
       if (!ka || !kern || ka->operand_count > BINARY_MAX_MARSHALED_OPERANDS) {
@@ -3491,16 +3043,10 @@ static int mir_encode_kernel(MirEncodeState *st, const MirInst *in) {
         ok = enc_err(fn, "failed to emit inline kernel");
         break;
       }
-      /* These kernels leave the YMM upper halves dirty (several emit their own
-       * closing vzeroupper, but not all); one more in the epilogue costs a
-       * single instruction per function and removes the need to track which. */
       fn->used_inline_vector = 1;
       break;
     }
     case MIR_SIMD_SILU_F32: {
-      /* Inline SiLU/SwiGLU gate. g/out->RCX, u->RDX, count->R8 marshalled by the
-       * preceding MIR_MOVs; dst.imm = has_mul. The kernel emits its own closing
-       * vzeroupper, so used_inline_vector stays unset. */
       if (!code_generator_binary_emit_simd_silu_f32_inline(&ctx->code,
                                                            (int)in->dst.imm)) {
         ok = enc_err(fn, "out of memory emitting inline SiLU kernel");
@@ -3523,10 +3069,6 @@ static int mir_encode_outgoing(MirEncodeState *st, const MirInst *in) {
   (void)i;
   switch (in->op) {
     case MIR_STORE_OUTARG: {
-      /* Store an outgoing stack call argument to [rsp + b.imm]. rsp is fixed
-       * after the prologue and the outgoing region is reserved there, so this
-       * is a plain rsp-relative store. A float value's bits bounce through the
-       * GP scratch (movq/movd from its XMM, or a plain load from its spill). */
       int ok = 1;
       BinaryGpRegister r = SCRATCH_A;
       if (in->is_float && in->a.kind == MIR_OPK_VREG) {
@@ -3561,10 +3103,6 @@ static int mir_encode_outgoing(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_CMOV: {
-      /* dst = (a != 0) ? b : dst. dst was pre-loaded with the else value by a
-       * preceding MIR_MOV, so `test a; cmovnz dst, b` completes the select.
-       * A spilled dst is staged through SCRATCH_A; cond stages through
-       * SCRATCH_B, and `then` reuses SCRATCH_B (cond is dead after the test). */
       int rok;
       BinaryGpRegister D;
       int dst_in_reg = dst_is_reg(fn, &in->dst, &D);
@@ -3594,8 +3132,6 @@ static int mir_encode_outgoing(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_PREFETCH: {
-      /* prefetcht0 [base + disp]: advisory, no destination. The address vreg
-       * is a plain read; a spilled address stages through SCRATCH_A. */
       if (in->a.kind != MIR_OPK_MEM || in->a.mem.index != MIR_VREG_NONE) {
         ok = enc_err(fn, "MIR_PREFETCH expects a base-only memory operand");
         break;
@@ -3627,10 +3163,6 @@ static int mir_encode_address(MirEncodeState *st, const MirInst *in) {
   (void)i;
   switch (in->op) {
     case MIR_LEA: {
-      /* dst <- address of [base + index*scale + disp]. base/index are vregs
-       * (index optional). Mirrors the scaled-LOAD address staging but
-       * materializes the address instead of dereferencing it. Emitted by the
-       * SLP-kernel lowering to form effective element pointers. */
       if (in->a.kind != MIR_OPK_MEM) {
         ok = enc_err(fn, "MIR_LEA expects a memory operand");
         break;
@@ -3640,8 +3172,6 @@ static int mir_encode_address(MirEncodeState *st, const MirInst *in) {
       int dst_in_reg = dst_is_reg(fn, &in->dst, &D);
       BinaryGpRegister target = dst_in_reg ? D : SCRATCH_A;
       MirOperand bop = mir_op_vreg(in->a.mem.base);
-      /* Same staging collision as the scaled LOAD above: keep base and index
-       * clear of the target and of each other, resident registers included. */
       BinaryGpRegister taken[4];
       int tn = 0;
       mir_note_fixed_reg(fn, &bop, taken, &tn);
@@ -3649,7 +3179,6 @@ static int mir_encode_address(MirEncodeState *st, const MirInst *in) {
       if (in->a.mem.index != MIR_VREG_NONE) {
         mir_note_fixed_reg(fn, &iop_probe, taken, &tn);
       }
-      /* As in the scaled load: the lea writes `target` last. */
       BinaryGpRegister vouch[1];
       int vn = mir_reg_in(target, taken, tn) ? 0 : 1;
       vouch[0] = target;
@@ -3693,11 +3222,6 @@ static int mir_encode_address(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_LEA_OUTARG: {
-      /* dst <- lea &slot in the INDIRECT struct-arg copy region. That region
-       * sits ABOVE the Win64 shadow space and the outgoing stack args (so a
-       * callee writing its shadow at [rsp..rsp+32] cannot clobber the copies),
-       * hence the absolute rsp offset is shadow + outgoing_stack_bytes + the
-       * per-arg slot offset (in->a.imm). rsp is fixed after the prologue. */
       const BinaryAbi *oa = code_generator_binary_active_abi();
       int off = in->b.kind == MIR_OPK_IMM && in->b.imm == 1
                     ? oa->shadow_space_size + (int)in->a.imm
@@ -3716,8 +3240,6 @@ static int mir_encode_address(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_LEA_GLOBAL: {
-      /* dst <- RIP-relative address of global symbol a.sym. is_unsigned carries
-       * the declare-external flag (set by lowering from the symbol). */
       const char *name = in->a.sym ? in->a.sym : "";
       const char *link = code_generator_get_link_symbol_name(fn->generator, name);
       if (!link || link[0] == '\0') {
@@ -3738,9 +3260,6 @@ static int mir_encode_address(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_LEA_FUNC: {
-      /* dst <- RIP-relative address of function symbol a.sym. This shares the
-       * same relocation path as global addresses; the linker resolves the code
-       * symbol and the function pointer receives that address. */
       const char *name = in->a.sym ? in->a.sym : "";
       const char *link = code_generator_get_link_symbol_name(fn->generator, name);
       if (!link || link[0] == '\0') {
@@ -3776,8 +3295,6 @@ static int mir_encode_literal_address(MirEncodeState *st, const MirInst *in) {
   (void)i;
   switch (in->op) {
     case MIR_LEA_LOCAL: {
-      /* dst <- address of local vreg a's stack home. The allocator forces an
-       * address-taken value to spill, so a is always memory-resident. */
       const MirVreg *lv = &fn->vregs[in->a.vreg];
       if (lv->in_register) {
         ok = enc_err(fn, "address-taken value was not spilled");
@@ -3797,8 +3314,6 @@ static int mir_encode_literal_address(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_LEA_CSTR: {
-      /* dst <- address of the string literal a.sym (RIP-relative lea into a
-       * .rdata cstring). dst is typically an ABI argument register. */
       const char *s = in->a.sym ? in->a.sym : "";
       BinaryGpRegister D;
       int dst_in_reg = dst_is_reg(fn, &in->dst, &D);
@@ -3814,9 +3329,6 @@ static int mir_encode_literal_address(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_LEA_STRLIT: {
-      /* dst <- address of the string literal a.sym's {chars,length} record in
-       * .rdata (the fat `string` value the fallback's
-       * emit_string_literal_value_address materializes). */
       const char *s = in->a.sym ? in->a.sym : "";
       BinaryGpRegister D;
       int dst_in_reg = dst_is_reg(fn, &in->dst, &D);
@@ -3855,12 +3367,6 @@ static int mir_encode_trap(MirEncodeState *st, const MirInst *in) {
             fn, in, &fn->ir_function->instructions[in->ir_index]);
         break;
       }
-      /* Terminal abort for a failed safety check. MIR only runs without
-       * stack-trace support, so this is the degraded path: puts(message) +
-       * exit(1) (matching code_generator_binary_emit_runtime_trap_call). rsp
-       * already sits on the reserved shadow space (mir_has_calls counts
-       * MIR_TRAP), so the calls need no rsp adjustment. The sequence never
-       * returns; it is reached only on the cold guard-fail branch. */
       const BinaryAbi *abi = code_generator_binary_active_abi();
       BinaryGpRegister arg0 = abi->int_param_registers[0];
       const char *msg = in->a.sym ? in->a.sym : "";
@@ -3881,10 +3387,6 @@ static int mir_encode_trap(MirEncodeState *st, const MirInst *in) {
         ok = enc_err(fn, "out of memory emitting trap puts");
         break;
       }
-      /* Then where the rest of the report lives. This path carries no line
-       * table, so the message above is the whole report: without this the
-       * program says what went wrong and nothing about where, and nothing
-       * tells the reader that -s is what changes that. */
       if (!code_generator_binary_emit_cstring_literal_address(
               fn->generator, ctx,
               "  rebuild with -s for the file, line and stack trace", arg0) ||

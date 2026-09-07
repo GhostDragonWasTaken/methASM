@@ -2075,7 +2075,7 @@ static void emit_body_instr(SpvFn *fn, const IRInstruction *in) {
 typedef struct {
   size_t lo, hi;
   const char *label;
-  const IRInstruction *term; /* terminator instruction, or NULL (fallthrough) */
+  const IRInstruction *term;
 } SpvBlock;
 
 static int is_terminator(IROpcode op) {
@@ -2551,7 +2551,6 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
       uint32_t t_false = (term->op == IR_OP_BRANCH_ZERO) ? taken_id : fall_id;
       emitv(&m->functions, Op_BranchConditional, 3, cond, t_true, t_false);
     } else {
-      /* fallthrough: continue into the next block, or return at the end */
       if (i + 1 < nblocks) {
         emitv(&m->functions, Op_Branch, 1, block_id[i + 1]);
       } else if (fn.returns_void) {

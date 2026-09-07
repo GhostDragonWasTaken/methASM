@@ -1,5 +1,5 @@
 #include "ir_optimize_internal.h"
-#include "../../common.h" // mettle_free_string
+#include "../../common.h"
 
 #define IR_POPCOUNT_BYTE_UNROLL 8
 
@@ -25,18 +25,11 @@ static int ir_popcount_body_is_v_shift_step(const IRInstruction *instruction,
   return 0;
 }
 
-/* Does this type name hold at most eight bits? */
 static int ir_type_name_is_byte(const char *name) {
   return name && (strcmp(name, "uint8") == 0 || strcmp(name, "int8") == 0 ||
                   strcmp(name, "bool") == 0 || strcmp(name, "char") == 0);
 }
 
-/* Is `symbol` declared, as a local or as a parameter, at byte width?
- *
- * Eight unrolled steps is the whole loop only when the value cannot carry more
- * than eight significant bits. Nothing checked that, so a uint64 popcount loop
- * folded to its low byte's answer and popcount(0xFFFFFFFFFFFFFFFF) came back
- * as 8. */
 static int ir_symbol_is_byte_wide(const IRFunction *function,
                                   const char *symbol) {
   if (!function || !symbol) {
@@ -328,10 +321,6 @@ static int ir_try_fold_popcount_byte_loop_at(IRFunction *function,
     return 1;
   }
 
-  /* The unroll below runs eight steps and stops, so the value has to be one
-   * that eight shifts exhaust. Only the declaration says that: a body cast
-   * back to uint8 narrows what the shift produced, and the value the loop
-   * STARTS from can still be wider than a byte. */
   if (!ir_symbol_is_byte_wide(function, v_symbol)) {
     return 1;
   }
@@ -341,10 +330,6 @@ static int ir_try_fold_popcount_byte_loop_at(IRFunction *function,
       done_index <= jump_index) {
     return 1;
   }
-  /* The rebuild below splices [0..header) + unrolled steps + [done..end),
-   * DROPPING everything in (jump..done). That is only the empty fallthrough
-   * gap when the exit label directly follows the loop; a threaded exit label
-   * further away would take live code (e.g. an else branch) with it. */
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, done_label)) {
     return 1;
   }
@@ -849,7 +834,6 @@ static int ir_try_fuse_popcount_buffer_at(IRFunction *function,
   if (ir_try_match_popcount_buffer_call_body(function, body_start, increment_index,
                                              &total_symbol, &load_source,
                                              &load_via_ptr)) {
-    /* call form */
   } else {
     const char *v_symbol = NULL;
     if (!ir_try_match_popcount_buffer_inlined_body(

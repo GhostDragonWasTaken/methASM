@@ -3123,7 +3123,6 @@ static int ir_lower_member_or_index(IRLoweringContext *context,
         }
       }
     }
-    /* Fall through to the lvalue-load path for struct/array member access. */
   }
     IROperand address = ir_operand_none();
     Type *value_type = NULL;

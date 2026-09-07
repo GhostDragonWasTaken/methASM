@@ -12,23 +12,12 @@ extern long long mir_encode_last_spills;
 #include <stdlib.h>
 #include <string.h>
 
-/* Source file a function was declared in (for the --explain focus filter). */
 static const char *mir_function_filename(const IRFunction *fn) {
   return fn ? fn->location.filename : NULL;
 }
 
-/* Non-nop IR size of the function currently in the eligibility gate, captured
- * at gate entry so the dozens of bail sites can report it to --explain
- * without each threading it through (the report ranks bailed functions by
- * size -- that is where baseline codegen actually costs). */
 static size_t g_mir_gate_fn_size = 0;
 
-/* TEMPORARY instrumentation: with METTLE_MIR_TRACE set, log why a function is
- * rejected by the MIR eligibility gate, so the spill-everything-fallback work
- * list can be prioritized by real frequency. Returns 0 (ineligible). Also
- * feeds the --explain backend report (a no-op when --explain is off). */
-/* getenv is slow on Windows and these are consulted per function (or per
- * bail); snapshot each knob once per process. */
 static int mir_env_trace(void) {
   static int cached = -1;
   if (cached < 0) {
@@ -70,12 +59,6 @@ static int mir_trace_bail(const IRFunction *fn, const char *reason) {
 
 extern const char *g_mir_ra_trace_name;
 
-/* ---- inline kernel operand walk ----------------------------------------- */
-
-/* Every operand slot of an instruction in one sequence: dest, lhs, rhs, then
- * the arguments. Returns NULL past the end, so callers just index upward. Both
- * the eligibility gate and the lowering walk kernels this way, which is what
- * keeps them agreeing on exactly which operands get staged. */
 static const IROperand *mir_instruction_operand_at(const IRInstruction *in,
                                                    int index) {
   if (index == 0) {
@@ -94,12 +77,6 @@ static const IROperand *mir_instruction_operand_at(const IRInstruction *in,
   return NULL;
 }
 
-/* Upper bound on the staging slots an inline kernel instruction needs: one per
- * by-name (TEMP/SYMBOL) operand. Immediates, floats, and string literals are
- * materialized by the kernel itself and need no slot. Returns -1 if an operand
- * is of a kind the bridge cannot stage (a LABEL, which no kernel takes). The
- * real slot count can only be lower, since operands naming one value share a
- * slot; over-estimating here just makes the gate marginally strict. */
 static int mir_kernel_slot_estimate(const IRInstruction *in) {
   int slots = 0;
   for (int k = 0;; k++) {
@@ -124,8 +101,6 @@ static int mir_kernel_slot_estimate(const IRInstruction *in) {
   return slots;
 }
 
-/* True if `name` resolves to a global variable of any type. Its storage has a
- * link-time address, so `&name` is always one RIP-relative LEA. */
 static int mir_name_is_global_variable(CodeGenerator *g, const char *name) {
   if (!g || !g->ir_program || !name) {
     return 0;
@@ -135,11 +110,6 @@ static int mir_name_is_global_variable(CodeGenerator *g, const char *name) {
          s->scope->type == CG_SCOPE_GLOBAL;
 }
 
-/* True if `name`'s address escapes through a module-level initializer: another
- * global holds &name (init_symbol_ref), or an aggregate initializer embeds it
- * (init_relocs). Such a global is aliasable by a pointer the function body
- * never visibly creates, so its cache vreg must ride the address-taken
- * flush/reload discipline even though no IR_OP_ADDRESS_OF names it. */
 static int mir_global_address_escapes_via_initializer(CodeGenerator *g,
                                                       const char *name) {
   if (!g || !g->ir_program || !name) {
@@ -169,9 +139,6 @@ static int mir_global_address_taken_in_module(CodeGenerator *g,
   return ir_program_global_address_taken(g->ir_program, name);
 }
 
-/* True if the source declared `name` volatile. Reading or writing such a global
- * is observable in itself, so its value may not live in a register: a spin on
- * one would read its cache vreg forever and never see another thread's write. */
 static int mir_global_is_volatile(CodeGenerator *g, const char *name) {
   const IRModuleSymbol *s = NULL;
   if (!g || !g->ir_program || !name) {
@@ -181,11 +148,6 @@ static int mir_global_is_volatile(CodeGenerator *g, const char *name) {
   return s && s->is_volatile;
 }
 
-/* True if `op` names a local or parameter of pointer-to-bytes type, the one
- * destination a bare string literal may be assigned to by address: the value
- * IS the address of the literal's NUL-terminated .rdata copy. A `string`
- * destination is a 16-byte record and takes the struct-home path instead, so
- * this never truncates one to its data pointer. */
 static MtlcType *mir_local_or_param_type(CodeGenerator *g,
                                          const IRFunction *ir_function,
                                          const char *name, int *is_param_out);
@@ -201,9 +163,6 @@ static int mir_operand_is_cstring_home(CodeGenerator *g,
       mir_local_or_param_type(g, ir_function, op->name, NULL));
 }
 
-/* True if `name` resolves to a read-accessible global scalar, a value we can
- * cache in a register at function entry (used by both the eligibility gate and
- * the entry-load emitter, so they agree exactly on what counts as cacheable). */
 static int mir_name_is_global_scalar(CodeGenerator *g, const char *name) {
   if (!mir_name_is_global_variable(g, name)) {
     return 0;
@@ -214,22 +173,9 @@ static int mir_name_is_global_scalar(CodeGenerator *g, const char *name) {
   return code_generator_binary_symbol_is_scalar_accessible(g, name);
 }
 
-/* IR -> MIR lowering for the Stage 2 scalar-integer subset, plus the
- * per-function eligibility gate and the MIR emit entry point.
- *
- * Eligible functions (see mir_function_is_eligible) are pure leaf integer code:
- * no calls, no address-of, no floats, no aggregates, <=4 GP params, and only
- * the opcodes handled below. Anything else falls back to the legacy emitter.
- * All values are computed as 64-bit; loads/stores carry their own width and
- * casts re-extend, so holding everything in 64-bit registers is exact. */
-
-/* ---- name -> vreg map --------------------------------------------------- */
-
 typedef struct {
-  const char *name; /* borrowed (interned IR string) */
-  int is_temp;      /* TEMP and SYMBOL operands are distinct namespaces: a
-                       compiler temp may share its bare name with a user
-                       local, and conflating them merges their storage */
+  const char *name;
+  int is_temp;
   MirVregId vreg;
 } MirNameEntry;
 
@@ -237,8 +183,6 @@ typedef struct {
   MirNameEntry *items;
   size_t count;
   size_t capacity;
-  /* Open-addressing index over items (slot+1; 0 = empty). Linear name scans
-   * here were a measured hotspot on large inlined functions. */
   size_t *buckets;
   size_t bucket_count;
 } MirNameMap;
@@ -328,13 +272,11 @@ static MirVregId mir_name_map_get_or_add(MirNameMap *m, MirFunction *fn,
     while (m->buckets[b]) {
       b = (b + 1) & (m->bucket_count - 1);
     }
-    m->buckets[b] = m->count; /* slot index (count-1) + 1 */
+    m->buckets[b] = m->count;
   }
   return v;
 }
 
-/* True if symbol `name` already has a vreg binding (param/local/cached
- * global). Symbols only, temps live in a separate namespace. */
 static int mir_name_map_has(const MirNameMap *m, const char *name) {
   if (m->bucket_count) {
     size_t b = mir_name_map_hash(name, 0) & (m->bucket_count - 1);
@@ -355,34 +297,16 @@ static int mir_name_map_has(const MirNameMap *m, const char *name) {
   return 0;
 }
 
-/* Register-promoted globals. Each referenced global scalar is loaded once at
- * entry (MIR_LOAD_GLOBAL) into a cache vreg; `all` lists every cached global and
- * `names` the subset that is written (stored back before every return). In a
- * function that makes calls, memory, not the cache vreg, is authoritative
- * across a call boundary: the written set is flushed before each call (so the
- * callee sees current values) and the full cached set is reloaded after (so we
- * observe any value the callee changed). Names are borrowed interned IR
- * strings. */
 typedef struct {
-  const char **names; /* written globals (write-back / flush-before-call) */
+  const char **names;
   size_t count;
-  const char **all; /* every cached global (reload-after-call) */
+  const char **all;
   size_t all_count;
-  const char **at;  /* address-taken globals (aliasable via &g): flush before a
-                       pointer LOAD/STORE, reload after a pointer STORE, so a
-                       store through the alias and a by-name access stay coherent */
+  const char **at;
   size_t at_count;
-  /* Per-IR-instruction dirty masks over names[] (bit j = names[j] possibly
-   * written since the last cleaning point on some path reaching that
-   * instruction). NULL = no analysis, flush the whole written set. */
   const unsigned long long *dirty;
 } MirGlobalWriteback;
 
-/* ---- operand mapping ---------------------------------------------------- */
-
-/* Map an IR operand that must resolve to a value: a float TEMP/SYMBOL -> an XMM
- * vreg, an int TEMP/SYMBOL -> a GP vreg, INT -> immediate, FLOAT -> float
- * immediate (raw IEEE bits). Sets has_error for anything outside the subset. */
 static MirOperand mir_value_operand(MirFunction *fn, CodeGenerator *g,
                                     BinaryFunctionContext *ctx, MirNameMap *map,
                                     const IROperand *op) {
@@ -438,9 +362,6 @@ static MirOperand mir_gp_value_operand(MirFunction *fn, CodeGenerator *g,
   return mir_value_operand(fn, g, ctx, map, op);
 }
 
-/* ---- compare/shift helpers ---------------------------------------------- */
-
-/* setcc opcode (second byte) for an IR comparison operator, signed or not. */
 static int mir_setcc_opcode(const char *op, int is_unsigned, unsigned char *out) {
   return binary_semantics_condition_code(op, is_unsigned, out);
 }
@@ -449,25 +370,16 @@ static int mir_is_comparison(const char *op) {
   return binary_semantics_is_comparison(op);
 }
 
-/* jcc opcode (second byte) to take when an IR comparison is FALSE, i.e. the
- * branch a `branch_zero` of the comparison result should take. */
 static int mir_false_jcc(const char *op, int is_unsigned, unsigned char *out) {
-  if (strcmp(op, "==") == 0) { *out = 0x85; return 1; } /* jne */
-  if (strcmp(op, "!=") == 0) { *out = 0x84; return 1; } /* je */
-  if (strcmp(op, "<") == 0)  { *out = is_unsigned ? 0x83 : 0x8D; return 1; } /* jae/jge */
-  if (strcmp(op, "<=") == 0) { *out = is_unsigned ? 0x87 : 0x8F; return 1; } /* ja/jg */
-  if (strcmp(op, ">") == 0)  { *out = is_unsigned ? 0x86 : 0x8E; return 1; } /* jbe/jle */
-  if (strcmp(op, ">=") == 0) { *out = is_unsigned ? 0x82 : 0x8C; return 1; } /* jb/jl */
+  if (strcmp(op, "==") == 0) { *out = 0x85; return 1; }
+  if (strcmp(op, "!=") == 0) { *out = 0x84; return 1; }
+  if (strcmp(op, "<") == 0)  { *out = is_unsigned ? 0x83 : 0x8D; return 1; }
+  if (strcmp(op, "<=") == 0) { *out = is_unsigned ? 0x87 : 0x8F; return 1; }
+  if (strcmp(op, ">") == 0)  { *out = is_unsigned ? 0x86 : 0x8E; return 1; }
+  if (strcmp(op, ">=") == 0) { *out = is_unsigned ? 0x82 : 0x8C; return 1; }
   return 0;
 }
 
-/* Ordered float comparison via ucomis. Because ucomis sets CF on "unordered"
- * (NaN), we pick the operand order so the single condition code is NaN-correct
- * (a comparison involving NaN must be false). `swap` requests ucomis(rhs,lhs).
- * For fused branches `cc` is the jcc taken when the comparison is FALSE
- * (branch_zero semantics); otherwise it is the setcc taken when TRUE.
- * Only the ordering operators are handled here; == / != need extra PF handling
- * and are left to the legacy path. */
 static int mir_float_cmp_info(const char *op, int fused, int *swap,
                               unsigned char *cc) {
   if (strcmp(op, ">") == 0)  { *swap = 0; *cc = fused ? 0x86 : 0x97; return 1; }
@@ -479,7 +391,6 @@ static int mir_float_cmp_info(const char *op, int fused, int *swap,
   return 0;
 }
 
-/* Float arithmetic operator -> MIR opcode (divide is supported for floats). */
 static int mir_float_arith_opcode(const char *op, MirOpcode *out) {
   if (strcmp(op, "+") == 0) { *out = MIR_FADD; return 1; }
   if (strcmp(op, "-") == 0) { *out = MIR_FSUB; return 1; }
@@ -488,8 +399,6 @@ static int mir_float_arith_opcode(const char *op, MirOpcode *out) {
   return 0;
 }
 
-/* Arithmetic operator -> MIR opcode. Returns 0 if not an arithmetic op we
- * handle (integer divide/modulo are intentionally excluded). */
 static int mir_arith_opcode(const char *op, MirOpcode *out) {
   if (strcmp(op, "+") == 0)  { *out = MIR_ADD; return 1; }
   if (strcmp(op, "-") == 0)  { *out = MIR_SUB; return 1; }
@@ -498,13 +407,10 @@ static int mir_arith_opcode(const char *op, MirOpcode *out) {
   if (strcmp(op, "|") == 0)  { *out = MIR_OR; return 1; }
   if (strcmp(op, "^") == 0)  { *out = MIR_XOR; return 1; }
   if (strcmp(op, "<<") == 0) { *out = MIR_SHL; return 1; }
-  if (strcmp(op, ">>") == 0) { *out = MIR_SHR; return 1; } /* SAR chosen by sign */
+  if (strcmp(op, ">>") == 0) { *out = MIR_SHR; return 1; }
   return 0;
 }
 
-/* Structural equality of two IR operands (for divmod-pair matching). Only the
- * operand kinds that can be a div dividend/divisor are compared; anything else
- * (float/string/none) is treated as unequal. */
 static int mir_ir_operand_equal(const IROperand *a, const IROperand *b) {
   if (a->kind != b->kind) {
     return 0;
@@ -524,14 +430,11 @@ static int mir_operand_is_unsigned(CodeGenerator *g, BinaryFunctionContext *ctx,
                                    const IROperand *op) {
   MtlcType *t = code_generator_binary_get_operand_type_in_context(g, ctx, op);
   if (!t) {
-    return 0; /* default signed */
+    return 0;
   }
   return !code_generator_binary_resolved_type_is_signed_integer(t);
 }
 
-/* Byte width that constrains an integer comparison operand: its scalar size for
- * a known <=4-byte integer, 8 for a 64-bit integer / pointer / unknown type, and
- * 0 for an INT literal (it constrains nothing, it follows the other operand). */
 static int mir_cmp_operand_width(CodeGenerator *g, BinaryFunctionContext *ctx,
                                  const IROperand *op) {
   if (op->kind == IR_OPERAND_INT) {
@@ -546,18 +449,6 @@ static int mir_cmp_operand_width(CodeGenerator *g, BinaryFunctionContext *ctx,
   return (s == 1 || s == 2 || s == 4) ? s : 8;
 }
 
-/* Width at which to compare two integer operands. MIR computes in 64-bit, so a
- * narrow value (e.g. a uint32 product) can carry garbage in its high bits; a
- * full 64-bit compare would then see that garbage and give the wrong answer.
- *
- * C compares at the promoted operand width, and so must MIR. We narrow to a
- * 32-bit cmp when BOTH typed operands are exactly 4-byte (int32/uint32)
- * integers: the 32-bit cmp looks only at the low 32 bits, which are always the
- * true value (the carried garbage lives above bit 31), and the signed/unsigned
- * setcc/jcc the caller picks reads the 32-bit flags, correct for equality AND
- * ordering. 1/2-byte operands and any 8-byte/pointer operand (or missing type
- * info) keep the conservative 64-bit compare. `op` is currently unused but kept
- * so the policy can be refined per operator if ever needed. */
 static int mir_int_compare_width(CodeGenerator *g, BinaryFunctionContext *ctx,
                                  const char *op, const IROperand *lhs,
                                  const IROperand *rhs) {
@@ -567,8 +458,6 @@ static int mir_int_compare_width(CodeGenerator *g, BinaryFunctionContext *ctx,
   int m = wl > wr ? wl : wr;
   return m == 4 ? 4 : 8;
 }
-
-/* ---- eligibility -------------------------------------------------------- */
 
 static int mir_type_is_gp_scalar(CodeGenerator *g, const char *type_name) {
   MtlcType *t = code_generator_binary_get_resolved_type(g, type_name, 0);
@@ -585,7 +474,6 @@ static int mir_type_is_gp_scalar(CodeGenerator *g, const char *type_name) {
   return sz == 1 || sz == 2 || sz == 4 || sz == 8;
 }
 
-/* A GP scalar OR a float32/float64 (the types MIR can now keep in a register). */
 static int mir_type_is_numeric_scalar(CodeGenerator *g, const char *type_name) {
   if (mir_type_is_gp_scalar(g, type_name)) {
     return 1;
@@ -594,11 +482,6 @@ static int mir_type_is_numeric_scalar(CodeGenerator *g, const char *type_name) {
   return t && code_generator_binary_resolved_type_float_bits(t) != 0;
 }
 
-/* A DIRECT small aggregate (struct/array by value, size 1/2/4/8): the Win64 ABI
- * passes and returns it in a single GP register exactly like an integer, so MIR
- * can carry it as an 8-byte value. Its memory home (when its address is taken
- * for field access) is 8 bytes, which covers the whole struct. Larger or
- * non-power-of-2 aggregates are INDIRECT (hidden pointer) and still bail. */
 static int mir_type_is_direct_small_aggregate(CodeGenerator *g,
                                               const char *type_name) {
   MtlcType *t = code_generator_binary_get_resolved_type(g, type_name, 0);
@@ -615,19 +498,11 @@ static int mir_type_is_direct_small_aggregate(CodeGenerator *g,
   return sz == 1 || sz == 2 || sz == 4 || sz == 8;
 }
 
-/* A type MIR can carry as a register-or-home value at a signature/local
- * boundary: a numeric scalar, or a DIRECT small aggregate (treated as 8 bytes).
- */
 static int mir_type_is_mir_value(CodeGenerator *g, const char *type_name) {
   return mir_type_is_numeric_scalar(g, type_name) ||
          mir_type_is_direct_small_aggregate(g, type_name);
 }
 
-/* An INDIRECT aggregate (struct/array by value, size>8 or non-power-of-2): the
- * Win64 ABI passes it BY REFERENCE, the caller copies it to a temp and passes
- * the address in a GP register. A parameter of this type therefore arrives as a
- * pointer, which MIR can hold as an 8-byte value; the body accesses fields
- * through that pointer (&@p yields the pointer, not a stack home). */
 static int mir_type_is_indirect_aggregate(CodeGenerator *g,
                                           const char *type_name) {
   MtlcType *t = code_generator_binary_get_resolved_type(g, type_name, 0);
@@ -635,20 +510,11 @@ static int mir_type_is_indirect_aggregate(CodeGenerator *g,
          code_generator_abi_classify(t) == ABI_PASS_INDIRECT;
 }
 
-/* A type acceptable as a PARAMETER: a MIR value (scalar / DIRECT small agg) or
- * an INDIRECT aggregate (received by reference as a pointer). */
 static int mir_type_is_param_value(CodeGenerator *g, const char *type_name) {
   return mir_type_is_mir_value(g, type_name) ||
          mir_type_is_indirect_aggregate(g, type_name);
 }
 
-/* Resolve the type of a NAME that is a parameter or a declared local of this IR
- * function. The symbol table has popped function scope by codegen time, so a
- * direct symbol_table_lookup returns NULL for locals/params; instead read the
- * function signature and DECLARE_LOCAL instructions, exactly as
- * code_generator_binary_get_operand_type_in_context does. *is_param_out (if
- * given) is set when the name is a parameter. Returns NULL for globals/unknown
- * names (which the caller resolves through the global symbol table). */
 static MtlcType *mir_local_or_param_type(CodeGenerator *g,
                                      const IRFunction *ir_function,
                                      const char *name, int *is_param_out) {
@@ -682,13 +548,6 @@ static MtlcType *mir_local_or_param_type(CodeGenerator *g,
   return NULL;
 }
 
-/* If `dest` names a signed/unsigned sub-64-bit integer variable (local, param, or
- * global scalar), return its byte width (1/2/4), else 0. Used to keep narrow
- * homes canonical: MIR computes in 64 bits, so an arithmetic result written to
- * a typed int32/uint32/int16/etc. home can carry bits above the type's width.
- * Narrow integer homes wrap to their width, so each such write is followed by
- * sign- or zero-extension of the destination vreg.
- */
 static int mir_dest_integer_narrow_width(CodeGenerator *g,
                                          BinaryFunctionContext *ctx,
                                          const IROperand *dest,
@@ -702,12 +561,6 @@ static int mir_dest_integer_narrow_width(CodeGenerator *g,
   }
   MtlcType *t = NULL;
   if (dest->kind == IR_OPERAND_TEMP) {
-    /* A temporary has no local/param/global home; its defining instruction
-     * bakes the result type into value_type (builder API). Resolving it lets a
-     * narrow temp carry the same canonicalization as a narrow named home, so
-     * `(x << 28)` computed into a temp is sign-extended before a following
-     * arithmetic shift reads it -- the frontend no longer needs to force the
-     * operand into a local. */
     t = code_generator_binary_get_operand_type_in_context(g, ctx, dest);
   } else {
     IRFunction *irf =
@@ -717,9 +570,6 @@ static int mir_dest_integer_narrow_width(CodeGenerator *g,
     }
     t = mir_local_or_param_type(g, irf, dest->name, NULL);
     if (!t && g->ir_program) {
-      /* Not a local/param: a global scalar (its symbol never goes out of
-       * scope). The cached-global vreg carries the value across the function
-       * body, so it needs the same canonicalization as a local's vreg. */
       const CgSym *s = code_generator_lookup_symbol(g, dest->name);
       t = s ? s->type : NULL;
     }
@@ -735,11 +585,6 @@ static int mir_dest_integer_narrow_width(CodeGenerator *g,
   return (w == 1 || w == 2 || w == 4) ? w : 0;
 }
 
-/* True if NAME is an INDIRECT aggregate local or by-reference parameter of this
- * function. MIR only touches such a value through its ADDRESS (field LOAD/STORE
- * off &@sym); a by-NAME use of the whole aggregate (assign, return, call
- * argument) would be miscompiled as an 8-byte MOV, so the eligibility gate
- * forbids it (except `return @local`, handled by Link 2). */
 static int mir_name_is_indirect_aggregate(CodeGenerator *g,
                                           const IRFunction *ir_function,
                                           const char *name) {
@@ -748,10 +593,6 @@ static int mir_name_is_indirect_aggregate(CodeGenerator *g,
          code_generator_abi_classify(t) == ABI_PASS_INDIRECT;
 }
 
-/* True if NAME is a struct LOCAL (not a by-reference parameter): one that owns a
- * stack home holding the struct itself. `return @local` for an INDIRECT return
- * copies from that home; a by-ref PARAMETER's home holds a pointer, not the
- * struct, so it is excluded (deferred to the fallback). */
 static int mir_name_is_indirect_struct_local(CodeGenerator *g,
                                              const IRFunction *ir_function,
                                              const char *name) {
@@ -761,7 +602,6 @@ static int mir_name_is_indirect_struct_local(CodeGenerator *g,
          code_generator_abi_classify(t) == ABI_PASS_INDIRECT;
 }
 
-/* roundup8 byte size of an INDIRECT aggregate type, or 0 if `t` isn't one. */
 static int mir_indirect_type_home_bytes(CodeGenerator *g, MtlcType *t) {
   if (!t || !code_generator_type_is_aggregate(t) ||
       code_generator_abi_classify(t) != ABI_PASS_INDIRECT) {
@@ -771,13 +611,6 @@ static int mir_indirect_type_home_bytes(CodeGenerator *g, MtlcType *t) {
   return (int)((code_generator_abi_type_size(t) + 7) & ~(size_t)7);
 }
 
-/* If TEMP `name` holds an INDIRECT struct VALUE, return its home byte size
- * (roundup8), else 0. The IR routes struct call results and intermediates
- * through temps; a temp's struct size is recovered from its context: the
- * INDIRECT return type of the call that defines it, the INDIRECT param type of
- * a call that consumes it, or the type of a struct SYMBOL it is whole-struct
- * assigned to/from. (Resolution is via calls/symbols only, never transitively
- * through another temp, so it cannot recurse.) */
 static int mir_name_is_global_aggregate(CodeGenerator *g,
                                         const IRFunction *irf,
                                         const char *name);
@@ -876,9 +709,6 @@ static int mir_struct_temp_size(CodeGenerator *g, const IRFunction *irf,
   return 0;
 }
 
-/* Home byte size of an operand that holds an INDIRECT struct VALUE in a stack
- * home we can LEA (a struct LOCAL symbol or a struct TEMP), else 0. A by-ref
- * struct PARAMETER is excluded (its home holds a pointer, not the struct). */
 static int mir_operand_struct_home_size(CodeGenerator *g,
                                         const IRFunction *irf,
                                         const IROperand *op) {
@@ -895,8 +725,6 @@ static int mir_operand_struct_home_size(CodeGenerator *g,
   return 0;
 }
 
-/* True if NAME is a by-reference (INDIRECT aggregate) PARAMETER: its value IS
- * the struct's address, so it can source an indirect copy without a home. */
 static int mir_name_is_indirect_param(CodeGenerator *g,
                                       const IRFunction *ir_function,
                                       const char *name) {
@@ -906,11 +734,6 @@ static int mir_name_is_indirect_param(CodeGenerator *g,
          code_generator_abi_classify(t) == ABI_PASS_INDIRECT;
 }
 
-/* True if NAME is a module-level AGGREGATE variable (struct/array/string
- * global, or an extern one): not a local/param, not scalar-accessible (small
- * DIRECT global aggregates are cached like scalars and stay off this path).
- * Such a global is never register-cached; memory is authoritative and its
- * address is a RIP-relative LEA. */
 static int mir_name_is_global_aggregate(CodeGenerator *g,
                                         const IRFunction *irf,
                                         const char *name) {
@@ -925,10 +748,6 @@ static int mir_name_is_global_aggregate(CodeGenerator *g,
          !code_generator_binary_symbol_is_scalar_accessible(g, name);
 }
 
-/* True if NAME is a string-typed LOCAL (not a by-ref param). Under the
- * backend's string convention an 8-byte string VALUE is a pointer to the
- * {chars,length} record, so a string local used by value yields the ADDRESS
- * of its 16-byte home (the fallback's emit_operand_load does the same LEA). */
 static int mir_name_is_string_local(CodeGenerator *g, const IRFunction *irf,
                                     const char *name) {
   int is_param = 0;
@@ -936,11 +755,6 @@ static int mir_name_is_string_local(CodeGenerator *g, const IRFunction *irf,
   return t && !is_param && t->kind == MTLC_TYPE_STRING;
 }
 
-/* An operand that can SOURCE an INDIRECT (by-value) aggregate copy: a struct
- * LOCAL or struct TEMP (LEA-able home), a by-ref aggregate PARAM (its value is
- * the address), a global aggregate (RIP-relative LEA; memory authoritative),
- * or a string LITERAL (its {chars,length} record is in .rdata). This is the
- * eligibility-side mirror of the fallback's emit_indirect_source_address. */
 static int mir_temp_is_indirect_call_result(const IRFunction *irf,
                                             const IROperand *op) {
   if (!irf || op->kind != IR_OPERAND_TEMP || !op->name) {
@@ -973,10 +787,6 @@ static int mir_indirect_source_is_supported(CodeGenerator *g,
           mir_name_is_global_aggregate(g, irf, op->name));
 }
 
-/* True if temp `name` holds a float value, judged from the producing
- * instruction's is_float flag (transitively through assign chains and call
- * return types). Uses IR structure only, so it is safe in eligibility (no
- * function context). Conservative: returns 0 when it cannot tell. */
 static int mir_temp_is_float(CodeGenerator *g, IRFunction *function,
                              const char *name, int depth) {
   if (!name || depth > 16) {
@@ -989,9 +799,6 @@ static int mir_temp_is_float(CodeGenerator *g, IRFunction *function,
       continue;
     }
     if (in->is_float) {
-      /* A comparison's is_float flag describes its OPERANDS; the RESULT is an
-       * integer 0/1 (ucomis + setcc / fused jcc), so it is a GP value and is
-       * fine as a branch condition. */
       if (in->op == IR_OP_BINARY && in->text && mir_is_comparison(in->text)) {
         return 0;
       }
@@ -1033,9 +840,6 @@ static int mir_temp_is_float(CodeGenerator *g, IRFunction *function,
   return 0;
 }
 
-/* A direct call MIR can lower: a known function, <=4 register arguments all of
- * GP-scalar type (float args are deferred), a non-INDIRECT (register) return,
- * and simple argument/destination operands. */
 static void mir_call_trace(const char *sub) {
   if (mir_env_trace()) {
     fprintf(stderr, "MIR-CALLBAIL\t%s\n", sub);
@@ -1048,9 +852,6 @@ static void mir_call_trace_named(const char *sub, const char *name) {
   }
 }
 
-/* The runtime abort traps the compiler injects for failed safety checks
- * (bounds, overflow, null, ...). They never return (puts+exit / handler abort),
- * so MIR can lower them as a self-contained terminal sequence. */
 static int mir_call_is_runtime_trap(const IRInstruction *in) {
   return in->text && (strcmp(in->text, "mettle_crash_trap_ex") == 0 ||
                       strcmp(in->text, "mettle_crash_trap") == 0);
@@ -1143,12 +944,6 @@ static int mir_syscall_operand_split(const IRInstruction *in,
   return 1;
 }
 
-/* The zero-fill lowering emits for an aggregate local declared without an
- * initializer. It names memset, which the call lowering turns into an inline
- * rep stos rather than a call, so nothing about it needs a declared callee --
- * and requiring one would drop every function holding an uninitialized struct
- * off the register-allocating backend. A user's own memset comes with an
- * `extern fn` declaration and takes the ordinary known-callee path. */
 static int mir_call_is_inline_zero_fill(const IRInstruction *in) {
   size_t a = 0;
 
@@ -1396,14 +1191,12 @@ static int mir_call_indirect_is_supported(CodeGenerator *g,
   return 1;
 }
 
-/* Classify an IR_OP_ADDRESS_OF target. */
 typedef enum {
-  MIR_ADDROF_UNSUPPORTED = 0, /* function/string/other: deferred */
-  MIR_ADDROF_LOCAL,           /* scalar/DIRECT-agg local or parameter (lea home) */
-  MIR_ADDROF_GLOBAL,          /* scalar global (lea RIP-relative) */
-  MIR_ADDROF_FUNCTION,        /* function symbol (lea code address) */
-  MIR_ADDROF_INDIRECT_PARAM   /* INDIRECT-aggregate param: &@p IS the by-ref
-                                 pointer, so copy the param value (no home) */
+  MIR_ADDROF_UNSUPPORTED = 0,
+  MIR_ADDROF_LOCAL,
+  MIR_ADDROF_GLOBAL,
+  MIR_ADDROF_FUNCTION,
+  MIR_ADDROF_INDIRECT_PARAM
 } MirAddrofKind;
 
 static MirAddrofKind mir_addressof_kind(CodeGenerator *g,
@@ -1419,36 +1212,19 @@ static MirAddrofKind mir_addressof_kind(CodeGenerator *g,
       mir_find_ir_function_named(g, in->lhs.name)) {
     return MIR_ADDROF_FUNCTION;
   }
-  /* Resolve the target as a local/parameter of this function from the IR (the
-   * symbol table has popped function scope by codegen time, so a direct lookup
-   * fails for locals/params). A NULL type means the name is a global/external. */
   int is_param = 0;
   MtlcType *t = mir_local_or_param_type(g, ir_function, in->lhs.name, &is_param);
   if (!t) {
-    /* Not a local/param: a global (or extern). Any global's address is a
-     * RIP-relative LEA. A scalar one is additionally register-cached, so the
-     * flush/reload around pointer ops keeps cache and memory coherent; an
-     * aggregate is never cached, leaving memory authoritative on its own. */
     return mir_name_is_global_variable(g, in->lhs.name) ? MIR_ADDROF_GLOBAL
                                                         : MIR_ADDROF_UNSUPPORTED;
   }
-  /* An INDIRECT-aggregate parameter is passed by reference: the parameter value
-   * already IS the struct's address, so &@p just yields that pointer. `string`
-   * is an aggregate on exactly a struct's terms ({chars,length}, 16 bytes,
-   * INDIRECT), so string params and locals take these same two paths. */
   if (is_param && code_generator_type_is_aggregate(t) &&
       code_generator_abi_classify(t) == ABI_PASS_INDIRECT) {
     return MIR_ADDROF_INDIRECT_PARAM;
   }
-  return MIR_ADDROF_LOCAL; /* scalar/DIRECT/INDIRECT-agg local or param: lea home */
+  return MIR_ADDROF_LOCAL;
 }
 
-/* Float bit-width (32/64) of a call-argument value operand for the eligibility
- * gate, which (unlike lowering) has no BinaryFunctionContext. Uses the operand's
- * own float_bits tag and the symbol table only, the same signals lowering's
- * code_generator_binary_operand_float_bits treats as authoritative (it returns
- * the operand's float_bits first), so the gate and lowering agree on which args
- * are float. Returns 0 for a non-float or undeterminable operand (gate defers). */
 static int mir_arg_float_bits(CodeGenerator *g, const IRFunction *ir_function,
                               const IROperand *op) {
   if (!op) {
@@ -1462,10 +1238,6 @@ static int mir_arg_float_bits(CodeGenerator *g, const IRFunction *ir_function,
       return op->float_bits;
     }
     if (op->kind == IR_OPERAND_SYMBOL && op->name) {
-      /* A float LOCAL or PARAMETER: resolve its declared type from the IR (the
-       * symbol table holds only globals at codegen time, scope having been
-       * popped). This is exactly the type lowering's mir_value_operand will see,
-       * so the gate and the homing agree on which args are float. */
       MtlcType *lt = mir_local_or_param_type(g, ir_function, op->name, NULL);
       if (lt) {
         return code_generator_binary_resolved_type_float_bits(lt);
@@ -1481,13 +1253,6 @@ static int mir_arg_float_bits(CodeGenerator *g, const IRFunction *ir_function,
   return 0;
 }
 
-/* SysV hands an aggregate of 16 bytes or less back in registers rather than
- * through a hidden out-pointer. MIR spills the eightbytes into the destination
- * struct's home itself, which needs both of them to be INTEGER class -- an SSE
- * eightbyte would have to cross banks on the way to memory, and no call the
- * standard library makes returns one. Mirrors the fallback emitter's
- * return_in_sysv_registers so the two agree on which calls take a hidden
- * pointer. */
 static int mir_call_sysv_returns_in_gp_registers(CodeGenerator *g,
                                                  const char *callee_name,
                                                  MtlcType *ret,
@@ -1807,8 +1572,6 @@ int mir_rewrite_string_concat_calls(IRFunction *ir_function) {
   return 1;
 }
 
-/* Pure-ish scan: returns 1 if every instruction is in the supported set and the
- * signature is GP-only. Uses generator for type queries; no MIR built yet. */
 static int mir_gate_control(CodeGenerator *generator,
                        const IRFunction *ir_function,
                        const IRInstruction *in, size_t i,
@@ -1822,13 +1585,6 @@ static int mir_gate_control(CodeGenerator *generator,
   case IR_OP_JUMP:
     break;
   case IR_OP_DECLARE_LOCAL:
-    /* A DIRECT small-aggregate local is allowed: field access lowers to
-     * &local + offset + LOAD/STORE (all supported), and when its address is
-     * taken it becomes memory-resident with an 8-byte home covering it. An
-     * INDIRECT struct local is also allowed: it gets a multi-slot home sized
-     * to the whole struct (home_bytes), and the same &local + offset + memory
-     * machinery reaches every field. Whole-struct by-name uses of it are
-     * rejected by the guard below, so only field access ever touches it. */
     if (in->text && !mir_type_is_mir_value(generator, in->text) &&
         !mir_type_is_indirect_aggregate(generator, in->text)) {
       return mir_trace_bail(ir_function, "declare_local:nonscalar");
@@ -1839,14 +1595,9 @@ static int mir_gate_control(CodeGenerator *generator,
         in->lhs.kind != IR_OPERAND_INT) {
       return mir_trace_bail(ir_function, "branch_zero:operand_kind");
     }
-    /* branch_zero on a float value (e.g. errdefer on a float return) needs a
-     * float-zero compare; float branches are deferred -> fall back. */
     break;
     break;
   case IR_OP_BRANCH_EQ: {
-    /* if (lhs == rhs) goto label: integer equality (switch/match dispatch).
-     * Both operands must be register-resident or an int literal; float
-     * equality would need ucomis, so defer it. */
     const IROperand *eq[2] = {&in->lhs, &in->rhs};
     for (int k = 0; k < 2; k++) {
       if (eq[k]->kind != IR_OPERAND_TEMP && eq[k]->kind != IR_OPERAND_SYMBOL &&
@@ -1900,12 +1651,10 @@ static int mir_gate_arith(CodeGenerator *generator,
     if (!in->text) {
       return mir_trace_bail(ir_function, "binary:no_text");
     }
-    /* String '+' is the concat kernel; only the fallback emitter has it. */
     if (in->value_type && in->value_type->kind == MTLC_TYPE_STRING) {
       return mir_trace_bail(ir_function, "binary:string");
     }
     if (in->is_float) {
-      /* Float arithmetic, or an ordered float comparison (<,<=,>,>=). */
       int sw;
       unsigned char fcc;
       if (!mir_float_arith_opcode(in->text, &tmp) &&
@@ -1945,9 +1694,6 @@ static int mir_gate_convert(CodeGenerator *generator,
   *handled = 1;
   switch (in->op) {
   case IR_OP_CAST:
-    /* Any scalar numeric cast: int<->int, int<->float, float<->float. The
-     * direction is resolved from operand types during lowering, which is
-     * exhaustive for these, so it cannot fail mid-function. */
     if (in->dest.kind != IR_OPERAND_TEMP && in->dest.kind != IR_OPERAND_SYMBOL) {
       return mir_trace_bail(ir_function, "cast:dest");
     }
@@ -1957,8 +1703,6 @@ static int mir_gate_convert(CodeGenerator *generator,
     }
     break;
   case IR_OP_UNARY:
-    /* Integer unary `-`, `~`, `+`, `!`; float unary `-` (negate as 0-x) and
-     * `+` (copy). Float `~`/`!` are not valid and popcnt is deferred. */
     if (!in->text) {
       return mir_trace_bail(ir_function, "unary:float_or_unsupported");
     }
@@ -2000,8 +1744,6 @@ static int mir_gate_value(CodeGenerator *generator,
     }
     if (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL &&
         in->lhs.kind != IR_OPERAND_INT && in->lhs.kind != IR_OPERAND_FLOAT) {
-      /* `@s <- "lit"`: a string literal into a string local/temp is a
-       * 16-byte copy from the literal's .rdata record (MIR_LEA_STRLIT). */
       if (in->lhs.kind == IR_OPERAND_STRING &&
           mir_operand_struct_home_size(generator, ir_function, &in->dest) >
               0) {
@@ -2036,11 +1778,6 @@ static int mir_gate_memory(CodeGenerator *generator,
   *handled = 1;
   switch (in->op) {
   case IR_OP_LOAD:
-    /* `%t <- *"literal" [8]` reads the data-pointer field of a string
-     * literal's fat struct: the value IS the address of a NUL-terminated
-     * .rdata cstring, so it lowers to MIR_LEA_CSTR (the same materialization
-     * used for string-literal call arguments). Any other width/shape on a
-     * STRING operand is deferred. */
     if (in->lhs.kind == IR_OPERAND_STRING) {
       if (in->is_float || in->rhs.kind != IR_OPERAND_INT ||
           in->rhs.int_value != 8) {
@@ -2076,9 +1813,6 @@ static int mir_gate_memory(CodeGenerator *generator,
     }
     break;
   case IR_OP_ROTATE_ADD:
-    /* next = a + b; a = b; b = next. Writes lhs and rhs too, which the
-     * written-global tracking only covers for dest, so a and b must be
-     * locals/params. */
     if (in->dest.kind != IR_OPERAND_SYMBOL ||
         in->lhs.kind != IR_OPERAND_SYMBOL ||
         in->rhs.kind != IR_OPERAND_SYMBOL || in->is_float ||
@@ -2090,10 +1824,6 @@ static int mir_gate_memory(CodeGenerator *generator,
     }
     break;
   case IR_OP_NEW:
-    /* Zeroed heap allocation: size is a compile-time INT, absent (defaults
-     * to 8), or a runtime GP value; the result pointer lands in a
-     * TEMP/SYMBOL. Win64 lowers to the inline GetProcessHeap+HeapAlloc
-     * sequence (MIR_HEAP_NEW), SysV to a plain calloc call. */
     if (in->dest.kind != IR_OPERAND_TEMP && in->dest.kind != IR_OPERAND_SYMBOL) {
       return mir_trace_bail(ir_function, "new:dest");
     }
@@ -2118,8 +1848,6 @@ static int mir_gate_select(CodeGenerator *generator,
   *handled = 1;
   switch (in->op) {
   case IR_OP_SELECT: {
-    /* dest = (cond != 0) ? then : else. Each of cond/then/else may be a
-     * temp/symbol/int; the dest is a temp/symbol. */
     const IROperand *sops[3] = {&in->lhs, &in->rhs,
                                 in->argument_count > 0 ? &in->arguments[0]
                                                        : NULL};
@@ -2158,14 +1886,6 @@ static int mir_gate_select(CodeGenerator *generator,
         in->lhs.kind != IR_OPERAND_FLOAT) {
       return mir_trace_bail(ir_function, "return:operand_kind");
     }
-    /* An INDIRECT-returning function returns anything the indirect-copy
-     * machinery can source: a struct LOCAL or TEMP home (a call result
-     * lands in the temp's home via the hidden pointer), a by-ref param's
-     * pointee, a global aggregate, or a string literal. */
-    /* A RETURN carrying no value in a struct-returning function is the
-     * fall-through the lowering appends after the real `return x`: there is
-     * nothing to copy, so it is just the epilogue. The baseline emits it the
-     * same way. */
     if (in->lhs.kind != IR_OPERAND_NONE &&
         mir_type_is_indirect_aggregate(generator,
                                        ir_function->return_type_name) &&
@@ -2184,9 +1904,6 @@ static int mir_gate_select(CodeGenerator *generator,
     }
     break;
   case IR_OP_ADDRESS_OF:
-    /* &local/&param (made memory-resident via forced spill) or &global (kept
-     * cached but coherent via flush/reload around pointer memory ops).
-     * Functions/strings have their own address forms and are deferred. */
     if (mir_addressof_kind(generator, ir_function, in) ==
         MIR_ADDROF_UNSUPPORTED) {
       return mir_trace_bail(ir_function, "addressof:unsupported");
@@ -2212,14 +1929,6 @@ static int mir_gate_mac(CodeGenerator *generator,
   switch (in->op) {
   case IR_OP_SIMD_SLP_MAC_I8:
   case IR_OP_SIMD_SLP_MAC_I32: {
-    /* SLP MAC kernel run INLINE inside the MIR function (so the surrounding
-     * outer loops keep register-allocated codegen). The lowering marshals the
-     * three base pointers + count + byte stride into RCX/RDX/R8/R9/RAX, so the
-     * only compile-time-constant requirement is the lane count K (it selects
-     * the xmm-vs-ymm kernel width); the bases, offsets, count, and stride may
-     * each be a runtime temp/symbol resolved via mir_value_operand. The I8
-     * variant (int8 a/b, int32 c) uses the same shape with different element
-     * scaling, handled in lowering. */
     if (in->argument_count < 6 || !in->arguments ||
         in->arguments[0].kind != IR_OPERAND_INT ||
         (in->arguments[0].int_value != 4 &&
@@ -2233,7 +1942,6 @@ static int mir_gate_mac(CodeGenerator *generator,
         return mir_trace_bail(ir_function, "slp_mac:base_kind");
       }
     }
-    /* count, a_off, b_off, b_stride, out_off */
     const int run_args[5] = {1, 2, 3, 4, 5};
     for (int k = 0; k < 5; k++) {
       const IROperand *o = &in->arguments[run_args[k]];
@@ -2254,12 +1962,6 @@ static int mir_gate_mac(CodeGenerator *generator,
 static int mir_gate_fill_counter(const IRFunction *ir_function,
                                  const IRInstruction *in,
                                  long long fill_mode) {
-  /* Mode 0 must start the induction variable at 0 (a nonzero start adjusts
-   * both the base and the count; deferred). A nonzero/runtime OFFSET (the
-   * invariant part of `base[offset + i]`) is supported by folding
-   * `base + offset*size` in MIR before the kernel, but only for an int64
-   * (wide) index so the pointer math is plain 64-bit -- an int32 offset would
-   * need the fallback's sign-extension to match exactly. */
   if (fill_mode == 0) {
     int start_zero = (in->arguments[3].kind == IR_OPERAND_INT &&
                       in->arguments[3].int_value == 0);
@@ -2268,10 +1970,6 @@ static int mir_gate_fill_counter(const IRFunction *ir_function,
     int wide = in->argument_count > 5 &&
                in->arguments[5].kind == IR_OPERAND_INT &&
                in->arguments[5].int_value == 64;
-    /* A nonzero start folds into the base and the count; a nonzero offset
-     * folds into the base. An int32 start subtracts at 32 bits and
-     * sign-extends (matching the fallback's movsxd); combining a narrow
-     * start with a runtime offset still defers. */
     if (!start_zero) {
       if (!wide && !offset_zero) {
         return mir_trace_bail(ir_function, "simd_fill:start");
@@ -2299,9 +1997,6 @@ static int mir_gate_fill_counter(const IRFunction *ir_function,
 static int mir_gate_fill_value(CodeGenerator *generator,
                                const IRFunction *ir_function,
                                const IRInstruction *in) {
-  /* The fill value: a compile-time INT, or a runtime invariant GP value
-   * (mem_fill's splatted word). A float-valued symbol would resolve to an
-   * XMM vreg the RAX marshalling cannot take, so it stays deferred. */
   (void)generator;
   if (in->arguments[2].kind != IR_OPERAND_INT &&
       in->arguments[2].kind != IR_OPERAND_FLOAT &&
@@ -2323,11 +2018,6 @@ static int mir_gate_fill(CodeGenerator *generator,
   *handled = 1;
   switch (in->op) {
   case IR_OP_SIMD_FILL: {
-    /* Inline fill passthrough: element-counted (mode 0), begin->end byte
-     * walk (mode 1), and byte-offset walk (mode 2, the mem_zero/mem_fill
-     * word loop), with a compile-time or runtime-invariant GP value. What
-     * still defers: float-valued fills, mode-1 pointer-iv write-backs, and
-     * mode-0 nonzero starts. */
     if (in->argument_count < 5 ||
         in->arguments[0].kind != IR_OPERAND_INT ||
         (in->arguments[0].int_value != 1 && in->arguments[0].int_value != 2 &&
@@ -2336,9 +2026,6 @@ static int mir_gate_fill(CodeGenerator *generator,
         in->arguments[1].kind != IR_OPERAND_INT) {
       return mir_trace_bail(ir_function, "simd_fill:shape");
     }
-    /* Mode 0 (element-counted), mode 1 (begin->end byte walk), and mode 2
-     * (byte-offset walk: the lowering folds base+start and bound-start in
-     * 64-bit MIR, and writes the live iv back as start + bytes walked). */
     long long fill_mode = in->arguments[1].int_value;
     if (fill_mode != 0 && fill_mode != 1 && fill_mode != 2) {
       return mir_trace_bail(ir_function, "simd_fill:mode");
@@ -2351,11 +2038,6 @@ static int mir_gate_fill(CodeGenerator *generator,
     if (!mir_gate_fill_counter(ir_function, in, fill_mode)) {
       return 0;
     }
-    /* A live induction variable (dest = the iv symbol) needs a final
-     * write-back, folded in MIR after the kernel: mode 0 (start 0) leaves
-     * iv = max(count, 0); mode 2 leaves iv = start + bytes walked. Either
-     * needs the iv to be a LOCAL/PARAM (resolvable to a vreg); mode 1's
-     * pointer iv and a global iv stay in the fallback. */
     if (in->dest.kind == IR_OPERAND_SYMBOL) {
       if ((fill_mode != 0 && fill_mode != 2) ||
           !mir_local_or_param_type(generator, ir_function, in->dest.name,
@@ -2392,12 +2074,6 @@ static int mir_gate_affine(CodeGenerator *generator,
   switch (in->op) {
   case IR_OP_SIMD_AFFINE_MAP_F64:
   case IR_OP_SIMD_AFFINE_MAP_F32: {
-    /* Inline float affine-map passthrough (`dst[i]=a*src[i]+b*dst[i]+c`, the
-     * float-copy/saxpy class). src (lhs) and dst (rhs) must be LEA-able
-     * pointers (TEMP/SYMBOL), the count GP-resolvable, and the a/b/c
-     * coefficients compile-time FLOAT immediates (so the kernel can bake their
-     * broadcasts); a runtime coefficient stays in the fallback. F32 and F64
-     * share this validation; the lowering below picks the width. */
     if (in->argument_count < 4 || !in->arguments) {
       return mir_trace_bail(ir_function, "affine_map:shape");
     }
@@ -2412,10 +2088,6 @@ static int mir_gate_affine(CodeGenerator *generator,
     }
     for (int k = 1; k <= 3; k++) {
       if (in->arguments[k].kind == IR_OPERAND_FLOAT) continue;
-      /* F64 additionally accepts a RUNTIME `a` scale (arguments[1]) -- the
-       * saxpy `y=a*x+y` shape where a varies per pass; it is marshalled into
-       * an xmm and broadcast at runtime. b and c (args 2,3) must stay
-       * compile-time so their broadcasts are baked. F32 stays const-only. */
       if (k == 1 && (in->arguments[k].kind == IR_OPERAND_TEMP ||
                      in->arguments[k].kind == IR_OPERAND_SYMBOL)) {
         continue;
@@ -2446,10 +2118,6 @@ static int mir_gate_vloop(CodeGenerator *generator,
   switch (in->op) {
   case IR_OP_SIMD_VLOOP_I32:
   case IR_OP_SIMD_VLOOP_F64: {
-    /* Inline general-vectorized-loop passthrough. Maps marshal <=3 distinct
-     * base pointers + count through RCX/RDX/R8/R9; reductions go through
-     * the generic kernel bridge (staged frame slots), which also carries
-     * their accumulator and any invariant scalars. */
     const char *vnames[4];
     const IROperand *vsrcs[4];
     const int vi32 = (in->op == IR_OP_SIMD_VLOOP_I32);
@@ -2461,9 +2129,6 @@ static int mir_gate_vloop(CodeGenerator *generator,
              : (in->float_bits != 64 && in->float_bits != 32)) {
       return mir_trace_bail(ir_function, "vloop:width");
     }
-    /* Reductions, scalar-reading DAGs, and 4-base maps run through the
-     * generic kernel bridge (staged slots); plain maps with <=3 bases take
-     * the marshalled fast path. */
     {
       const int vreduce = in->arguments[0].int_value != 0;
       int bridge = vreduce || in->arguments[5].int_value != 0;
@@ -2513,9 +2178,6 @@ static int mir_gate_silu(CodeGenerator *generator,
   *handled = 1;
   switch (in->op) {
   case IR_OP_SIMD_SILU_F32: {
-    /* Inline SiLU/SwiGLU passthrough. g (lhs) must be a LEA-able pointer, the
-     * count GP-resolvable, and (SwiGLU) u (rhs) a pointer too; plain SiLU
-     * leaves rhs NONE/"" (no multiply). */
     if (in->argument_count < 1 || !in->arguments ||
         (in->lhs.kind != IR_OPERAND_TEMP &&
          in->lhs.kind != IR_OPERAND_SYMBOL)) {
@@ -2541,8 +2203,6 @@ static int mir_gate_silu(CodeGenerator *generator,
 
 static int mir_gate_inline_kernel(const IRFunction *ir_function,
                                   const IRInstruction *in) {
-  /* A kernel in the inline-kernel table runs in place (MIR_IR_KERNEL): it
-   * needs no per-opcode gate, only room to stage its by-name operands. */
   if (mir_ir_kernel_for_op(in->op)) {
     int slots = mir_kernel_slot_estimate(in);
     if (slots < 0) {
@@ -2553,7 +2213,6 @@ static int mir_gate_inline_kernel(const IRFunction *ir_function,
     }
     return 1;
   }
-  /* NEW, ROTATE_ADD, the tensor ops: not yet. */
   char buf[40];
   snprintf(buf, sizeof(buf), "op:%d", (int)in->op);
   return mir_trace_bail(ir_function, buf);
@@ -2607,7 +2266,6 @@ static int mir_sysv_returns_in_registers(CodeGenerator *g,
 
 static int mir_gate_signature(CodeGenerator *generator,
                               const IRFunction *ir_function) {
-  /* Signature: <=4 GP params, GP-or-void return, no indirect return. */
   if (ir_function->parameter_count > MIR_MAX_PARAMS) {
     return mir_trace_bail(ir_function, "sig:params>max");
   }
@@ -2624,12 +2282,6 @@ static int mir_gate_signature(CodeGenerator *generator,
       pis_float[i] =
           (rt && code_generator_binary_resolved_type_float_bits(rt) != 0) ? 1 : 0;
     }
-    /* GP params beyond the ABI's argument registers are homed from the caller's
-     * stack frame (handled below). A FLOAT param landing on the stack is not
-     * homed yet, so defer those functions to the fallback. An INDIRECT struct
-     * return consumes the first integer argument slot as a hidden out-pointer,
-     * shifting every user parameter up by one, model that here so the on-stack
-     * detection matches the prologue's homing exactly. */
     int hidden = mir_type_is_indirect_aggregate(generator,
                                                 ir_function->return_type_name) &&
                          !mir_sysv_returns_in_registers(generator, ir_function,
@@ -2663,8 +2315,6 @@ static int mir_gate_signature(CodeGenerator *generator,
       }
     }
   }
-  /* A non-void return must be a register value (scalar / DIRECT small agg) OR an
-   * INDIRECT aggregate returned via the hidden out-pointer (handled at RETURN). */
   if (ir_function->return_type_name && ir_function->return_type_name[0] &&
       strcmp(ir_function->return_type_name, "void") != 0 &&
       !mir_type_is_mir_value(generator, ir_function->return_type_name) &&
@@ -2681,7 +2331,6 @@ static void mir_scan_global_write(CodeGenerator *generator,
                                   int *has_global_write, int *gw_overflow,
                                   const char **gw_names,
                                   size_t *gw_count) {
-  /* An undefined SYMBOL written here is a global STORE. */
   if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name) {
     int found = 0;
     for (size_t j = 0; j < defined->count; j++) {
@@ -2690,8 +2339,6 @@ static void mir_scan_global_write(CodeGenerator *generator,
         break;
       }
     }
-    /* STORE's dest is an ADDRESS operand: `*@g <- v` stores through a global
-     * aggregate's memory (never cached, so it is not a cache write). */
     int agg_addr_dest =
         !found &&
         (in->op == IR_OP_STORE ||
@@ -2835,10 +2482,6 @@ static void mir_scan_global_operands(CodeGenerator *generator,
 
 static int mir_gate_globals(CodeGenerator *generator,
                             IRFunction *ir_function) {
-  /* Collect the names that are defined inside the function: parameters and
-   * declared locals. Any SYMBOL operand naming something outside this set is a
-   * global (or otherwise externally-defined) value. Those become vregs that no
-   * prologue/def ever initializes, so the function is not yet MIR-eligible. */
   MirNameMap defined = {0};
   MirFunction scratch_fn;
   memset(&scratch_fn, 0, sizeof(scratch_fn));
@@ -2866,12 +2509,6 @@ static int mir_gate_globals(CodeGenerator *generator,
     mir_function_destroy(&scratch_fn);
     return mir_trace_bail(ir_function, "globals:lowering_error");
   }
-  /* Any SYMBOL operand not defined in this function is a global access. It is
-   * eligible iff it is a plain scalar global (no address-of in scope, an
-   * IR_OP_ADDRESS_OF would be rejected below, so no aliasing pointer can reach
-   * it). Calls are fine: the lowering flushes written globals before each call
-   * and reloads cached globals after, keeping memory authoritative across the
-   * call boundary. */
   mir_scan_global_operands(generator, ir_function, &defined, &globals_ok,
                            &has_global_write, &has_call, &gw_overflow);
   mir_name_map_destroy(&defined);
@@ -2879,13 +2516,6 @@ static int mir_gate_globals(CodeGenerator *generator,
   if (!globals_ok) {
     return mir_trace_bail(ir_function, "global_access");
   }
-  /* Mixing global writes with calls is fine now that the flush before each
-   * call/return is flow-sensitive: only globals actually dirtied since the
-   * last cleaning point are stored back, so a clean cached value can never
-   * stomp another thread's write between a reload and the next call (the
-   * lock()/unlock() hazard that used to force these functions to the
-   * fallback). The dirty analysis tracks at most 64 written globals; past
-   * that it degrades to flush-everything, so such functions stay deferred. */
   if (has_global_write && has_call && gw_overflow) {
     return mir_trace_bail(ir_function, "global_write_with_call");
   }
@@ -2987,11 +2617,6 @@ static int mir_gate_indirect_operands(CodeGenerator *generator,
 static int mir_gate_indirect_aggregate(CodeGenerator *generator,
                                        const IRFunction *ir_function,
                                        const IRInstruction *in) {
-  /* Whole-struct by-name guard: an INDIRECT aggregate (struct local or
-   * by-reference param) may only be DECLARED or have its ADDRESS taken; MIR
-   * reaches its fields exclusively through &@sym + offset memory ops. Any
-   * other by-name appearance (assign/return/call-arg/store value) would copy
-   * just the low 8 bytes, so defer such a function to the fallback. */
   {
     if (!mir_gate_indirect_operands(generator, ir_function, in)) {
       return 0;
@@ -3001,9 +2626,6 @@ static int mir_gate_indirect_aggregate(CodeGenerator *generator,
           in->arguments[a].name &&
           mir_name_is_indirect_aggregate(generator, ir_function,
                                          in->arguments[a].name) &&
-          /* A struct passed by value is allowed when Link 4 can source the
-           * outgoing copy: a struct LOCAL's home, or a by-ref param's
-           * pointer (mir_call_is_supported validates the callee param). */
           !((in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT) &&
             mir_indirect_source_is_supported(generator, ir_function,
                                              &in->arguments[a]))) {
@@ -3133,8 +2755,6 @@ static int mir_function_is_eligible_inner(CodeGenerator *generator,
   return 1;
 }
 
-/* ---- lowering ----------------------------------------------------------- */
-
 static int mir_emit1(MirFunction *fn, MirOpcode op, MirOperand dst,
                      MirOperand a, MirOperand b, int width, int is_unsigned,
                      unsigned char cc) {
@@ -3195,9 +2815,6 @@ static int mir_emit_bf16_narrow(MirFunction *fn, MirVregId gbits,
                    mir_op_vreg(gnan), 8, 0, 0);
 }
 
-/* ---- constant-divisor strength reduction (magic multiply) --------------- */
-
-/* The pooled GP vreg for a loop-invariant 64-bit integer constant, or NONE. */
 static MirVregId mir_iconst_lookup(MirFunction *fn, int64_t value) {
   for (size_t i = 0; i < fn->iconst_count; i++) {
     if (fn->iconsts[i].value == value) {
@@ -3207,9 +2824,6 @@ static MirVregId mir_iconst_lookup(MirFunction *fn, int64_t value) {
   return MIR_VREG_NONE;
 }
 
-/* Add `value` to the integer-constant pool and emit its initial materialization.
- * A later MIR layout pass moves the movabs to a hot-loop preheader. No-op if
- * already pooled. */
 static int mir_iconst_add(MirFunction *fn, int64_t value) {
   if (mir_iconst_lookup(fn, value) != MIR_VREG_NONE) {
     return 1;
@@ -3236,45 +2850,25 @@ static int mir_iconst_add(MirFunction *fn, int64_t value) {
                    mir_op_none(), 8, 0, 0);
 }
 
-/* An integer-constant operand: the hoisted pool vreg if `value` was pooled,
- * otherwise an inline immediate. */
 static MirOperand mir_iconst_operand(MirFunction *fn, int64_t value) {
   MirVregId v = mir_iconst_lookup(fn, value);
   return (v != MIR_VREG_NONE) ? mir_op_vreg(v) : mir_op_imm(value);
 }
 
-/* If `a / C` or `a % C` (compile-time constant C, dividend signedness `uns`)
- * lowers via a magic-multiply MULHI, return 1 and set *Mout to the 64-bit magic
- * constant the MULHI multiplies by; return 0 for the forms that emit no MULHI
- * (C in {0, 1, -1} or |C| a power of two). Mirrors the magic selection inside
- * mir_emit_const_divmod so the magic can be pre-pooled and hoisted out of a
- * loop. */
 static int mir_divmod_magic(int64_t C, int uns, int64_t *Mout) {
   CgStrengthRewrite rw;
   if (!cg_strength_classify('/', C, uns, &rw) || rw.kind != CG_SR_DIV_MAGIC) {
-    return 0; /* trivial or power-of-two divisors lower without a MULHI */
+    return 0;
   }
   *Mout = rw.magic;
   return 1;
 }
 
-/* Strength-reduce `dst = a / C` or `dst = a % C` for a compile-time constant C
- * into a magic-number multiply (+ shifts), avoiding the long-latency divide.
- * Returns 1 if it emitted the reduced form, 0 to fall back to a real divide
- * (C == 0 keeps the divide so the /0 runtime trap fires). `uns` is the
- * dividend's signedness; `mod` selects remainder. All math is 64-bit. */
 static int mir_emit_const_divmod(MirFunction *fn, MirOperand dst, MirOperand a,
                                  int64_t C, int uns, int mod) {
   if (C == 0) {
     return 0;
   }
-  /* The dividend is read repeatedly (MULHI, then the remainder/sign-correction
-   * ops). A vreg is safe to re-read directly: it never lives in RAX/RDX (those
-   * are non-allocatable encoder scratch), so MULHI's RAX:RDX clobber cannot
-   * corrupt it, and this function never writes `a` before its last read. Only an
-   * immediate (or other non-vreg) needs a fresh-vreg snapshot, copying it once
-   * avoids re-emitting a 10-byte movabs at each use. Skipping the copy for the
-   * common register dividend removes one mov per div/mod in hot loops. */
   MirOperand A;
   if (a.kind == MIR_OPK_VREG) {
     A = a;
@@ -3319,7 +2913,6 @@ static int mir_emit_const_divmod(MirFunction *fn, MirOperand dst, MirOperand a,
         return 0;
       }
     } else {
-      /* bias = (a < 0) ? (2^k - 1) : 0 ; q = (a + bias) >> k (arithmetic). */
       MirVregId t1 = mir_new_vreg(fn, MIR_RC_GP, 8);
       MirVregId t2 = mir_new_vreg(fn, MIR_RC_GP, 8);
       if (t1 == MIR_VREG_NONE || t2 == MIR_VREG_NONE ||
@@ -3349,7 +2942,6 @@ static int mir_emit_const_divmod(MirFunction *fn, MirOperand dst, MirOperand a,
         return 0;
       }
     } else {
-      /* q = (((a - t) >> 1) + t) >> (s - 1)  (overflow-safe average). */
       MirVregId d1 = mir_new_vreg(fn, MIR_RC_GP, 8);
       if (d1 == MIR_VREG_NONE ||
           !mir_emit1(fn, MIR_SUB, mir_op_vreg(d1), A, mir_op_vreg(tv), 8, 0,
@@ -3382,7 +2974,6 @@ static int mir_emit_const_divmod(MirFunction *fn, MirOperand dst, MirOperand a,
     if (s > 0 && !mir_emit1(fn, MIR_SAR, Q, Q, mir_op_imm(s), 8, 0, 0)) {
       return 0;
     }
-    /* q += sign bit of q (round toward zero). */
     MirVregId sb = mir_new_vreg(fn, MIR_RC_GP, 8);
     if (sb == MIR_VREG_NONE ||
         !mir_emit1(fn, MIR_SHR, mir_op_vreg(sb), Q, mir_op_imm(63), 8, 1, 0) ||
@@ -3395,7 +2986,6 @@ static int mir_emit_const_divmod(MirFunction *fn, MirOperand dst, MirOperand a,
     return q_in_dst ? 1
                     : mir_emit1(fn, MIR_MOV, dst, Q, mir_op_none(), 8, 0, 0);
   }
-  /* remainder = a - q * C */
   MirVregId mv = mir_new_vreg(fn, MIR_RC_GP, 8);
   if (mv == MIR_VREG_NONE) {
     return 0;
@@ -3416,8 +3006,6 @@ static int mir_emit_const_divmod(MirFunction *fn, MirOperand dst, MirOperand a,
   return mir_emit1(fn, MIR_SUB, dst, A, mir_op_vreg(mv), 8, 0, 0);
 }
 
-/* Emit a MIR_STORE_GLOBAL for each named global, writing its cached vreg back to
- * memory (Vg -> [g]). */
 static int mir_emit_global_flush_names(MirFunction *fn, CodeGenerator *g,
                                        MirNameMap *map, const char **names,
                                        size_t count) {
@@ -3441,8 +3029,6 @@ static int mir_emit_global_flush_names(MirFunction *fn, CodeGenerator *g,
   return 1;
 }
 
-/* Emit a MIR_LOAD_GLOBAL for each named global, refreshing its cache vreg from
- * memory ([g] -> Vg). */
 static int mir_emit_global_reload_names(MirFunction *fn, CodeGenerator *g,
                                         MirNameMap *map, const char **names,
                                         size_t count) {
@@ -3471,14 +3057,6 @@ static int mir_emit_global_reload_names(MirFunction *fn, CodeGenerator *g,
   return 1;
 }
 
-/* Flush the DIRTY cached globals back to memory. Called before each MIR_RET
- * (so memory is consistent on every exit) and before a call (so the callee sees
- * current values). With the dirty analysis available, only globals actually
- * written since the last cleaning point are stored: writing a merely-cached
- * (clean) value back would race a concurrent writer that updated the global
- * between our reload and this flush -- the lock()/unlock() idiom, where the
- * synchronizing calls are exactly the boundaries a stale store-back must not
- * cross. */
 static int mir_emit_global_writebacks(MirFunction *fn, CodeGenerator *g,
                                       MirNameMap *map,
                                       const MirGlobalWriteback *wb) {
@@ -3499,15 +3077,6 @@ static int mir_emit_global_writebacks(MirFunction *fn, CodeGenerator *g,
   return mir_emit_global_flush_names(fn, g, map, wb->names, wb->count);
 }
 
-/* Flush the address-taken globals a pointer access could read, before that
- * access. Only the ones whose cache can differ from memory: a global the
- * function never writes by name was loaded once at entry and refreshed after
- * every aliasing store, so storing it back writes the value already there.
- *
- * The unconditional form put that dead store in front of every load and every
- * store in the function, which inside a loop means several per iteration. A
- * kernel inlined into a caller that happens to cache one address-taken global
- * paid for it on every element it touched. */
 static int mir_emit_global_alias_flush(MirFunction *fn, CodeGenerator *g,
                                        MirNameMap *map,
                                        const MirGlobalWriteback *wb) {
@@ -3523,11 +3092,11 @@ static int mir_emit_global_alias_flush(MirFunction *fn, CodeGenerator *g,
       }
     }
     if (written == wb->count) {
-      continue; /* never written by name: the cache holds what memory holds */
+      continue;
     }
     if (wb->dirty && fn->cur_ir_index >= 0 && written < 64 &&
         !((wb->dirty[fn->cur_ir_index] >> written) & 1ull)) {
-      continue; /* clean on every path reaching here */
+      continue;
     }
     if (!mir_emit_global_flush_names(fn, g, map, &wb->at[i], 1)) {
       return 0;
@@ -3536,14 +3105,6 @@ static int mir_emit_global_alias_flush(MirFunction *fn, CodeGenerator *g,
   return 1;
 }
 
-/* Flow-sensitive dirty-global analysis over the IR CFG. Returns a malloc'd
- * array of instruction_count masks: mask[i] bit j set = names[j] was possibly
- * written (cache newer than memory) on some path reaching instruction i, with
- * function entry clean and every call a cleaning point (its flush-before /
- * reload-after leaves cache == memory). Forward may-analysis to fixpoint;
- * unreachable code keeps an empty mask. Returns NULL when the analysis does
- * not apply (no instructions, no written globals, more than 64 of them, or a
- * malformed branch target); the caller then flushes the whole set. */
 static unsigned long long *mir_compute_global_dirty_masks(
     const IRFunction *irf, const char **names, size_t count) {
   size_t n = irf->instruction_count;
@@ -3587,8 +3148,7 @@ static unsigned long long *mir_compute_global_dirty_masks(
       unsigned long long s = mask[i];
       if (in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT ||
           in->op == IR_OP_INLINE_ASM) {
-        s = 0; /* kill first: the flush+reload cleans, THEN a @g=f() dest
-                  capture re-dirties below */
+        s = 0;
       }
       if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
           in->op != IR_OP_DECLARE_LOCAL) {
@@ -3622,12 +3182,6 @@ static unsigned long long *mir_compute_global_dirty_masks(
   return mask;
 }
 
-/* Reload every cached global EXCEPT `except` (borrowed name). Used after a call
- * whose result is assigned straight to a global (`@g = f()`, which the optimizer
- * fuses into one CALL with dest=@g): the call lowering has already captured the
- * return value into @g's cache vreg, and C semantics discard any write the
- * callee made to @g's memory, so reloading @g from (still-stale) memory would
- * wrongly clobber the fresh result with the old value. */
 static int mir_emit_global_reloads_except(MirFunction *fn, CodeGenerator *g,
                                           MirNameMap *map,
                                           const MirGlobalWriteback *wb,
@@ -3769,29 +3323,11 @@ static int mir_call_may_write_globals(CodeGenerator *g, const IRFunction *irf,
   return !target_ir || mir_ir_function_may_write_global(g, target_ir);
 }
 
-/* Emit a fixed-size byte copy of `size` bytes from [src_base] to [dst_base],
- * where both bases are pointer vregs. Lowered as a straight-line sequence of
- * load/store pairs through a fresh GP temp (8 bytes at a time, then a 4/2/1
- * tail), exactly the [base + disp] memory MOVs the field-access path already
- * uses, so it needs no new encoder support and the allocator schedules the
- * pointers and temps normally. Used to copy an INDIRECT struct into a caller's
- * hidden return slot (and, later, for whole-struct assignment and arguments). */
-/* Above this many bytes a block copy stops being unrolled. Each unrolled word
- * costs a load and a store, about sixteen bytes of code, so a 608-byte struct
- * -- a rule table entry, an engine's config record -- was expanding to more
- * than a kilobyte of moves at every copy site. `rep movsb` is a dozen
- * instructions whatever the count, and the microcoded copy beats a long
- * straight-line run once the count is this large anyway. Below the threshold
- * the unrolled form still wins: it needs no register marshalling and leaves
- * the function a leaf. */
 #define MIR_STRUCT_COPY_UNROLL_MAX 128
 
 static int mir_emit_struct_copy(MirFunction *fn, MirVregId dst_base,
                                 MirVregId src_base, int size) {
   if (size > MIR_STRUCT_COPY_UNROLL_MAX) {
-    /* Same shape the memcpy call lowering uses: put destination, source and
-     * count in the active convention's first three integer argument registers
-     * and let MIR_REP_MOVSB be the copy. */
     const BinaryAbi *abi = code_generator_binary_active_abi();
     if (abi && abi->int_param_count >= 3) {
       return mir_emit1(fn, MIR_MOV,
@@ -3827,13 +3363,6 @@ static int mir_emit_struct_copy(MirFunction *fn, MirVregId dst_base,
   return 1;
 }
 
-/* Materialize the ADDRESS of an INDIRECT-aggregate copy SOURCE into a fresh
- * vreg: a struct LOCAL/TEMP leas its home (marking it memory-resident at least
- * `sz` bytes), a by-ref aggregate PARAM's value is already the address (plain
- * MOV), and a string LITERAL leas its {chars,length} record. The MIR mirror of
- * the fallback's emit_indirect_source_address; eligibility has vetted the
- * operand via mir_indirect_source_is_supported. Returns MIR_VREG_NONE on
- * failure. */
 static MirVregId mir_emit_indirect_source_addr(MirFunction *fn,
                                                CodeGenerator *g,
                                                BinaryFunctionContext *ctx,
@@ -3846,8 +3375,6 @@ static MirVregId mir_emit_indirect_source_addr(MirFunction *fn,
   }
   if (op->kind == IR_OPERAND_STRING) {
     const char *s = op->name ? op->name : "";
-    /* imm carries the literal's byte length, which strlen cannot recover once
-     * the bytes hold an interior NUL. */
     MirOperand lit = mir_op_symbol(s);
     lit.imm = (long long)ir_operand_string_length(op);
     if (!mir_emit1(fn, MIR_LEA_STRLIT, mir_op_vreg(base), lit,
@@ -3892,10 +3419,6 @@ static MirVregId mir_emit_indirect_source_addr(MirFunction *fn,
   return base;
 }
 
-/* Resolve an operand used as a memory ADDRESS: a global aggregate's name
- * materializes its RIP-relative address into a fresh vreg (it has no cached
- * value vreg; memory is authoritative), anything else is the plain value
- * operand (a pointer temp/local, or a cached scalar's vreg). */
 static MirOperand mir_address_operand(MirFunction *fn, CodeGenerator *g,
                                       BinaryFunctionContext *ctx,
                                       MirNameMap *map, const IROperand *op) {
@@ -3942,7 +3465,6 @@ static MirOperand mir_address_operand(MirFunction *fn, CodeGenerator *g,
   }
 }
 
-/* A width-tagged float register move (xmm copy). */
 static int mir_emit_fmov(MirFunction *fn, MirOperand dst, MirOperand src,
                          int width) {
   MirInst in;
@@ -3959,8 +3481,6 @@ static int mir_emit_fmov(MirFunction *fn, MirOperand dst, MirOperand src,
 static MirOperand mir_float_const_operand(MirFunction *fn, double value,
                                           int width_bytes);
 
-/* Store a float call argument into its outgoing stack slot, converted to the
- * parameter's width. */
 static MirOperand coerce_float_operand(MirFunction *fn, CodeGenerator *g,
                                        BinaryFunctionContext *ctx,
                                        MirNameMap *map, const IROperand *op,
@@ -3989,7 +3509,6 @@ static int mir_emit_float_stack_arg(MirFunction *fn, CodeGenerator *g,
   return mir_emit(fn, &st);
 }
 
-/* Raw IEEE-754 bits of a double value at the given float width (4 or 8). */
 static uint64_t mir_float_bits_at(double value, int width_bytes) {
   if (width_bytes == 4) {
     float f = (float)value;
@@ -4002,7 +3521,6 @@ static uint64_t mir_float_bits_at(double value, int width_bytes) {
   return u;
 }
 
-/* The pooled vreg for a loop-invariant constant (bits,width), or MIR_VREG_NONE. */
 static MirVregId mir_pool_lookup(MirFunction *fn, uint64_t bits, int width) {
   for (size_t i = 0; i < fn->fconst_count; i++) {
     if (fn->fconsts[i].bits == bits && fn->fconsts[i].width == width) {
@@ -4012,10 +3530,6 @@ static MirVregId mir_pool_lookup(MirFunction *fn, uint64_t bits, int width) {
   return MIR_VREG_NONE;
 }
 
-/* Add (bits,width) to the float-constant pool and emit its initial
- * materialization.
- * A later MIR layout pass moves it to a hot-loop preheader. No-op if already
- * pooled. */
 static int mir_pool_add(MirFunction *fn, uint64_t bits, int width) {
   if (mir_pool_lookup(fn, bits, width) != MIR_VREG_NONE) {
     return 1;
@@ -4042,8 +3556,6 @@ static int mir_pool_add(MirFunction *fn, uint64_t bits, int width) {
   return mir_emit_fmov(fn, mir_op_vreg(v), mir_op_fimm(bits), width);
 }
 
-/* A float-constant operand: the hoisted pool vreg if this (value,width) was
- * pooled, otherwise an inline float immediate. */
 static MirOperand mir_float_const_operand(MirFunction *fn, double value,
                                           int width) {
   uint64_t bits = mir_float_bits_at(value, width);
@@ -4051,11 +3563,6 @@ static MirOperand mir_float_const_operand(MirFunction *fn, double value,
   return (v != MIR_VREG_NONE) ? mir_op_vreg(v) : mir_op_fimm(bits);
 }
 
-/* Resolve a float operand to the operation's width `target_bytes`, inserting a
- * cvtss2sd/cvtsd2ss when the operand's natural float width differs. A float
- * literal is materialized directly at the target width. This is the implicit
- * promotion/narrowing the IR leaves to the backend (e.g. float32 * 1.5 computes
- * at float64). */
 static MirOperand coerce_float_operand(MirFunction *fn, CodeGenerator *g,
                                        BinaryFunctionContext *ctx,
                                        MirNameMap *map, const IROperand *op,
@@ -4064,14 +3571,11 @@ static MirOperand coerce_float_operand(MirFunction *fn, CodeGenerator *g,
     return mir_float_const_operand(fn, op->float_value, target_bytes);
   }
   if (op->kind == IR_OPERAND_INT) {
-    /* Integer literal used in a float op -> a float constant of that value. */
     return mir_float_const_operand(fn, (double)op->int_value, target_bytes);
   }
   MirOperand v = mir_value_operand(fn, g, ctx, map, op);
   int fb = code_generator_binary_operand_float_bits(g, ctx, op);
   if (fb == 0) {
-    /* Integer operand promoted into a float op (the IR leaves the cvtsi2sd to
-     * the backend, e.g. `f + y` with y an int). */
     MirVregId tmp = mir_new_vreg(fn, MIR_RC_XMM, target_bytes);
     if (tmp == MIR_VREG_NONE) {
       return v;
@@ -4092,7 +3596,6 @@ static MirOperand coerce_float_operand(MirFunction *fn, CodeGenerator *g,
   return v;
 }
 
-/* Operand (compute) width in bytes of a float comparison's operands. */
 static int mir_float_cmp_width(CodeGenerator *g, BinaryFunctionContext *ctx,
                                const IRInstruction *in) {
   int fb = code_generator_binary_operand_float_bits(g, ctx, &in->lhs);
@@ -4102,7 +3605,6 @@ static int mir_float_cmp_width(CodeGenerator *g, BinaryFunctionContext *ctx,
   return fb ? fb / 8 : 8;
 }
 
-/* IR index of a label definition by name, or SIZE_MAX. */
 static size_t mir_ir_label_index(IRFunction *function, const char *name) {
   if (!name) {
     return SIZE_MAX;
@@ -4116,12 +3618,6 @@ static size_t mir_ir_label_index(IRFunction *function, const char *name) {
   return SIZE_MAX;
 }
 
-/* Build the constant pools: every distinct float literal used INSIDE a loop (a
- * backward jump/branch range), plus the 64-bit magic-multiply constant of every
- * in-loop `x / C` / `x % C` with a constant divisor, is hoisted to a vreg.
- * Constants outside loops are left inline (no register-pressure benefit). Must
- * run before the body is lowered so uses can resolve to pooled vregs; the
- * materializations are relocated after MIR layout. */
 static int mir_build_const_pool(MirFunction *fn, CodeGenerator *g,
                                 BinaryFunctionContext *ctx,
                                 IRFunction *function) {
@@ -4156,9 +3652,6 @@ static int mir_build_const_pool(MirFunction *fn, CodeGenerator *g,
       continue;
     }
     const IRInstruction *in = &function->instructions[j];
-    /* Pool the div/mod magic-multiply constant for `x / C` / `x % C` (a
-     * compile-time-constant divisor) so the 64-bit magic is materialized once at
-     * preheader instead of with a 10-byte movabs every loop iteration. */
     if (in->op == IR_OP_BINARY && !in->is_float && in->text &&
         (in->text[0] == '/' || in->text[0] == '%') && in->text[1] == '\0' &&
         in->rhs.kind == IR_OPERAND_INT) {
@@ -4199,14 +3692,6 @@ static int mir_build_const_pool(MirFunction *fn, CodeGenerator *g,
   return ok;
 }
 
-/* If `op` is an integer constant usable as a 32-bit compare immediate, return 1
- * and set *out to its sign-extended value. Recognizes a literal INT directly, or
- * a temp whose single definition is a CAST of an integer literal to an integer
- * type (the shape a loop bound like `i < (int64)N` takes). The cast value is
- * recomputed at the destination width/signedness so a narrowing cast cannot fold
- * to the wrong number, and only values fitting signed-32 are accepted. This lets
- * a counted-loop bound become `cmp reg, imm32` instead of being rematerialized
- * into a register every iteration. */
 static int mir_fused_cmp_imm(CodeGenerator *g, BinaryFunctionContext *ctx,
                              const IRFunction *f, const IROperand *op,
                              long long *out) {
@@ -4228,8 +3713,6 @@ static int mir_fused_cmp_imm(CodeGenerator *g, BinaryFunctionContext *ctx,
         def->lhs.kind != IR_OPERAND_INT || !def->text) {
       return 0;
     }
-    /* The cast target type is named by def->text (e.g. "int64"); the temp's dest
-     * type is not registered in this context, so resolve from the name. */
     MtlcType *dt = code_generator_binary_get_resolved_type(g, def->text, 0);
     if (!dt || code_generator_binary_resolved_type_float_bits(dt)) {
       return 0;
@@ -4257,8 +3740,6 @@ static int mir_fused_cmp_imm(CodeGenerator *g, BinaryFunctionContext *ctx,
   return 1;
 }
 
-/* Fuse `%t = a CMP b; branch_zero %t -> L` into a compare-and-branch: integer
- * `cmp a,b; j<!CMP> L`, or float `ucomis a,b; j<!CMP> L`. */
 static int mir_lower_compare_branch(MirFunction *fn, CodeGenerator *g,
                                     BinaryFunctionContext *ctx, MirNameMap *map,
                                     const IRFunction *ir_function,
@@ -4281,9 +3762,6 @@ static int mir_lower_compare_branch(MirFunction *fn, CodeGenerator *g,
   MirOperand a = mir_value_operand(fn, g, ctx, map, &cmp->lhs);
   int uns = cmp->is_unsigned || mir_operand_is_unsigned(g, ctx, &cmp->lhs) ||
             mir_operand_is_unsigned(g, ctx, &cmp->rhs);
-  /* Fold a constant right-hand bound into the compare as an imm32 so the loop
-   * does not rematerialize it into a register every iteration. The producer is
-   * dropped separately (mir_compute_const_compare_skips). */
   long long imm;
   MirOperand b;
   if (mir_fused_cmp_imm(g, ctx, ir_function, &cmp->rhs, &imm)) {
@@ -4322,8 +3800,6 @@ static int mir_temp_use_count(const IRFunction *function, const char *name) {
   return count;
 }
 
-/* True when instruction i is a single-use comparison (integer or ordered float)
- * whose result is consumed only by an immediately-following branch_zero. */
 static int mir_fuses_compare_branch(CodeGenerator *g, IRFunction *function,
                                     size_t i) {
   if (i + 1 >= function->instruction_count) {
@@ -4350,21 +3826,6 @@ static int mir_fuses_compare_branch(CodeGenerator *g, IRFunction *function,
   return mir_temp_use_count(function, cmp->dest.name) == 1;
 }
 
-/* ---- generic inline kernel (MIR_IR_KERNEL) ------------------------------- */
-
-/* Run one table kernel in place. Every by-name operand of `in` is staged into
- * an address-taken vreg (a plain frame slot), the kernel runs against those
- * slots, and each slot is read back into the value it came from.
- *
- * Staging through memory rather than fixed registers is what makes this one
- * routine cover the whole table: the bridge never has to know which register a
- * kernel wants an operand in, how many times it loads it, or which of its
- * operands it writes. The cost is a store and a load per operand around a loop
- * that runs over an entire array, which is not measurable.
- *
- * Operands naming the SAME value share one slot (see MirKernelAux): a kernel
- * that accumulates into its own destination reads and writes one variable
- * through two operand positions, and two slots would race on the read-back. */
 static int mir_lower_ir_kernel(MirFunction *fn, CodeGenerator *g,
                                BinaryFunctionContext *ctx, MirNameMap *map,
                                const IRInstruction *in) {
@@ -4378,12 +3839,9 @@ static int mir_lower_ir_kernel(MirFunction *fn, CodeGenerator *g,
   if (!mir_function_own_aux(fn, aux)) {
     return 0;
   }
-  aux->ir = in; /* borrowed: the IR outlives this function's codegen */
+  aux->ir = in;
   aux->kernel_index = kernel_index;
 
-  /* Source vreg per slot, and the staging vreg it is copied through. Kept
-   * alongside the aux (which the encoder reads) rather than in it, since the
-   * encoder needs only the staging side. */
   MirVregId source[MIR_KERNEL_MAX_SLOTS];
   int is_float[MIR_KERNEL_MAX_SLOTS];
   int width[MIR_KERNEL_MAX_SLOTS];
@@ -4394,7 +3852,7 @@ static int mir_lower_ir_kernel(MirFunction *fn, CodeGenerator *g,
       break;
     }
     if (op->kind != IR_OPERAND_TEMP && op->kind != IR_OPERAND_SYMBOL) {
-      continue; /* the kernel materializes immediates and literals itself */
+      continue;
     }
     MirOperand v = mir_value_operand(fn, g, ctx, map, op);
     if (v.kind != MIR_OPK_VREG) {
@@ -4410,7 +3868,7 @@ static int mir_lower_ir_kernel(MirFunction *fn, CodeGenerator *g,
     }
     if (slot < 0) {
       if (aux->slot_count >= MIR_KERNEL_MAX_SLOTS) {
-        fn->has_error = 1; /* the gate sized this; a mismatch is a bug */
+        fn->has_error = 1;
         return 0;
       }
       int fb = code_generator_binary_operand_float_bits(g, ctx, op);
@@ -4423,9 +3881,6 @@ static int mir_lower_ir_kernel(MirFunction *fn, CodeGenerator *g,
       if (stage == MIR_VREG_NONE) {
         return 0;
       }
-      /* address_taken keeps the staging value out of the register file: it
-       * lives only in its frame slot, which is exactly the storage the kernel
-       * addresses. */
       fn->vregs[stage].address_taken = 1;
       aux->slot_vreg[slot] = stage;
     }
@@ -4460,9 +3915,6 @@ static int mir_lower_ir_kernel(MirFunction *fn, CodeGenerator *g,
     }
   }
 
-  /* Read every slot back, not just the ones the kernel writes: which operands
-   * are outputs is kernel-specific knowledge the bridge deliberately does not
-   * carry, and reloading an input costs one move and restores its own value. */
   for (int s = 0; s < aux->slot_count; s++) {
     MirOperand stage = mir_op_vreg(aux->slot_vreg[s]);
     MirOperand dst = mir_op_vreg(source[s]);
@@ -4586,11 +4038,8 @@ static int mir_lower_control(MirFunction *fn, CodeGenerator *g,
   }
 
   case IR_OP_BRANCH_ZERO: {
-    /* if (cond == 0) goto label  ->  test cond; je label */
     int cfb = code_generator_binary_operand_float_bits(g, ctx, &in->lhs);
     if (cfb) {
-      /* A float condition is zero when it compares equal to 0.0, which is the
-       * composite ordered-equality FSETCC, then a branch on that 0/1. */
       int cw = cfb / 8;
       MirOperand fv = coerce_float_operand(fn, g, ctx, map, &in->lhs, cw);
       MirOperand fz = mir_float_const_operand(fn, 0.0, cw);
@@ -4611,18 +4060,14 @@ static int mir_lower_control(MirFunction *fn, CodeGenerator *g,
     }
     MirOperand cond = mir_value_operand(fn, g, ctx, map, &in->lhs);
     return mir_emit1(fn, MIR_JCC, mir_op_label(in->text), cond, mir_op_none(), 8,
-                     0, 0x84 /* je */);
+                     0, 0x84 );
   }
 
   case IR_OP_BRANCH_EQ: {
-    /* if (lhs == rhs) goto label  ->  cmp lhs,rhs; je label. Equality, so
-     * signedness is irrelevant and a constant rhs (the common switch/match
-     * case value) folds into the cmp's imm32 (or a scratch reg if it doesn't
-     * fit) inside the MIR_CMPBR encoder. */
     MirOperand a = mir_value_operand(fn, g, ctx, map, &in->lhs);
     MirOperand b = mir_value_operand(fn, g, ctx, map, &in->rhs);
     return mir_emit1(fn, MIR_CMPBR, mir_op_label(in->text), a, b, 8, 0,
-                     0x84 /* je */);
+                     0x84 );
   }
 
   default:
@@ -4643,9 +4088,6 @@ static int mir_lower_assign(MirFunction *fn, CodeGenerator *g,
   *handled = 1;
   switch (in->op) {
   case IR_OP_ASSIGN: {
-    /* Whole-struct copy `@a <- @b` / `@a <- %t` / `%t <- @a`: both operands hold
-     * an INDIRECT struct in a LEA-able home, so copy the bytes (rep movsb via the
-     * struct-copy helper) instead of an 8-byte MOV that would truncate. */
     {
       const IRFunction *airf =
           ctx && ctx->function_name
@@ -4702,21 +4144,16 @@ static int mir_lower_assign(MirFunction *fn, CodeGenerator *g,
     if (dfb) {
       int sfb = code_generator_binary_operand_float_bits(g, ctx, &in->lhs);
       if (in->lhs.kind == IR_OPERAND_FLOAT) {
-        /* Literal at the destination width (pooled if loop-invariant). */
         MirOperand lit = mir_float_const_operand(fn, in->lhs.float_value, dfb / 8);
         return mir_emit_fmov(fn, dst, lit, dfb / 8);
       }
       if (in->lhs.kind == IR_OPERAND_INT) {
-        /* Integer literal into a float home (`float v;` zero-init): a float
-         * constant of that value, matching coerce_float_operand. A raw fmov
-         * of the integer immediate is unencodable as an XMM operand. */
         MirOperand lit =
             mir_float_const_operand(fn, (double)in->lhs.int_value, dfb / 8);
         return mir_emit_fmov(fn, dst, lit, dfb / 8);
       }
       MirOperand src = mir_value_operand(fn, g, ctx, map, &in->lhs);
       if (sfb && sfb != dfb) {
-        /* Float store of a differently-sized value narrows/widens. */
         return mir_emit1(fn, MIR_CVTF2F, dst, src, mir_op_none(), dfb / 8, 0, 0);
       }
       return mir_emit_fmov(fn, dst, src, dfb / 8);
@@ -4746,12 +4183,10 @@ static int mir_lower_float_binary(MirFunction *fn, CodeGenerator *g,
     if (mir_float_arith_opcode(in->text, &fop)) {
       int fb = code_generator_binary_instruction_result_float_bits(g, ctx, in);
       int w = fb ? fb / 8 : 8;
-      /* Coerce each operand to the operation width (implicit promotion). */
       MirOperand fa = coerce_float_operand(fn, g, ctx, map, &in->lhs, w);
       MirOperand fbop = coerce_float_operand(fn, g, ctx, map, &in->rhs, w);
       return mir_emit1(fn, fop, dst, fa, fbop, w, 0, 0);
     }
-    /* Non-fused ordered float comparison -> 0/1 via ucomis + setcc. */
     int swap;
     unsigned char cc = 0;
     if (!mir_float_cmp_info(in->text, 0, &swap, &cc)) {
@@ -4809,21 +4244,14 @@ static int mir_lower_divide(MirFunction *fn, CodeGenerator *g,
                             const IRInstruction *in, MirOperand dst,
                             MirOperand a, MirOperand b) {
   (void)map;
-    /* idiv/div: signedness is the dividend's (lhs) type; cc carries the
-     * quotient-vs-remainder choice (1 == remainder, the `%` case). */
     int uns = in->is_unsigned || mir_operand_is_unsigned(g, ctx, &in->lhs);
     unsigned char mod = (in->text[0] == '%') ? 1 : 0;
 
-    /* Constant-divisor strength reduction: replace the long-latency divide
-     * with a magic-number multiply + shifts. Falls through to a real divide
-     * for C == 0 (preserves the /0 trap) or unhandled forms. */
     if (in->rhs.kind == IR_OPERAND_INT &&
         mir_emit_const_divmod(fn, dst, a, in->rhs.int_value, uns, mod)) {
       return 1;
     }
 
-    /* Divmod fusion. If a sibling `x op d` already did the divide and captured
-     * BOTH results, this op is just a move of the value it needs. */
     if (in->dest.name) {
       for (size_t k = 0; k < fn->divmod_precomp_count; k++) {
         if (fn->divmod_precomp[k].name &&
@@ -4835,18 +4263,10 @@ static int mir_lower_divide(MirFunction *fn, CodeGenerator *g,
       }
     }
 
-    /* Otherwise look ahead in this basic block for the complementary op (`/`
-     * paired with `%`, same operands) so a single divide serves both. The
-     * scan stops at a block boundary / call (clobbers RAX:RDX) or any
-     * redefinition of the dividend or divisor (would make the cached results
-     * stale). */
     const IRInstruction *sibling =
         mir_find_divmod_sibling(fn, g, ctx, in, mod);
 
     if (sibling) {
-      /* One divide; capture quotient (RAX) into qv and remainder (RDX) into
-       * rv. The MOV reading RDX must immediately follow the divide (nothing
-       * between can clobber RDX, which is non-allocatable scratch). */
       MirVregId qv = mir_new_vreg(fn, MIR_RC_GP, 8);
       MirVregId rv = mir_new_vreg(fn, MIR_RC_GP, 8);
       if (qv == MIR_VREG_NONE || rv == MIR_VREG_NONE) {
@@ -4858,8 +4278,8 @@ static int mir_lower_divide(MirFunction *fn, CodeGenerator *g,
                      0)) {
         return 0;
       }
-      MirVregId mine = mod ? rv : qv;     /* this op's result */
-      MirVregId theirs = mod ? qv : rv;   /* the sibling's result */
+      MirVregId mine = mod ? rv : qv;
+      MirVregId theirs = mod ? qv : rv;
       fn->divmod_precomp[fn->divmod_precomp_count].name = sibling->dest.name;
       fn->divmod_precomp[fn->divmod_precomp_count].vreg = theirs;
       fn->divmod_precomp_count++;
@@ -4900,18 +4320,12 @@ static int mir_lower_binary(MirFunction *fn, CodeGenerator *g,
     }
     MirOpcode op = MIR_ADD;
     mir_arith_opcode(in->text, &op);
-    /* `0 - x` is a negate. Written literally it is rare, but it is the standard
-     * way to build an all-ones mask from a bit (`0 - (crc & 1)`), and SUB is
-     * two-address: without this the encoder must first materialize the zero
-     * into the destination register, so the idiom costs two instructions per
-     * use instead of one. */
     if (op == MIR_SUB && in->lhs.kind == IR_OPERAND_INT &&
         in->lhs.int_value == 0) {
       return mir_emit1(fn, MIR_NEG, dst, b, mir_op_none(), 8, 0, 0);
     }
     int uns = 0;
     if (op == MIR_SHR) {
-      /* arithmetic vs logical right shift depends on the LHS signedness. */
       if (!in->is_unsigned && !mir_operand_is_unsigned(g, ctx, &in->lhs)) {
         op = MIR_SAR;
       } else {
@@ -4942,14 +4356,6 @@ static int mir_lower_unary(MirFunction *fn, CodeGenerator *g,
     MirOperand dst = mir_value_operand(fn, g, ctx, map, &in->dest);
     const char *op = in->text ? in->text : "";
     if (in->is_float) {
-      /* Float negate `-x` as a sign-bit flip, matching the fallback's
-       * emit_unary exactly so 0 and NaN signs agree; `+x` is a copy. The
-       * operand is coerced to the result precision first.
-       *
-       * `0 - x` is right for every float except zero, where IEEE 754 asks for
-       * -0.0 and the subtract yields +0.0, and it cannot flip the sign of a
-       * NaN at all. The mask is the bit pattern of negative zero at this
-       * width, which is the sign bit and nothing else. */
       int fb = code_generator_binary_instruction_result_float_bits(g, ctx, in);
       int w = fb ? fb / 8 : 8;
       MirOperand x = coerce_float_operand(fn, g, ctx, map, &in->lhs, w);
@@ -4970,7 +4376,6 @@ static int mir_lower_unary(MirFunction *fn, CodeGenerator *g,
       return mir_emit1(fn, MIR_MOV, dst, a, mir_op_none(), 8, 0, 0);
     }
     if (strcmp(op, "!") == 0) {
-      /* !x == (x == 0) as 0/1: SETCC does cmp a,0; sete; movzx. */
       unsigned char cc = 0;
       mir_setcc_opcode("==", 0, &cc);
       return mir_emit1(fn, MIR_SETCC, dst, a, mir_op_imm(0), 8, 0, cc);
@@ -4998,16 +4403,10 @@ static int mir_lower_cast_across_banks(MirFunction *fn, CodeGenerator *g,
   int dfb = code_generator_binary_operand_float_bits(g, ctx, &in->dest);
   int sfb = code_generator_binary_operand_float_bits(g, ctx, &in->lhs);
   if (dfb && !sfb) {
-    /* int -> float. is_unsigned carries the SOURCE's signedness (set by IR
-     * lowering); an unsigned source needs the halve-convert-double sequence
-     * because the machine's conversion is signed. */
     return mir_emit1(fn, MIR_CVTSI2F, dst, a, mir_op_none(), dfb / 8,
                      in->is_unsigned ? 1 : 0, 0);
   }
   if (!dfb && sfb) {
-    /* float -> int (truncating); width selects cvttsd2si vs cvttss2si.
-     * A uint64 target needs the bias sequence: the machine's truncation is
-     * signed and answers its sentinel for anything at or above 2^63. */
     const MtlcType *tt = (in->text && g->ir_program)
                    ? code_generator_named_type(g, in->text)
                    : NULL;
@@ -5091,10 +4490,6 @@ static int mir_lower_cast(MirFunction *fn, CodeGenerator *g,
     if (crossed) {
       return converted;
     }
-    /* The cast's target type is named on the instruction (in->text) and is
-     * always resolvable; the dest operand's type is not (a temp has no
-     * resolved type at -O0, which would silently drop a narrowing cast). Prefer
-     * in->text, matching the fallback emitter, and fall back to the operand. */
     const MtlcType *dt = (in->text && g->ir_program)
                    ? code_generator_named_type(g, in->text)
                    : NULL;
@@ -5107,33 +4502,13 @@ static int mir_lower_cast(MirFunction *fn, CodeGenerator *g,
     if (dw != 1 && dw != 2 && dw != 4 && dw != 8) {
       dw = 8;
     }
-    /* Re-express a's 64-bit value as the dst integer type. A NARROWING cast
-     * (dw < source width) truncates to dw bytes then extends per dst signedness.
-     * A WIDENING cast (dw >= source width) must extend from the SOURCE width per
-     * the SOURCE signedness, because MIR computes in 64-bit and a narrow source
-     * value (e.g. a uint32 product) can carry garbage above its width, a plain
-     * 64-bit move would carry that garbage into the wider value (e.g.
-     * `(int64)(uint32_a * uint32_b)`). */
     MtlcType *st = code_generator_binary_get_operand_type_in_context(g, ctx, &in->lhs);
     int sw = st ? code_generator_binary_resolved_type_scalar_size(st) : 0;
     int ssigned = st ? code_generator_binary_resolved_type_is_signed_integer(st)
                      : 1;
     int swf = st ? code_generator_binary_resolved_type_float_bits(st) : 0;
     if ((sw == 1 || sw == 2 || sw == 4) && swf == 0 && dw >= sw) {
-      /* Widening from a known narrow integer source extends by the SOURCE
-       * signedness, which is what gives those bits their value. Same width is
-       * not a widening but a reinterpretation, and there the destination
-       * decides: a uint32 lives in its register zero-extended, so
-       * `(uint32)int32_value` has to clear the high half. Extending by the
-       * source there left `(uint32)x >> 1` shifting a sign-extended value, and
-       * a right shift is exactly where the high half stops being invisible. */
       int extend_signed = (dw == sw) ? dsigned : ssigned;
-      /* A signed narrow source widened into an unsigned destination narrower
-       * than 64 bits needs both halves of the story: the source's sign is what
-       * gives the bits their value, and the destination's width is where that
-       * value has to live zero-extended. Extending by the source alone left
-       * `(uint32)int16_minus_one` reading 0xFFFFFFFFFFFFFFFF instead of
-       * 4294967295. */
       if (extend_signed && !dsigned && dw < 8 && dw > sw) {
         MirVregId widened = mir_new_vreg(fn, MIR_RC_GP, 8);
         if (widened == MIR_VREG_NONE ||
@@ -5149,10 +4524,8 @@ static int mir_lower_cast(MirFunction *fn, CodeGenerator *g,
                        mir_op_none(), sw, !extend_signed, 0);
     }
     if (dw == 8) {
-      /* Widening to 64 bits from an 8-byte or unknown source: a plain move. */
       return mir_emit1(fn, MIR_MOV, dst, a, mir_op_none(), 8, 0, 0);
     }
-    /* Narrowing to a < source-width dst: truncate+extend per dst signedness. */
     return mir_emit1(fn, dsigned ? MIR_MOVSX : MIR_MOVZX, dst, a, mir_op_none(),
                      dw, !dsigned, 0);
   }
@@ -5176,9 +4549,6 @@ static int mir_lower_load(MirFunction *fn, CodeGenerator *g,
   switch (in->op) {
   case IR_OP_LOAD: {
     if (in->lhs.kind == IR_OPERAND_STRING) {
-      /* Data-pointer field of a string literal: materialize the .rdata
-       * cstring address directly (validated to be the 8-byte pointer load by
-       * the eligibility gate). */
       MirOperand dst = mir_value_operand(fn, g, ctx, map, &in->dest);
       const char *s = in->lhs.name ? in->lhs.name : "";
       return mir_emit1(fn, MIR_LEA_CSTR, dst, mir_op_symbol(s), mir_op_none(),
@@ -5190,10 +4560,6 @@ static int mir_lower_load(MirFunction *fn, CodeGenerator *g,
       fn->has_error = 1;
       return 0;
     }
-    /* `@s <- *addr [8]` with a string-local dest: the loaded 8 bytes are a
-     * record POINTER (the backend's string value convention); deref-copy the
-     * 16-byte record into the local's home, mirroring the fallback's
-     * emit_local_string_store. */
     if (size == 8 && in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name) {
       const IRFunction *lirf =
           ctx && ctx->function_name
@@ -5332,18 +4698,10 @@ static int mir_lower_store(MirFunction *fn, CodeGenerator *g,
       return mir_emit1(fn, MIR_MOV, mem, mir_op_vreg(gdst), mir_op_none(), 2, 0, 0);
     }
     if (in->is_float) {
-      /* Coerce the value to the store width: a literal is materialized at
-       * that width, and a float64-tracked arithmetic result narrows via
-       * cvtsd2ss before a 4-byte store (a raw movss of a double's low dword
-       * silently stores garbage, 0 for round values). */
       MirOperand fval =
           coerce_float_operand(fn, g, ctx, map, &in->lhs, size);
       return mir_emit_fmov(fn, mem, fval, size);
     }
-    /* `*addr <- @s [8]` with a string-local value: the stored 8 bytes are the
-     * local's home ADDRESS (a record pointer, the string value convention). A
-     * by-ref param's plain vreg already holds its pointer, so it takes the
-     * generic path below. */
     if (size == 8 &&
         (in->lhs.kind == IR_OPERAND_SYMBOL || in->lhs.kind == IR_OPERAND_TEMP) &&
         in->lhs.name) {
@@ -5397,11 +4755,6 @@ static int mir_lower_select(MirFunction *fn, CodeGenerator *g,
   *handled = 1;
   switch (in->op) {
   case IR_OP_SELECT: {
-    /* dst = (cond != 0) ? then : else. Stage cond and then in vregs, pre-load
-     * a result vreg with else, then MIR_CMOV res, cond, then. Pre-loading res
-     * makes its live range start before the cmov so it interferes with
-     * cond/then and gets a distinct register (cmov needs res != then). Finally
-     * move res into the IR dest (which may be a memory-resident local). */
     MirOperand cond = mir_value_operand(fn, g, ctx, map, &in->lhs);
     MirOperand then_v = mir_value_operand(fn, g, ctx, map, &in->rhs);
     MirOperand else_v = mir_value_operand(fn, g, ctx, map, &in->arguments[0]);
@@ -5462,10 +4815,6 @@ static int mir_lower_alloc(MirFunction *fn, CodeGenerator *g,
   *handled = 1;
   switch (in->op) {
   case IR_OP_NEW: {
-    /* Zeroed heap allocation. Size: compile-time INT (>0), defaulted 8 (NONE
-     * or <=0), or a runtime GP value. Win64: marshal size->R8 and emit the
-     * inline GetProcessHeap+HeapAlloc(HEAP_ZERO_MEMORY) sequence; SysV:
-     * calloc(1, size). Result moves out of RAX into the dest. */
     const BinaryAbi *nabi = code_generator_binary_active_abi();
     MirOperand sz;
     if (in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value > 0) {
@@ -5859,10 +5208,6 @@ static int mir_lower_syscall(MirFunction *fn, CodeGenerator *g,
   }
 }
 
-/* A string LITERAL argument. To a `cstring` parameter it hands over the address
- * of the NUL-terminated chars; to a `string` parameter it hands over the address
- * of the {chars,length} record, which is what an 8-byte string VALUE is under
- * this backend's convention. Mirrors the baseline's emit_call_argument_load. */
 static int mir_emit_string_literal_arg(MirFunction *fn, const IROperand *arg,
                                        MtlcType *pt, MirOperand dst) {
   MirOperand lit = mir_op_symbol(arg->name ? arg->name : "");
@@ -5873,13 +5218,6 @@ static int mir_emit_string_literal_arg(MirFunction *fn, const IROperand *arg,
   return mir_emit1(fn, MIR_LEA_STRLIT, dst, lit, mir_op_none(), 8, 0, 0);
 }
 
-/* The value of a call argument. A string LOCAL is the one operand whose value
- * is not what its vreg holds: under this backend's convention an 8-byte string
- * VALUE is the address of its {chars,length} record, so the argument is a LEA
- * of the local's home. Reading the vreg instead hands over the first field,
- * the characters pointer, which is a different address entirely. The address
- * path (mir_address_operand) already knew this; the call path did not, and
- * `--safe` caught it by registering an origin against the wrong slot. */
 static MirOperand mir_call_arg_operand(MirFunction *fn, CodeGenerator *g,
                                        BinaryFunctionContext *ctx,
                                        MirNameMap *map, const IROperand *arg) {
@@ -5975,7 +5313,6 @@ static int mir_marshal_stack_args(const MirCallArgs *c) {
     }
     MirOperand val;
     if (indirect_off[a] >= 0) {
-      /* INDIRECT struct arg: pass &copy_slot. */
       MirVregId t = mir_new_vreg(fn, MIR_RC_GP, 8);
       if (t == MIR_VREG_NONE ||
           !mir_emit1(fn, MIR_LEA_OUTARG, mir_op_vreg(t),
@@ -6048,7 +5385,6 @@ static int mir_marshal_gp_args(const MirCallArgs *c) {
     }
     BinaryGpRegister reg = locs[s].gp_register;
     if (indirect_off[a] >= 0) {
-      /* INDIRECT struct arg: lea &copy_slot directly into the ABI arg reg. */
       if (!mir_emit1(fn, MIR_LEA_OUTARG, mir_op_phys(reg, MIR_RC_GP),
                      mir_op_imm(indirect_off[a]), mir_op_none(), 8, 0, 0)) {
         return 0;
@@ -6133,13 +5469,9 @@ static int mir_marshal_xmm_args(const MirCallArgs *c) {
     if (pfb != 32 && pfb != 64) {
       pfb = 64;
     }
-    /* coerce handles every source: literals at the param width, float
-     * values width-converted, int values via cvtsi2sd. */
     MirOperand val =
         coerce_float_operand(fn, g, ctx, map, &in->arguments[a], pfb / 8);
     if (val.kind == MIR_OPK_FIMM) {
-      /* A float immediate cannot move straight into a physical register;
-       * stage it in a vreg first. */
       MirVregId t = mir_new_vreg(fn, MIR_RC_XMM, pfb / 8);
       if (t == MIR_VREG_NONE ||
           !mir_emit_fmov(fn, mir_op_vreg(t), val, pfb / 8)) {
@@ -6180,8 +5512,6 @@ static int mir_copy_indirect_args(MirFunction *fn, CodeGenerator *g,
     int sz = (int)code_generator_abi_type_size(pt);
     indirect_off[a] = indirect_region;
     indirect_region += (sz + 7) & ~7;
-    /* Copy the struct into the slot: from a local/temp home, through a
-     * by-ref param's pointer, or from a string literal's .rdata record. */
     MirVregId src_base = mir_emit_indirect_source_addr(
         fn, g, ctx, map, cirf, &in->arguments[a], sz);
     MirVregId dst_base = mir_new_vreg(fn, MIR_RC_GP, 8);
@@ -6264,15 +5594,9 @@ static int mir_emit_call_result(MirFunction *fn, CodeGenerator *g,
                                 int ret_indirect, int sysv_gp_return,
                                 const BinarySysvAggregate *sysv_ret) {
   if (ret_indirect) {
-    /* The struct result was written into the dest local's home by the callee;
-     * nothing to move out of RAX. */
     return 1;
   }
   if (sysv_gp_return) {
-    /* Take the eightbytes out of RAX and RDX first: the address of the
-     * destination's home is computed after they are in vregs, so the
-     * allocator cannot hand the address register one that still holds a
-     * piece of the result. */
     MirVregId parts[2] = {MIR_VREG_NONE, MIR_VREG_NONE};
     int part_is_sse[2] = {0, 0};
     size_t e = 0;
@@ -6341,7 +5665,6 @@ static int mir_emit_call_result(MirFunction *fn, CodeGenerator *g,
     }
     return 1;
   }
-  /* Move the return value out of RAX / XMM0 before anything clobbers it. */
   if (in->dest.kind == IR_OPERAND_TEMP || in->dest.kind == IR_OPERAND_SYMBOL) {
     int rfb = code_generator_binary_operand_float_bits(g, ctx, &in->dest);
     MirOperand dst = mir_value_operand(fn, g, ctx, map, &in->dest);
@@ -6932,26 +6255,10 @@ static int mir_lower_slp_mac(MirFunction *fn, CodeGenerator *g,
   switch (in->op) {
   case IR_OP_SIMD_SLP_MAC_I8:
   case IR_OP_SIMD_SLP_MAC_I32: {
-    /* Inline SLP MAC kernel. Marshal the three effective element pointers
-     * (base + offset*4), the k count, and the byte row stride into
-     * RCX/RDX/R8/R9/RAX: like call-argument setup, then emit the pure-loop MIR
-     * op. The lane count K is a compile-time constant (validated in
-     * eligibility); the kernel advances b by the RAX stride each iteration. The
-     * op is treated like a call by the allocator, so no live value occupies a
-     * volatile across it.
-     *
-     * Compute every value into a vreg FIRST, then do all the fixed-register MOVs
-     * LAST: the MIR_LEA encoder stages spilled base/index through RDX/R11, which
-     * would otherwise clobber a kernel argument already parked in RDX. */
     long long K = in->arguments[0].int_value;
-    /* Element size per pointer. int32 SLP: a/b/out all 4-byte. int8 SLP: a and
-     * b are int8 arrays (1-byte), out (c) is int32 (4-byte). The stride (b's
-     * per-k row advance) is in the same units as b, so it scales by b's element
-     * size. The MIR op's `width` carries b's element size so the encoder picks
-     * the int8-widening kernel. */
     int is_i8 = (in->op == IR_OP_SIMD_SLP_MAC_I8);
-    const int elem[3] = {is_i8 ? 1 : 4, is_i8 ? 1 : 4, 4}; /* a, b, out */
-    const IROperand *bases[3] = {&in->lhs, &in->rhs, &in->dest}; /* a, b, out */
+    const int elem[3] = {is_i8 ? 1 : 4, is_i8 ? 1 : 4, 4};
+    const IROperand *bases[3] = {&in->lhs, &in->rhs, &in->dest};
     const int off_arg[3] = {2, 3, 5};
     MirVregId ptr_vreg[3];
     for (int p = 0; p < 3; p++) {
@@ -6980,7 +6287,6 @@ static int mir_lower_slp_mac(MirFunction *fn, CodeGenerator *g,
         return 0;
       }
     }
-    /* byte row stride into a vreg (stride_elems * b's element size). */
     int stride_elem = elem[1];
     MirOperand stride = mir_value_operand(fn, g, ctx, map, &in->arguments[4]);
     MirVregId stride_vreg = mir_new_vreg(fn, MIR_RC_GP, 8);
@@ -6998,7 +6304,7 @@ static int mir_lower_slp_mac(MirFunction *fn, CodeGenerator *g,
                      mir_op_imm(2), 8, 0, 0)) {
         return 0;
       }
-    } else if (stride.kind == MIR_OPK_VREG) { /* stride_elem == 1: no scaling */
+    } else if (stride.kind == MIR_OPK_VREG) {
       if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(stride_vreg), stride,
                      mir_op_none(), 8, 0, 0)) {
         return 0;
@@ -7014,8 +6320,6 @@ static int mir_lower_slp_mac(MirFunction *fn, CodeGenerator *g,
                    0)) {
       return 0;
     }
-    /* Now park each computed value in its kernel register (no LEAs left to
-     * clobber them). RCX=a, RDX=b, R8=out, R9=count, RAX=byte stride. */
     if (!mir_emit1(fn, MIR_MOV, mir_op_phys(BINARY_GP_RCX, MIR_RC_GP),
                    mir_op_vreg(ptr_vreg[0]), mir_op_none(), 8, 0, 0) ||
         !mir_emit1(fn, MIR_MOV, mir_op_phys(BINARY_GP_RDX, MIR_RC_GP),
@@ -7028,7 +6332,6 @@ static int mir_lower_slp_mac(MirFunction *fn, CodeGenerator *g,
                    mir_op_vreg(stride_vreg), mir_op_none(), 8, 0, 0)) {
       return 0;
     }
-    /* width = b's element size (1 = int8-widening kernel, 4 = int32 kernel). */
     return mir_emit1(fn, MIR_SIMD_SLP_MAC, mir_op_imm(K), mir_op_none(),
                      mir_op_none(), elem[1], 0, 0);
   }
@@ -7046,8 +6349,6 @@ static int mir_fill_counted_writeback(MirFunction *fn, CodeGenerator *g,
                                       const IRInstruction *in,
                                       MirOperand cnt, MirOperand m0_start,
                                       int m0_start_zero) {
-    /* Final iv = start + max(bound-start, 0); cnt already holds bound-start
-     * (or the plain bound when start is 0). */
     MirOperand iv = mir_value_operand(fn, g, ctx, map, &in->dest);
     MirVregId mask = mir_new_vreg(fn, MIR_RC_GP, 8);
     if (mask == MIR_VREG_NONE ||
@@ -7260,19 +6561,11 @@ static int mir_lower_fill(MirFunction *fn, CodeGenerator *g,
   *handled = 1;
   switch (in->op) {
   case IR_OP_SIMD_FILL: {
-    /* Inline fill. Marshal base->RCX, element count (mode 0) / end pointer
-     * (mode 1) / byte length (mode 2)->R8, value->RAX, then emit the kernel.
-     * The value is parked into RAX LAST so it cannot clobber a base/count
-     * source that the allocator happened to place in RAX (the only poolable
-     * register among the three targets). */
     MirOperand base = mir_value_operand(fn, g, ctx, map, &in->lhs);
     MirOperand cnt = mir_value_operand(fn, g, ctx, map, &in->rhs);
     MirOperand val = mir_gp_value_operand(fn, g, ctx, map, &in->arguments[2]);
     long long size = in->arguments[0].int_value;
     long long mode = in->arguments[1].int_value;
-    /* Mode-0 with a runtime offset and/or nonzero start (int64 index): fold
-     * `base + (offset+start)*size` in 64-bit MIR, and elements = bound-start,
-     * so the kernel runs the plain element loop. */
     MirOperand m0_start = mir_op_imm(0);
     int m0_start_zero = 1;
     if (mode == 0 &&
@@ -7280,9 +6573,6 @@ static int mir_lower_fill(MirFunction *fn, CodeGenerator *g,
                                &m0_start_zero, size)) {
       return 0;
     }
-    /* Mode-2 byte-offset walk: fold `base + start` and the byte length
-     * `bound - start` here in 64-bit MIR (the kernel receives the length
-     * precomputed); keep the length vreg for the live-iv write-back below. */
     MirOperand m2_start = mir_op_imm(0);
     int m2_start_zero = 1;
     if (mode == 2 &&
@@ -7298,24 +6588,15 @@ static int mir_lower_fill(MirFunction *fn, CodeGenerator *g,
                    mir_op_none(), 8, 0, 0)) {
       return 0;
     }
-    /* dst.imm = element size; a.imm = fill mode (0 element-counted, 1 byte-walk). */
     if (!mir_emit1(fn, MIR_SIMD_FILL, mir_op_imm(size), mir_op_imm(mode),
                    mir_op_none(), (int)size, 0, 0)) {
       return 0;
     }
-    /* Live induction variable (mode 0, start 0): the unit-stride loop leaves
-     * iv = max(count, 0) (the count for an empty loop, else the bound). Fold it
-     * branchlessly as `cnt & ~(cnt >> 63)` so a later use of the counter reads
-     * the right value -- matching the fallback's cmov write-back exactly. */
     if (mode == 0 && in->dest.kind == IR_OPERAND_SYMBOL &&
         !mir_fill_counted_writeback(fn, g, ctx, map, in, cnt, m0_start,
                                     m0_start_zero)) {
       return 0;
     }
-    /* Mode-2 live iv: the scalar loop leaves iv = start when the walk is
-     * empty (len <= 0), else start + len rounded up to the stride (the tail
-     * store overshoots exactly as `i += size` does). Fold branchlessly:
-     * walked = ((len + size-1) & -size) & ~(len >> 63); iv = start + walked. */
     if (mode == 2 && in->dest.kind == IR_OPERAND_SYMBOL &&
         !mir_fill_offset_writeback(fn, g, ctx, map, in, cnt, m2_start,
                                    m2_start_zero, size)) {
@@ -7350,9 +6631,6 @@ static int mir_lower_affine_map(MirFunction *fn, CodeGenerator *g,
   }
   switch (in->op) {
   case IR_OP_SIMD_AFFINE_MAP_F32: {
-    /* Inline float32 affine map: marshal src->RCX, dst->RDX, count->R8, then emit
-     * the kernel with the (compile-time) a/b/c coefficient bits in dst/a/b.imm
-     * and the b_is_one/b_is_zero/c_is_zero flags in cc. */
     MirOperand src = mir_value_operand(fn, g, ctx, map, &in->lhs);
     MirOperand dst = mir_value_operand(fn, g, ctx, map, &in->rhs);
     MirOperand cnt = mir_value_operand(fn, g, ctx, map, &in->arguments[0]);
@@ -7392,9 +6670,6 @@ static int mir_lower_affine_map(MirFunction *fn, CodeGenerator *g,
   }
 
   case IR_OP_SIMD_AFFINE_MAP_F64: {
-    /* Inline float64 affine map: marshal src->RCX, dst->RDX, count->R8, then
-     * emit the kernel with the (compile-time) a/b/c coefficient 64-bit bits in
-     * dst/a/b.imm and the b_is_one/b_is_zero/c_is_zero flags in cc. */
     MirOperand src = mir_value_operand(fn, g, ctx, map, &in->lhs);
     MirOperand dst = mir_value_operand(fn, g, ctx, map, &in->rhs);
     MirOperand cnt = mir_value_operand(fn, g, ctx, map, &in->arguments[0]);
@@ -7406,9 +6681,6 @@ static int mir_lower_affine_map(MirFunction *fn, CodeGenerator *g,
                    mir_op_none(), 8, 0, 0)) {
       return 0;
     }
-    /* Runtime `a`: marshal its scalar value into XMM4 (the kernel's `a` lane,
-     * a caller-saved register the kernel clobbers anyway) right before the
-     * kernel, which then broadcasts it instead of materializing an immediate. */
     int a_runtime = in->arguments[1].kind != IR_OPERAND_FLOAT;
     if (a_runtime) {
       MirOperand av = mir_value_operand(fn, g, ctx, map, &in->arguments[1]);
@@ -7466,10 +6738,6 @@ static int mir_lower_vloop(MirFunction *fn, CodeGenerator *g,
         return mir_lower_ir_kernel(fn, g, ctx, map, in);
       }
     }
-    /* Inline general vloop (any lane width, maps only): marshal the <=3 distinct
-     * base pointers into RCX/RDX/R8/R9 (kGp order, matching the kernel's dist)
-     * and the element count into the next arg register; the kernel reads its DAG
-     * from the borrowed IRInstruction in `aux`. */
     static const int kGp[4] = {BINARY_GP_RCX, BINARY_GP_RDX, BINARY_GP_R8,
                                BINARY_GP_R9};
     const char *vnames[4];
@@ -7495,7 +6763,7 @@ static int mir_lower_vloop(MirFunction *fn, CodeGenerator *g,
     memset(&v, 0, sizeof(v));
     v.op = MIR_SIMD_VLOOP;
     v.ir_index = -1;
-    v.aux = in; /* borrowed: the IR outlives this function's codegen */
+    v.aux = in;
     return mir_emit(fn, &v);
   }
 
@@ -7517,8 +6785,6 @@ static int mir_lower_silu(MirFunction *fn, CodeGenerator *g,
   *handled = 1;
   switch (in->op) {
   case IR_OP_SIMD_SILU_F32: {
-    /* Inline SiLU/SwiGLU gate: marshal g/out->RCX, count->R8, u->RDX (SwiGLU),
-     * then emit the kernel with has_mul in dst.imm. */
     int has_mul = (in->rhs.kind == IR_OPERAND_TEMP ||
                    in->rhs.kind == IR_OPERAND_SYMBOL);
     MirOperand gbase = mir_value_operand(fn, g, ctx, map, &in->lhs);
@@ -7565,16 +6831,10 @@ static int mir_lower_address_of(MirFunction *fn, CodeGenerator *g,
             : NULL;
     MirAddrofKind ak = mir_addressof_kind(g, irf, in);
     if (ak == MIR_ADDROF_INDIRECT_PARAM) {
-      /* &@p of a by-reference (INDIRECT) struct param: the param already holds
-       * the struct's address, so the address-of is just a copy of the pointer. */
       MirOperand ptr = mir_value_operand(fn, g, ctx, map, &in->lhs);
       return mir_emit1(fn, MIR_MOV, dst, ptr, mir_op_none(), 8, 0, 0);
     }
     if (ak == MIR_ADDROF_GLOBAL) {
-      /* &global: lea its RIP-relative address (is_unsigned carries the
-       * declare-external flag for the encoder). The global stays cached; the
-       * main loop flushes/reloads address-taken globals around pointer memory
-       * ops so the alias and the cache vreg stay coherent. */
       const CgSym *s = g->ir_program
                       ? code_generator_lookup_symbol(g, in->lhs.name)
                       : NULL;
@@ -7590,18 +6850,12 @@ static int mir_lower_address_of(MirFunction *fn, CodeGenerator *g,
       return mir_emit1(fn, MIR_LEA_FUNC, dst, mir_op_symbol(in->lhs.name),
                        mir_op_none(), 8, is_extern, 0);
     }
-    /* &local / &param: mark the target memory-resident and lea its stack home. */
     MirOperand src = mir_value_operand(fn, g, ctx, map, &in->lhs);
     if (src.kind != MIR_OPK_VREG) {
       fn->has_error = 1;
       return 0;
     }
     fn->vregs[src.vreg].address_taken = 1;
-    /* An INDIRECT struct local needs a home large enough for the whole struct,
-     * since field stores reach past the first 8 bytes. Size it to the struct
-     * size rounded up to an 8-byte slot. (Scalars and DIRECT small aggregates
-     * keep home_bytes == 0, i.e. the default single slot.) The type is resolved
-     * from the IR (function scope has popped from the symbol table by now). */
     {
       int is_param = 0;
       MtlcType *lt = mir_local_or_param_type(g, irf, in->lhs.name, &is_param);
@@ -7610,9 +6864,6 @@ static int mir_lower_address_of(MirFunction *fn, CodeGenerator *g,
         size_t sz = code_generator_abi_type_size(lt);
         fn->vregs[src.vreg].home_bytes = (int)((sz + 7) & ~(size_t)7);
       }
-      /* A narrow scalar's home is authoritative only at its declared width:
-       * the aliasing pointer writes exactly those bytes, so a by-name read
-       * must extend from them rather than load the whole 8-byte slot. */
       if (lt && !code_generator_type_is_aggregate(lt) &&
           code_generator_binary_resolved_type_float_bits(lt) == 0) {
         int w = code_generator_binary_resolved_type_scalar_size(lt);
@@ -7626,11 +6877,6 @@ static int mir_lower_address_of(MirFunction *fn, CodeGenerator *g,
         fn->vregs[src.vreg].home_width = 2;
         fn->vregs[src.vreg].home_signed = 0;
       }
-      /* Read off the IR, exactly as the fallback layout does: the safety pass
-       * has already said which locals it describes, by emitting a registration
-       * whose argument is the address of one. A described local's home must
-       * cover whole granules, so the neighbour it sits next to cannot share
-       * one and blind them both. */
       if (!is_param &&
           binary_function_local_is_safety_described(irf, in->lhs.name)) {
         fn->vregs[src.vreg].home_granule = 1;
@@ -7696,55 +6942,27 @@ static int mir_lower_instruction(MirFunction *fn, CodeGenerator *g,
   return 0;
 }
 
-/* ---- scaled-address (SIB) folding --------------------------------------- *
- * An array access lowers to three IR ops: a shift/multiply that scales the
- * index, an add that offsets the base pointer, and the load/store itself. x86
- * addresses that whole thing in one [base + index*scale] memory operand, so we
- * detect the pattern and let the load/store carry a SIB MirMem, dropping the
- * two address-computation instructions. This is the single biggest scalar
- * codegen win for index-heavy loops (e.g. matmul): it removes a shift, an add,
- * and (when the base would otherwise spill) a reload every memory access. */
-
 typedef struct {
   int valid;
   IROperand base;
   IROperand index;
   int scale;
-  /* Constant byte offset to add on top of base + index*scale. Non-zero when the
-   * index was itself `j + k`: x86 addresses carry that k for free in their
-   * displacement, so `a[j + 1]` need not compute a second index register. */
   long long disp;
 } MirAddrFold;
 
-/* Per-function index over TEMP names, recording for each temp how many
- * instructions READ it and which instruction DEFINES it.
- *
- * A read is any lhs/rhs operand, plus a STORE's dest (that dest is the store's
- * address, so it is read, not defined). A producer's own dest is a definition.
- *
- * The address- and compare-fold passes below ask both questions once per
- * candidate access. Answering each by scanning the whole instruction list made
- * those passes quadratic, with a strcmp per instruction visited -- profiling a
- * 226k-line compile put that single call site at 3.8% of total wall clock, the
- * largest source of strcmp in the compiler. One pass builds the index; each
- * query is then a hash lookup. */
 typedef struct {
   const char *name;
   int reads;
-  /* Reads that occur as the ADDRESS operand of a non-float LOAD/STORE. When
-   * this equals `reads`, every consumer of the temp is an access that can carry
-   * the address in its own memory operand, so the address computation can be
-   * folded into all of them at once rather than only a single one. */
   int addr_reads;
-  long def_index; /* -1 until an instruction defines it */
-  int def_count;  /* number of instructions defining it (non-SSA names exist) */
+  long def_index;
+  int def_count;
 } MirTempUse;
 
 typedef struct {
   MirTempUse *items;
   size_t count;
   size_t capacity;
-  size_t *buckets; /* open addressing over items: slot+1, 0 = empty */
+  size_t *buckets;
   size_t bucket_count;
 } MirTempUseIndex;
 
@@ -7756,7 +6974,6 @@ static void mir_temp_use_destroy(MirTempUseIndex *ix) {
   ix->count = ix->capacity = ix->bucket_count = 0;
 }
 
-/* Slot for `name`, appending an empty entry when absent. NULL only on OOM. */
 static MirTempUse *mir_temp_use_slot(MirTempUseIndex *ix, const char *name) {
   size_t h = mettle_fnv1a_hash(name);
   size_t b = h & (ix->bucket_count - 1);
@@ -7785,7 +7002,6 @@ static MirTempUse *mir_temp_use_slot(MirTempUseIndex *ix, const char *name) {
   ix->buckets[b] = ix->count;
 
   if ((ix->count + 1) * 4 >= ix->bucket_count * 3) {
-    /* Rehash before the table gets dense enough for probes to lengthen. */
     size_t nb = ix->bucket_count * 2;
     size_t *fresh = (size_t *)calloc(nb, sizeof(size_t));
     if (!fresh) {
@@ -7829,8 +7045,6 @@ static int mir_temp_use_build(const IRFunction *f, MirTempUseIndex *ix) {
         in->dest.name) {
       reads[nreads++] = &in->dest;
     }
-    /* The address operand of a non-float LOAD/STORE: a read that an x86 memory
-     * operand can absorb (see mir_compute_address_folds). */
     const IROperand *addr_read = NULL;
     if (!in->is_float) {
       if (in->op == IR_OP_LOAD && in->lhs.kind == IR_OPERAND_TEMP &&
@@ -7841,15 +7055,6 @@ static int mir_temp_use_build(const IRFunction *f, MirTempUseIndex *ix) {
         addr_read = &in->dest;
       }
     }
-    /* The argument vector is an input vector. Call arguments live there, and
-     * so do the third operand of a SELECT and the operands of every SIMD
-     * kernel. Counting only lhs/rhs/dest made a temp whose only reader is a
-     * call argument look unread, and the address folds below retire a
-     * producer they believe has exactly one reader -- so `%t = i << 2;
-     * f(%t); ... = base[%t]` folded `i*4` into the load's SIB and deleted the
-     * shift, leaving the call reading a register nothing wrote. Rare in
-     * ordinary code and universal under --safe, where every checked access is
-     * `check(base, off, ...)` followed by a load through the same `off`. */
     for (size_t a = 0; a < in->argument_count; a++) {
       const IROperand *arg = &in->arguments[a];
       if (arg->kind != IR_OPERAND_TEMP || !arg->name) {
@@ -7873,9 +7078,6 @@ static int mir_temp_use_build(const IRFunction *f, MirTempUseIndex *ix) {
         e->addr_reads++;
       }
     }
-    /* Any op with a TEMP dest, STORE included: the two queries are independent,
-     * and the scan this replaces treated a STORE's dest as both a read (its
-     * address) and a candidate definition. */
     if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name) {
       MirTempUse *e = mir_temp_use_slot(ix, in->dest.name);
       if (!e) {
@@ -7883,12 +7085,8 @@ static int mir_temp_use_build(const IRFunction *f, MirTempUseIndex *ix) {
         return 0;
       }
       if (e->def_index < 0) {
-        e->def_index = (long)i; /* first definition wins, as the scan did */
+        e->def_index = (long)i;
       }
-      /* A STORE's dest is the address it writes THROUGH, not a value it
-       * defines, so it must not count towards the "exactly one producer"
-       * test -- `*%t <- v` would otherwise make every stored-through address
-       * look multiply-defined. (def_index keeps its historical behaviour.) */
       if (in->op != IR_OP_STORE) {
         e->def_count++;
       }
@@ -7915,18 +7113,11 @@ static int mir_temp_read_count(const MirTempUseIndex *ix, const char *name) {
   return e ? e->reads : 0;
 }
 
-/* Index of the instruction whose dest defines temp `name`, or -1. */
 static long mir_temp_def_index(const MirTempUseIndex *ix, const char *name) {
   const MirTempUse *e = mir_temp_use_find(ix, name);
   return e ? e->def_index : -1;
 }
 
-/* True when every read of `name` is the address operand of a non-float
- * LOAD/STORE, and the name has exactly one definition. Both conditions are
- * needed before an address computation may be folded into more than one
- * access: a non-address read would still need the value in a register, and a
- * second definition means `def_index` does not identify the producer that
- * reaches those reads. */
 static int mir_temp_reads_are_all_addresses(const MirTempUseIndex *ix,
                                             const char *name, int *reads_out) {
   const MirTempUse *e = mir_temp_use_find(ix, name);
@@ -7937,19 +7128,13 @@ static int mir_temp_reads_are_all_addresses(const MirTempUseIndex *ix,
     *reads_out = e->reads;
   }
   if (e->reads == 1) {
-    return 1; /* the long-standing single-access fold; unchanged */
+    return 1;
   }
   return e->def_count == 1 && e->reads == e->addr_reads;
 }
 
-/* True when `operand` names the value written by `in`. Symbols are the mutable
- * ones -- a temp is written by its own producer, which the caller has already
- * accounted for. */
 static int mir_instruction_defines_operand(const IRInstruction *in,
                                            const IROperand *operand) {
-  /* A NOP is a deleted instruction: the optimizer blanks the opcode but leaves
-   * the operands in place, so its `dest` names a value it no longer writes.
-   * A STORE's `dest` is its address -- read, not written. */
   if (in->op == IR_OP_NOP || in->op == IR_OP_STORE) {
     return 0;
   }
@@ -7963,16 +7148,6 @@ static int mir_instruction_defines_operand(const IRInstruction *in,
   return strcmp(in->dest.name, operand->name) == 0;
 }
 
-/* An access folds the address computation into its own memory operand, so the
- * operands are re-read at the access rather than at the original add. Folding
- * into SEVERAL accesses is therefore only sound while `base` and `index` still
- * hold the values they had at the add. Walk forward from the producer and
- * require all `expected` accesses to be reached before either operand is
- * rewritten (a store through a pointer cannot change a register value, so only
- * direct writes and calls -- which may write a global -- matter).
- *
- * The scan is bounded: a candidate whose uses are far apart is left alone
- * rather than paying an unbounded walk per access on a large function. */
 #define MIR_ADDR_FOLD_SCAN_LIMIT 256
 
 static int mir_addr_fold_multiuse_safe(const IRFunction *f, size_t def_index,
@@ -8002,8 +7177,6 @@ static int mir_addr_fold_multiuse_safe(const IRFunction *f, size_t def_index,
       }
       continue;
     }
-    /* A call may write any global, and the base/index of an array access are
-     * routinely globals or parameters spilled to memory. */
     if ((in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT) &&
         (base_is_symbol || index_is_symbol)) {
       return 0;
@@ -8016,15 +7189,6 @@ static int mir_addr_fold_multiuse_safe(const IRFunction *f, size_t def_index,
   return 0;
 }
 
-/* An index of the form `j + k` (k a constant) needs no arithmetic of its own:
- * x86 carries `k * scale` in the address displacement. Neighbour accesses --
- * `src[i + 1]`, `dst[o + 2]`, `a[i - 1]` -- are ubiquitous, and each one was
- * paying an ADD and a register for an offset the address encodes for free.
- *
- * Rewrites *index to `j` and adds the byte offset to *disp, but only when the
- * constant-add temp exists solely to feed this address (otherwise its producer
- * still has to run and nothing is saved). Returns the producer's index to skip,
- * or -1 when the index is left alone. */
 static long mir_fold_index_constant_offset(const IRFunction *f,
                                            const MirTempUseIndex *uses,
                                            IROperand *index, int scale,
@@ -8047,7 +7211,6 @@ static long mir_fold_index_constant_offset(const IRFunction *f,
   if (!subtract && strcmp(p->text, "+") != 0) {
     return -1;
   }
-  /* For subtraction only `j - k` works; `k - j` negates the index. */
   const IROperand *var = NULL;
   long long konst = 0;
   if (p->rhs.kind == IR_OPERAND_INT &&
@@ -8069,7 +7232,7 @@ static long mir_fold_index_constant_offset(const IRFunction *f,
   long long total = *disp + offset;
   if (offset / (scale ? scale : 1) != konst || total < -2147483648LL ||
       total > 2147483647LL) {
-    return -1; /* would not fit the displacement */
+    return -1;
   }
   *index = *var;
   *disp = total;
@@ -8111,14 +7274,6 @@ static int mir_decode_scale(const IRInstruction *p, IROperand *index,
   return 0;
 }
 
-/* Scan for `LOAD/STORE [ base + (index<<k|index*c) ]` and record a SIB fold for
- * each, marking the two address-producer instructions to be skipped. Only
- * integer accesses fold (the float encoder path does not read mem.index). */
-/* Mark for skipping the producer of any loop-bound constant that the fused
- * compare-branch will fold into an imm32 (see mir_fused_cmp_imm). Without this
- * the CAST that materializes the bound stays in the loop as a dead `mov reg,
- * imm` every iteration. Only drops a producer whose temp is read solely by that
- * compare. */
 static void mir_compute_const_compare_skips(CodeGenerator *g,
                                             BinaryFunctionContext *ctx,
                                             IRFunction *f,
@@ -8137,7 +7292,7 @@ static void mir_compute_const_compare_skips(CodeGenerator *g,
       continue;
     }
     if (mir_temp_read_count(uses, cmp->rhs.name) != 1) {
-      continue; /* bound temp feeds something else; keep its producer */
+      continue;
     }
     long def = mir_temp_def_index(uses, cmp->rhs.name);
     if (def >= 0) {
@@ -8146,8 +7301,6 @@ static void mir_compute_const_compare_skips(CodeGenerator *g,
   }
 }
 
-/* What can carry a memory operand's base: a temp, or a pointer-valued symbol
- * (a parameter or local the allocator keeps in a register). */
 static int mir_addr_base_operand_kind(const IROperand *operand) {
   return operand && operand->name &&
          (operand->kind == IR_OPERAND_TEMP ||
@@ -8230,12 +7383,6 @@ static void mir_compute_address_folds(const IRFunction *f,
     if (in->is_float || addr->kind != IR_OPERAND_TEMP || !addr->name) {
       continue;
     }
-    /* Every read of the address must be an access that can carry it in its own
-     * memory operand, or dropping its producer would lose a value another
-     * instruction needs. Several such accesses are fine -- a SIB operand costs
-     * no extra instruction, so re-deriving the address per access is strictly
-     * cheaper than computing it once into a register. `count[d] = count[d] + 1`
-     * (load and store through one address) is the common shape. */
     int addr_reads = 0;
     if (!mir_temp_reads_are_all_addresses(uses, addr->name, &addr_reads)) {
       continue;
@@ -8249,8 +7396,6 @@ static void mir_compute_address_folds(const IRFunction *f,
         strcmp(padd->text, "+") != 0) {
       continue;
     }
-    /* One operand is the base pointer, the other the scaled index (a temp whose
-     * sole use is this add). Try both orderings. */
     const IROperand *order[2][2] = {{&padd->lhs, &padd->rhs},
                                     {&padd->rhs, &padd->lhs}};
     for (int t = 0; t < 2; t++) {
@@ -8259,13 +7404,6 @@ static void mir_compute_address_folds(const IRFunction *f,
       if (scaled->kind != IR_OPERAND_TEMP || !scaled->name) {
         continue;
       }
-      /* The scaled index may have more than one reader: `a[i] * b[i]` reads one
-       * `i << 2` twice once CSE has folded the two copies together. Such an
-       * access still folds -- a SIB operand re-derives `i*4` for free -- but its
-       * producer has to stay for the other reader, so only retire the shift when
-       * this access is its sole reader. Refusing outright would drop the whole
-       * pair onto the scale-1 fallback, which folds the SCALED value as an
-       * index and gets the address wrong. */
       int scaled_reads = mir_temp_read_count(uses, scaled->name);
       if (scaled_reads < 1) {
         continue;
@@ -8292,25 +7430,16 @@ static void mir_compute_address_folds(const IRFunction *f,
       folds[i].index = index;
       folds[i].scale = scale;
       folds[i].disp = disp;
-      skip[ai] = 1; /* the base+scaled add */
+      skip[ai] = 1;
       if (scaled_reads == 1) {
-        skip[si] = 1; /* the index scale, read by this access alone */
+        skip[si] = 1;
         if (offset_producer >= 0) {
-          skip[offset_producer] = 1; /* the index's constant offset */
+          skip[offset_producer] = 1;
         }
       }
       break;
     }
 
-    /* Scale-1 fallback: a plain `base + index` with no explicit scaling, i.e.
-     * the unit-stride access `a[i]` on a byte/char/pointer-sized-by-1 buffer
-     * (and any loop walking an int8/uint8 array). Both operands must be
-     * register-resident values (TEMP or SYMBOL); fold them straight into
-     * [op0 + op1*1]. base/index are symmetric at scale 1, so either ordering
-     * encodes identically. Unlike the scaled path this consumes no separate
-     * producer and leaves both operands live (the index is typically the loop
-     * induction variable, still needed by the increment), so only the add
-     * itself is dropped. */
     if (!folds[i].valid) {
       const IROperand *o0 = &padd->lhs;
       const IROperand *o1 = &padd->rhs;
@@ -8320,9 +7449,6 @@ static void mir_compute_address_folds(const IRFunction *f,
           (addr_reads == 1 ||
            mir_addr_fold_multiuse_safe(f, (size_t)ai, addr->name, o0, o1,
                                        addr_reads))) {
-        /* Either side may be the one carrying the `+ k`; the base pointer is
-         * whichever is not. Try the second operand first, the usual index
-         * position for `buf[i + 1]`. */
         IROperand index = *o1;
         IROperand base = *o0;
         long long disp = 0;
@@ -8343,23 +7469,13 @@ static void mir_compute_address_folds(const IRFunction *f,
         folds[i].index = index;
         folds[i].scale = 1;
         folds[i].disp = disp;
-        skip[ai] = 1; /* fold the base+index add into the memory operand */
+        skip[ai] = 1;
         if (offset_producer >= 0) {
           skip[offset_producer] = 1;
         }
       }
     }
 
-    /* Constant-displacement fallback: `ptr + const_int` -- a struct-field or
-     * fixed-offset access (`p->field`, `b[i].field`, `*(ptr + k)`) -- folds the
-     * constant straight into the x86 displacement: [base + disp]. The constant
-     * is exactly the displacement (the access size is unchanged, so there is no
-     * width or aliasing concern). Unlike the scaled/scale-1 paths this consumes
-     * no separate producer -- only the add is dropped -- and the base pointer
-     * temp stays live, since it is typically shared across several field
-     * accesses on the same element (folding base+index*scale here instead would
-     * re-derive it per field). mir_lower_folded_access turns an IR_OPERAND_INT
-     * index into the displacement. */
     if (!folds[i].valid) {
       const IROperand *o0 = &padd->lhs;
       const IROperand *o1 = &padd->rhs;
@@ -8375,11 +7491,6 @@ static void mir_compute_address_folds(const IRFunction *f,
         cst = o0;
       }
       base_is_symbol = base && base->kind == IR_OPERAND_SYMBOL;
-      /* A symbol base is re-read at the access rather than at the add, so it
-       * has to survive the gap even when there is only one access; a temp is
-       * written once and cannot. `p->field` through a pointer parameter is the
-       * shape this reaches, and it was materializing the address into a
-       * register for every field read in the function. */
       if (base && cst->int_value >= -2147483648LL &&
           cst->int_value <= 2147483647LL &&
           ((addr_reads == 1 && !base_is_symbol) ||
@@ -8409,14 +7520,13 @@ static void mir_compute_address_folds(const IRFunction *f,
           folds[i].base = *base;
           folds[i].index = *cst;
           folds[i].scale = 1;
-          skip[ai] = 1; /* fold the ptr+const add into the memory displacement */
+          skip[ai] = 1;
         }
       }
     }
   }
 }
 
-/* Lower a LOAD/STORE whose address folded into a [base + index*scale] SIB. */
 static int mir_lower_folded_access(MirFunction *fn, CodeGenerator *g,
                                    BinaryFunctionContext *ctx, MirNameMap *map,
                                    const IRInstruction *in,
@@ -8428,9 +7538,6 @@ static int mir_lower_folded_access(MirFunction *fn, CodeGenerator *g,
   }
   MirOperand mem;
   if (fold->index.kind == IR_OPERAND_INT) {
-    /* A constant index (e.g. `p[0]`, `arr[5]`) folds into the displacement:
-     * [base + index*scale]. mir_decode_scale yields the literal index when the
-     * scaled-offset expression is itself constant. */
     long long disp = fold->index.int_value * (long long)fold->scale + fold->disp;
     if (disp < -2147483648LL || disp > 2147483647LL) {
       fn->has_error = 1;
@@ -8454,9 +7561,6 @@ static int mir_lower_folded_access(MirFunction *fn, CodeGenerator *g,
     fn->has_error = 1;
     return 0;
   }
-  /* String value convention (same as the unfolded LOAD/STORE paths): an
-   * 8-byte string value is a record pointer, so a string-local dest deref-
-   * copies and a string-local source stores its home's address. */
   const IRFunction *sirf =
       ctx && ctx->function_name
           ? code_generator_find_ir_function_binary(g, ctx->function_name)
@@ -8512,34 +7616,6 @@ static int mir_lower_folded_access(MirFunction *fn, CodeGenerator *g,
   return mir_emit1(fn, MIR_MOV, mem, val, mir_op_none(), size, 0, 0);
 }
 
-/* ---- loop rotation ------------------------------------------------------ */
-
-/* Rotate top-tested loops to bottom-tested ones. The lowering emits a while
- * loop as `label H; CMPBR cc -> Lexit; <body>; JMP H`, a fall-through test at
- * the top plus an unconditional back-jump every iteration (two branches/iter).
- * This rewrites it to `CMPBR cc -> Lexit (guard); H: <body>; CMPBR !cc -> H`,
- * so the back-edge is a single conditional branch and the top test runs once.
- *
- * Done by (1) converting each backward `JMP H` into a `CMPBR` with the header's
- * compare operands and the inverted condition (x86: cc ^ 1 flips the test),
- * targeting H, and (2) swapping `label H` with its following CMPBR so H now
- * marks the body start. Only safe when H is immediately followed by its CMPBR:
- * then the compare operands are loop-stable live values (a counter and a bound),
- * not temps computed by the header's condition evaluation, so re-testing them
- * at the back-edge (after the body's update) is exactly the loop condition. */
-/* Fuse `MOV d, s` immediately followed by `MOVSX/MOVZX d, d` into
- * `MOVSX/MOVZX d, s`: the extend overwrites d with the extension of its low
- * bytes, so reading s directly is identical and the copy is dead. The narrow-
- * integer canonicalization emitted after an ASSIGN is exactly this shape
- * (`MOV cd, b; MOVSX cd, cd`), so this removes a register copy -- and one
- * short-lived value, easing register pressure -- per narrow copy-assign, which
- * is common in inlined and recursive code (e.g. rec_fib's `mov r13,r12; movsxd
- * r13,r13d`). Only vreg->vreg moves (a load/immediate MOV is left alone), and
- * the two are adjacent so s cannot be redefined between them. */
-/* True for integer ops whose low 32 result bits depend only on the low 32 bits
- * of their inputs, so evaluating them at operand size 32 gives the same answer
- * as evaluating at 64 and discarding the top half. The right shifts, the
- * divides and MULHI are excluded: they read the bits above 32. */
 static int mir_op_low32_is_self_contained(MirOpcode op) {
   switch (op) {
   case MIR_ADD:
@@ -8556,22 +7632,6 @@ static int mir_op_low32_is_self_contained(MirOpcode op) {
   }
 }
 
-/* uint32 arithmetic is evaluated in 64-bit registers and truncated back after
- * every step, so each operation is followed by a zero-extend of its own result.
- * That extend is pure overhead: a 32-bit-operand-size instruction already
- * zero-extends into the full register. Where the extend immediately follows the
- * op that defines it -- so nothing can observe the untruncated value -- mark the
- * op as 32-bit and delete the extend.
- *
- * Two things follow. The instruction disappears, and so does its cycle: an
- * in-place `mov r8d, r8d` is one of the few register moves the hardware cannot
- * rename away, and in a serial recurrence (a bit-at-a-time CRC, a hash step)
- * that cycle sits on the loop-carried path. The 32-bit form also takes a full
- * 32-bit immediate, so masking constants like 0xEDB88320 stop needing a
- * register: at width 8 they do not fit a sign-extended imm32.
- *
- * Only MOVZX qualifies. MOVSX asks for sign extension, which a 32-bit operation
- * does not perform. */
 static void mir_canonicalize_commutative(MirFunction *fn) {
   if (!fn) {
     return;
@@ -8603,8 +7663,6 @@ static void mir_narrow_zero_extended_ops(MirFunction *fn) {
         ext->dst.vreg != ext->a.vreg) {
       continue;
     }
-    /* The defining op must be the previous real instruction: anything in
-     * between could read the value before it is truncated. */
     size_t d = i;
     while (d > 0 && fn->insns[d - 1].op == MIR_NOP) {
       d--;
@@ -8623,29 +7681,6 @@ static void mir_narrow_zero_extended_ops(MirFunction *fn) {
   }
 }
 
-/* ---- demanded bits: drop extensions nothing looks at ---------------------
- *
- * int32 values live in 64-bit registers, so the frontend re-extends after every
- * step to keep the register agreeing with the declared type. Most of those
- * extensions are dead: an `i` that is only ever compared as int32 and fed to
- * more int32 arithmetic never has its upper half read, and the sign extension
- * that guards it is pure cost -- an instruction, and in a recurrence a cycle,
- * per step.
- *
- * The analysis asks one question per value: does EVERY reader of it look only
- * at its low 32 bits? Start by assuming yes for all, then let each instruction
- * veto the values it reads in full. A 32-bit ALU result depends only on the low
- * halves of its inputs, so those readers pass the question down to their own
- * destination -- which is why this iterates to a fixpoint. The answer only ever
- * moves from yes to no, so it converges, and anything not explicitly understood
- * vetoes, so an unmodelled opcode is safe by construction.
- *
- * Where the answer is yes, a MOVSX/MOVZX of that value becomes a plain copy,
- * which the register allocator's coalescer then usually removes outright. */
-
-/* Reads of these ops' operands only need the low 32 bits when the op's own
- * result does. Right shifts, divides and MULHI are excluded: they read the
- * bits above 32 even when their result does not. */
 static int mir_op_demand_passes_through(MirOpcode op) {
   switch (op) {
   case MIR_ADD:
@@ -8674,7 +7709,6 @@ static void mir_demand_veto_operand(const MirOperand *op, char *low32,
     low32[op->vreg] = 0;
   }
   if (op->kind == MIR_OPK_MEM) {
-    /* An address is always used in full. */
     if (op->mem.base != MIR_VREG_NONE && (size_t)op->mem.base < n) {
       low32[op->mem.base] = 0;
     }
@@ -8684,7 +7718,6 @@ static void mir_demand_veto_operand(const MirOperand *op, char *low32,
   }
 }
 
-/* True when `in` writes a GP vreg whose own readers all want just 32 bits. */
 static int mir_demand_dst_is_low32(const MirInst *in, const char *low32,
                                    size_t n) {
   return in->dst.kind == MIR_OPK_VREG && in->dst.vreg != MIR_VREG_NONE &&
@@ -8701,9 +7734,6 @@ static void mir_drop_dead_extensions(MirFunction *fn) {
     return;
   }
   for (size_t v = 0; v < n; v++) {
-    /* An address-taken value lives in memory, where a full-width load elsewhere
-     * can see the bits this analysis would let go undefined. Float and vector
-     * values are not in scope at all. */
     low32[v] = (fn->vregs[v].rclass == MIR_RC_GP && !fn->vregs[v].address_taken)
                    ? 1
                    : 0;
@@ -8719,21 +7749,17 @@ static void mir_drop_dead_extensions(MirFunction *fn) {
       }
       int reads_low32_only = 0;
       if ((in->op == MIR_MOVZX || in->op == MIR_MOVSX) && in->width <= 4) {
-        reads_low32_only = 1; /* only the low `width` bytes are extended */
+        reads_low32_only = 1;
       } else if ((in->op == MIR_CMP || in->op == MIR_CMPBR ||
                   in->op == MIR_TEST) &&
                  in->width == 4) {
         reads_low32_only = 1;
       } else if (mir_op_demand_passes_through(in->op)) {
-        /* A store (`mov [mem], a`) has no vreg destination to pass the question
-         * to, and writes `width` bytes; treat only the narrow store as narrow. */
         reads_low32_only = mir_demand_dst_is_low32(in, low32, n) ||
                            (in->op == MIR_MOV && in->dst.kind == MIR_OPK_MEM &&
                             in->width <= 4);
       }
       if (reads_low32_only) {
-        /* The value operands are read narrowly, but an address inside them is
-         * still an address. */
         if (in->a.kind == MIR_OPK_MEM) {
           mir_demand_veto_operand(&in->a, low32, n);
         }
@@ -8751,8 +7777,6 @@ static void mir_drop_dead_extensions(MirFunction *fn) {
         mir_demand_veto_operand(&in->dst, low32, n);
       }
     }
-    /* A veto can turn a pass-through op into a full reader of its own inputs,
-     * so re-run until the flags stop moving. They only ever move one way. */
     size_t still_low32 = 0;
     for (size_t v = 0; v < n; v++) {
       still_low32 += (size_t)low32[v];
@@ -8770,7 +7794,6 @@ static void mir_drop_dead_extensions(MirFunction *fn) {
         in->dst.kind != MIR_OPK_VREG || !low32[in->dst.vreg]) {
       continue;
     }
-    /* Nothing reads above bit 31, so the extension is just a copy. */
     in->op = MIR_MOV;
     in->width = 8;
     in->is_unsigned = 0;
@@ -8959,14 +7982,6 @@ static void mir_elide_guarded_sext(MirFunction *fn) {
     size_t cand_movsx[8];
     size_t cand_add[8];
     unsigned char cand_inplace[8];
-    /* 0: the add already targets A, just drop the sext.
-     * 1: the add targets a temp nothing else reads, so retarget it to A.
-     * 2: the temp IS read elsewhere -- json_parse stores `pos + 1` back
-     *    through the Parser between the add and the sext -- so leave both
-     *    the add and that reader alone and weaken the sext to a plain move.
-     *    The guard proves the value fits in int32, which is the whole content
-     *    of the sign extension; the copy that remains is what the allocator
-     *    coalesces away. */
     unsigned char cand_weaken[8];
     size_t cand_count = 0;
     size_t sp = 0;
@@ -9079,8 +8094,6 @@ static void mir_elide_guarded_sext(MirFunction *fn) {
               }
             }
           }
-          /* The retarget above needs the temp to be private and adjacent.
-           * When it is neither, the sign extension is still redundant. */
           if (!multi_def && def_at != (size_t)-1 && visited[def_at] &&
               cand_count < 8) {
             const MirInst *add = &fn->insns[def_at];
@@ -9160,12 +8173,11 @@ static void mir_fuse_mov_then_extend(MirFunction *fn) {
         mov->a.vreg == ext->dst.vreg) {
       continue;
     }
-    ext->a.vreg = mov->a.vreg; /* extend reads the copy's source directly */
-    mov->op = MIR_NOP;         /* the copy is now dead */
+    ext->a.vreg = mov->a.vreg;
+    mov->op = MIR_NOP;
   }
 }
 
-/* Every vreg an operand READS (a MEM operand reads its base and index). */
 static void mir_operand_reads_pair(const MirOperand *op, MirVregId out[2]) {
   out[0] = MIR_VREG_NONE;
   out[1] = MIR_VREG_NONE;
@@ -9180,15 +8192,6 @@ static void mir_operand_reads_pair(const MirOperand *op, MirVregId out[2]) {
   }
 }
 
-/* ---- fold a constant address adjustment into the access -----------------
- *
- * Reading a struct field lowers to "compute the base, add the field offset,
- * load through it". x86 addressing already has that offset field, so the add
- * is free to absorb: `add rax, 4; mov edx, [rax]` becomes `mov edx, [rax+4]`.
- * A three-field node read pays this three times per visit.
- *
- * Only an add whose result is used exactly once, by that one access, can move
- * -- otherwise the address is still needed in a register. */
 static void mir_fold_address_offsets(MirFunction *fn) {
   if (!fn || fn->insn_count < 2 || fn->vreg_count == 0) {
     return;
@@ -9203,7 +8206,7 @@ static void mir_fold_address_offsets(MirFunction *fn) {
   for (size_t i = 0; i < fn->insn_count; i++) {
     const MirInst *in = &fn->insns[i];
     if (in->op == MIR_NOP) {
-      continue; /* retired: its leftover operands are neither reads nor writes */
+      continue;
     }
     const MirOperand *ops[3] = {&in->a, &in->b, &in->dst};
     for (int k = 0; k < 3; k++) {
@@ -9236,11 +8239,6 @@ static void mir_fold_address_offsets(MirFunction *fn) {
     if (add->b.imm < INT32_MIN / 2 || add->b.imm > INT32_MAX / 2) {
       continue;
     }
-    /* The access must be the very next instruction -- anything in between could
-     * redefine the base the offset would now be applied to. The lowering does
-     * leave plain `vC <- addr` copies in the way, though, so walk through any
-     * that are themselves used exactly once: they are links in the same chain,
-     * and retiring them leaves nothing behind. */
     MirVregId cur = addr;
     size_t u = i;
     size_t chain[4];
@@ -9273,7 +8271,6 @@ static void mir_fold_address_offsets(MirFunction *fn) {
       }
       break;
     }
-    /* The float access path has no scaled-index form, so never hand it one. */
     if (!mem || uses[cur] != 1 || mem->mem.index == cur ||
         mem->mem.phys_base_valid ||
         (fn->insns[u].is_float && mem->mem.index != MIR_VREG_NONE)) {
@@ -9297,33 +8294,17 @@ static void mir_fold_address_offsets(MirFunction *fn) {
   free(defs);
 }
 
-/* ---- redundant load elimination -----------------------------------------
- *
- * `if (data[i] <= data[j]) { tmp[k] = data[i]; }` loads data[i] twice: once to
- * compare it and once to store it. The second load is reached only through the
- * first, and nothing writes memory in between, so it can read the register the
- * first one already filled. Merge sort's inner loop pays this on every
- * iteration, and the shape -- test a value, then use it -- is everywhere.
- *
- * This is a linear scan carrying a small table of loads whose results are still
- * valid. An entry dies when anything could have changed what it loaded (a
- * store, a call, an inline kernel), when one of its address registers is
- * rewritten, when its own destination is rewritten, or at a label the value
- * might not have reached along every incoming edge. */
-
 #define MIR_LOAD_TABLE_MAX 12
 
 typedef struct {
-  int def;        /* MIR index of the load */
-  MirVregId dst;  /* vreg it filled */
-  MirMem mem;     /* address it read */
+  int def;
+  MirVregId dst;
+  MirMem mem;
   int width;
   int is_unsigned;
   int is_float;
 } MirAvailableLoad;
 
-/* A plain register load: `dst(vreg) <- [mem]`, no scaling of the result beyond
- * the width/signedness the instruction already carries. */
 static int mir_is_plain_load(const MirInst *in) {
   return in->op == MIR_MOV && in->a.kind == MIR_OPK_MEM &&
          in->dst.kind == MIR_OPK_VREG;
@@ -9335,8 +8316,6 @@ static int mir_mem_same(const MirMem *a, const MirMem *b) {
          a->phys_base == b->phys_base;
 }
 
-/* Could this instruction change what some earlier load returned? Stores are the
- * obvious case; a call or an inline kernel can write anywhere. */
 static int mir_clobbers_memory(const MirInst *in) {
   if (in->dst.kind == MIR_OPK_MEM) {
     return 1;
@@ -9353,9 +8332,6 @@ static int mir_clobbers_memory(const MirInst *in) {
   }
 }
 
-/* Keep only the entries `keep` also has: what is available where two paths meet
- * is what was available on both. Identity is the destination vreg -- the same
- * vreg is the same value. */
 static size_t mir_load_table_intersect(MirAvailableLoad *dst, size_t dst_n,
                                        const MirAvailableLoad *keep,
                                        size_t keep_n) {
@@ -9371,7 +8347,6 @@ static size_t mir_load_table_intersect(MirAvailableLoad *dst, size_t dst_n,
   return n;
 }
 
-/* The instruction before `index`, skipping NOPs; -1 if there is none. */
 static int mir_prev_real(const MirFunction *fn, size_t index) {
   for (size_t k = index; k > 0; k--) {
     if (fn->insns[k - 1].op != MIR_NOP) {
@@ -9385,9 +8360,6 @@ static void mir_cse_loads(MirFunction *fn) {
   if (!fn || fn->insn_count < 2) {
     return;
   }
-  /* Per label: the highest index that branches to it (a back-edge, i.e. a loop
-   * header, if it is at or past the label), and an ordinal for the snapshot
-   * table below. */
   int *pred_hi = (int *)malloc(fn->insn_count * sizeof(int));
   int *label_ord = (int *)malloc(fn->insn_count * sizeof(int));
   if (!pred_hi || !label_ord) {
@@ -9419,10 +8391,6 @@ static void mir_cse_loads(MirFunction *fn) {
     }
   }
 
-  /* What was available at each forward branch into a label. Without this, an
-   * `if (p) { ...store... } else { ...reuse... }` loses the reuse: the linear
-   * walk reaches the else-arm's label having passed through the then-arm's
-   * store, which the branched-to path never executes. */
   MirAvailableLoad *snap = NULL;
   size_t *snap_n = NULL;
   char *snap_seen = NULL;
@@ -9480,9 +8448,8 @@ static void mir_cse_loads(MirFunction *fn) {
     if (in->op == MIR_LABEL) {
       int o = label_ord[i];
       if (pred_hi[i] >= (int)i) {
-        table_n = 0; /* loop header: memory may change across the back-edge */
+        table_n = 0;
       } else if (pred_hi[i] < 0) {
-        /* Only reachable by falling through: the walked table is exact. */
       } else if (!snap || !snap_seen[o]) {
         table_n = 0;
       } else {
@@ -9501,7 +8468,6 @@ static void mir_cse_loads(MirFunction *fn) {
       continue;
     }
 
-    /* Reuse: an identical load whose value is still around becomes a copy. */
     if (mir_is_plain_load(in)) {
       for (size_t e = 0; e < table_n; e++) {
         if (table[e].width == in->width &&
@@ -9516,8 +8482,6 @@ static void mir_cse_loads(MirFunction *fn) {
       }
     }
 
-    /* Anything this instruction writes invalidates the entries that depend on
-     * it, whether as an address register or as the cached result itself. */
     if (in->dst.kind == MIR_OPK_VREG) {
       MirVregId w = in->dst.vreg;
       size_t keep = 0;
@@ -9549,51 +8513,26 @@ static void mir_cse_loads(MirFunction *fn) {
   free(snap_seen);
 }
 
-/* ---- float64 pair vectorizer (SLP) --------------------------------------- */
-/*
- * Structs of the form {x, y, ...} in float64 produce statement pairs that
- * differ only in the field offset: `p.vx += f*dx; p.vy += f*dy` is two loads,
- * two multiplies, two adds and two stores that clang runs as one movupd,
- * mulpd, addpd, movupd. This pass finds ADJACENT float64 store pairs (same
- * base register, displacements 8 apart), grows the operation DAG upward while
- * both lanes stay isomorphic, and rewrites the pair lanes into one width-16
- * instruction each: loads become movupd, arithmetic becomes the packed VEX
- * form, a scalar appearing in both lanes becomes one vmovddup.
- *
- * Soundness rules:
- *  - Everything stays inside one straight-line region (no labels, branches,
- *    or calls between the earliest and latest instruction touched).
- *  - The fused instruction sits at the LATER lane's original index, so each
- *    earlier lane conceptually moves down: any memory access strictly between
- *    the two lanes must be provably disjoint (same base register with
- *    non-overlapping displacements). A different base register may alias and
- *    refuses the pair.
- *  - An original whose value is read outside the graph is KEPT (the pair
- *    recomputes its lanes); only fully-internal originals are dropped. That
- *    trades a little duplicate scalar work for never needing lane extraction,
- *    and the dead-code sweep already removes what turns out unread.
- */
-
 #define MIR_SLP_MAX_NODES 24
 
 typedef struct {
-  MirVregId lo;      /* lane-0 value (MIR_VREG_NONE for a store node) */
+  MirVregId lo;
   MirVregId hi;
-  size_t lo_at;      /* defining instruction indices */
+  size_t lo_at;
   size_t hi_at;
-  MirVregId pair;    /* the width-16 vreg carrying both lanes */
-  int kind;          /* 0 load, 1 binop, 2 dup, 3 store */
-  MirOpcode op;      /* for binops */
-  int child_a;       /* node indices, -1 = none */
+  MirVregId pair;
+  int kind;
+  MirOpcode op;
+  int child_a;
   int child_b;
   int keep_originals;
 } MirSlpNode;
 
 typedef struct {
   MirFunction *fn;
-  const int *def_count;  /* per-vreg definition count */
-  const size_t *def_at;  /* index of the single def (valid when count==1) */
-  const int *use_count;  /* per-vreg read count */
+  const int *def_count;
+  const size_t *def_at;
+  const int *use_count;
   MirSlpNode nodes[MIR_SLP_MAX_NODES];
   int node_count;
   size_t region_lo;
@@ -9632,17 +8571,12 @@ static int mir_slp_is_f64_store(const MirInst *in) {
 }
 
 static int mir_slp_is_f64_binop(const MirInst *in) {
-  /* the opcode is float by definition; is_float is not set uniformly */
   return (in->op == MIR_FADD || in->op == MIR_FSUB || in->op == MIR_FMUL ||
           in->op == MIR_FDIV) &&
          in->width == 8 && in->dst.kind == MIR_OPK_VREG &&
          in->a.kind == MIR_OPK_VREG && in->b.kind == MIR_OPK_VREG;
 }
 
-/* Address bases are equal when they are the same register, or when both are
- * single-def registers computed by the same operation over equal operands:
- * the lowering recomputes `live + i*32` per field access, so the .x and .y
- * addresses arrive in different vregs holding one value. */
 static int mir_slp_same_base(const MirFunction *fn, const int *def_count,
                              const size_t *def_at, MirVregId a, MirVregId b,
                              int depth);
@@ -9691,11 +8625,6 @@ static int mir_slp_same_base(const MirFunction *fn, const int *def_count,
       return mir_slp_same_base(fn, def_count, def_at, da->a.vreg, db->a.vreg,
                                depth + 1);
     }
-    /* Two loads of one location are one value when nothing can have written
-     * it in between: same width, same address (base equivalence + equal
-     * displacement, no index), and every store between the two positions is
-     * provably disjoint from it. The lowering reloads `w->live` per field
-     * access, so every address chain bottoms out here. */
     if (da->a.kind == MIR_OPK_MEM && db->a.kind == MIR_OPK_MEM &&
         da->a.mem.index == MIR_VREG_NONE && db->a.mem.index == MIR_VREG_NONE &&
         da->a.mem.disp == db->a.mem.disp &&
@@ -9741,8 +8670,6 @@ static int mir_slp_same_base(const MirFunction *fn, const int *def_count,
   }
 }
 
-/* mem accesses [base+disp, +8) provably disjoint: equal base value, ranges
- * apart. A base that may differ may alias. */
 static void mir_slp_resolve_addr(const MirFunction *fn, const int *def_count,
                                  const size_t *def_at, MirVregId base,
                                  int disp, MirVregId *root_out, int *disp_out);
@@ -9765,14 +8692,6 @@ static int mir_slp_mem_disjoint(const MirFunction *fn, const int *def_count,
   return acc_disp + 8 <= base_disp || base_disp + 8 <= acc_disp;
 }
 
-/* The earlier lane at `from` conceptually moves down to `to`: every memory
- * access strictly between must be disjoint with (base, disp). Accesses that
- * belong to the graph itself are checked too -- the graph's own lanes are
- * same-base-adjacent pairs, and adjacent is NOT disjoint, so partner lanes are
- * skipped by index. */
-/* moving_is_store: a moving STORE conflicts with both reads and writes of its
- * location; a moving LOAD conflicts only with writes (loads reorder freely
- * against loads). */
 static int mir_slp_can_cross(const MirFunction *fn, const int *def_count,
                              const size_t *def_at, size_t from, size_t to,
                              MirVregId base, int disp, size_t partner,
@@ -9795,9 +8714,6 @@ static int mir_slp_can_cross(const MirFunction *fn, const int *def_count,
   return 1;
 }
 
-/* Normalize an address to (root, disp): the lowering splits `p + 8` into its
- * own ADD as often as it folds it into the displacement, so both spellings
- * must compare equal. Follows single-def `ADD vreg, imm` and register copies. */
 static void mir_slp_resolve_addr(const MirFunction *fn, const int *def_count,
                                  const size_t *def_at, MirVregId base,
                                  int disp, MirVregId *root_out,
@@ -9834,8 +8750,6 @@ static int mir_slp_find_node(const MirSlpGraph *g, MirVregId lo, MirVregId hi) {
   return -1;
 }
 
-/* Build (or find) the pair node for lanes (lo, hi). Returns the node index or
- * -1 when the lanes cannot run in lockstep. */
 static int mir_slp_pair_value(MirSlpGraph *g, MirVregId lo, MirVregId hi) {
   MirFunction *fn = g->fn;
   int found = mir_slp_find_node(g, lo, hi);
@@ -9846,9 +8760,6 @@ static int mir_slp_pair_value(MirSlpGraph *g, MirVregId lo, MirVregId hi) {
     return -1;
   }
 
-  /* One scalar feeding both lanes broadcasts. Zero definitions is a
-   * parameter: defined at entry, stable everywhere. More than one is a
-   * mutable local and refuses. */
   if (lo == hi) {
     if (g->def_count[lo] > 1) {
       return -1;
@@ -9862,7 +8773,7 @@ static int mir_slp_pair_value(MirSlpGraph *g, MirVregId lo, MirVregId hi) {
     g->nodes[n].kind = 2;
     g->nodes[n].child_a = -1;
     g->nodes[n].child_b = -1;
-    g->nodes[n].keep_originals = 1; /* the scalar def always stays */
+    g->nodes[n].keep_originals = 1;
     return n;
   }
 
@@ -9878,11 +8789,6 @@ static int mir_slp_pair_value(MirSlpGraph *g, MirVregId lo, MirVregId hi) {
   const MirInst *li = &fn->insns[la];
   const MirInst *hi_in = &fn->insns[ha];
 
-  /* Adjacent loads: lane 0 at [base+d], lane 1 at [base+d+8]. The fused load
-   * runs at the EARLIER lane's slot, so the LATER lane conceptually moves up:
-   * everything between must be provably disjoint from the later lane's
-   * address (its own lane may legitimately be stored to in between -- the
-   * scalar code loaded before that store, and so does the fused load). */
   MirVregId lo_root = MIR_VREG_NONE, hi_root = MIR_VREG_NONE;
   int lo_disp = 0, hi_disp = 0;
   if (mir_slp_is_f64_load(li) && mir_slp_is_f64_load(hi_in)) {
@@ -9915,8 +8821,6 @@ static int mir_slp_pair_value(MirSlpGraph *g, MirVregId lo, MirVregId hi) {
     return n;
   }
 
-  /* Isomorphic binops: same opcode, lanes pair recursively. FDIV pairs too --
-   * both lanes divide, so the packed form raises exactly the same traps. */
   if (mir_slp_is_f64_binop(li) && mir_slp_is_f64_binop(hi_in) &&
       li->op == hi_in->op && la < ha) {
     int ca = mir_slp_pair_value(g, li->a.vreg, hi_in->a.vreg);
@@ -9944,8 +8848,6 @@ static int mir_slp_pair_value(MirSlpGraph *g, MirVregId lo, MirVregId hi) {
   return -1;
 }
 
-/* Internal uses: reads of a node's lanes by other graph originals. A lane
- * read anywhere else forces the originals to stay. */
 static void mir_slp_mark_escapes(MirSlpGraph *g, size_t st_lo, size_t st_hi) {
   MirFunction *fn = g->fn;
   for (int n = 0; n < g->node_count; n++) {
@@ -9955,7 +8857,6 @@ static void mir_slp_mark_escapes(MirSlpGraph *g, size_t st_lo, size_t st_hi) {
     }
     int internal_lo = 0;
     int internal_hi = 0;
-    /* the two original stores read the root's lanes and are dropped */
     if (fn->insns[st_lo].a.kind == MIR_OPK_VREG &&
         fn->insns[st_lo].a.vreg == node->lo) {
       internal_lo++;
@@ -9992,8 +8893,6 @@ static void mir_slp_mark_escapes(MirSlpGraph *g, size_t st_lo, size_t st_hi) {
       node->keep_originals = 1;
     }
   }
-  /* Keeping a parent's originals means its lanes still read the children's
-   * lanes, so the children's originals must stay too. Propagate down. */
   int changed = 1;
   while (changed) {
     changed = 0;
@@ -10014,11 +8913,6 @@ static void mir_slp_mark_escapes(MirSlpGraph *g, size_t st_lo, size_t st_hi) {
   }
 }
 
-/* One emitted pair instruction, targeted at a slot in the original stream:
- * it is inserted immediately before whatever remains at that index. Loads
- * anchor at the EARLIER lane (later lane proved able to move up); arithmetic
- * anchors at the LATER lane (its inputs' anchors are strictly earlier);
- * broadcasts anchor with their first consumer. */
 typedef struct {
   size_t at;
   MirInst inst;
@@ -10032,7 +8926,7 @@ static int mir_slp_emit_node(MirSlpGraph *g, int n, size_t consumer_anchor,
   size_t anchor;
   if (node->pair != MIR_VREG_NONE) {
     if (anchor_out) {
-      *anchor_out = node->lo_at; /* already placed; anchor irrelevant */
+      *anchor_out = node->lo_at;
     }
     return 1;
   }
@@ -10045,7 +8939,6 @@ static int mir_slp_emit_node(MirSlpGraph *g, int n, size_t consumer_anchor,
     break;
   default:
     anchor = consumer_anchor;
-    /* the broadcast scalar must exist by then (parameters exist at entry) */
     if (g->def_count[node->lo] == 1 && g->def_at[node->lo] >= anchor) {
       return 0;
     }
@@ -10071,7 +8964,7 @@ static int mir_slp_emit_node(MirSlpGraph *g, int n, size_t consumer_anchor,
   in->width = 16;
   in->ir_index = -1;
   switch (node->kind) {
-  case 0: { /* load pair: movupd from lane 0's (lower) address */
+  case 0: {
     const MirInst *l0 = &fn->insns[node->lo_at];
     in->op = MIR_MOV;
     in->dst = mir_op_vreg(node->pair);
@@ -10098,8 +8991,6 @@ static int mir_slp_emit_node(MirSlpGraph *g, int n, size_t consumer_anchor,
   return 1;
 }
 
-/* Try to vectorize the store pair at (s_lo, s_hi). Returns 1 and fills the
- * rewrite plan when the whole graph pairs. */
 static int mir_slp_try_store_pair(MirFunction *fn, const int *def_count,
                                   const size_t *def_at, const int *use_count,
                                   size_t s_lo, size_t s_hi, int *changed) {
@@ -10114,8 +9005,6 @@ static int mir_slp_try_store_pair(MirFunction *fn, const int *def_count,
 
   int root = -1;
   {
-    /* Region: from the earliest def the graph can reach back to, up to the
-     * later store. Start wide (the enclosing straight-line run). */
     size_t lo = s_lo;
     while (lo > 0 && mir_slp_region_ok(fn, lo - 1, lo - 1)) {
       lo--;
@@ -10130,19 +9019,16 @@ static int mir_slp_try_store_pair(MirFunction *fn, const int *def_count,
   if (root < 0) {
     return 0;
   }
-  /* The earlier store moves down to the later one. */
   if (!mir_slp_can_cross(fn, def_count, def_at, s_lo, s_hi,
                          st_lo->dst.mem.base, st_lo->dst.mem.disp, s_hi, 1)) {
     return 0;
   }
-  /* A store pair with a bare broadcast root gains nothing. */
   if (g.nodes[root].kind == 2) {
     return 0;
   }
 
   mir_slp_mark_escapes(&g, s_lo, s_hi);
 
-  /* Emit the pair chain, each instruction targeted at its own slot. */
   MirSlpEmit emitted[MIR_SLP_MAX_NODES + 2];
   int emitted_count = 0;
   size_t root_anchor = 0;
@@ -10151,7 +9037,7 @@ static int mir_slp_try_store_pair(MirFunction *fn, const int *def_count,
     return 0;
   }
   if (root_anchor >= s_hi) {
-    return 0; /* the root value must exist before the fused store runs */
+    return 0;
   }
   {
     MirSlpEmit *slot = &emitted[emitted_count++];
@@ -10162,12 +9048,10 @@ static int mir_slp_try_store_pair(MirFunction *fn, const int *def_count,
     st->is_float = 1;
     st->width = 16;
     st->ir_index = -1;
-    st->dst = st_lo->dst; /* lane 0 = the lower resolved address */
+    st->dst = st_lo->dst;
     st->a = mir_op_vreg(g.nodes[root].pair);
   }
 
-  /* Rebuild: droppable originals disappear, each emitted instruction lands
-   * just before whatever remains at its slot. */
   unsigned char *drop = calloc(fn->insn_count, 1);
   if (!drop) {
     return 0;
@@ -10210,8 +9094,6 @@ static int mir_slp_try_store_pair(MirFunction *fn, const int *def_count,
   return 1;
 }
 
-/* Pair adjacent float64 stores and the operation DAGs behind them. One
- * rewrite per scan; def/use tables go stale at the first change. */
 static void mir_slp_pair_f64(MirFunction *fn) {
   if (!fn || fn->insn_count < 4) {
     return;
@@ -10283,7 +9165,6 @@ static void mir_slp_pair_f64(MirFunction *fn) {
             fprintf(stderr, "[slp] pair candidate @%zu/@%zu disp %d/%d\n", i,
                     j, a->dst.mem.disp, b->dst.mem.disp);
           }
-          /* lane order == program order: the .x store first, .y second */
           if (mir_slp_try_store_pair(fn, def_count, def_at, use_count, i, j,
                                      &changed)) {
             if (dbg) {
@@ -10479,9 +9360,6 @@ static void mir_rotate_loops(MirFunction *fn) {
     return;
   }
   for (size_t j = 0; j + 1 < fn->insn_count; j++) {
-    /* A rotatable header is `label H` immediately followed by its `CMPBR cc ->
-     * E`. (Immediate adjacency means the compare operands are loop-stable live
-     * values, not header-computed temps.) */
     if (fn->insns[j].op != MIR_LABEL ||
         fn->insns[j].dst.kind != MIR_OPK_LABEL || !fn->insns[j].dst.sym ||
         fn->insns[j + 1].op != MIR_CMPBR ||
@@ -10489,16 +9367,9 @@ static void mir_rotate_loops(MirFunction *fn) {
         !fn->insns[j + 1].dst.sym) {
       continue;
     }
-    const char *hname = fn->insns[j].dst.sym;     /* header / body-start label */
-    const char *ename = fn->insns[j + 1].dst.sym; /* loop exit target          */
+    const char *hname = fn->insns[j].dst.sym;
+    const char *ename = fn->insns[j + 1].dst.sym;
 
-    /* Require that the only edge into H is a single backward `JMP H`: the latch.
-     * Rotation moves the test above the label, so H stops being tested on entry
-     * and every other edge reaching it would run the body without ever
-     * evaluating the loop condition. That covers conditional back-edges as well
-     * as unconditional ones -- a `while (i <= j) { ...; if (i <= j) { ... } }`
-     * lowers the `if`'s false arm to a `CMPBR H`, which is a back-edge the JMP
-     * scan alone does not see -- and forward jumps into the header. */
     size_t be = 0;
     int nbe = 0;
     int other_edge = 0;
@@ -10531,10 +9402,6 @@ static void mir_rotate_loops(MirFunction *fn) {
     if (nbe != 1 || other_edge) {
       continue;
     }
-    /* The instruction right after the back-edge must be the header's exit label.
-     * Otherwise the rotated loop's fall-through (the not-taken bottom test) would
-     * land on the wrong block, e.g. when the loop is the last statement in an
-     * `if` and its exit is the enclosing block's end, not a `while_end` here. */
     if (be + 1 >= fn->insn_count || fn->insns[be + 1].op != MIR_LABEL ||
         fn->insns[be + 1].dst.kind != MIR_OPK_LABEL ||
         !fn->insns[be + 1].dst.sym ||
@@ -10542,9 +9409,6 @@ static void mir_rotate_loops(MirFunction *fn) {
       continue;
     }
 
-    /* Convert the back-edge `JMP H` into the bottom test `CMPBR !cc -> H` (loop
-     * while the condition still holds; fall through to the exit label when it
-     * fails). cc ^ 1 inverts the x86 condition. dst already targets H. */
     fn->insns[be].op = MIR_CMPBR;
     fn->insns[be].a = fn->insns[j + 1].a;
     fn->insns[be].b = fn->insns[j + 1].b;
@@ -10552,15 +9416,12 @@ static void mir_rotate_loops(MirFunction *fn) {
     fn->insns[be].is_unsigned = fn->insns[j + 1].is_unsigned;
     fn->insns[be].cc = (unsigned char)(fn->insns[j + 1].cc ^ 1u);
 
-    /* Swap `label H` with its CMPBR so H marks the body and the CMPBR is a
-     * one-time entry guard. */
     MirInst tmp = fn->insns[j];
     fn->insns[j] = fn->insns[j + 1];
     fn->insns[j + 1] = tmp;
   }
 }
 
-/* MIR index of the LABEL defining `name`, or (size_t)-1. */
 static int mir_insn_defines_label(const MirInst *in, const char *name) {
   return in->op == MIR_LABEL && in->dst.kind == MIR_OPK_LABEL && in->dst.sym &&
          strcmp(in->dst.sym, name) == 0;
@@ -10625,11 +9486,6 @@ static void mir_label_index_build(MirFunction *fn) {
   fn->label_slot_insns = fn->insn_count;
 }
 
-/* Answered from an index built in one walk. This was a full scan of the
- * instruction stream per lookup, and the back-edge table resolves every branch
- * target through it while itself being called once per branch, so an N-arm
- * if/else function cost O(N^3): at 1600 arms, 2.56M calls totalling 13.7
- * BILLION compares, and codegen was 99.8% of the compile. */
 static size_t mir_label_index(const MirFunction *fn, const char *name) {
   if (!fn || !name) {
     return (size_t)-1;
@@ -10651,10 +9507,6 @@ static size_t mir_label_index(const MirFunction *fn, const char *name) {
       h = (h + 1u) & mask;
     }
   }
-  /* Absent from the map, which a rewrite that left insn_count alone can also
-   * mean. Rescanning keeps the answer right whatever a pass did, and rebuilds
-   * so the next lookup is cheap again. A branch to a label this function does
-   * not define is the only case that pays this twice. */
   size_t found = mir_label_index_scan(fn, name);
   if (found != (size_t)-1) {
     mir_label_index_build(mutable_fn);
@@ -10662,15 +9514,6 @@ static size_t mir_label_index(const MirFunction *fn, const char *name) {
   return found;
 }
 
-/* True if MIR index p sits inside a loop body: some JMP/CMPBR back-edge after p
- * targets a label defined at or before p (it spans p). */
-/* Bounds of the tightest loop containing `p`: the back edge at `hi` jumps to the
- * header at `lo`, and lo <= p < hi. The tightest is the one whose header sits
- * latest, which is the innermost loop `p` belongs to. */
-/* One back edge: the branch at `branch` jumps to a label defined at `target`,
- * at or before it. Collected once per pass so the enclosing-loop query does not
- * walk the whole function per candidate -- that walk was the O(N^2) left after
- * the label lookup itself became an index. */
 typedef struct {
   size_t target;
   size_t branch;
@@ -10712,8 +9555,6 @@ static size_t mir_collect_back_edges(const MirFunction *fn,
   return count;
 }
 
-/* Ascending in `branch`, so a tie on the header keeps the earliest back edge,
- * exactly as the walk it replaces did. */
 static int mir_enclosing_loop_from(const MirBackEdge *edges, size_t edge_count,
                                    size_t p, size_t *lo, size_t *hi) {
   int found = 0;
@@ -10805,9 +9646,6 @@ static int mir_label_has_forward_target(const MirFunction *fn, const char *name,
   return 0;
 }
 
-/* True iff every use of `v` lies within the inclusive instruction range
- * [lo, hi]. Used to prove a pooled constant is confined to a single loop body
- * before its materialization is sunk to that loop's header. */
 static int mir_all_uses_in_range(const MirFunction *fn, MirVregId v, size_t lo,
                                  size_t hi) {
   for (size_t i = 0; i < fn->insn_count; i++) {
@@ -10818,10 +9656,6 @@ static int mir_all_uses_in_range(const MirFunction *fn, MirVregId v, size_t lo,
   return 1;
 }
 
-/* Returns the loop header to sink the constant to, and its loop-body end via
- * *loop_end. Returns first_use (and leaves *loop_end = first_use) when no
- * enclosing loop encloses first_use -- the caller must not relocate then, since
- * a non-loop position need not dominate the constant's other uses. */
 static int mir_insert_point_is_reached(const MirFunction *fn, size_t insert) {
   const MirInst *previous = NULL;
 
@@ -10858,12 +9692,6 @@ static size_t mir_const_insert_index(const MirFunction *fn, size_t first_use,
   return insert;
 }
 
-/* Loop-pooled constants are discovered before lowering, so their original MOVs
- * land near function entry. Relocate those materializations to the nearest safe
- * preheader of the loop that first uses them: back-edges jump to the label, so
- * an instruction before that label runs once on loop entry and not per
- * iteration. This keeps magic div/mod constants and pooled float literals out of
- * unrelated setup calls and gives the allocator much shorter live ranges. */
 static void mir_place_const_pool(MirFunction *fn) {
   if (!fn || (!fn->fconst_count && !fn->iconst_count) || fn->insn_count == 0) {
     return;
@@ -10964,23 +9792,6 @@ static void mir_place_const_pool(MirFunction *fn) {
   free(skip);
 }
 
-/* Cold-exit sinking. An in-loop early-return guard lowers to a forward CMPBR
- * that skips a short straight-line block ending in RET; the loop continuation
- * is the branch TARGET, so the hot path pays a taken forward branch every
- * iteration (on top of the back-edge -- two taken branches/iter). Invert the
- * branch to jump to the return block, sink that block to the function tail, and
- * fall through to the continuation. The back-edge is then the loop's only taken
- * branch (matching what gcc/clang do for search/validation loops). The move is
- * pure relabel + relocate of a straight-line exit block, so it is value- and
- * control-equivalent regardless of the branch's real probability; the loop gate
- * only restricts WHERE it pays off. */
-/* `jcc A; jmp B; A:` is a branch over a branch: five bytes of unconditional
- * jump on one of the two ways through every if/else and every rotated loop
- * exit that lands here. Inverting the condition reaches both targets with one
- * branch: `j!cc B; A:`. x86 condition inversion is the exact complement
- * (opcode ^ 1), and for the float branches the complement also routes the
- * unordered (NaN) case to the side the original fall-through took, so the
- * rewrite is value-equivalent for every input including NaN. */
 static void mir_thread_branch_over_jump(MirFunction *fn) {
   if (!fn || fn->insn_count < 3) {
     return;
@@ -11013,17 +9824,15 @@ static void mir_sink_cold_exits(MirFunction *fn) {
   if (!fn || fn->insn_count < 4) {
     return;
   }
-  /* An appended tail block must be unreachable by fall-through, so the function
-   * must already end in a terminator. */
   MirOpcode last = fn->insns[fn->insn_count - 1].op;
   if (last != MIR_RET && last != MIR_JMP && last != MIR_TRAP) {
     return;
   }
 
   typedef struct {
-    size_t p;      /* the CMPBR to invert */
-    size_t lo, hi; /* sunk region [lo, hi) -- ends in RET */
-    char *label;   /* fresh target name (owned by fn) */
+    size_t p;
+    size_t lo, hi;
+    char *label;
   } Sink;
   Sink *sinks = NULL;
   size_t nsink = 0, cap = 0;
@@ -11031,8 +9840,6 @@ static void mir_sink_cold_exits(MirFunction *fn) {
   if (!moved) {
     return;
   }
-  /* Collected once: this loop only reads the stream, and the rewrite below runs
-   * after it finishes, so the edges stay accurate for every query here. */
   MirBackEdge *back_edges = NULL;
   size_t back_edge_count = mir_collect_back_edges(fn, &back_edges);
 
@@ -11043,10 +9850,10 @@ static void mir_sink_cold_exits(MirFunction *fn) {
     }
     size_t q = mir_label_index(fn, br->dst.sym);
     if (q == (size_t)-1 || q < p + 2) {
-      continue; /* backward branch, or empty fall-through region */
+      continue;
     }
     if (q - 1 - p > 16) {
-      continue; /* keep this to short early-exit blocks */
+      continue;
     }
     int ok = 1;
     for (size_t r = p + 1; r < q; r++) {
@@ -11064,14 +9871,6 @@ static void mir_sink_cold_exits(MirFunction *fn) {
     if (!ok) {
       continue;
     }
-    /* The region has to end itself, or sinking it would fall into whatever
-     * follows at the end of the function. A RET arm is cold on the return
-     * heuristic. A JMP arm is worth sinking on either of two grounds: it
-     * leaves the loop, which a loop by definition does once however many times
-     * it goes around; or the branch guarding it tests equality against a
-     * constant, which is false far more often than not, so the equal case is
-     * the arm to move out. Either way the common path stops jumping twice to
-     * reach the code after the arm. */
     MirOpcode tail = fn->insns[q - 1].op;
     size_t loop_lo = 0, loop_hi = 0;
     if (!mir_enclosing_loop_from(back_edges, back_edge_count, p, &loop_lo,
@@ -11085,10 +9884,6 @@ static void mir_sink_cold_exits(MirFunction *fn) {
         break;
       }
     }
-    /* An arm that calls is not a rare fixup, it is the work. A dispatch chain's
-     * arms all look like equality tests, but exactly one of them runs every
-     * time, so moving them out of line costs the case that hits a jump it did
-     * not pay before, and buys nothing the call does not already swamp. */
     int arm_is_cold = 0;
     if (arm_calls) {
       continue;
@@ -11154,7 +9949,7 @@ static void mir_sink_cold_exits(MirFunction *fn) {
     return;
   }
 
-  size_t total = fn->insn_count + nsink; /* one new label per sunk block */
+  size_t total = fn->insn_count + nsink;
   MirInst *out = (MirInst *)malloc(total * sizeof(MirInst));
   if (!out) {
     free(moved);
@@ -11197,8 +9992,6 @@ static void mir_sink_cold_exits(MirFunction *fn) {
   free(back_edges);
   free(sinks);
 }
-
-/* ---- emit entry --------------------------------------------------------- */
 
 static int mir_emit_volatile_global_reads(MirFunction *fn, CodeGenerator *g,
                                           MirNameMap *map,
@@ -11456,30 +10249,17 @@ int code_generator_binary_emit_function_via_mir(
   fn.reserve_rbx = ir_function->is_interrupt ? 1 : 0;
   memset(&map, 0, sizeof(map));
 
-  /* Globals this function writes: register-promoted (cached at entry, written
-   * back before each return). Eligibility has proven these are leaf-function
-   * scalar-global writes with no aliasing pointer in scope. */
   MirGlobalWriteback wb = {0};
   size_t wb_cap = 0;
   size_t wb_all_cap = 0;
   size_t wb_at_cap = 0;
   unsigned long long *dirty_masks = NULL;
 
-  /* MIR owns saved registers and the frame; discard anything the legacy
-   * promoter left in the context. */
   context->saved_register_count = 0;
   context->saved_xmm_count = 0;
   context->raw_frame_size = 0;
   context->frame_size = 0;
   context->return_float_bits = 0;
-  /* Frame-pointer omission is DISABLED: a controlled A/B (same C baseline)
-   * showed it is performance-neutral across the benchmark suite (~0% on ~11
-   * benches, +3% on const_mod, but -6% on saxpy and -3% on func_ptr) -- no net
-   * win, with downside on a couple of leaf loops, plus the added rsp-addressing
-   * complexity. The freed rbp rarely binds and rsp-relative slots cost a SIB
-   * byte. Set unconditionally to 0 so the allocator keeps the rbp frame and rbp
-   * stays reserved. (The FPO machinery in mir_encode/mir_regalloc is inert while
-   * this is 0; opt back in via METTLE_FPO if a future change makes it pay off.) */
   {
     static int fpo = -1;
     if (fpo < 0) {
@@ -11514,17 +10294,6 @@ int code_generator_binary_emit_function_via_mir(
     goto oom;
   }
 
-  /* Address-taken globals (&g): a pointer can read/write their memory, so the
-   * cache vreg must be flushed before a pointer LOAD/STORE and reloaded after a
-   * pointer STORE. Collect them once (deduped).
-   *
-   * Only globals the loop above actually cached belong here. One that is merely
-   * address-taken -- `&g` with no read of `g` by name anywhere in the function,
-   * which is every global aggregate, since those are only ever reached through
-   * an address -- has no cache vreg, and memory is already authoritative. Its
-   * name still maps to a fresh vreg on demand, so flushing it would store an
-   * undefined register over the global's own storage: `var p: int32* = &g;
-   * return *p;` read back whatever the allocator had left in that register. */
   for (size_t i = 0; i < ir_function->instruction_count; i++) {
     const IRInstruction *in = &ir_function->instructions[i];
     if (in->op != IR_OP_ADDRESS_OF || in->lhs.kind != IR_OPERAND_SYMBOL ||
@@ -11556,10 +10325,6 @@ int code_generator_binary_emit_function_via_mir(
     }
     wb.at[wb.at_count++] = in->lhs.name;
   }
-  /* A cached global can also be aliased by a pointer built at MODULE scope
-   * (`var p: int32* = &g;`): no IR_OP_ADDRESS_OF appears in any function, but
-   * a pointer LOAD/STORE can still reach its memory. Give those the same
-   * address-taken flush/reload discipline. */
   for (size_t i = 0; i < wb.all_count; i++) {
     if (!mir_global_address_escapes_via_initializer(generator, wb.all[i]) &&
         !mir_global_address_taken_in_module(generator, wb.all[i])) {
@@ -11587,24 +10352,13 @@ int code_generator_binary_emit_function_via_mir(
     wb.at[wb.at_count++] = wb.all[i];
   }
 
-  /* Dirty-global flow analysis: lets the flush before each call/return write
-   * only the globals actually dirtied since the last cleaning point, instead
-   * of the whole written set (whose clean members a flush could stomp under
-   * concurrency). A NULL result (no writes, >64 written globals, malformed
-   * CFG) degrades to flushing everything -- but eligibility bails the
-   * write+call combination in that case, so calls never see the degraded
-   * flush. */
   dirty_masks = mir_compute_global_dirty_masks(ir_function, wb.names, wb.count);
   wb.dirty = dirty_masks;
 
-  /* Hoist loop-invariant constants into pooled vregs. Their materialization
-   * starts here and is relocated to hot-loop preheaders after MIR layout. */
   if (!mir_build_const_pool(&fn, generator, context, ir_function)) {
     goto oom;
   }
 
-  /* Detect [base + index*scale] address folds before lowering: the producers
-   * are marked to skip and each access carries its SIB descriptor. */
   char *fold_skip = NULL;
   MirAddrFold *folds = NULL;
   if (ir_function->instruction_count > 0) {
@@ -11629,19 +10383,10 @@ int code_generator_binary_emit_function_via_mir(
   }
 
   for (size_t i = 0; i < ir_function->instruction_count; i++) {
-    /* --annotate-asm: attribute every op emitted while lowering this IR
-     * instruction back to it (inert when the annotator is off). */
     fn.cur_ir_index = (int)i;
     if (fold_skip[i]) {
-      continue; /* address sub-expression folded into a SIB access */
+      continue;
     }
-    /* A pointer LOAD/STORE may alias an address-taken global: flush the cached
-     * address-taken globals to memory first (so the access sees pending by-name
-     * writes), and reload them after a STORE (so a later by-name read sees what
-     * the store wrote through the alias). Empty set => no overhead. */
-    /* An inline kernel reads and writes arrays through pointers, so it is a
-     * pointer memory op for this purpose too: an address-taken global it walks
-     * over must be flushed from its cache vreg first and reloaded after. */
     int kernel_op =
         mir_ir_kernel_index_for_op(ir_function->instructions[i].op) >= 0 ||
         ir_function->instructions[i].op == IR_OP_INLINE_ASM;
@@ -11678,11 +10423,8 @@ int code_generator_binary_emit_function_via_mir(
         free(folds);
         goto oom;
       }
-      i++; /* consumed the branch_zero too */
+      i++;
     } else {
-      /* Around a call, memory is the source of truth for cached globals: flush
-       * the written ones first (the callee may read them), lower the call, then
-       * reload cached globals only when the callee may have written them. */
       const IRInstruction *cin = &ir_function->instructions[i];
       int is_call = cin->op == IR_OP_CALL || cin->op == IR_OP_CALL_INDIRECT ||
                     cin->op == IR_OP_INLINE_ASM;
@@ -11706,9 +10448,6 @@ int code_generator_binary_emit_function_via_mir(
         goto oom;
       }
       if (is_call && call_writes_globals && wb.all_count > 0) {
-        /* If the call's result is assigned straight to a global (@g = f()), the
-         * call lowering already captured RAX into @g's cache vreg; don't reload
-         * @g from its stale memory (that would drop the just-stored result). */
         const IROperand *cd = &cin->dest;
         const char *except =
             (cd->kind == IR_OPERAND_SYMBOL && cd->name &&
@@ -11721,11 +10460,6 @@ int code_generator_binary_emit_function_via_mir(
           goto oom;
         }
       }
-      /* Keep narrow integer homes canonical: an ASSIGN/BINARY/UNARY/CALL
-       * result written to an int32/uint32/int16/etc. variable was computed in
-       * 64 bits and may carry garbage above the type's width. LOAD already
-       * extends at the access width, CAST canonicalizes itself, and an
-       * in-range literal is canonical as materialized, so those are skipped. */
       {
         if (cin->op == IR_OP_ASSIGN || cin->op == IR_OP_BINARY ||
             cin->op == IR_OP_UNARY || cin->op == IR_OP_CALL ||
@@ -11749,11 +10483,6 @@ int code_generator_binary_emit_function_via_mir(
                                       (1ull << bits);
             }
           }
-          /* Range-proven elision: when the operand ranges show the exact
-           * 64-bit result already fits the home's width, the computed bits
-           * ARE canonical and the re-extension is dropped. This is what takes
-           * the `movsx` off every int32 loop counter's step (`i = i + 1`
-           * under an `i < n` guard cannot leave int32). */
           int range_canonical = 0;
           if (cw && !literal_canonical && !fn.has_error &&
               (cin->op == IR_OP_BINARY || cin->op == IR_OP_ASSIGN)) {
@@ -11805,11 +10534,6 @@ int code_generator_binary_emit_function_via_mir(
   mir_build_jump_tables(&fn);
   mir_rotate_loops(&fn);
   mir_thread_branch_over_jump(&fn);
-  /* The const pool decides where a materialization dominates its uses from the
-   * linear order, so it has to run while that order still reflects the control
-   * flow. Sinking moves a use out of line, where it is reached by a branch from
-   * above rather than by falling through, and a pool placed afterwards can land
-   * a definition on a path the use never takes. */
   mir_place_const_pool(&fn);
   mir_sink_cold_exits(&fn);
 
@@ -11834,8 +10558,6 @@ int code_generator_binary_emit_function_via_mir(
       mir_function_dump(&fn, stderr);
     }
   }
-  /* --annotate-asm: open a capture context so mir_encode's per-instruction
-   * records land under this function (inert when the annotator is off). */
   fn.cur_ir_index = -1;
   if (mir_annotate_enabled()) {
     mir_annotate_begin_function(

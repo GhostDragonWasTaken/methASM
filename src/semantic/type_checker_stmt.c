@@ -1,9 +1,5 @@
-// Type checker: statement checking (if / for / switch / dispatch).
 #include "type_checker_internal.h"
 
-/* One entry per enclosing loop, holding its label or NULL. Pushing on failure
- * is still safe: a loop whose label could not be recorded simply cannot be
- * named, and the diagnostic that follows says so. */
 static int type_checker_push_loop_label(TypeChecker *checker,
                                         const char *label) {
   if (checker->loop_label_count == checker->loop_label_capacity) {
@@ -37,13 +33,6 @@ static int type_checker_loop_label_in_scope(const TypeChecker *checker,
   return 0;
 }
 
-// Validation functions for semantic analysis
-
-// Statement and expression validation functions
-
-/* --report-launches: print every dispatch site with its geometry, the half of
- * the occupancy question the device-side report cannot see. Set by the driver
- * before checking begins. */
 static int g_report_launches = 0;
 static int g_report_launches_header = 0;
 
@@ -80,11 +69,6 @@ static int type_checker_check_gpu_launch(TypeChecker *checker,
     return 0;
   }
 
-  /* Two forms of launch target. `dispatch NAME[...]` where NAME is a declared
-   * `extern kernel` is checked against that signature like an ordinary call,
-   * and its handle is resolved by name at lowering. Anything else is the
-   * original untyped form: an opaque runtime handle from gpu_func, which the
-   * compiler cannot check beyond its being an integer or pointer. */
   Symbol *kernel_symbol = NULL;
   if (launch->kernel->type == AST_IDENTIFIER && launch->kernel->data) {
     Identifier *identifier = (Identifier *)launch->kernel->data;
@@ -120,10 +104,6 @@ static int type_checker_check_gpu_launch(TypeChecker *checker,
       if (!param_type) {
         continue;
       }
-      /* A device pointer is an int64 handle on the host: the address lives in
-       * device memory and the host never dereferences it. Accept an integer
-       * for a pointer parameter, which is the whole existing calling
-       * convention, but keep every other pair exact. */
       int device_handle_for_pointer = param_type->kind == TYPE_POINTER &&
                                       type_checker_is_integer_type(arg_type);
       if (!device_handle_for_pointer &&
@@ -262,10 +242,6 @@ static int type_checker_check_gpu_launch(TypeChecker *checker,
     }
   }
 
-  /* A declared kernel launched with an explicit block shape that contradicts
-   * its declaration is a launch the driver will refuse (the module carries
-   * .reqntid). When both are known at compile time, refuse it here instead,
-   * where the message can name both shapes. */
   if (kernel_symbol && !launch->work && launch->kernel_block[0] > 0) {
     long long actual[3] = {0, 0, 0};
     int all_constant = 1;
@@ -324,8 +300,6 @@ static int type_checker_check_gpu_launch(TypeChecker *checker,
                                                        : 1) *
                           (launch->kernel_block[2] > 0 ? launch->kernel_block[2]
                                                        : 1);
-      /* Work items per block, not threads per block: a `per = warp` kernel
-       * spends 32 threads on each item. */
       long long per_item = launch->kernel_threads_per_item > 0
                                ? launch->kernel_threads_per_item
                                : 1;
@@ -365,9 +339,6 @@ static int type_checker_check_gpu_launch(TypeChecker *checker,
   return 1;
 }
 
-/* Fold one arm's end state into the running join. A missing arm and one that
-   cannot fall out of its own end both leave the join alone: neither reaches the
-   statement after the `if`. */
 static void type_checker_if_join_arm(TypeChecker *checker,
                                      unsigned char *joined, size_t joined_count,
                                      ASTNode *arm) {
@@ -410,9 +381,6 @@ int type_checker_check_if_statement(TypeChecker *checker,
     return 0;
   }
 
-  /* `@uniform! if`: a contract that every work item of the group takes the
-     same arm. The condition's own type may already say it, in which case the
-     decorator restates a fact rather than asking for one. */
   if (if_stmt->uniform_mode || (condition_type && condition_type->refine_uniform)) {
     const char *why = NULL;
     if (!type_checker_expression_is_uniform(checker, if_stmt->condition,
@@ -436,17 +404,10 @@ int type_checker_check_if_statement(TypeChecker *checker,
                                    if_stmt->condition->location, message);
       }
     } else {
-      if_stmt->uniform_mode = 3; /* proven: the branch is a group decision */
+      if_stmt->uniform_mode = 3;
     }
   }
 
-  /* Initialization flow through the chain. Every arm is checked from the entry
-   * state; what reaches the statement after the `if` is the intersection of the
-   * paths that can get there. So a variable written on every path is
-   * initialized afterwards, and one written on some paths is not. An arm that
-   * returns, breaks or continues never reaches the join and does not constrain
-   * it. Without an `else` there is a fall-through path that writes nothing,
-   * which is the entry state; with one, every path is an arm. */
   size_t init_snapshot_count = 0;
   unsigned char *init_snapshot =
       type_checker_init_tracker_capture(checker, &init_snapshot_count);
@@ -467,9 +428,6 @@ int type_checker_check_if_statement(TypeChecker *checker,
       return 0;
     }
     if (if_stmt->else_branch) {
-      /* Exhaustive: start from "initialized everywhere" and let the arms cut
-       * it down. If every arm terminates nothing is cut, and nothing reaches
-       * the join to read it either. */
       memset(joined, 1, init_snapshot_count * sizeof(unsigned char));
     } else {
       memcpy(joined, init_snapshot,
@@ -603,9 +561,6 @@ int type_checker_body_assigns(const ASTNode *node, const char *name) {
   return 0;
 }
 
-/* A loop's condition decides how many times each work item goes round. Where
-   every work item goes round the same number of times, the group is intact
-   inside the body and a collective there speaks to all of it. */
 static int type_checker_check_loop_uniformity(TypeChecker *checker,
                                               ASTNode *condition,
                                               int *uniform_mode) {
@@ -757,11 +712,6 @@ int type_checker_check_for_statement(TypeChecker *checker,
   }
 
   if (for_stmt->increment) {
-    /* An assignment carries a target, and only the statement checker looks at
-     * one: as an expression it answers with the type of the value and never
-     * asks where it is going. The initializer above already dispatches this
-     * way; the step did not, so `for (var i: int32 = 0; i < 3; nosuch = i + 1)`
-     * named an undeclared variable, type-checked clean, and reached codegen. */
     int step_ok = (for_stmt->increment->type == AST_ASSIGNMENT ||
                    for_stmt->increment->type == AST_FUNCTION_CALL)
                       ? type_checker_check_statement(checker,
@@ -828,8 +778,6 @@ int type_checker_check_for_statement(TypeChecker *checker,
   return 1;
 }
 
-/* The first `fallthrough` this case body would reach, or NULL. A nested switch
- * owns its own cases, so the walk stops at one. */
 static const ASTNode *type_checker_find_fallthrough(const ASTNode *node) {
   size_t i;
   if (!node || node->type == AST_SWITCH_STATEMENT) {
@@ -1014,10 +962,6 @@ int type_checker_check_switch_statement(TypeChecker *checker,
       }
 
       long long case_value = 0;
-      /* With the checker, a cast and a named constant fold here the same way
-         they fold in a `const` initializer. Without it `case (int32)(1):` was
-         "must be a compile-time integer constant expression", which is what it
-         plainly is. */
       int case_eval_ok = type_checker_eval_integer_constant_with_checker(
           checker, case_clause->value, &case_value);
       if (!case_eval_ok &&
@@ -1029,7 +973,6 @@ int type_checker_check_switch_statement(TypeChecker *checker,
           case_eval_ok = 1;
         }
       }
-      /* Qualified plain-enum variant in a case: `case EnumName.Variant:`. */
       if (!case_eval_ok &&
           case_clause->value->type == AST_MEMBER_ACCESS) {
         MemberAccess *cma = (MemberAccess *)case_clause->value->data;
@@ -1060,10 +1003,6 @@ int type_checker_check_switch_statement(TypeChecker *checker,
         return 0;
       }
 
-      // Range case `lo..hi`: validate the upper bound the same way as the
-      // lower bound, require it be a compile-time integer constant, and ensure
-      // lo <= hi. First-match-wins dispatch makes overlapping ranges harmless,
-      // so they are not tracked for duplicate detection.
       if (case_clause->value_high) {
         Type *high_type =
             type_checker_infer_type(checker, case_clause->value_high);
@@ -1191,25 +1130,15 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
   if (!type_checker_check_statement_body(checker, statement)) {
     return 0;
   }
-  /* The bank check runs after the statement is typed, because it reads the
-     types the accesses inside it ended with. */
   return type_checker_check_conflict_free(checker, statement);
 }
 
 static int type_checker_check_block(TypeChecker *checker, ASTNode *statement) {
-    // A block of statements
     Program *block = (Program *)statement->data;
     if (block) {
-      /* Const eval rewrites the block before any of it is checked: a `comptime for`
-       * becomes one copy of its body per field, and each copy is checked
-       * against a different field type from here on. */
       int expanded_ok =
           type_checker_expand_comptime_block(checker, statement, 0);
 
-      /* If this block is itself an expansion, every diagnostic raised while
-       * checking it names the iteration that generated it. The frame is live
-       * for the whole check, nested frames included, so a `comptime for` inside a
-       * `comptime for` reports the full chain. */
       SourceSpan expansion_origin;
       const char *expansion_note =
           type_checker_expansion_note(checker, statement, &expansion_origin);
@@ -1218,7 +1147,6 @@ static int type_checker_check_block(TypeChecker *checker, ASTNode *statement) {
           error_reporter_push_note_frame(checker->error_reporter,
                                          expansion_origin, expansion_note);
 
-      // Enter a new nested scope
       if (!symbol_table_enter_scope(checker->symbol_table, SCOPE_BLOCK)) {
         type_checker_set_error_at_location(
             checker, statement->location,
@@ -1237,16 +1165,12 @@ static int type_checker_check_block(TypeChecker *checker, ASTNode *statement) {
         return 0;
       }
 
-      /* The binding is declared in the expansion's own scope, so it cannot be
-       * seen by anything outside the body the programmer wrote. */
       int block_ok = expanded_ok &&
                      type_checker_declare_expansion_binding(checker, statement);
       int reached_terminator = 0;
       size_t block_guard_depth = type_checker_guard_depth(checker);
       for (size_t i = 0; i < statement->child_count; i++) {
         ASTNode *child = statement->children[i];
-        /* A directive still standing here is one the expander refused and has
-         * already reported on. Checking it again would only cascade. */
         if (child && child->type == AST_COMPTIME_FOR) {
           continue;
         }
@@ -1255,8 +1179,6 @@ static int type_checker_check_block(TypeChecker *checker, ASTNode *statement) {
               checker->error_reporter, ERROR_SEMANTIC, child->location,
               "Unreachable code: statement will never execute");
         }
-        // A bad statement doesn't stop the walk: keep checking the block's
-        // remaining statements so one compile reports every error.
         if (!type_checker_check_statement(checker, statement->children[i])) {
           block_ok = 0;
         }
@@ -1295,18 +1217,16 @@ static int type_checker_check_while(TypeChecker *checker, ASTNode *statement) {
       return 0;
     }
 
-    // Check condition type
     Type *condition_type =
         type_checker_infer_type(checker, while_stmt->condition);
     if (!condition_type) {
-      return 0; // Error already reported
+      return 0;
     }
     if (type_checker_reject_comptime_escape(
             checker, while_stmt->condition->location, condition_type)) {
       return 0;
     }
 
-    // Condition should be a numeric type (treated as boolean)
     if (!type_checker_is_numeric_type(condition_type)) {
       type_checker_report_type_mismatch(checker,
                                         while_stmt->condition->location,
@@ -1417,13 +1337,10 @@ static int type_checker_check_return(TypeChecker *checker, ASTNode *statement) {
       }
 
       ASTNode *value = ret_stmt->values ? ret_stmt->values[0] : ret_stmt->value;
-      // Check if return value type matches function return type
       checker->aggregate_target_type = func_return_type;
       Type *value_type = type_checker_infer_type(checker, value);
       checker->aggregate_target_type = NULL;
       if (!value_type) {
-        // Error already reported by type_checker_infer_type if it failed
-        // Only set generic error if no specific error was set
         if (!checker->has_error) {
           type_checker_set_error_at_location(
               checker, ret_stmt->value->location,
@@ -1590,11 +1507,9 @@ static int type_checker_check_statement_body(TypeChecker *checker,
   case AST_FUNCTION_DECLARATION:
   case AST_STRUCT_DECLARATION:
   case AST_ASSIGNMENT:
-    // These are handled by process_declaration
     return type_checker_process_declaration(checker, statement);
 
   case AST_FUNCTION_CALL: {
-    // Function call as statement (no return value used)
     Type *return_type = type_checker_infer_type(checker, statement);
     if (!return_type) {
       return 0;
@@ -1634,10 +1549,6 @@ static int type_checker_check_statement_body(TypeChecker *checker,
     return type_checker_check_match_statement(checker, statement);
   }
 
-  /* `quiesce;` names a point where the program consents to a code swap.
-   * Nothing runs here that the programmer did not write, so there is nothing
-   * to check about the point itself; what a swap is allowed to change is
-   * checked against `layoutof` where the swap is proposed. */
   case AST_QUIESCE_STATEMENT:
     return 1;
 
@@ -1659,8 +1570,6 @@ static int type_checker_check_statement_body(TypeChecker *checker,
   case AST_INLINE_ASM:
     return 1;
 
-  /* Expansion rewrites a `comptime for` where its enclosing block can see it,
-   * so one arriving here sits where a block cannot be spliced in. */
   case AST_COMPTIME_FOR:
     type_checker_set_error_at_location(
         checker, statement->location,
@@ -1671,10 +1580,6 @@ static int type_checker_check_statement_body(TypeChecker *checker,
     return type_checker_check_block(checker, statement);
 
   default: {
-    /* Everything that reaches here is an expression standing where a
-       statement belongs. Name the shape and say what happens to its value,
-       so the reader knows whether they meant to assign it, call something,
-       or delete the line. */
     const char *shape = "expression";
     const char *why = "its value goes nowhere";
     switch (statement->type) {

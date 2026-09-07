@@ -148,7 +148,6 @@ void parser_advance(Parser *parser) {
   token_destroy(&parser->current_token);
   parser->current_token = parser->peek_token;
 
-  // Clear peek_token to avoid double-free
   parser->peek_token.type = TOKEN_EOF;
   parser->peek_token.value = NULL;
   parser->peek_token.lexeme.data = NULL;
@@ -157,7 +156,6 @@ void parser_advance(Parser *parser) {
   parser->peek_token.column = 0;
   parser->peek_token.is_interned = 0;
 
-  // Get new peek token
   parser->peek_token = lexer_next_token(parser->lexer);
 
   if (parser->current_token.type == TOKEN_ERROR) {
@@ -304,7 +302,6 @@ int parser_expect_statement_end(Parser *parser) {
     return 1;
   }
 
-  // Skip over any extra newlines
   while (parser_match(parser, TOKEN_NEWLINE)) {
     parser_advance(parser);
   }
@@ -343,17 +340,12 @@ int parser_expect(Parser *parser, TokenType type) {
   snprintf(error_msg, sizeof(error_msg), "Expected %s, found %s", expected_str,
            actual_str);
 
-  // Generate context-specific suggestions
   const char *suggestion = NULL;
   char help_buf[PARSER_ERROR_BUF_SIZE];
   if (type == TOKEN_SEMICOLON) {
     suggestion = "add a semicolon ';' to end the statement";
   } else if (type == TOKEN_RPAREN &&
              parser->current_token.type == TOKEN_COMMA) {
-    /* A comma where ')' was due means one of two different mistakes, and the
-       parser knows which: a list that ran on, or parentheses asked to hold
-       more than the one value they can hold. Mettle has no comma operator
-       and no tuples, so the second is never a list at all. */
     const char *ctx = parser->group_context;
     if (ctx && (strcmp(ctx, "parameter list") == 0 ||
                 strcmp(ctx, "argument list") == 0)) {
@@ -396,12 +388,9 @@ void parser_set_error_with_suggestion(Parser *parser, const char *message,
   free(parser->error_message);
   parser->error_message = strdup(message);
 
-  // A bad token leaves the stream unreliable, so every grammar complaint after
-  // it is a guess. The lexical error already names the real problem.
   if (parser->saw_lexical_error)
     return;
 
-  // If we have an error reporter, add the error to it
   if (parser->error_reporter) {
     SourceLocation location = source_location_create(
         parser->current_token.line, parser->current_token.column);
@@ -420,7 +409,6 @@ void parser_set_error_with_suggestion(Parser *parser, const char *message,
       error_reporter_add_error_with_span_and_suggestion(
           parser->error_reporter, ERROR_SYNTAX, span, message, suggestion);
     } else {
-      // Try to generate a helpful suggestion
       const char *auto_suggestion = NULL;
       if (parser->current_token.value) {
         auto_suggestion =
@@ -455,7 +443,6 @@ void parser_recover_from_error(Parser *parser) {
   parser->error_recovery_mode = 1;
   parser_synchronize(parser);
 
-  // Clear error state to continue parsing
   parser->has_error = 0;
   free(parser->error_message);
   parser->error_message = NULL;
@@ -473,9 +460,6 @@ void parser_synchronize(Parser *parser) {
       return;
     }
 
-    // Synchronize on the current token, not peek. Using peek can return
-    // without consuming an invalid current token (e.g. current '=>', peek
-    // 'return'), causing parse/recover loops to spin forever at top level.
     switch (parser->current_token.type) {
     case TOKEN_FUNCTION:
     case TOKEN_FN:
@@ -509,19 +493,10 @@ void parser_recover_in_block(Parser *parser, int block_depth) {
   parser->error_recovery_mode = 1;
   while (parser->current_token.type != TOKEN_EOF) {
     if (parser->brace_depth <= block_depth) {
-      // The block's own closing brace ends the search; the block parser
-      // consumes it, so recovery must not.
       if (parser->current_token.type == TOKEN_RBRACE)
         break;
-      // A '{' here opens the body of the construct whose header just failed.
-      // Stopping in front of it lets that body parse as an ordinary block, so
-      // the statements inside are still checked and the header costs one
-      // diagnostic.
       if (parser->current_token.type == TOKEN_LBRACE)
         break;
-      // A broken loop header holds semicolons of its own (`for i = 0; i < n;`),
-      // so stopping at the first one would drop the rest of the header into
-      // the block as statements. Run to the body brace instead.
       if (!parser->recover_at_body_brace &&
           (parser->current_token.type == TOKEN_SEMICOLON ||
            parser->current_token.type == TOKEN_NEWLINE)) {
@@ -536,8 +511,6 @@ void parser_recover_in_block(Parser *parser, int block_depth) {
   parser->recover_at_body_brace = 0;
 }
 
-// Tokens that begin a top-level item. Recovery at file scope stops on one of
-// these so the rest of a broken function body is never read as declarations.
 static int parser_token_starts_declaration(TokenType type) {
   switch (type) {
   case TOKEN_IMPORT:
@@ -581,37 +554,37 @@ void parser_recover_to_declaration(Parser *parser) {
 int parser_get_operator_precedence(TokenType type) {
   switch (type) {
   case TOKEN_DOT:
-    return 13; // Member access (highest precedence)
+    return 13;
   case TOKEN_MULTIPLY:
   case TOKEN_DIVIDE:
   case TOKEN_PERCENT:
-    return 11; // Multiplicative
+    return 11;
   case TOKEN_PLUS:
   case TOKEN_MINUS:
-    return 10; // Additive
+    return 10;
   case TOKEN_LSHIFT:
   case TOKEN_RSHIFT:
-    return 9; // Shift
+    return 9;
   case TOKEN_LESS_THAN:
   case TOKEN_LESS_EQUALS:
   case TOKEN_GREATER_THAN:
   case TOKEN_GREATER_EQUALS:
-    return 8; // Relational
+    return 8;
   case TOKEN_EQUALS_EQUALS:
   case TOKEN_NOT_EQUALS:
-    return 7; // Equality
+    return 7;
   case TOKEN_AMPERSAND:
-    return 6; // Bitwise AND
+    return 6;
   case TOKEN_CARET:
-    return 5; // Bitwise XOR
+    return 5;
   case TOKEN_PIPE:
-    return 4; // Bitwise OR
+    return 4;
   case TOKEN_AND_AND:
-    return 3; // Logical AND
+    return 3;
   case TOKEN_OR_OR:
-    return 2; // Logical OR
+    return 2;
   default:
-    return 0; // Not a binary operator
+    return 0;
   }
 }
 
@@ -642,18 +615,6 @@ int parser_is_binary_operator(TokenType type) {
   }
 }
 
-/* An operator that may open a continuation line, so
- *
- *   var wx: float64 = x + a(i)
- *                       + b(i);
- *
- * reads as one expression. It is the mirror of the trailing form, which works
- * because the loop below skips newlines after consuming an operator.
- *
- * Every operator here is one no statement can begin with, so nothing that used
- * to parse as two statements now parses as one. `*` is the exception and is
- * deliberately absent: `*p = 5;` is a statement, so a line opening with `*`
- * is genuinely ambiguous. Multiplication splits on the trailing form. */
 static int parser_operator_opens_continuation_line(TokenType type) {
   switch (type) {
   case TOKEN_PLUS:
@@ -706,7 +667,6 @@ ASTNode *parser_parse_program(Parser *parser) {
   while (parser->current_token.type != TOKEN_EOF) {
     size_t token_pos_before = parser->lexer->position;
 
-    // Skip empty statements/newlines at the top level
     if (parser->current_token.type == TOKEN_NEWLINE ||
         parser->current_token.type == TOKEN_SEMICOLON) {
       parser_advance(parser);
@@ -716,7 +676,6 @@ ASTNode *parser_parse_program(Parser *parser) {
     ASTNode *declaration = parser_parse_declaration(parser);
 
     if (declaration) {
-      // Add to program's declarations array
       prog_data->declarations =
           realloc(prog_data->declarations,
                   (prog_data->declaration_count + 1) * sizeof(ASTNode *));
@@ -745,7 +704,6 @@ ASTNode *parser_parse_program(Parser *parser) {
 
     if (parser->has_error) {
       parser_recover_to_declaration(parser);
-      // Hard guard against non-advancing recovery loops.
       if (parser->current_token.type != TOKEN_EOF &&
           parser->lexer->position == token_pos_before) {
         parser_advance(parser);
@@ -758,38 +716,26 @@ ASTNode *parser_parse_program(Parser *parser) {
 
 static ASTNode *parser_parse_extern_var_declaration(Parser *parser);
 
-// Flags collected from a run of `@ident[!]` decorators.
 typedef struct {
-  int is_inline;          // `@inline`
-  int is_inline_contract; // `@inline!` (implies is_inline)
-  int is_noinline;        // `@noinline`
-  int is_pure;            // `@pure`
-  int is_noalloc;         // `@noalloc`
-  int is_test;            // `@test`: compile-time unit test (mettle test)
-  int is_swappable;       // `@swappable`: may be replaced at a `quiesce` point
+  int is_inline;
+  int is_inline_contract;
+  int is_noinline;
+  int is_pure;
+  int is_noalloc;
+  int is_test;
+  int is_swappable;
   int is_naked;
   int is_interrupt;
   int is_rule;
-  int simd_mode; // SimdAttr from `@simd` / `@simd!` (SIMD_ATTR_NONE if absent)
-  int unroll_factor; // `@unroll(n)` on a loop; 0 if absent
-  /* `@uniform` / `@uniform!` on an `if`, a `for` or a `while`: the condition
-     or the trip count is the same for every work item of the group. 1 is the
-     hint, 2 is the contract that fails the build. */
+  int simd_mode;
+  int unroll_factor;
   int uniform_mode;
-  /* `@conflict_free` / `@conflict_free!` on a statement: the addresses one
-     subgroup touches in each workgroup access inside it fall in distinct
-     banks. 1 is the hint, 2 is the contract. */
   int conflict_free_mode;
 } ParsedDecorators;
 
-// Consume a run of `@ident[!]` decorators into `out`. Assumes the current token
-// is TOKEN_AT. Returns 1 on success (parser positioned on the decorated
-// construct), 0 on error (a parser error is set). Recognizes `@inline` /
-// `@inline!`, `@noinline`, `@pure`, `@noalloc`, and `@simd` / `@simd!`;
-// rejects unknown names, duplicates, and the `@inline`+`@noinline` conflict.
 static int parser_parse_one_decorator(Parser *parser,
                                       ParsedDecorators *out) {
-  parser_advance(parser); // consume '@'
+  parser_advance(parser);
   if (!parser_is_identifier_like(parser->current_token.type)) {
     parser_set_error(parser,
                      "Expected a decorator name after '@' (one of 'inline', "
@@ -805,8 +751,8 @@ static int parser_parse_one_decorator(Parser *parser,
     out->is_inline = 1;
     parser_advance(parser);
     if (parser->current_token.type == TOKEN_NOT) {
-      out->is_inline_contract = 1; // `@inline!`: contract, not just a hint
-      parser_advance(parser);      // consume '!'
+      out->is_inline_contract = 1;
+      parser_advance(parser);
     }
   } else if (strcmp(name, "noalloc") == 0) {
     if (out->is_noalloc) {
@@ -869,40 +815,40 @@ static int parser_parse_one_decorator(Parser *parser,
       parser_set_error(parser, "Duplicate '@conflict_free' decorator");
       return 0;
     }
-    parser_advance(parser); // consume 'conflict_free'
+    parser_advance(parser);
     out->conflict_free_mode = 1;
     if (parser->current_token.type == TOKEN_NOT) {
       out->conflict_free_mode = 2;
-      parser_advance(parser); // consume '!'
+      parser_advance(parser);
     }
   } else if (strcmp(name, "uniform") == 0) {
     if (out->uniform_mode) {
       parser_set_error(parser, "Duplicate '@uniform' decorator");
       return 0;
     }
-    parser_advance(parser); // consume 'uniform'
+    parser_advance(parser);
     out->uniform_mode = 1;
     if (parser->current_token.type == TOKEN_NOT) {
       out->uniform_mode = 2;
-      parser_advance(parser); // consume '!'
+      parser_advance(parser);
     }
   } else if (strcmp(name, "simd") == 0) {
     if (out->simd_mode != SIMD_ATTR_NONE) {
       parser_set_error(parser, "Duplicate '@simd' decorator");
       return 0;
     }
-    parser_advance(parser); // consume 'simd'
+    parser_advance(parser);
     out->simd_mode = SIMD_ATTR_HINT;
     if (parser->current_token.type == TOKEN_NOT) {
       out->simd_mode = SIMD_ATTR_CONTRACT;
-      parser_advance(parser); // consume '!'
+      parser_advance(parser);
     }
   } else if (strcmp(name, "unroll") == 0) {
     if (out->unroll_factor) {
       parser_set_error(parser, "Duplicate '@unroll' decorator");
       return 0;
     }
-    parser_advance(parser); // consume 'unroll'
+    parser_advance(parser);
     if (!parser_expect(parser, TOKEN_LPAREN)) {
       parser_set_error(parser, "Expected '(factor)' after '@unroll'");
       return 0;
@@ -970,9 +916,6 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
                      "never becomes code, so no other decorator applies to it");
     return 0;
   }
-  /* A swap replaces a function at its call boundary, so the boundary has to
-   * still be there. An inlined body has no call to redirect and no single
-   * place to redirect it: the copies are spread across every caller. */
   if (out->is_swappable && out->is_inline) {
     parser_set_error(parser,
                      "'@swappable' and '@inline' are mutually exclusive: a "
@@ -987,9 +930,6 @@ static ASTNode *parser_parse_comptime_for(Parser *parser, int declarations);
 static ASTNode *parser_parse_type_declaration(Parser *parser);
 static char *parser_parse_type_annotation(Parser *parser);
 
-/* Function decorators: `@inline` / `@noinline` / `@pure` / `@simd` may
- * prefix a (possibly `export`-qualified) function declaration. Parse the
- * chain, then stamp the flags onto the function it decorates. */
 static ASTNode *parser_parse_decorated_declaration(Parser *parser) {
   ParsedDecorators decos;
   if (!parser_parse_decorator_chain(parser, &decos))
@@ -1046,10 +986,7 @@ static ASTNode *parser_parse_decorated_declaration(Parser *parser) {
 }
 
 static ASTNode *parser_parse_extern_declaration(Parser *parser) {
-  parser_advance(parser); // consume 'extern'
-  /* `extern kernel name(params);` declares, host-side, a kernel defined in a
-   * separately compiled device module: the signature `dispatch` checks its
-   * arguments against. */
+  parser_advance(parser);
   if (parser->current_token.type == TOKEN_FUNCTION ||
       parser->current_token.type == TOKEN_FN ||
       parser->current_token.type == TOKEN_KERNEL) {
@@ -1269,8 +1206,6 @@ static ASTNode *parser_parse_type_declaration(Parser *parser) {
   char *type_params[4];
   size_t type_param_count = 0;
   parser_advance(parser);
-  /* `type Uniform<T> = T where uniform(value);` is a template: the parameter
-     names stand for a type the use site supplies. */
   if (parser->current_token.type == TOKEN_LESS_THAN) {
     parser_advance(parser);
     while (parser_is_identifier_like(parser->current_token.type)) {
@@ -1316,9 +1251,6 @@ static ASTNode *parser_parse_type_declaration(Parser *parser) {
   char *binding = NULL;
   if (parser->current_token.type == TOKEN_WHERE) {
     parser_advance(parser);
-    /* `where n: n >= 0` names the value the predicate speaks about. Two
-     * tokens settle it: nothing that starts an expression is an identifier
-     * followed by a colon, so the default `value` stays unambiguous. */
     if (parser_is_identifier_like(parser->current_token.type) &&
         parser->peek_token.type == TOKEN_COLON) {
       binding = strdup(parser->current_token.value);
@@ -1366,7 +1298,7 @@ static ASTNode *parser_parse_type_declaration(Parser *parser) {
 }
 
 static ASTNode *parser_parse_exported_declaration(Parser *parser) {
-  parser_advance(parser); // consume 'export'
+  parser_advance(parser);
   ASTNode *decl = NULL;
   if (parser_at_contextual_keyword(parser, "type", TOKEN_IDENTIFIER)) {
     decl = parser_parse_type_declaration(parser);
@@ -1406,7 +1338,7 @@ static ASTNode *parser_parse_exported_declaration(Parser *parser) {
       ((VarDeclaration *)decl->data)->is_exported = 1;
     }
   } else if (parser->current_token.type == TOKEN_EXTERN) {
-    parser_advance(parser); // consume 'extern'
+    parser_advance(parser);
     if (parser->current_token.type == TOKEN_FUNCTION ||
         parser->current_token.type == TOKEN_FN) {
       decl = parser_parse_function_declaration(parser);
@@ -1716,8 +1648,6 @@ ASTNode *parser_parse_declaration(Parser *parser) {
   if (!parser)
     return NULL;
 
-  /* Contextual `comptime for` in declaration position: the body holds
-   * declarations, and its expansions are spliced into the enclosing module. */
   if (parser_at_contextual_keyword(parser, "comptime", TOKEN_FOR)) {
     return parser_parse_comptime_for(parser, 1);
   }
@@ -1766,7 +1696,6 @@ ASTNode *parser_parse_declaration(Parser *parser) {
   case TOKEN_IMPL:
     return parser_parse_impl_declaration(parser);
   default:
-    /* Try to parse as a statement instead. */
     return parser_parse_statement(parser);
   }
 }
@@ -1805,9 +1734,6 @@ static const char *parser_compound_assign_op(TokenType type) {
   }
 }
 
-/* `i++` and `i--` are statements, exactly like `i += 1` and `i -= 1`. They
- * carry no value, so there is no order-of-evaluation question to answer and no
- * prefix/postfix distinction to observe: both spellings mean the same step. */
 static const char *parser_increment_op(TokenType type) {
   switch (type) {
   case TOKEN_PLUS_PLUS:   return "+";
@@ -1842,11 +1768,9 @@ static ASTNode *parser_parse_assignment_from_target(Parser *parser,
     compound_op = increment_op;
   }
 
-  parser_advance(parser); // consume '=', a compound operator, or '++' / '--'
+  parser_advance(parser);
 
   if (increment_op) {
-    /* The step is the only operand `++` can have, so it is synthesized here
-     * rather than parsed. */
     value = ast_create_number_literal(1, target->location, 10);
   } else {
     value = parser_parse_expression(parser);
@@ -1856,7 +1780,6 @@ static ASTNode *parser_parse_assignment_from_target(Parser *parser,
     return NULL;
   }
 
-  // Desugar `target OP= value` into `target = target OP value`.
   if (compound_op) {
     ASTNode *target_clone = ast_clone_node(target);
     if (!target_clone) {
@@ -1893,8 +1816,6 @@ static ASTNode *parser_parse_assignment_from_target(Parser *parser,
   return ast_create_field_assignment(target, value, target->location);
 }
 
-/* `++target` and `--target` in statement position. The step is identical to the
- * postfix spelling above; only the order the two tokens are read in differs. */
 static ASTNode *parser_parse_prefix_increment(Parser *parser) {
   if (!parser) {
     return NULL;
@@ -1905,7 +1826,7 @@ static ASTNode *parser_parse_prefix_increment(Parser *parser) {
     return NULL;
   }
 
-  parser_advance(parser); // consume '++' or '--'
+  parser_advance(parser);
 
   ASTNode *target = parser_parse_expression(parser);
   if (!target) {
@@ -2064,7 +1985,6 @@ static ASTNode *parser_parse_parenthesized_assignment(Parser *parser) {
   return assignment;
 }
 
-/* Enough of the parser's position to rewind a speculative parse. */
 typedef struct {
   size_t lexer_position;
   size_t lexer_line;
@@ -2084,9 +2004,6 @@ static void parser_restore_state(Parser *parser,
                                  const ParserSavedState *state);
 static void parser_discard_saved_state(ParserSavedState *state);
 
-/* True where `ident(` starts a composed declaration name rather than naming a
- * function the programmer wrote. Only inside a `comptime for`, so a program
- * with its own `ident` is untouched. */
 static int parser_at_composed_name(Parser *parser) {
   return parser->comptime_depth > 0 &&
          parser_is_identifier_like(parser->current_token.type) &&
@@ -2095,19 +2012,9 @@ static int parser_at_composed_name(Parser *parser) {
          parser->peek_token.type == TOKEN_LPAREN;
 }
 
-/* `ident("prefix", f.name)` where a declaration's name goes.
- *
- * A metaprogram that generates one declaration per field needs each of them to
- * have a different name, and the only compile-time strings in the language are
- * the ones reflection answers with. So the name is composed the way `typeof`
- * and `offsetof` were built: an identifier and call syntax, adding no
- * punctuation the lexer did not already read.
- *
- * The parts stay unevaluated here. The expander joins them once per iteration,
- * which is the only point at which the binding has a value. */
 static ASTNode *parser_parse_composed_name(Parser *parser) {
   SourceLocation location = parser_current_location(parser);
-  parser_advance(parser); /* consume the contextual `ident` */
+  parser_advance(parser);
   if (!parser_expect(parser, TOKEN_LPAREN)) {
     return NULL;
   }
@@ -2159,29 +2066,22 @@ static ASTNode *parser_parse_composed_name(Parser *parser) {
   return node;
 }
 
-/* Read a declaration's name: either an identifier, or the `ident(...)` form
- * that composes one. Exactly one of `*out_name` and `*out_composed` is set. */
 static int parser_parse_declaration_name(Parser *parser, const char *expected,
                                          char **out_name,
                                          ASTNode **out_composed) {
   *out_name = NULL;
   *out_composed = NULL;
-  /* Whatever the last declaration parse abandoned. */
   ast_destroy_node(parser->pending_composed_name);
   parser->pending_composed_name = NULL;
 
-  /* `ident("...")` reads as an attempt to compose a name wherever it appears:
-   * no parameter list starts with a string. Saying so beats letting it fail
-   * further along as a malformed parameter, and a function the programmer
-   * really did call `ident` is untouched, because its parameters are named. */
   if (parser->comptime_depth == 0 &&
       parser_is_identifier_like(parser->current_token.type) &&
       parser->current_token.value &&
       strcmp(parser->current_token.value, "ident") == 0 &&
       parser->peek_token.type == TOKEN_LPAREN) {
     ParserSavedState saved = parser_save_state(parser);
-    parser_advance(parser); /* `ident` */
-    parser_advance(parser); /* '(' */
+    parser_advance(parser);
+    parser_advance(parser);
     int composes = parser->current_token.type == TOKEN_STRING;
     parser_restore_state(parser, &saved);
     parser_discard_saved_state(&saved);
@@ -2199,8 +2099,6 @@ static int parser_parse_declaration_name(Parser *parser, const char *expected,
       return 0;
     }
     parser->pending_composed_name = *out_composed;
-    /* A placeholder, so anything that reaches for a name before the expander
-     * has run reads as unresolved rather than as a crash. */
     *out_name = strdup("<ident>");
     return *out_name != NULL;
   }
@@ -2214,9 +2112,6 @@ static int parser_parse_declaration_name(Parser *parser, const char *expected,
   return *out_name != NULL;
 }
 
-/* A `comptime for` body at module scope holds declarations, where one inside a
- * function holds statements. The directive is the same either way; what
- * differs is the list its expansions are spliced into. */
 static ASTNode *parser_parse_declaration_block(Parser *parser) {
   SourceLocation location = parser_current_location(parser);
   if (!parser_expect(parser, TOKEN_LBRACE)) {
@@ -2264,19 +2159,9 @@ static ASTNode *parser_parse_declaration_block(Parser *parser) {
   return block;
 }
 
-/* `comptime for <binding> in <sequence> { <body> }`.
- *
- * `comptime` is contextual, the same way `in` is: no token and no keyword is
- * reserved for it, so a program that already uses `comptime` as a name keeps
- * working. Only `comptime` immediately followed by `for` starts one of these.
- *
- * The binding carries no type annotation because it is bound to a `Field` by
- * the expander, which is the one type it can ever have. The body is always
- * braced -- an expansion is a block, and a block is what gives each iteration
- * its own scope. */
 static ASTNode *parser_parse_comptime_for(Parser *parser, int declarations) {
   SourceLocation location = parser_current_location(parser);
-  parser_advance(parser); // consume the contextual `comptime`
+  parser_advance(parser);
   if (!parser_expect(parser, TOKEN_FOR)) {
     return NULL;
   }
@@ -2300,7 +2185,6 @@ static ASTNode *parser_parse_comptime_for(Parser *parser, int declarations) {
     return NULL;
   }
 
-  // Contextual `in`, the same spelling the range-based `for` uses.
   if (!parser_is_identifier_like(parser->current_token.type) ||
       strcmp(parser->current_token.value, "in") != 0) {
     parser_set_error(parser,
@@ -2349,9 +2233,6 @@ static ASTNode *parser_parse_comptime_for(Parser *parser, int declarations) {
   return node;
 }
 
-/* Words that declare something in C, Rust, Go, or Python and nothing in
-   Mettle. Naming the Mettle spelling once beats letting the reader work back
-   from a run of grammar complaints. */
 static const struct {
   const char *word;
   const char *message;
@@ -2386,10 +2267,6 @@ static const struct {
      "a function that returns nothing leaves the '-> type' off"},
 };
 
-/* Two names in a row start no Mettle statement, so the reader has written a
-   declaration in another language's grammar. Say so and stop, rather than
-   letting the expression parser complain about the second name. Returns 1
-   when it reported. */
 static int parser_reject_foreign_declaration(Parser *parser) {
   if (parser->current_token.type != TOKEN_IDENTIFIER &&
       !(parser->current_token.type >= TOKEN_MOV &&
@@ -2488,27 +2365,17 @@ ASTNode *parser_parse_statement(Parser *parser) {
   if (!parser)
     return NULL;
 
-  // Contextual `comptime for`: only this exact pair starts a compile-time
-  // loop, so `comptime` stays available as an ordinary identifier.
   if (parser_at_contextual_keyword(parser, "comptime", TOKEN_FOR)) {
     return parser_parse_comptime_for(parser, 0);
   }
 
-  // Contextual `quiesce;`: the swap point. Contextual the same way `comptime`
-  // is, so a program already using `quiesce` as a name keeps working. The
-  // semicolon is what tells the marker from a variable of that name, and the
-  // only thing it takes away is a bare `quiesce;` expression statement, which
-  // reads a value and discards it.
   if (parser_at_contextual_keyword(parser, "quiesce", TOKEN_SEMICOLON)) {
     SourceLocation location = parser_current_location(parser);
-    parser_advance(parser); // consume the contextual `quiesce`
-    parser_advance(parser); // consume ';'
+    parser_advance(parser);
+    parser_advance(parser);
     return ast_create_quiesce_statement(location);
   }
 
-  /* Contextual `fallthrough;`: continue into the next case of a switch. A case
-   * ends where the next one begins, so this is what asks for the other
-   * behaviour, and it is contextual for the same reason `quiesce` is. */
   if (parser_at_contextual_keyword(parser, "fallthrough", TOKEN_SEMICOLON)) {
     SourceLocation location = parser_current_location(parser);
     parser_advance(parser);
@@ -2516,23 +2383,17 @@ ASTNode *parser_parse_statement(Parser *parser) {
     return ast_create_fallthrough_statement(location);
   }
 
-  // Vectorization attribute on a loop: `@simd` / `@simd!`.
-  //   @simd  for i in 0..n { ... }   -> best-effort hint (warn if not vectorized)
-  //   @simd! for i in 0..n { ... }   -> hard contract (compile error otherwise)
-  // The attribute may sit in front of a label too: `@simd outer: for ...`.
-  // Only `@simd` is meaningful on a loop; the other decorators are function-only.
   if (parser->current_token.type == TOKEN_AT) {
     return parser_parse_decorated_statement(parser);
   }
 
-  // Labeled loop: IDENT ':' (while | for)
   if (parser->current_token.type == TOKEN_IDENTIFIER &&
       parser->peek_token.type == TOKEN_COLON) {
     Token after_colon = lexer_peek_token(parser->lexer);
     if (after_colon.type == TOKEN_WHILE || after_colon.type == TOKEN_FOR) {
       char *label = strdup(parser->current_token.value);
-      parser_advance(parser); // consume IDENT
-      parser_advance(parser); // consume ':'
+      parser_advance(parser);
+      parser_advance(parser);
 
       ASTNode *loop = NULL;
       if (parser->current_token.type == TOKEN_WHILE) {
@@ -2702,25 +2563,11 @@ ASTNode *parser_parse_expression(Parser *parser) {
 }
 
 int parser_is_identifier_like(TokenType type) {
-  // Check if token can be used as an identifier in expression context
   return type == TOKEN_IDENTIFIER ||
-         // x86 mnemonics can be used as function names
          (type >= TOKEN_MOV && type <= TOKEN_SYSCALL) ||
-         // x86 registers can be used as identifiers in high-level context
          (type >= TOKEN_EAX && type <= TOKEN_R15);
 }
 
-/* A nested type argument list closes with `>>`, which the lexer reads as one
- * right-shift token: `Pair<Box<int32>, Box<int32>>` failed to parse while the
- * same type spelled `... Box<int32> >` succeeded.
- *
- * These two split it. The inner list takes one `>` from the pair by rewriting
- * the token in place to a single `>` WITHOUT advancing, leaving that `>` as the
- * current token for the enclosing list to consume normally. Deeper nests fall
- * out of the same rule: `>>>>` is RSHIFT RSHIFT, and each level takes one `>`
- * in turn. Only the type is rewritten -- the token's text stays ">>", which
- * nothing in this path reads -- so a speculative parse that backtracks restores
- * the original token from its clone and loses the rewrite with it. */
 static int parser_at_type_arg_close(const Parser *parser) {
   return parser->current_token.type == TOKEN_GREATER_THAN ||
          parser->current_token.type == TOKEN_RSHIFT;
@@ -2739,15 +2586,9 @@ static int parser_consume_type_arg_close(Parser *parser) {
 }
 
 int parser_is_type_keyword(TokenType type) {
-  // Check if token is a built-in type keyword
   return (type >= TOKEN_INT8 && type <= TOKEN_STRING_TYPE);
 }
 
-/* Built-in type names the lexer carries as plain identifiers rather than
-   keywords. Without them `(cstring)&p` reads as `cstring & p` -- a bitwise and
-   of the reflection value named `cstring` -- because the cast/grouping
-   disambiguation below only trusts a leading type keyword. Naming the three
-   here keeps the token set unchanged. */
 int parser_is_builtin_type_name(const char *text) {
   return text && (strcmp(text, "bool") == 0 || strcmp(text, "cstring") == 0 ||
                   strcmp(text, "rawptr") == 0 || strcmp(text, "float16") == 0 ||
@@ -2850,7 +2691,7 @@ static int parser_parse_where_clause(Parser *parser, char **type_params,
     return 1;
   }
 
-  parser_advance(parser); // consume 'where'
+  parser_advance(parser);
 
   do {
     size_t param_index = 0;
@@ -2948,7 +2789,7 @@ static char **parser_parse_type_param_list(Parser *parser, char ***out_traits,
   *out_traits = NULL;
   if (parser->current_token.type != TOKEN_LESS_THAN)
     return NULL;
-  parser_advance(parser); // consume '<'
+  parser_advance(parser);
 
   char **params = NULL;
   char **traits = NULL;
@@ -2998,9 +2839,6 @@ static char **parser_parse_type_param_list(Parser *parser, char ***out_traits,
 static char *parser_parse_type_annotation(Parser *parser);
 static char *parser_parse_type_annotation_ex(Parser *parser, int allow_array);
 
-/* `volatile T`: every access to a T is observable in itself, so none may be
- * removed, merged, reordered against another volatile access, or served from
- * a register. Spelled as a prefix qualifier and carried in the type text. */
 static int parser_at_volatile_type(Parser *parser) {
   return parser_is_identifier_like(parser->current_token.type) &&
          parser->current_token.value &&
@@ -3031,8 +2869,6 @@ static char *parser_parse_volatile_type(Parser *parser) {
   return qualified;
 }
 
-/* Function pointer type: fn(param_types) -> return_type (thin), or
- * Fn(param_types) -> return_type (a stateful closure type). */
 static int parser_at_closure_type(Parser *parser) {
   return parser_is_identifier_like(parser->current_token.type) &&
          parser->current_token.value &&
@@ -3116,7 +2952,7 @@ static char *parser_parse_function_pointer_type(Parser *parser,
   size_t fn_len;
   int first = 1;
 
-  parser_advance(parser); /* consume 'fn' or 'Fn' */
+  parser_advance(parser);
   if (!parser_expect(parser, TOKEN_LPAREN)) {
     parser_set_error(parser,
                      "Expected '(' after 'fn' in function pointer type");
@@ -3137,7 +2973,7 @@ static char *parser_parse_function_pointer_type(Parser *parser,
         free(params_buf);
         return NULL;
       }
-      parser_advance(parser); /* consume ',' */
+      parser_advance(parser);
       if (params_len + 1 >= params_cap) {
         params_cap *= 2;
         params_buf = realloc(params_buf, params_cap);
@@ -3186,7 +3022,6 @@ static char *parser_parse_function_pointer_type(Parser *parser,
     free(params_buf);
     return NULL;
   }
-  /* "fn(" + params + ")->" + ret + NUL */
   fn_len = 4 + params_len + 3 + strlen(ret) + 1;
   type_name = malloc(fn_len);
   if (!type_name) {
@@ -3206,7 +3041,7 @@ static char *parser_parse_qualified_type(Parser *parser, char *type_name) {
     char *qualified_type;
     size_t qualified_len;
 
-    parser_advance(parser); /* consume '.' */
+    parser_advance(parser);
     if (!parser_is_identifier_like(parser->current_token.type) &&
         !parser_is_type_keyword(parser->current_token.type)) {
       parser_set_error(parser, "Expected type name after '.'");
@@ -3242,7 +3077,7 @@ static char *parser_parse_type_arguments(Parser *parser, char *type_name) {
   if (parser->current_token.type != TOKEN_LESS_THAN) {
     return type_name;
   }
-  parser_advance(parser); /* consume '<' */
+  parser_advance(parser);
 
   args_buf = malloc(args_cap);
   args_buf[0] = '\0';
@@ -3258,7 +3093,7 @@ static char *parser_parse_type_arguments(Parser *parser, char *type_name) {
         free(type_name);
         return NULL;
       }
-      parser_advance(parser); /* consume ',' */
+      parser_advance(parser);
 
       if (args_len + 1 >= args_cap) {
         char *new_args_buf;
@@ -3319,11 +3154,6 @@ static char *parser_parse_type_arguments(Parser *parser, char *type_name) {
   return full_type;
 }
 
-/* `T global*`, `T shared align(16)*`, `T constant[]`: the space a device
-   pointer, slice or view names, and the alignment its address is claimed to
-   have. Both are contextual: `global` is only a qualifier where a pointer,
-   slice or view suffix follows it, so an identifier named `global` elsewhere
-   still reads as one. */
 static const char *parser_device_space_word(Parser *parser) {
   static const char *const words[] = {"global", "shared", "constant", "local"};
   size_t i;
@@ -3431,14 +3261,11 @@ static char *parser_parse_pointer_suffix(Parser *parser, char *type_name) {
     snprintf(next_type, next_len, "%s*", type_name);
     free(type_name);
     type_name = next_type;
-    parser_advance(parser); /* consume '*' */
+    parser_advance(parser);
   }
   return type_name;
 }
 
-/* `layout row`, `layout swizzle128`, `layout interleave(4)`: how a view stores
-   its elements. The names live in std/warp as constants, so this is a word in
-   a type rather than a token of its own. */
 static char *parser_parse_layout_suffix(Parser *parser, char *type_name) {
   char written[64];
   if (!type_name || !parser_at_contextual_keyword(parser, "layout",
@@ -3478,11 +3305,8 @@ static char *parser_parse_array_suffix(Parser *parser, char *type_name) {
   if (parser->current_token.type != TOKEN_LBRACKET) {
     return type_name;
   }
-  parser_advance(parser); /* consume '[' */
+  parser_advance(parser);
 
-  /* `T[..]`: a gathered parameter. The brackets say array and the `..` says the
-     length comes from the call, which is what a variadic parameter is. Inside
-     the function it is an ordinary `T[]`. */
   if (parser->current_token.type == TOKEN_DOT_DOT) {
     size_t rest_len = strlen(type_name) + 5;
     char *rest_type = malloc(rest_len);
@@ -3500,8 +3324,6 @@ static char *parser_parse_array_suffix(Parser *parser, char *type_name) {
     return rest_type;
   }
 
-  /* `T[]`: a slice, whose length is not part of the type. Empty brackets are
-     what says so, and the suffix keeps stacking after it. */
   if (parser->current_token.type == TOKEN_RBRACKET) {
     size_t slice_len = strlen(type_name) + 3;
     char *slice_type = malloc(slice_len);
@@ -3561,9 +3383,6 @@ static char *parser_parse_array_suffix(Parser *parser, char *type_name) {
     return NULL;
   }
 
-  /* `T[128, 64]`: a view whose extents are part of its type. Every index into
-     one is bounded by the type rather than by a value travelling beside it,
-     and a layout can be written after it. */
   if (parser->current_token.type == TOKEN_COMMA) {
     size_t extents_len = strlen(type_name) + strlen(size_text) + 4;
     char *extents = malloc(extents_len);
@@ -3630,10 +3449,6 @@ static char *parser_parse_array_suffix(Parser *parser, char *type_name) {
   snprintf(full_type, full_len, "%s[%s]", type_name, size_text);
   free(type_name);
   free(size_text);
-  /* Another '[' after a sized one is a further dimension: `int32[3][4]` is
-     three rows of four, the way the declaration reads. The slice form above
-     already stacked; only this branch stopped, which is what made a second
-     dimension a syntax error rather than a type. */
   return parser_parse_array_suffix(parser, full_type);
 }
 
@@ -3648,10 +3463,6 @@ static char *parser_parse_type_annotation_ex(Parser *parser, int allow_array) {
     return parser_parse_volatile_type(parser);
   }
 
-  /* A parenthesised type groups what a suffix binds to. `fn(int32) -> int32[2]`
-   * reads the array as the return type, because that is where the suffix sits;
-   * `(fn(int32) -> int32)[2]` is the array of function pointers. The
-   * parentheses stay in the text so the resolver sees the same grouping. */
   if (parser->current_token.type == TOKEN_LPAREN) {
     char *inner;
     char *grouped;
@@ -3687,10 +3498,6 @@ static char *parser_parse_type_annotation_ex(Parser *parser, int allow_array) {
   if (parser->current_token.type == TOKEN_FN || is_closure_fn) {
     type_name = parser_parse_function_pointer_type(parser, is_closure_fn);
   } else if (parser_at_composed_name(parser)) {
-    /* A type annotation is a name the checker resolves, and resolution happens
-     * before the binding this would be composed from has a value. Naming the
-     * boundary beats a parse error further along that points at the wrong
-     * token. */
     parser_set_error(parser,
                      "'ident(...)' composes a declaration's name, not a type; "
                      "write a generated type's name out where you use it");
@@ -3739,7 +3546,6 @@ static int parser_literal_radix_hint(const char *value) {
   if (value[1] == 'b' || value[1] == 'B') {
     return 2;
   }
-  /* Leading zeros without 0x/0b prefix are still decimal (e.g. "007"). */
   return 10;
 }
 
@@ -3786,13 +3592,6 @@ static ParserLiteralScan parser_scan_unsigned_literal(
   return PARSER_LITERAL_OK;
 }
 
-/*
- * Parses integer TOKEN_NUMBER lexeme text into long long bits and radix.
- * Handles decimal, hexadecimal, and binary (0b) digits only. Overflow is
- * detected while accumulating rather than read back from errno: the owned
- * runtime's strtoull wraps modulo 2^64 and never reports ERANGE, so every
- * literal past UINT64_MAX used to be accepted with a wrapped value.
- */
 static int parser_parse_integer_literal_string(
     Parser *parser, const char *value, long long *out_value,
     unsigned char *out_radix) {
@@ -3834,12 +3633,6 @@ static int parser_parse_integer_literal_string(
     return 1;
   }
 
-  /* Past LLONG_MAX but still a uint64 keeps the bit pattern, exactly as the
-   * hexadecimal branch above does: without this a uint64 constant had to be
-   * written in hex -- 18446744073709551615 was rejected while
-   * 0xFFFFFFFFFFFFFFFF, the same value, was accepted. A leading '-' is not
-   * part of the literal (it lexes as unary minus), so this only ever widens
-   * the positive range. */
   scan = parser_scan_unsigned_literal(value, 10u, &u);
   if (scan == PARSER_LITERAL_INVALID) {
     parser_set_error(parser, "Invalid integer literal");
@@ -3957,15 +3750,9 @@ static char *parser_make_multi_return_name(const char *function_name) {
   return name;
 }
 
-/* Anonymous function (lambda) expression: `fn(params) [-> ret] { body }`. In
- * expression position `fn` always begins a lambda; the type spelling
- * `fn(...)->R` is parsed only in type positions by parser_parse_type_annotation,
- * and named declarations only at the top level via parse_declaration. The node
- * is an AST_LAMBDA_EXPRESSION carrying a FunctionDeclaration payload with a NULL
- * name; the closure-conversion pass lifts it to a real top-level function. */
 static ASTNode *parser_parse_lambda_expression(Parser *parser) {
   SourceLocation location = parser_current_location(parser);
-  parser_advance(parser); // consume 'fn'
+  parser_advance(parser);
 
   if (!parser_expect(parser, TOKEN_LPAREN)) {
     return NULL;
@@ -4051,9 +3838,6 @@ static ASTNode *parser_parse_lambda_expression(Parser *parser) {
   return node;
 }
 
-/* Free the half-built element/name arrays of an aggregate literal that failed
- * to parse. The element nodes are not children of anything yet, so they have to
- * go too. */
 static void parser_free_aggregate_parts(ASTNode **elements, char **field_names,
                                         size_t count) {
   for (size_t i = 0; i < count; i++) {
@@ -4092,8 +3876,6 @@ static int parser_aggregate_push(ASTNode ***elements, char ***field_names,
   return 1;
 }
 
-/* `[ a, b, c ]` or `[ value; count ]`. The lexer suppresses newlines inside
- * brackets, so a table may be written across as many lines as it needs. */
 static ASTNode *parser_parse_array_literal(Parser *parser,
                                            SourceLocation location) {
   ASTNode **elements = NULL;
@@ -4101,7 +3883,7 @@ static ASTNode *parser_parse_array_literal(Parser *parser,
   size_t capacity = 0;
   ASTNode *repeat_count = NULL;
 
-  parser_advance(parser); // consume '['
+  parser_advance(parser);
 
   if (parser->current_token.type != TOKEN_RBRACKET) {
     for (;;) {
@@ -4118,8 +3900,6 @@ static ASTNode *parser_parse_array_literal(Parser *parser,
         return NULL;
       }
 
-      /* `[value; count]` repeats one element; it is only meaningful as the
-       * whole literal, so it may appear exactly once, after the first. */
       if (parser->current_token.type == TOKEN_SEMICOLON) {
         if (count != 1) {
           parser_set_error(parser,
@@ -4128,7 +3908,7 @@ static ASTNode *parser_parse_array_literal(Parser *parser,
           parser_free_aggregate_parts(elements, NULL, count);
           return NULL;
         }
-        parser_advance(parser); // consume ';'
+        parser_advance(parser);
         repeat_count = parser_parse_expression(parser);
         if (!repeat_count) {
           parser_free_aggregate_parts(elements, NULL, count);
@@ -4140,9 +3920,9 @@ static ASTNode *parser_parse_array_literal(Parser *parser,
       if (parser->current_token.type != TOKEN_COMMA) {
         break;
       }
-      parser_advance(parser); // consume ','
+      parser_advance(parser);
       if (parser->current_token.type == TOKEN_RBRACKET) {
-        break; // trailing comma
+        break;
       }
     }
   }
@@ -4164,9 +3944,6 @@ static ASTNode *parser_parse_array_literal(Parser *parser,
   return node;
 }
 
-/* `{ field: value, ... }`. Braces do not suppress newlines (they delimit
- * blocks, where newlines end statements), so this skips them explicitly and a
- * struct literal may span lines. */
 static ASTNode *parser_parse_struct_literal(Parser *parser,
                                             SourceLocation location) {
   ASTNode **elements = NULL;
@@ -4174,7 +3951,7 @@ static ASTNode *parser_parse_struct_literal(Parser *parser,
   size_t count = 0;
   size_t capacity = 0;
 
-  parser_advance(parser); // consume '{'
+  parser_advance(parser);
   while (parser->current_token.type == TOKEN_NEWLINE) {
     parser_advance(parser);
   }
@@ -4194,7 +3971,7 @@ static ASTNode *parser_parse_struct_literal(Parser *parser,
         parser_free_aggregate_parts(elements, field_names, count);
         return NULL;
       }
-      parser_advance(parser); // consume the field name
+      parser_advance(parser);
       if (!parser_expect(parser, TOKEN_COLON)) {
         free(field_name);
         parser_free_aggregate_parts(elements, field_names, count);
@@ -4222,12 +3999,12 @@ static ASTNode *parser_parse_struct_literal(Parser *parser,
       if (parser->current_token.type != TOKEN_COMMA) {
         break;
       }
-      parser_advance(parser); // consume ','
+      parser_advance(parser);
       while (parser->current_token.type == TOKEN_NEWLINE) {
         parser_advance(parser);
       }
       if (parser->current_token.type == TOKEN_RBRACE) {
-        break; // trailing comma
+        break;
       }
     }
   }
@@ -4248,8 +4025,6 @@ static ASTNode *parser_parse_struct_literal(Parser *parser,
   return node;
 }
 
-// Name the token in front of the reader as concretely as the token allows:
-// its own text when it has text worth printing, otherwise its class.
 static void parser_describe_token(const Token *token, char *out, size_t cap) {
   switch (token->type) {
   case TOKEN_EOF:
@@ -4274,8 +4049,6 @@ static void parser_describe_token(const Token *token, char *out, size_t cap) {
   snprintf(out, cap, "%s", token_type_to_string(token->type));
 }
 
-// True for keywords that open a statement. One of these in expression
-// position is nearly always a missing operand, not a misspelt name.
 static int parser_token_starts_statement(TokenType type) {
   switch (type) {
   case TOKEN_IF:
@@ -4304,15 +4077,10 @@ static int parser_token_starts_statement(TokenType type) {
   }
 }
 
-// The expression parser ran out of grammar. Say what it was reading, what it
-// found instead, and what to write. This is the last stop for a large share
-// of the syntax errors a reader ever sees, so it earns the detail.
 static void parser_error_expected_expression(Parser *parser) {
   char found[PARSER_PREV_TEXT_MAX + 24];
   parser_describe_token(&parser->current_token, found, sizeof(found));
 
-  // What the parser had just read. It names the operator or keyword whose
-  // operand went missing, which is where the reader has to type.
   char after[PARSER_PREV_TEXT_MAX + 16];
   after[0] = '\0';
   switch (parser->previous_token_type) {
@@ -4359,7 +4127,6 @@ static void parser_error_expected_expression(Parser *parser) {
   snprintf(message, sizeof(message), "Expected an expression%s, found %s",
            after, found);
 
-  // A suggestion aimed at the shape of the mistake, not at the grammar.
   char help[PARSER_ERROR_BUF_SIZE];
   const char *suggestion = NULL;
   TokenType found_type = parser->current_token.type;
@@ -4402,15 +4169,6 @@ static void parser_error_expected_expression(Parser *parser) {
                                   "expected an expression here");
 }
 
-/* String interpolation. "{expr}" inside a literal desugars right here, at the
- * token, into '+' concatenation over the split parts, so no later stage sees
- * interpolation as a distinct feature. Each expression part is wrapped in a
- * __mtl_interp() call; the type checker types that name and IR lowering
- * rewrites it to the matching mettle_string_from_* runtime conversion.
- *
- * Only '{' is special. '{{' is a literal '{'; '}' is a plain character except
- * while scanning for the end of an interpolation, where braces nest so struct
- * literals and blocks inside the expression survive. */
 static void parser_interp_patch_locations(ASTNode *node,
                                           SourceLocation location) {
   if (!node)
@@ -4597,13 +4355,9 @@ fail:
 }
 
 static ASTNode *parser_parse_number_literal(Parser *parser, SourceLocation location) {
-    // Check if it's a float or integer
     char *value = parser->current_token.value;
     ASTNode *result;
 
-    // A decimal point or an exponent marker makes it a float. The radix prefix
-    // has to be ruled out first: hex digits include 'e', so 0x1E is an integer
-    // and only an unprefixed literal can carry an exponent.
     int has_radix_prefix =
         value[0] == '0' && (value[1] == 'x' || value[1] == 'X' ||
                             value[1] == 'b' || value[1] == 'B');
@@ -4626,9 +4380,6 @@ static ASTNode *parser_parse_number_literal(Parser *parser, SourceLocation locat
       if (!result) {
         return NULL;
       }
-      /* The lexer folded `'a'` to 97 and handed back a number. The lexeme
-       * still opens with a quote, which is the only surviving trace that the
-       * program wrote a character. */
       if (parser->current_token.lexeme.data &&
           parser->current_token.lexeme.length > 0 &&
           parser->current_token.lexeme.data[0] == '\'') {
@@ -4648,8 +4399,6 @@ ASTNode *parser_parse_primary_expression(Parser *parser) {
 
   if (parser_is_identifier_like(parser->current_token.type) ||
       parser_is_type_keyword(parser->current_token.type)) {
-    /* Type names (`int32`, `string`, ...) are compile-time Type values in
-     * expression position, not a parallel type-level grammar. */
     ASTNode *result =
         ast_create_identifier(parser->current_token.value, location);
     parser_advance(parser);
@@ -4662,9 +4411,6 @@ ASTNode *parser_parse_primary_expression(Parser *parser) {
 
   case TOKEN_STRING: {
     ASTNode *result;
-    /* The lexeme length, not strlen: `\0` is a legal escape, so the literal's
-     * bytes can run past an interior NUL and both the brace search and the
-     * copy have to span all of them. */
     size_t token_length = parser->current_token.lexeme.length;
     if (parser->current_token.value &&
         memchr(parser->current_token.value, '{', token_length)) {
@@ -4678,19 +4424,19 @@ ASTNode *parser_parse_primary_expression(Parser *parser) {
     return result;
   }
   case TOKEN_IMPORT_STR: {
-    parser_advance(parser); // consume 'import_str'
+    parser_advance(parser);
     if (parser->current_token.type != TOKEN_STRING) {
       parser_set_error(parser, "Expected string literal after 'import_str'");
       return NULL;
     }
     char *file_path = strdup(parser->current_token.value);
-    parser_advance(parser); // consume the string
+    parser_advance(parser);
     ASTNode *node = ast_create_import_str(file_path, location);
     free(file_path);
     return node;
   }
   case TOKEN_LPAREN: {
-    parser_advance(parser); // consume '('
+    parser_advance(parser);
     const char *saved_group = parser->group_context;
     parser->group_context = "grouped expression";
     ASTNode *expr = parser_parse_expression(parser);
@@ -4702,9 +4448,6 @@ ASTNode *parser_parse_primary_expression(Parser *parser) {
     parser->group_context = saved_group;
     return expr;
   }
-  /* Aggregate literals. A '[' only reaches primary position when nothing
-   * precedes it (indexing is postfix), and a '{' only reaches an expression
-   * when a block was not what was being parsed, so neither is ambiguous. */
   case TOKEN_LBRACKET:
     return parser_parse_array_literal(parser, location);
   case TOKEN_LBRACE:
@@ -4719,15 +4462,13 @@ ASTNode *parser_parse_primary_expression(Parser *parser) {
     return ast_create_identifier("this", location);
   }
   case TOKEN_NEW: {
-    parser_advance(parser); // Built-in memory alloc handling
+    parser_advance(parser);
     if (!parser_is_identifier_like(parser->current_token.type) &&
         !parser_is_type_keyword(parser->current_token.type) &&
         parser->current_token.type != TOKEN_FN) {
       parser_set_error(parser, "Expected type name after 'new'");
       return NULL;
     }
-    /* The array suffix is left unparsed: `new T[n]` allocates n of them, and
-       the count is an expression the program computes. */
     char *type_name = parser_parse_type_annotation_ex(parser, 0);
     ASTNode *new_expr = NULL;
     if (!type_name) {
@@ -4823,7 +4564,6 @@ ASTNode *parser_parse_cast_expression(Parser *parser) {
   if (!parser || parser->current_token.type != TOKEN_LPAREN)
     return NULL;
 
-  // Only try if the next token could start a type name
   if (!parser_is_type_keyword(parser->peek_token.type) &&
       !parser_is_identifier_like(parser->peek_token.type) &&
       parser->peek_token.type != TOKEN_FN) {
@@ -4836,14 +4576,8 @@ ASTNode *parser_parse_cast_expression(Parser *parser) {
 
   SourceLocation location = parser_current_location(parser);
 
-  parser_advance(parser); // consume '('
+  parser_advance(parser);
 
-  // Remember whether the parenthesized type begins with a built-in type
-  // keyword (int32, int64, float64, ...). The parser keeps no registry of
-  // user-defined type names, so this is its only reliable signal that the
-  // parenthesized token is genuinely a type rather than a value. We use it
-  // below to disambiguate `(name) <op> x` where <op> is both a unary and a
-  // binary operator (`&`, `*`, `+`, `-`).
   int type_starts_with_keyword =
       parser_is_type_keyword(parser->current_token.type) ||
       parser_is_builtin_type_name(parser->current_token.value);
@@ -4859,26 +4593,11 @@ ASTNode *parser_parse_cast_expression(Parser *parser) {
 
   parser->error_reporter = saved.error_reporter;
 
-  parser_advance(parser); // consume ')'
+  parser_advance(parser);
 
-  // A bare single identifier (no built-in keyword, and no pointer/generic/
-  // function structure such as `*`, `<` or `(`) gives the parser no reason to
-  // believe it names a type. `(MyStruct*)`, `(Vec<T>)` and `(fn(int32)->T)`
-  // are structurally types and stay casts.
-  //
-  // `[` and `.` are NOT on that list, though `T[4]` and `mod.Type` are written
-  // with them, because `a[0]` and `p.x` are written with them too and those
-  // are far commoner. Taking them as type structure made `(a[i]) * (b[j])` and
-  // `(p.x) - (q.x)` parse as a cast whose target is the index or the field
-  // path, and the build failed with "Unknown target type for cast" pointing
-  // inside the parentheses. Only the four operators that are both prefix and
-  // infix reach this test, so a cast to an array or a qualified type still
-  // parses everywhere else; `(int32[4])` keeps its keyword, and a qualified
-  // pointer type keeps its `*`.
   int looks_like_type =
       type_starts_with_keyword || strpbrk(type_name, "*<(") != NULL;
 
-  // Check if it's a grouped expression instead
   int is_binary = parser_is_binary_operator(parser->current_token.type);
   int is_unary = parser_is_unary_operator(parser->current_token.type);
   if (parser->current_token.type == TOKEN_RPAREN ||
@@ -4886,9 +4605,6 @@ ASTNode *parser_parse_cast_expression(Parser *parser) {
       parser->current_token.type == TOKEN_SEMICOLON ||
       parser->current_token.type == TOKEN_EOF ||
       (is_binary && !is_unary) ||
-      // Ambiguous prefix operator (`&`/`*`/`+`/`-`) after a token that does not
-      // look like a type: treat `(name) <op> x` as a parenthesized expression
-      // followed by a binary operator, not a cast of a unary expression.
       (is_binary && is_unary && !looks_like_type)) {
     free(type_name);
     parser_restore_state(parser, &saved);
@@ -4918,9 +4634,6 @@ ASTNode *parser_parse_unary_expression(Parser *parser) {
 
   SourceLocation location = parser_current_location(parser);
 
-  /* A run of prefix operators, and a run of casts, each recurse here without
-   * passing through parser_parse_expression, so they answer to the ceiling
-   * themselves. */
   if (parser->expression_depth >= PARSER_MAX_EXPRESSION_DEPTH) {
     parser_report_expression_too_deep(parser);
     return NULL;
@@ -4963,16 +4676,9 @@ static int parser_try_parse_generic_call_type_args(Parser *parser,
 
   ParserSavedState saved = parser_save_state(parser);
   parser->error_message = NULL;
-  // This is a speculative parse: `<` after an identifier is far more often a
-  // comparison than a type-argument list. Detach the reporter first, exactly as
-  // parser_parse_cast_expression does, so a failed speculation leaves no
-  // diagnostic behind - parser_restore_state alone cannot retract one that has
-  // already been handed to the reporter. Without this, `v < fields[i].range.lo`
-  // backtracks and reparses correctly but still fails the build with the
-  // speculation's "Expected array size after '['".
   parser->error_reporter = NULL;
 
-  parser_advance(parser); // consume '<'
+  parser_advance(parser);
 
   char **type_args = NULL;
   size_t type_arg_count = 0;
@@ -5022,14 +4728,6 @@ static int parser_try_parse_generic_call_type_args(Parser *parser,
   return 0;
 }
 
-// Kernel index built-ins: maps `<obj>.<axis>` to its target-neutral GPU index
-// intrinsic link-name (gpu_tid_x etc.), or NULL if not a built-in:
-//   thread.x     -> gpu_tid_x
-//   block.x      -> gpu_ctaid_x
-//   block_dim.x  -> gpu_ntid_x
-//   grid_dim.x   -> gpu_nctaid_x
-// Only consulted in GPU-module (gpu_mode) compiles. Returns a pointer into a
-// static buffer (single-threaded parse; copied immediately by the caller).
 static const char *parser_gpu_index_intrinsic(const char *obj,
                                               const char *axis) {
   if (!obj || !axis || axis[0] == 0 || axis[1] != 0) {
@@ -5065,9 +4763,6 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
     return NULL;
 
   while (1) {
-    /* A line opening with `.` or `->` continues this one, so a chain can be
-     * written down the page. Neither can begin a statement, so nothing that
-     * used to parse as two statements now parses as one. */
     parser_skip_chain_continuation(parser);
     SourceLocation location = parser_current_location(parser);
 
@@ -5077,7 +4772,7 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
       size_t call_type_arg_count = 0;
       if (parser_try_parse_generic_call_type_args(parser, &call_type_args,
                                                   &call_type_arg_count)) {
-        parser_advance(parser); // consume '('
+        parser_advance(parser);
         const char *saved_group = parser->group_context;
         parser->group_context = "argument list";
 
@@ -5137,7 +4832,6 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
     }
 
     if (parser->current_token.type == TOKEN_LPAREN) {
-      // Function call or method call
       int tensor_named_call =
           parser_identifier_name_is(expr, "tensor_mma") ||
           parser_identifier_name_is(expr, "tensor_matmul") ||
@@ -5159,20 +4853,13 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
           parser_identifier_name_is(expr, "async_copy_workgroup");
       int compiler_named_call =
           tensor_named_call || atomic_named_call || async_named_call;
-      parser_advance(parser); // consume '('
+      parser_advance(parser);
 
-      // Parse arguments first (common to both cases)
       ASTNode **arguments = NULL;
       char **argument_names = NULL;
       size_t arg_count = 0;
 
-      /* Set when typeof's argument was read as a type, so the ordinary
-       * argument parse below knows the list is already complete. */
       int typeof_type_argument = 0;
-      /* `typeof` takes either a type or an expression, and only one of those
-       * is spelled with `*` or `[N]`. Try the type reading first and fall back
-       * to the expression parse, so `typeof(Point*)` and `typeof(n)` both
-       * work without the grammar having to tell them apart up front. */
       if (parser_identifier_name_is(expr, "typeof") &&
           parser->current_token.type != TOKEN_RPAREN) {
         ParserSavedState typeof_saved = parser_save_state(parser);
@@ -5257,13 +4944,10 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
               parser->current_token.type == TOKEN_IDENTIFIER &&
               parser->peek_token.type == TOKEN_COLON) {
             argument_name = strdup(parser->current_token.value);
-            parser_advance(parser); /* name -> ':' */
-            parser_advance(parser); /* ':' -> value */
+            parser_advance(parser);
+            parser_advance(parser);
           }
           ASTNode *arg = NULL;
-          /* `workgroup` is a declaration keyword, but it is also the neutral
-           * memory-model spelling used by native atomic named options. Preserve
-           * it as an identifier value in this tightly scoped call grammar. */
           if (compiler_named_call && argument_name &&
               parser->current_token.type == TOKEN_WORKGROUP) {
             arg = ast_create_identifier(
@@ -5309,11 +4993,9 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
       parser->group_context = NULL;
 
       if (expr->type == AST_MEMBER_ACCESS) {
-        // Method call: obj.method(args)
         MemberAccess *access = (MemberAccess *)expr->data;
         char *method_name = strdup(access->member);
         ASTNode *object = access->object;
-        // Detach the object from the member access so it's not double-freed
         access->object = NULL;
         free(expr->children);
         expr->children = NULL;
@@ -5327,8 +5009,6 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
         free(argument_names);
         free(method_name);
       } else if (expr->type == AST_IDENTIFIER) {
-        // Regular function call (or function pointer variable - type checker
-        // validates)
         Identifier *id_data = (Identifier *)expr->data;
         char *func_name = strdup(id_data->name);
         ast_destroy_node(expr);
@@ -5344,9 +5024,6 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
         free(argument_names);
         free(func_name);
       } else {
-        // (expr)(args) / f(...)(args): call through the value the expression
-        // produces - a thin function pointer or a closure. The node owns the
-        // callee expression and the argument nodes; only the array is ours.
         ASTNode *fp = ast_create_func_ptr_call(expr, arguments, arg_count,
                                                location);
         for (size_t i = 0; i < arg_count; i++)
@@ -5360,15 +5037,8 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
       }
 
     } else if (parser->current_token.type == TOKEN_DOT) {
-      // Member access
-      parser_advance(parser); // consume '.'
+      parser_advance(parser);
 
-      /* A field name here is subject to the same rule as where it was declared
-       * and where a literal initializes it, both of which accept any
-       * identifier-like token. The x86 mnemonics are lexed as keywords
-       * everywhere, not just inside an `asm` block, so requiring a bare
-       * TOKEN_IDENTIFIER meant a field called `add`, `sub`, `cmp`, `div`, or
-       * `mov` could be declared and initialized but never read back. */
       if (!parser_is_identifier_like(parser->current_token.type)) {
         parser_set_error(parser, "Expected member name after '.'");
         ast_destroy_node(expr);
@@ -5378,8 +5048,6 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
       char *member = strdup(parser->current_token.value);
       parser_advance(parser);
 
-      // GPU kernel index built-ins: `thread.x` etc. desugar to a call to the
-      // corresponding target-neutral gpu_* intrinsic in GPU-module compiles.
       const char *gpu_intr = NULL;
       if ((parser->gpu_mode || parser->in_kernel_body) &&
           expr->type == AST_IDENTIFIER && expr->data) {
@@ -5401,8 +5069,7 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
       }
 
     } else if (parser->current_token.type == TOKEN_ARROW) {
-      // Pointer member access: p->field == (*p).field
-      parser_advance(parser); // consume '->'
+      parser_advance(parser);
 
       if (!parser_is_identifier_like(parser->current_token.type)) {
         parser_set_error(parser, "Expected member name after '->'");
@@ -5424,7 +5091,7 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
       free(member);
 
     } else if (parser->current_token.type == TOKEN_LBRACKET) {
-      parser_advance(parser); // consume '['
+      parser_advance(parser);
 
       ASTNode *index_expr = parser_parse_expression(parser);
       if (!index_expr) {
@@ -5456,15 +5123,9 @@ ASTNode *parser_parse_binary_expression(Parser *parser, int min_precedence) {
   if (!left)
     return NULL;
 
-  /* Operators of one precedence fold left here rather than recursing, so this
-   * loop deepens the tree without deepening the parser. The later passes walk
-   * that tree recursively, so the fold has to answer to the same ceiling; the
-   * count is restored on the way out so a sibling expression starts level. */
   int enclosing_depth = parser->expression_depth;
 
   for (;;) {
-    /* Blank lines inside a split expression: stepping over one leaves another
-     * newline current, so a statement that does end here still sees one. */
     while (parser->current_token.type == TOKEN_NEWLINE &&
            parser->peek_token.type == TOKEN_NEWLINE) {
       parser_advance(parser);
@@ -5473,7 +5134,7 @@ ASTNode *parser_parse_binary_expression(Parser *parser, int min_precedence) {
         parser_operator_opens_continuation_line(parser->peek_token.type) &&
         parser_get_operator_precedence(parser->peek_token.type) >=
             min_precedence) {
-      parser_advance(parser); // the operator opens the next line
+      parser_advance(parser);
     }
     if (!parser_is_binary_operator(parser->current_token.type)) {
       break;
@@ -5514,15 +5175,12 @@ ASTNode *parser_parse_binary_expression(Parser *parser, int min_precedence) {
   return left;
 }
 
-// Parse an optional platform guard on an import: `import "..." if windows;`
-// (or `if linux`). On success writes a heap-allocated platform name to
-// *out_guard (or NULL when there is no guard) and returns 1; returns 0 on error.
 static int parser_parse_import_guard(Parser *parser, char **out_guard) {
   *out_guard = NULL;
   if (parser->current_token.type != TOKEN_IF) {
     return 1;
   }
-  parser_advance(parser); // consume 'if'
+  parser_advance(parser);
   if (!parser_is_identifier_like(parser->current_token.type) ||
       !parser->current_token.value) {
     parser_set_error(parser,
@@ -5536,7 +5194,7 @@ static int parser_parse_import_guard(Parser *parser, char **out_guard) {
     return 0;
   }
   *out_guard = strdup(name);
-  parser_advance(parser); // consume platform name
+  parser_advance(parser);
   if (!*out_guard) {
     parser_set_error(parser, "Out of memory parsing import guard");
     return 0;
@@ -5549,11 +5207,10 @@ ASTNode *parser_parse_import_declaration(Parser *parser) {
     return NULL;
 
   SourceLocation location = parser_current_location(parser);
-  parser_advance(parser); // consume 'import'
+  parser_advance(parser);
 
-  // Selective import: import { a, b } from "mod"
   if (parser->current_token.type == TOKEN_LBRACE) {
-    parser_advance(parser); // consume '{'
+    parser_advance(parser);
 
     char **selected = NULL;
     size_t selected_count = 0;
@@ -5582,10 +5239,10 @@ ASTNode *parser_parse_import_declaration(Parser *parser) {
       }
 
       selected[selected_count++] = strdup(parser->current_token.value);
-      parser_advance(parser); // consume name
+      parser_advance(parser);
 
       if (parser->current_token.type == TOKEN_COMMA) {
-        parser_advance(parser); // consume ','
+        parser_advance(parser);
       } else {
         break;
       }
@@ -5597,9 +5254,8 @@ ASTNode *parser_parse_import_declaration(Parser *parser) {
       free(selected);
       return NULL;
     }
-    parser_advance(parser); // consume '}'
+    parser_advance(parser);
 
-    // expect 'from'
     if (!parser_is_identifier_like(parser->current_token.type) ||
         !parser->current_token.value ||
         strcmp(parser->current_token.value, "from") != 0) {
@@ -5608,7 +5264,7 @@ ASTNode *parser_parse_import_declaration(Parser *parser) {
       free(selected);
       return NULL;
     }
-    parser_advance(parser); // consume 'from'
+    parser_advance(parser);
 
     if (parser->current_token.type != TOKEN_STRING) {
       parser_set_error(parser, "Expected string literal after 'from'");
@@ -5618,7 +5274,7 @@ ASTNode *parser_parse_import_declaration(Parser *parser) {
     }
 
     char *module_name = strdup(parser->current_token.value);
-    parser_advance(parser); // consume string
+    parser_advance(parser);
 
     char *guard = NULL;
     if (!parser_parse_import_guard(parser, &guard)) {
@@ -5639,7 +5295,7 @@ ASTNode *parser_parse_import_declaration(Parser *parser) {
     ASTNode *node = ast_create_import_declaration(
         module_name, NULL, (const char **)selected, selected_count, location);
     if (node && node->data && guard) {
-      ((ImportDeclaration *)node->data)->platform_guard = guard; // transfer
+      ((ImportDeclaration *)node->data)->platform_guard = guard;
     } else {
       free(guard);
     }
@@ -5649,7 +5305,6 @@ ASTNode *parser_parse_import_declaration(Parser *parser) {
     return node;
   }
 
-  // Plain import or namespaced import
   if (parser->current_token.type != TOKEN_STRING) {
     parser_set_error(parser, "Expected string literal after 'import'");
     return NULL;
@@ -5657,19 +5312,19 @@ ASTNode *parser_parse_import_declaration(Parser *parser) {
 
   char *module_name = strdup(parser->current_token.value);
   char *namespace_alias = NULL;
-  parser_advance(parser); // consume string
+  parser_advance(parser);
 
   if (parser_is_identifier_like(parser->current_token.type) &&
       parser->current_token.value &&
       strcmp(parser->current_token.value, "as") == 0) {
-    parser_advance(parser); // consume 'as'
+    parser_advance(parser);
     if (!parser_is_identifier_like(parser->current_token.type)) {
       free(module_name);
       parser_set_error(parser, "Expected namespace alias after 'as'");
       return NULL;
     }
     namespace_alias = strdup(parser->current_token.value);
-    parser_advance(parser); // consume alias
+    parser_advance(parser);
   }
 
   char *guard = NULL;
@@ -5689,7 +5344,7 @@ ASTNode *parser_parse_import_declaration(Parser *parser) {
   ASTNode *node =
       ast_create_import_declaration(module_name, namespace_alias, NULL, 0, location);
   if (node && node->data && guard) {
-    ((ImportDeclaration *)node->data)->platform_guard = guard; // transfer
+    ((ImportDeclaration *)node->data)->platform_guard = guard;
   } else {
     free(guard);
   }
@@ -5727,7 +5382,7 @@ static ASTNode *parser_parse_extern_var_declaration(Parser *parser) {
     free(var_name);
     return NULL;
   }
-  parser_advance(parser); // consume ':'
+  parser_advance(parser);
 
   char *type_name = parser_parse_type_annotation(parser);
   if (!type_name) {
@@ -5738,7 +5393,7 @@ static ASTNode *parser_parse_extern_var_declaration(Parser *parser) {
 
   char *link_name = NULL;
   if (parser->current_token.type == TOKEN_EQUALS) {
-    parser_advance(parser); // consume '='
+    parser_advance(parser);
     if (parser->current_token.type != TOKEN_STRING) {
       parser_set_error(
           parser,
@@ -5808,15 +5463,13 @@ ASTNode *parser_parse_var_declaration(Parser *parser) {
       return NULL;
     }
   }
-  // Expect 'var' or 'const' keyword
   int is_const = (parser->current_token.type == TOKEN_CONST);
   if (is_const) {
-    parser_advance(parser); // consume 'const'
+    parser_advance(parser);
   } else if (!parser_expect(parser, TOKEN_VAR)) {
     return NULL;
   }
 
-  // Expect identifier
   char *var_name = NULL;
   ASTNode *composed_name = NULL;
   if (!parser_parse_declaration_name(parser,
@@ -5830,9 +5483,8 @@ ASTNode *parser_parse_var_declaration(Parser *parser) {
   char *type_name = NULL;
   ASTNode *initializer = NULL;
 
-  // Optional type annotation: ': type'
   if (parser->current_token.type == TOKEN_COLON) {
-    parser_advance(parser); // consume ':'
+    parser_advance(parser);
 
     type_name = parser_parse_type_annotation(parser);
     if (!type_name) {
@@ -5844,9 +5496,8 @@ ASTNode *parser_parse_var_declaration(Parser *parser) {
     }
   }
 
-  // Optional initializer: '= expression'
   if (parser->current_token.type == TOKEN_EQUALS) {
-    parser_advance(parser); // consume '='
+    parser_advance(parser);
 
     initializer = parser_parse_expression(parser);
     if (!initializer) {
@@ -5856,7 +5507,6 @@ ASTNode *parser_parse_var_declaration(Parser *parser) {
     }
   }
 
-  // A constant must always have a value to fold at compile time.
   if (is_const && !initializer) {
     parser_set_error(parser, "Constant declaration requires an initializer");
     free(var_name);
@@ -5864,8 +5514,6 @@ ASTNode *parser_parse_var_declaration(Parser *parser) {
     return NULL;
   }
 
-  // For type inference, if no type is specified but there's an initializer,
-  // we'll leave type_name as NULL and let the semantic analyzer infer it
   if (!type_name && !initializer) {
     parser_set_error(parser, "Variable declaration must have either a type "
                              "annotation or an initializer");
@@ -5873,7 +5521,6 @@ ASTNode *parser_parse_var_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Expect a newline or semicolon to end the declaration
   parser_expect_statement_end(parser);
 
   ASTNode *var_decl =
@@ -6090,9 +5737,6 @@ static int parser_parse_kernel_attributes(Parser *parser,
                      "Kernel block volume must not exceed 1024 work-items");
     return 0;
   }
-  /* `per = thread` (the default) or `per = warp`: how many threads one unit
-   * of work costs. A warp-per-row matvec covers block_volume/32 rows per
-   * block, not block_volume, and `dispatch k[work: n]` has to know which. */
   if (parser->current_token.type == TOKEN_COMMA) {
     parser_advance(parser);
     if (parser->current_token.type != TOKEN_IDENTIFIER ||
@@ -6144,16 +5788,9 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     parser_set_error(parser, "Expected 'fn' or 'kernel'");
     return NULL;
   }
-  /* Preserve kernel identity. The declaration otherwise shares the function
-   * grammar, but semantic analysis and the backend treat it as a GPU entry
-   * point rather than an ordinary host/device helper function. */
   int is_kernel = parser->current_token.type == TOKEN_KERNEL;
   parser_advance(parser);
 
-  /* `kernel(block = 256)` / `kernel(block = (x, y, z))`: the launch block
-   * shape this kernel requires. Recorded on the declaration so the backends
-   * can stamp it into the module (.reqntid / LocalSize) and the launch is
-   * rejected by the driver instead of running with a garbage lane mapping. */
   int kernel_block[3] = {0, 0, 0};
   int kernel_threads_per_item = 0;
   if (is_kernel && parser->current_token.type == TOKEN_LPAREN &&
@@ -6162,7 +5799,6 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Expect function name
   char *func_name = NULL;
   ASTNode *composed_name = NULL;
   if (!parser_parse_declaration_name(parser, "Expected function name after 'fn'",
@@ -6182,7 +5818,6 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     }
   }
 
-  // Expect '('
   if (!parser_expect(parser, TOKEN_LPAREN)) {
     parser_free_type_param_list(func_type_params, func_type_param_traits,
                                 func_type_param_count);
@@ -6202,7 +5837,6 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Expect ')'
   if (!parser_expect(parser, TOKEN_RPAREN)) {
     for (size_t i = 0; i < param_count; i++) {
       free(param_names[i]);
@@ -6216,14 +5850,13 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Optional return type: '-> type' (or ': type' for compatibility)
   char *return_type = NULL;
   char **return_types = NULL;
   size_t return_type_count = 0;
   char *link_name = NULL;
   if (parser->current_token.type == TOKEN_ARROW ||
       parser->current_token.type == TOKEN_COLON) {
-    parser_advance(parser); // consume return separator
+    parser_advance(parser);
 
     if (parser->current_token.type == TOKEN_LPAREN) {
       return_types = parser_parse_multi_return_types(parser, &return_type_count);
@@ -6237,7 +5870,6 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
       if (!parser->has_error) {
         parser_set_error(parser, "Expected return type after return separator");
       }
-      // Clean up
       for (size_t i = 0; i < param_count; i++) {
         free(param_names[i]);
         free(param_types[i]);
@@ -6387,7 +6019,7 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
   }
 
   if (parser->current_token.type == TOKEN_EQUALS) {
-    parser_advance(parser); // consume '='
+    parser_advance(parser);
     if (parser->current_token.type != TOKEN_STRING) {
       parser_set_error(parser, "Expected string literal link name after '='");
       for (size_t i = 0; i < param_count; i++) {
@@ -6422,7 +6054,6 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     }
   }
 
-  // Parse function body (block) or allow forward declaration terminator
   ASTNode *body = NULL;
   if (parser->current_token.type == TOKEN_LBRACE) {
     int outer_kernel_body = parser->in_kernel_body;
@@ -6430,7 +6061,6 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     body = parser_parse_block(parser);
     parser->in_kernel_body = outer_kernel_body;
     if (!body && parser->has_error) {
-      // Clean up
       for (size_t i = 0; i < param_count; i++) {
         free(param_names[i]);
         free(param_types[i]);
@@ -6452,7 +6082,6 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
   } else {
     parser_set_error(parser,
                      "Expected function body ('{') or declaration terminator");
-    // Clean up
     for (size_t i = 0; i < param_count; i++) {
       free(param_names[i]);
       free(param_types[i]);
@@ -6526,7 +6155,6 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
   parser_free_type_param_list(func_type_params, func_type_param_traits,
                               func_type_param_count);
 
-  // Clean up temporary strings
   free(func_name);
   free(return_type);
   free(link_name);
@@ -6761,11 +6389,10 @@ ASTNode *parser_parse_enum_declaration(Parser *parser) {
   char *enum_name = strdup(parser->current_token.value);
   parser_advance(parser);
 
-  // Optional generic type parameters: enum Option<T> { ... }
   char **type_params = NULL;
   size_t type_param_count = 0;
   if (parser->current_token.type == TOKEN_LESS_THAN) {
-    parser_advance(parser); // consume '<'
+    parser_advance(parser);
     while (parser->current_token.type != TOKEN_GREATER_THAN &&
            parser->current_token.type != TOKEN_EOF && !parser->has_error) {
       if (parser->current_token.type == TOKEN_COMMA ||
@@ -6821,10 +6448,9 @@ ASTNode *parser_parse_enum_declaration(Parser *parser) {
     char *variant_name = strdup(parser->current_token.value);
     parser_advance(parser);
 
-    // Optional payload type: Some(T)
     char *payload_type = NULL;
     if (parser->current_token.type == TOKEN_LPAREN) {
-      parser_advance(parser); // consume '('
+      parser_advance(parser);
       if (!parser_is_identifier_like(parser->current_token.type) &&
           !parser_is_type_keyword(parser->current_token.type)) {
         parser_set_error(parser, "Expected payload type in variant");
@@ -6911,7 +6537,7 @@ ASTNode *parser_parse_enum_declaration(Parser *parser) {
     if (decl && type_param_count > 0) {
       decl->type_params = type_params;
       decl->type_param_count = type_param_count;
-      type_params = NULL; // ownership transferred
+      type_params = NULL;
       type_param_count = 0;
     }
   }
@@ -6933,12 +6559,10 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
     return NULL;
 
   SourceLocation location = parser_current_location(parser);
-  // Expect 'struct' keyword
   if (!parser_expect(parser, TOKEN_STRUCT)) {
     return NULL;
   }
 
-  // Expect struct name
   char *struct_name = NULL;
   ASTNode *composed_name = NULL;
   if (!parser_parse_declaration_name(
@@ -6968,7 +6592,6 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Expect '{'
   if (!parser_expect(parser, TOKEN_LBRACE)) {
     parser_free_type_param_list(type_params, type_param_traits,
                                 type_param_count);
@@ -6976,7 +6599,6 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Parse fields and methods
   char **field_names = NULL;
   char **field_types = NULL;
   size_t field_count = 0;
@@ -6986,7 +6608,6 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
   while (parser->current_token.type != TOKEN_RBRACE &&
          parser->current_token.type != TOKEN_EOF && !parser->has_error) {
 
-    // Allow blank lines and redundant separators inside struct bodies.
     if (parser->current_token.type == TOKEN_NEWLINE ||
         parser->current_token.type == TOKEN_SEMICOLON) {
       parser_advance(parser);
@@ -6994,14 +6615,12 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
     }
 
     if (parser->current_token.type == TOKEN_METHOD) {
-      // Parse method declaration
       ASTNode *method = parser_parse_method_declaration(parser);
       if (method) {
         methods = realloc(methods, (method_count + 1) * sizeof(ASTNode *));
         methods[method_count] = method;
         method_count++;
       } else if (parser->has_error) {
-        // Clean up and return
         for (size_t i = 0; i < field_count; i++) {
           free(field_names[i]);
           free(field_types[i]);
@@ -7018,10 +6637,8 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
         return NULL;
       }
     } else {
-      // Parse field declaration: name: type;
       if (!parser_is_identifier_like(parser->current_token.type)) {
         parser_set_error(parser, "Expected field name or method declaration");
-        // Clean up
         for (size_t i = 0; i < field_count; i++) {
           free(field_names[i]);
           free(field_types[i]);
@@ -7038,16 +6655,13 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
         return NULL;
       }
 
-      // Reallocate field arrays
       field_names = realloc(field_names, (field_count + 1) * sizeof(char *));
       field_types = realloc(field_types, (field_count + 1) * sizeof(char *));
 
       field_names[field_count] = strdup(parser->current_token.value);
       parser_advance(parser);
 
-      // Expect ':'
       if (!parser_expect(parser, TOKEN_COLON)) {
-        // Clean up
         for (size_t i = 0; i <= field_count; i++) {
           free(field_names[i]);
           if (i < field_count)
@@ -7065,13 +6679,11 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
         return NULL;
       }
 
-      // Parse field type
       field_types[field_count] = parser_parse_type_annotation(parser);
       if (!field_types[field_count]) {
         if (!parser->has_error) {
           parser_set_error(parser, "Expected field type");
         }
-        // Clean up
         for (size_t i = 0; i <= field_count; i++) {
           free(field_names[i]);
           if (i < field_count)
@@ -7090,14 +6702,11 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
       }
       field_count++;
 
-      // Expect a newline or semicolon to end the declaration
       parser_expect_statement_end(parser);
     }
   }
 
-  // Expect '}'
   if (!parser_expect(parser, TOKEN_RBRACE)) {
-    // Clean up
     for (size_t i = 0; i < field_count; i++) {
       free(field_names[i]);
       free(field_types[i]);
@@ -7146,7 +6755,6 @@ ASTNode *parser_parse_struct_declaration(Parser *parser) {
   }
   free(field_names);
   free(field_types);
-  // Note: methods array is now owned by the AST node, don't free it
 
   return struct_decl;
 }
@@ -7270,7 +6878,7 @@ ASTNode *parser_parse_return_statement(Parser *parser) {
     return NULL;
 
   SourceLocation location = parser_current_location(parser);
-  parser_advance(parser); // consume 'return'
+  parser_advance(parser);
 
   ASTNode *value = NULL;
   ASTNode **values = NULL;
@@ -7293,7 +6901,7 @@ ASTNode *parser_parse_return_statement(Parser *parser) {
         parser_restore_state(parser, &saved);
         parser_discard_saved_state(&saved);
 
-        parser_advance(parser); // consume '('
+        parser_advance(parser);
         value = parser_parse_expression(parser);
         if (!value) {
           return NULL;
@@ -7421,8 +7029,8 @@ ASTNode *parser_parse_if_statement(Parser *parser) {
 
   while (parser->current_token.type == TOKEN_ELSE) {
     if (parser->peek_token.type == TOKEN_IF) {
-      parser_advance(parser); // consume 'else'
-      parser_advance(parser); // consume 'if'
+      parser_advance(parser);
+      parser_advance(parser);
 
       if (!parser_expect(parser, TOKEN_LPAREN)) {
         parser_set_error(parser, "Expected '(' after 'else if'");
@@ -7458,7 +7066,7 @@ ASTNode *parser_parse_if_statement(Parser *parser) {
         parser_advance(parser);
       }
     } else {
-      parser_advance(parser); // consume 'else'
+      parser_advance(parser);
       else_branch = (parser->current_token.type == TOKEN_LBRACE)
                         ? parser_parse_block(parser)
                         : parser_parse_statement(parser);
@@ -7607,21 +7215,6 @@ ASTNode *parser_parse_continue_statement(Parser *parser) {
   return parser_parse_break_or_continue(parser, TOKEN_CONTINUE);
 }
 
-// Range-based for: `for i [: type] in start ..|..= end { body }`.
-// Desugars at parse time into a classic counted ForStatement so every
-// downstream stage (type checker, IR lowering, the counted-loop vectorizer)
-// sees the exact shape it already handles:
-//
-//   for i in lo..hi   =>  var i = lo;  i <  hi;  i = i + 1
-//   for i in lo..=hi  =>  var i = lo;  i <= hi;  i = i + 1
-//
-// The `start` bound is evaluated once (the loop initializer); the `end` bound
-// is re-evaluated in the condition each iteration, matching Mettle's C-style
-// `for`/`while` semantics. Hoist a call-valued bound yourself if that matters.
-// `in` is a contextual keyword (a plain identifier elsewhere), so adding this
-// form breaks no existing program that uses `in` as a name.
-/* Builds the block above. Takes ownership of `var_name`, `type_name` and
- * `subject` whatever happens, so the caller is done with all three. */
 static ASTNode *parser_finish_string_for(Parser *parser, SourceLocation location,
                                          char *var_name, char *type_name,
                                          ASTNode *subject) {
@@ -7640,12 +7233,6 @@ static ASTNode *parser_finish_string_for(Parser *parser, SourceLocation location
 
   serial++;
   snprintf(index_name, sizeof(index_name), ".fori%d", serial);
-  /* A subject that is already a name needs no home of its own: naming it is
-   * the whole of evaluating it. Anything else -- a call, a concatenation --
-   * gets a hidden local so `for c in read_line(buf)` reads one line rather
-   * than one per character. A body that reassigns the named subject is
-   * therefore observed by the loop, the same way the range form re-reads its
-   * bound each iteration. */
   if (subject && subject->type == AST_IDENTIFIER) {
     Identifier *named = (Identifier *)subject->data;
     if (named && named->name &&
@@ -7677,9 +7264,6 @@ static ASTNode *parser_finish_string_for(Parser *parser, SourceLocation location
     ((VarDeclaration *)subject_decl->data)->structural_type = 1;
   }
 
-  /* var c[: type] = .fors[.fori];  -- the element, named as the program asked.
-   * Its type is structural when unannotated: it is whatever indexing answers,
-   * which for a string is `char`. */
   element_decl = ast_create_var_declaration(
       var_name, type_name,
       ast_create_array_index_expression(
@@ -7693,8 +7277,6 @@ static ASTNode *parser_finish_string_for(Parser *parser, SourceLocation location
     ((VarDeclaration *)element_decl->data)->structural_type = 1;
   }
 
-  /* The element declaration has to run before the body, and the body may be a
-   * single statement rather than a block, so wrap both either way. */
   {
     ASTNode *inner = ast_create_program();
     Program *inner_data = inner ? (Program *)inner->data : NULL;
@@ -7724,8 +7306,6 @@ static ASTNode *parser_finish_string_for(Parser *parser, SourceLocation location
   }
   ((VarDeclaration *)index_decl->data)->structural_type = 1;
 
-  /* .fori < (int64).fors.length -- the cast keeps the counter's signed
-   * comparison from meeting the unsigned length. */
   condition = ast_create_binary_expression(
       ast_create_identifier(index_name, location), "<",
       ast_create_cast_expression(
@@ -7826,8 +7406,6 @@ static ASTNode *parser_parse_range_for(Parser *parser, SourceLocation location) 
   char *var_name = strdup(parser->current_token.value);
   parser_advance(parser);
 
-  // Optional type annotation: `for i: int64 in ...`. Without one, the variable
-  // type is inferred from the start bound (same rule as `var i = <expr>`).
   char *type_name = NULL;
   if (parser->current_token.type == TOKEN_COLON) {
     parser_advance(parser);
@@ -7840,12 +7418,8 @@ static ASTNode *parser_parse_range_for(Parser *parser, SourceLocation location) 
     }
   }
 
-  // Contextual `in`.
   if (!parser_is_identifier_like(parser->current_token.type) ||
       strcmp(parser->current_token.value, "in") != 0) {
-    // `for i = 0; ...` is the C header written without its parentheses. Name
-    // the two forms Mettle has rather than complaining about a missing 'in'
-    // the reader never meant to write.
     if (parser->current_token.type == TOKEN_EQUALS) {
       char help[PARSER_ERROR_BUF_SIZE];
       snprintf(help, sizeof(help),
@@ -7872,31 +7446,15 @@ static ASTNode *parser_parse_range_for(Parser *parser, SourceLocation location) 
     return NULL;
   }
 
-  /* `for c in s` over a string. No '..' followed the subject, so this is the
-   * character form rather than a range, and it desugars into the counted loop
-   * the rest of the compiler already handles:
-   *
-   *   {
-   *     var .fors: string = s;
-   *     for .fori in 0 .. (int64).fors.length {
-   *       var c: char = .fors[.fori];
-   *       <body>
-   *     }
-   *   }
-   *
-   * The subject gets a hidden local so it is evaluated once: `for c in
-   * read_line(buf)` must not read a line per character. The hidden names start
-   * with a dot, which no source identifier can, so neither can collide with a
-   * name the program chose or with a nested loop's own pair. */
   if (parser->current_token.type != TOKEN_DOT_DOT) {
     return parser_finish_string_for(parser, location, var_name, type_name,
                                     start);
   }
-  parser_advance(parser); // consume '..'
+  parser_advance(parser);
   int inclusive = 0;
   if (parser->current_token.type == TOKEN_EQUALS) {
     inclusive = 1;
-    parser_advance(parser); // consume '=' of '..='
+    parser_advance(parser);
   }
 
   ASTNode *end = parser_parse_expression(parser);
@@ -7918,20 +7476,14 @@ static ASTNode *parser_parse_range_for(Parser *parser, SourceLocation location) 
     return NULL;
   }
 
-  // initializer: var <name>[: type] = <start>
   ASTNode *initializer =
       ast_create_var_declaration(var_name, type_name, start, location);
-  // The loop counter's type is structural (it takes the type of its bound), so
-  // it is exempt from the "explicit type required" rule when no `: type` given.
   if (initializer && !type_name) {
     ((VarDeclaration *)initializer->data)->structural_type = 1;
   }
-  // condition: <name> <  <end>   (exclusive)
-  //            <name> <= <end>   (inclusive)
   ASTNode *condition = ast_create_binary_expression(
       ast_create_identifier(var_name, location), inclusive ? "<=" : "<", end,
       location);
-  // increment: <name> = <name> + 1
   ASTNode *step_value = ast_create_binary_expression(
       ast_create_identifier(var_name, location), "+",
       ast_create_number_literal(1, location, 10), location);
@@ -7956,21 +7508,9 @@ static ASTNode *parser_parse_range_for(Parser *parser, SourceLocation location) 
                                   location);
 }
 
-// GPU kernel launch. The compact form remains
-//
-//   dispatch K[grid, block](a0, ...)
-//
-// and the complete neutral launch surface is
-//
-//   dispatch K[grid: (gx, gy, gz), block: (bx, by, bz),
-//              shared: bytes, stream: handle](a0, ...)
-//
-// Named options may be reordered; grid and block are required, while shared
-// and stream default to zero. Parsing preserves a semantic launch statement.
-// Argument ABI marshalling belongs to host-runtime lowering, not the parser.
 static ASTNode *parser_parse_dispatch_statement(Parser *parser) {
   SourceLocation loc = parser_current_location(parser);
-  parser_advance(parser); // consume 'dispatch'
+  parser_advance(parser);
 
   if (parser->current_token.type != TOKEN_IDENTIFIER) {
     parser_set_error(parser,
@@ -8010,7 +7550,6 @@ static ASTNode *parser_parse_dispatch_statement(Parser *parser) {
     DISP_FAIL();
   }
 
-  // Compact [grid, block] or complete named launch controls.
   if (!parser_expect(parser, TOKEN_LBRACKET)) {
     parser_set_error(parser, "Expected launch controls after the dispatch kernel");
     DISP_FAIL();
@@ -8062,13 +7601,13 @@ static ASTNode *parser_parse_dispatch_statement(Parser *parser) {
       if (option == 1) have_grid = 1;
       else if (option == 2) have_block = 1;
       else if (option == 3) have_shared = 1;
-      else if (option == 5) { /* `work` is recorded by its parse below */ }
+      else if (option == 5) {  }
       else {
         have_stream = 1;
         stream_was_named = 1;
       }
 
-      parser_advance(parser); // control name
+      parser_advance(parser);
       if (!parser_expect(parser, TOKEN_COLON)) DISP_FAIL();
       if (option == 1 || option == 2) {
         ASTNode **dimensions = option == 1 ? grid : block;
@@ -8110,8 +7649,6 @@ static ASTNode *parser_parse_dispatch_statement(Parser *parser) {
         DISP_FAIL();
       }
     }
-    /* `work:` replaces both: the grid comes from the work count divided by
-     * the kernel's declared block shape, which the type checker supplies. */
     if (work) {
       if (have_grid) {
         parser_set_error(parser,
@@ -8130,8 +7667,6 @@ static ASTNode *parser_parse_dispatch_statement(Parser *parser) {
 
   if (!shared) shared = ast_create_number_literal(0, loc, 10);
   if (!stream) stream = ast_create_number_literal(0, loc, 10);
-  /* A `work:` launch carries placeholder geometry: lowering replaces it with
-   * the work count divided by the kernel's declared block shape. */
   if (work) {
     for (size_t d = 0; d < 3; d++) {
       if (!grid[d]) grid[d] = ast_create_number_literal(1, loc, 10);
@@ -8143,7 +7678,6 @@ static ASTNode *parser_parse_dispatch_statement(Parser *parser) {
     DISP_FAIL();
   }
 
-  // ( args )
   if (!parser_expect(parser, TOKEN_LPAREN)) {
     parser_set_error(parser, "Expected '(' before dispatch arguments");
     DISP_FAIL();
@@ -8170,10 +7704,6 @@ static ASTNode *parser_parse_dispatch_statement(Parser *parser) {
     DISP_FAIL();
   }
 
-  /* `dispatch K[grid, block](args) on s;` -- enqueue on an explicit stream.
-   * Sugar over the named `stream:` control, so the compact form can overlap
-   * launches with transfers without spelling the full three-dimensional
-   * geometry. */
   if (parser->current_token.type == TOKEN_IDENTIFIER &&
       strcmp(parser->current_token.value, "on") == 0) {
     if (stream_was_named) {
@@ -8182,7 +7712,7 @@ static ASTNode *parser_parse_dispatch_statement(Parser *parser) {
                        "'stream:' control; drop one of the two");
       DISP_FAIL();
     }
-    parser_advance(parser); // consume 'on'
+    parser_advance(parser);
     ast_destroy_node(stream);
     stream = parser_parse_expression(parser);
     if (!stream) {
@@ -8216,8 +7746,6 @@ ASTNode *parser_parse_for_statement(Parser *parser) {
     return NULL;
   }
 
-  // The classic C-style form always opens with '('. Anything else starts a
-  // range-based loop: `for i in lo..hi { ... }`.
   if (parser->current_token.type != TOKEN_LPAREN) {
     return parser_parse_range_for(parser, location);
   }
@@ -8371,7 +7899,6 @@ ASTNode *parser_parse_switch_statement(Parser *parser) {
         parser_set_error(parser, "Expected constant expression after 'case'");
         break;
       }
-      // Range case: `case lo..hi:` matches any value in [lo, hi].
       if (parser->current_token.type == TOKEN_DOT_DOT) {
         parser_advance(parser);
         case_high = parser_parse_expression(parser);
@@ -8480,14 +8007,6 @@ ASTNode *parser_parse_switch_statement(Parser *parser) {
   return switch_node;
 }
 
-// Parse: match (expr) {
-//   case VariantName(binding): { body }   (statement form; body is a block)
-//   case VariantName: { body }
-//   default: { body }
-// }
-// In expression form (is_expression=1) each arm body is a value-yielding
-// expression instead of a block:
-//   match (expr) { case Some(v): v + 1, default: 0 }
 static ASTNode *parser_parse_match_core(Parser *parser, int is_expression) {
   if (!parser)
     return NULL;
@@ -8536,7 +8055,7 @@ static ASTNode *parser_parse_match_core(Parser *parser, int is_expression) {
       arm.variant_name = strdup("default");
       parser_advance(parser);
     } else if (parser->current_token.type == TOKEN_CASE) {
-      parser_advance(parser); // consume 'case'
+      parser_advance(parser);
       if (!parser_is_identifier_like(parser->current_token.type)) {
         parser_set_error(parser, "Expected variant name after 'case' in match");
         break;
@@ -8544,9 +8063,8 @@ static ASTNode *parser_parse_match_core(Parser *parser, int is_expression) {
       arm.variant_name = strdup(parser->current_token.value);
       parser_advance(parser);
 
-      // Optional binding: case Some(v)
       if (parser->current_token.type == TOKEN_LPAREN) {
-        parser_advance(parser); // consume '('
+        parser_advance(parser);
         if (!parser_is_identifier_like(parser->current_token.type)) {
           parser_set_error(parser, "Expected binding name in match arm");
           free(arm.variant_name);
@@ -8603,7 +8121,6 @@ static ASTNode *parser_parse_match_core(Parser *parser, int is_expression) {
     arms = new_arms;
     arms[arm_count++] = arm;
 
-    // Expression-form arms may be separated by a comma.
     if (is_expression && parser->current_token.type == TOKEN_COMMA)
       parser_advance(parser);
 
@@ -8641,7 +8158,6 @@ static ASTNode *parser_parse_match_core(Parser *parser, int is_expression) {
   for (size_t i = 0; i < arm_count; i++) {
     free(arms[i].variant_name);
     free(arms[i].binding_name);
-    // body nodes now owned by the match node
   }
   free(arms);
   return node;
@@ -8659,38 +8175,26 @@ ASTNode *parser_parse_block(Parser *parser) {
   if (!parser)
     return NULL;
 
-  // Expect '{'
   if (!parser_expect(parser, TOKEN_LBRACE)) {
     return NULL;
   }
 
-  /* Blocks nest through the statement parser the way expressions nest through
-   * the expression parser, and the passes that walk them recurse the same way,
-   * so they answer to the same ceiling. brace_depth already counts the braces
-   * consumed, so the guard reads it rather than keeping a second tally across
-   * this function's several exits. The check follows the '{' rather than
-   * preceding it: a refusal that consumed nothing would leave the caller
-   * looking at the same token and trying again forever. */
   if (parser->brace_depth >= PARSER_MAX_EXPRESSION_DEPTH) {
     parser_report_block_too_deep(parser);
     return NULL;
   }
 
-  // Create a block node (we'll use a program node to hold statements)
   ASTNode *block = ast_create_program();
   if (!block)
     return NULL;
 
   Program *block_data = (Program *)block->data;
 
-  // Depth this block's body sits at, so recovery can find its closing brace.
   const int body_depth = parser->brace_depth;
 
-  // Parse statements until we hit '}'
   while (parser->current_token.type != TOKEN_RBRACE &&
          parser->current_token.type != TOKEN_EOF) {
 
-    // Skip empty statements/newlines
     if (parser->current_token.type == TOKEN_NEWLINE ||
         parser->current_token.type == TOKEN_SEMICOLON) {
       parser_advance(parser);
@@ -8699,7 +8203,6 @@ ASTNode *parser_parse_block(Parser *parser) {
 
     ASTNode *stmt = parser_parse_statement(parser);
     if (stmt) {
-      // Add to block's statements array
       block_data->declarations =
           realloc(block_data->declarations,
                   (block_data->declaration_count + 1) * sizeof(ASTNode *));
@@ -8709,16 +8212,12 @@ ASTNode *parser_parse_block(Parser *parser) {
         ast_add_child(block, stmt);
       }
 
-      // Attempt to consume optional statement end (semicolon or newline)
-      // for statements that didn't already consume it.
       if (stmt->type != AST_DEFER_STATEMENT &&
           (parser->current_token.type == TOKEN_SEMICOLON ||
            parser->current_token.type == TOKEN_NEWLINE)) {
         parser_expect_statement_end(parser);
       }
       if (parser->has_error) {
-        // A statement parsed but its tail did not. Recover here too, so one
-        // stray token does not spill the rest of the body onto file scope.
         parser_recover_in_block(parser, body_depth);
         parser->has_error = 0;
         free(parser->error_message);
@@ -8727,9 +8226,6 @@ ASTNode *parser_parse_block(Parser *parser) {
     } else {
       if (!parser->has_error)
         parser_set_error(parser, "Expected a statement");
-      // Skip to the next statement in this same block and keep checking. The
-      // block still consumes its own '}', so one bad statement costs one
-      // diagnostic rather than a run of them from file scope.
       parser_recover_in_block(parser, body_depth);
       parser->has_error = 0;
       free(parser->error_message);
@@ -8737,7 +8233,6 @@ ASTNode *parser_parse_block(Parser *parser) {
     }
   }
 
-  // Expect '}'
   if (!parser_expect(parser, TOKEN_RBRACE)) {
     ast_destroy_node(block);
     return NULL;
@@ -8751,12 +8246,10 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     return NULL;
 
   SourceLocation location = parser_current_location(parser);
-  // Expect 'method' keyword
   if (!parser_expect(parser, TOKEN_METHOD)) {
     return NULL;
   }
 
-  // Expect method name
   if (!parser_is_identifier_like(parser->current_token.type)) {
     parser_set_error(parser, "Expected method name after 'method'");
     return NULL;
@@ -8765,7 +8258,6 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
   char *method_name = strdup(parser->current_token.value);
   parser_advance(parser);
 
-  // Expect '('
   if (!parser_expect(parser, TOKEN_LPAREN)) {
     free(method_name);
     return NULL;
@@ -8781,7 +8273,6 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Expect ')'
   if (!parser_expect(parser, TOKEN_RPAREN)) {
     for (size_t i = 0; i < param_count; i++) {
       free(param_names[i]);
@@ -8793,11 +8284,10 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Optional return type: '-> type' (or ': type' for compatibility)
   char *return_type = NULL;
   if (parser->current_token.type == TOKEN_ARROW ||
       parser->current_token.type == TOKEN_COLON) {
-    parser_advance(parser); // consume return separator
+    parser_advance(parser);
 
     return_type = parser_parse_type_annotation(parser);
     if (!return_type) {
@@ -8828,12 +8318,10 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Parse method body (block)
   ASTNode *body = NULL;
   if (parser->current_token.type == TOKEN_LBRACE) {
     body = parser_parse_block(parser);
     if (!body && parser->has_error) {
-      // Clean up
       for (size_t i = 0; i < param_count; i++) {
         free(param_names[i]);
         free(param_types[i]);
@@ -8847,7 +8335,6 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     }
   } else {
     parser_set_error(parser, "Expected method body ('{')");
-    // Clean up
     for (size_t i = 0; i < param_count; i++) {
       free(param_names[i]);
       free(param_types[i]);
@@ -8860,10 +8347,8 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Create method declaration node (we'll use AST_METHOD_DECLARATION type)
   ASTNode *method_decl = ast_create_node(AST_METHOD_DECLARATION, location);
   if (!method_decl) {
-    // Clean up
     for (size_t i = 0; i < param_count; i++) {
       free(param_names[i]);
       free(param_types[i]);
@@ -8878,10 +8363,8 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     return NULL;
   }
 
-  // Create method declaration data (reuse FunctionDeclaration structure)
   FunctionDeclaration *method_data = calloc(1, sizeof(FunctionDeclaration));
   if (!method_data) {
-    // Clean up
     for (size_t i = 0; i < param_count; i++) {
       free(param_names[i]);
       free(param_types[i]);
@@ -8927,7 +8410,6 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     ast_add_child(method_decl, body);
   }
 
-  // Clean up temporary strings
   free(method_name);
   free(return_type);
   for (size_t i = 0; i < param_count; i++) {

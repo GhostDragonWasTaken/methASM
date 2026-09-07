@@ -1,5 +1,5 @@
 #include "ir_optimize_internal.h"
-#include "../../common.h" // mettle_free_string
+#include "../../common.h"
 
 static int ir_builtin_integer_type_info(const char *name, int *size_out,
                                         int *is_unsigned_out) {
@@ -105,22 +105,10 @@ static int ir_try_compose_single_use_cast(IRFunction *function,
     return 1;
   }
 
-  /* Composing keeps the narrower conversion and trusts the backend to
-   * materialize it at the destination's width, extending by the narrow type's
-   * sign. That holds everywhere but one place: a 32-bit operation on x86-64
-   * zero-extends into the 64-bit register, so a signed 32-bit narrowing left
-   * the high half clear instead of sign-extended. `(int64)(int32)u` on a
-   * uint32 then read -4 back as 4294967292, and Mettle's own linker rejected
-   * every REL32 relocation as out of range. Leave that one pair uncomposed. */
   if (cast_size > producer_size && producer_size == 4 && !producer_unsigned) {
     return 1;
   }
 
-  /* Compose integer cast chains by keeping only the narrower conversion.
-   * Equal-width chains keep the later cast so signed/unsigned reinterpretation
-   * at that width remains visible. A later dead-temp pass removes the first
-   * cast, but nopping it here lets this same pass continue coalescing through
-   * the new source. */
   composed_type = (cast_size <= producer_size) ? cast->text : producer->text;
   type_copy = mettle_strdup(composed_type);
   if (!type_copy || !ir_operand_clone(&producer->lhs, &source)) {
@@ -236,12 +224,6 @@ int ir_coalesce_single_use_temp_assign_pass(IRFunction *function,
       continue;
     }
 
-    /* A float ASSIGN may encode an IEEE-754 width conversion (e.g. a float64
-     * expression narrowed into a float32 destination on return/assignment).
-     * Folding the producer's dest forward would drop that cvtsd2ss/cvtss2sd and
-     * store the wrong half of the value. Only coalesce when no width change is
-     * implied: the producer must itself be float at the same width as the
-     * assign's target. */
     if (assign_instruction->is_float) {
       int assign_bits = (assign_instruction->float_bits == 32) ? 32 : 64;
       int producer_bits =
@@ -305,8 +287,6 @@ static void ir_symbol_value_map_invalidate_name(IRSymbolValueMap *map,
 
   ir_temp_value_map_remove(map, symbol_name);
 
-  /* O(1) fast path: no surviving entry values this symbol, so the compaction
-   * scan below would remove nothing. */
   if (!ir_temp_value_map_any_value_symbol(map, symbol_name)) {
     return;
   }
@@ -320,7 +300,6 @@ static void ir_symbol_value_map_invalidate_name(IRSymbolValueMap *map,
       remove = 1;
     }
     if (entry->value.kind == IR_OPERAND_TEMP && entry->value.name) {
-      /* Temp values may embed propagated symbols; conservatively keep. */
     }
 
     if (remove) {
@@ -510,9 +489,6 @@ static int ir_propagate_instruction_operands(IRTempValueMap *temp_map,
   return 1;
 }
 
-/* Record `i` as the last position reading each temp/symbol operand of the
- * instruction. dest is included: for stores it is an address read, and for
- * writes the entry gets invalidated anyway, so overcounting is harmless. */
 static int ir_cp_note_operand_uses(const IRInstruction *ins, size_t i,
                                    IRTempValueMap *temp_last,
                                    IRTempValueMap *sym_last) {
@@ -550,11 +526,6 @@ static int ir_cp_note_operand_uses(const IRInstruction *ins, size_t i,
   return 1;
 }
 
-/* Drop entries whose key is not read anywhere past `i`: they can never be
- * looked up again, but without pruning every label SNAPSHOT copies them --
- * which made this pass O(labels x live-entries), the dominant compile cost
- * on big inlined functions (4M cloned entries per iteration on a 4000-call
- * main). Pruning loses no soundness: it only removes facts. */
 static void ir_cp_prune_dead_entries(IRTempValueMap *map,
                                      const IRTempValueMap *last_use,
                                      size_t i) {
@@ -587,9 +558,6 @@ static int ir_try_evaluate_integer_binary(const char *op, long long lhs,
                                           long long rhs, long long *result,
                                           int *folded);
 
-/* Constant value of an operand under the current propagation maps, WITHOUT
- * rewriting the operand (a persistent rewrite would perturb the shape the
- * SIMD recognizers pattern-match downstream). */
 static int ir_cp_operand_constant(const IRTempValueMap *temp_map,
                                   const IRTempValueMap *symbol_map,
                                   const IROperand *operand, long long *out) {
@@ -610,11 +578,6 @@ static int ir_cp_operand_constant(const IRTempValueMap *temp_map,
   return 0;
 }
 
-/* A fold runs in 64 bits, but the instruction's result type may be narrower,
- * and the value has to come back in that width or the next instruction reads a
- * number C never produced. `(int)15 << 28` is 0xF0000000, which is negative as
- * an int: folding it as 64-bit left it positive, so the `>> 28` that read it
- * back shifted in zeros and `(x << 28) >> 28` gave 15 instead of -1. */
 static int ir_mtlc_type_is_unsigned_integer(const MtlcType *type) {
   if (!type) {
     return 0;
@@ -646,23 +609,6 @@ static long long ir_narrow_folded(const MtlcType *type, long long value) {
   }
 }
 
-/* Fold `dest = a op b` to `dest <- C` the moment the propagation maps prove
- * both operands constant, INSIDE the propagation walk. Recording the result
- * immediately lets an entire arithmetic chain over one variable
- * (`m = m ^ K; m = m * P; ...` - the shape inlining a keyed helper with
- * constant arguments produces) collapse in a single pass instead of one
- * step per fixpoint round. Operands are consulted, never rewritten, so
- * partially-constant expressions keep their recognizable shape.
- *
- * Width discipline (the canonical-homes contract): a temp computes at the
- * full 64-bit width; a typed local's result wraps to its declared width on
- * the write. So a TEMP dest folds as-is, a SYMBOL dest folds only when its
- * declared type is known, with the result narrowed accordingly, and
- * comparisons fold at operand width regardless of dest. Sign-sensitive ops
- * are skipped when the instruction is unsigned: the evaluator computes
- * signed semantics. */
-/* Declared integer width of a type name, as bits (0 = a full 64) plus
- * signedness. Returns 0 for NULL, or for anything that is not an integer. */
 static int ir_declared_integer_width(const char *type, int *bits_out,
                                      int *unsigned_out) {
   static const struct {
@@ -687,12 +633,6 @@ static int ir_declared_integer_width(const char *type, int *bits_out,
   return 0;
 }
 
-/* Wrap a constant assigned into a narrow integer local to that local's width.
- * The store truncates, so the wrapped value is what the next reader loads --
- * but propagation recorded (and forwarded) the unwrapped one. The fold below
- * narrows a BINARY that writes the home directly; `var b: int8 = a + 1` is
- * lowered as a BINARY into a temp followed by this ASSIGN, so it kept 128 and
- * a later `b == -128` folded false. */
 static void ir_cp_wrap_assign_to_home(const IRFunction *function,
                                       IRInstruction *instruction,
                                       int *any_changed) {
@@ -747,8 +687,7 @@ static void ir_cp_fold_constant_binary(const IRFunction *function,
     }
   }
 
-  /* Result-width narrowing for typed symbol destinations. */
-  int narrow_bits = 0; /* 0 = keep 64-bit */
+  int narrow_bits = 0;
   int narrow_unsigned = 0;
   int is_compare = strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 ||
                    strcmp(op, "<") == 0 || strcmp(op, "<=") == 0 ||
@@ -759,18 +698,10 @@ static void ir_cp_fold_constant_binary(const IRFunction *function,
                                  (IRFunction *)function,
                                  instruction->dest.name)
                            : NULL;
-    /* No type is a global or untracked local, and anything that is not an
-     * integer is a pointer/float/struct home: width unknown, don't fold. */
     if (!ir_declared_integer_width(type, &narrow_bits, &narrow_unsigned)) {
       return;
     }
   }
-  /* The evaluator computes signed semantics, so a sign-sensitive op on an
-   * unsigned destination must not fold here. instruction->is_unsigned only ever
-   * gets set on loads, so this declared-type answer is the one that catches a
-   * `uint64` local: `var c: uint64 = 10000000000000000000; c / 2` folded with a
-   * signed divide and silently produced a negative result under -O while the
-   * unoptimized build divided correctly. */
   if (narrow_unsigned &&
       (strcmp(op, ">>") == 0 || strcmp(op, "/") == 0 || strcmp(op, "%") == 0 ||
        strcmp(op, "<") == 0 || strcmp(op, "<=") == 0 || strcmp(op, ">") == 0 ||
@@ -793,11 +724,6 @@ static void ir_cp_fold_constant_binary(const IRFunction *function,
     }
   }
   if (narrow_bits == 0 && instruction->dest.kind != IR_OPERAND_SYMBOL) {
-    /* A narrow temp is canonicalized at its definition (issue #13), and this
-     * fold replaces that definition, so it has to hand back the same canonical
-     * value. Without this `(x << 28) >> 28` folded to 0xF0000000 as a 64-bit
-     * temp, and the arithmetic shift that read it back saw a positive number:
-     * the textbook hand-rolled sign extension returned 15 instead of -1. */
     result = ir_narrow_folded(instruction->value_type, result);
   }
   ir_rewrite_to_assign_int(instruction, result, any_changed);
@@ -824,12 +750,6 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
     return 0;
   }
 
-  /* Address-taken symbol set for store invalidation, built once: this pass
-   * never introduces ADDRESS_OF instructions, so it stays valid across every
-   * iteration. (Per-store function rescans were a cubic term here.) Last-use
-   * indexes (name -> last instruction position reading it) power the dead-
-   * entry pruning at labels; rebuilt per iteration because propagation
-   * rewrites operands. */
   IRTempValueMap addr_taken, temp_last_use, sym_last_use, storage_syms;
   if (!ir_temp_value_map_init(&addr_taken) ||
       !ir_temp_value_map_init(&temp_last_use) ||
@@ -871,19 +791,9 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
       IRInstruction *instruction = &function->instructions[i];
 
       if (instruction->op == IR_OP_LABEL && instruction->text) {
-        /* Entries nobody reads past this point would only bloat the label
-         * snapshots below (every label clones the live map; unpruned, that
-         * was O(labels x entries) -- the dominant compile cost on big
-         * inlined functions). */
         ir_cp_prune_dead_entries(&map, &temp_last_use, i);
         ir_cp_prune_dead_entries(&symbol_map, &sym_last_use, i);
 
-        /* The label is reachable from explicit jumps/branches *and* from
-         * fall-through if the previous non-nop instruction is not a JUMP or
-         * RETURN. Merge the fall-through map into label_in[L] first so the
-         * load below is the intersection of every incoming flow. Without
-         * this, a label after two writes "x <- 1 / jump L / x <- 0 / L:"
-         * would inherit only the jump's map and wrongly conclude x == 1. */
         int fall_through = 1;
         for (size_t pi = i; pi > 0;) {
           pi--;
@@ -897,7 +807,7 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
           break;
         }
         if (i == 0) {
-          fall_through = 0; /* first instruction has no predecessor */
+          fall_through = 0;
         }
 
         if (fall_through) {
@@ -1020,11 +930,9 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
         ir_temp_value_map_clear(&symbol_map);
       }
 
-
       if ((instruction->op == IR_OP_JUMP || instruction->op == IR_OP_BRANCH_ZERO ||
            instruction->op == IR_OP_BRANCH_EQ) &&
           instruction->text) {
-        /* Same reasoning as the label prune: don't snapshot dead entries. */
         ir_cp_prune_dead_entries(&map, &temp_last_use, i);
         if (!ir_label_value_map_merge_incoming(&label_in, instruction->text,
                                                &map, &flow_changed)) {
@@ -1136,18 +1044,6 @@ static int ir_try_evaluate_integer_binary(const char *op, long long lhs,
   return 1;
 }
 
-/* `x / 2^k` -> `x * 2^-k` for a float divisor that is an exact power of two.
- *
- * This is the one float identity that needs no reassociation licence. Both
- * forms scale by the same exact real value and round once, so they agree on
- * every input including NaN, both infinities, both zeros, and the subnormals
- * that round on the way out. Requiring the reciprocal to be normal is what
- * buys that: if 2^-k were subnormal the reciprocal would itself be rounded,
- * and the two forms would part company.
- *
- * A divide is 14 cycles and holds the divider for four; the multiply is four
- * cycles and fully pipelined. physics_grid pays two of these per particle per
- * step for `x / CELL_SIZE`. */
 static int ir_pow2_reciprocal(double c, int float_bits, double *out) {
   uint64_t bits = 0;
   uint64_t sign = 0;
@@ -1156,11 +1052,11 @@ static int ir_pow2_reciprocal(double c, int float_bits, double *out) {
   memcpy(&bits, &c, sizeof(bits));
   sign = bits & 0x8000000000000000ull;
   if ((bits & 0x000FFFFFFFFFFFFFull) != 0) {
-    return 0; /* mantissa bits set: not a power of two */
+    return 0;
   }
   biased = (int)((bits >> 52) & 0x7FFull);
   if (biased == 0 || biased == 0x7FF) {
-    return 0; /* zero or subnormal, or an infinity/NaN */
+    return 0;
   }
   {
     int k = biased - 1023;
@@ -1172,14 +1068,6 @@ static int ir_pow2_reciprocal(double c, int float_bits, double *out) {
   memcpy(out, &bits, sizeof(bits));
   return 1;
 }
-/* The divisor's value, when it is one the compiler already knows: a float
- * literal, or a name bound to an immutable float global. Reading the global
- * here rather than folding every float const at its use site is deliberate.
- * Folding them all replaces one hoisted register with a materialization per
- * use, which cost physics_grid 3.65% and cancelled the entire divide win.
- * Only the divisor is worth substituting, because the rewrite consumes the
- * constant rather than adding one: the divide's constant becomes the
- * multiply's. */
 static int ir_float_divisor_value(const IROperand *rhs, double *out) {
   const IRModuleSymbol *symbol;
   if (rhs->kind == IR_OPERAND_FLOAT) {
@@ -1236,8 +1124,6 @@ static int ir_try_fold_integer_binary(IRInstruction *instruction,
     return 1;
   }
 
-  /* Same rule as the propagation-time fold above: signed evaluation cannot
-   * stand in for an unsigned divide, remainder, shift, or ordering. */
   if ((instruction->is_unsigned ||
        ir_mtlc_type_is_unsigned_integer(instruction->value_type)) &&
       (strcmp(instruction->text, ">>") == 0 ||
@@ -1267,11 +1153,6 @@ static int ir_try_fold_integer_binary(IRInstruction *instruction,
     }
   }
 
-  /* Every algebraic identity now lives in the declarative table in
-   * ir_optimize_rewrite.c; add a rule there to teach a new one. Facts that
-   * depend on WHERE the instruction sits (a dividend that cannot be negative,
-   * a mask that covers every reachable bit) belong to the range analysis in
-   * ir_optimize_value_range.c instead. */
   return ir_rewrite_apply_binary_identities(instruction, ranges, at, changed);
 }
 
@@ -1603,10 +1484,6 @@ static int ir_bitset_emit(IRFunction *function, size_t at, size_t last,
   return 1;
 }
 
-/* Folds ONE chain and reports whether it did. The emit rewrites the
- * instruction stream and invalidates the use map built above it, so a
- * function holding several chains -- which is what inlining a predicate
- * like `skip_ws` into every caller produces -- needs one call per chain. */
 static int ir_bitset_match_chain(const IRFunction *function,
                                  const IRTempUseMap *uses, size_t index,
                                  long long *keys, size_t *key_count,
@@ -1689,11 +1566,6 @@ static int ir_bitset_match_chain(const IRFunction *function,
 static int ir_bitset_rewrite_chain(IRFunction *function, size_t index,
                                    size_t branch, const long long *keys,
                                    size_t key_count, int *changed) {
-  /* Both are read out of the array before anything is inserted into it: the
-   * chain is rewritten in place, and when it is shorter than the replacement
-   * the room has to be opened first. The old alternative was to decline, which
-   * made the fold depend on how many neighbouring instructions some earlier
-   * pass happened to retire. */
   IROperand value = ir_operand_copy(&function->instructions[index].lhs);
   char *miss = mettle_strdup(function->instructions[branch].text);
   size_t have = branch - index + 1;
@@ -1965,11 +1837,6 @@ int ir_constant_and_branch_simplify_pass(IRFunction *function,
     }
   }
 
-  /* The range analysis is what proves the facts the table cannot express as a
-   * pattern on operand slots -- "this dividend is never negative", "this mask
-   * covers every bit the value can carry", "this comparison is already
-   * decided". It builds its tables on the first question, so a function with
-   * no divide, mask, or bounded comparison never pays for it. */
   IRValueRangeCtx ranges;
   ir_value_range_ctx_init(&ranges, function);
 
@@ -2021,13 +1888,6 @@ int ir_remove_redundant_jumps_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* Label name -> its instruction index, collected in one walk.
- *
- * Jump threading resolves a branch's target label, then the target of the jump
- * it lands on, up to a bounded depth. Resolving each by scanning the function
- * is quadratic in a function that is mostly branches. Threading rewrites branch
- * targets only -- it never moves or retires a label -- so one map serves the
- * whole pass. */
 typedef struct {
   const char **names;
   size_t *indices;
@@ -2076,7 +1936,7 @@ static int ir_label_pos_index_build(const IRFunction *function,
     slot = (size_t)mettle_fnv1a_hash(instruction->text) & mask;
     while (index->names[slot]) {
       if (strcmp(index->names[slot], instruction->text) == 0) {
-        break; /* the first definition wins, as the scan did */
+        break;
       }
       slot = (slot + 1) & mask;
     }
@@ -2224,13 +2084,6 @@ int ir_remove_empty_conditional_diamonds_pass(IRFunction *function,
     }
 
     if (strcmp(branch->text, jump->text) == 0) {
-      /* `branch -> L; jump L` looks redundant (both paths reach L), but only if
-       * the `jump` is genuinely this branch's diamond-closer -- i.e. the very
-       * next non-nop instruction is `label L` itself. If some OTHER label
-       * intervenes (e.g. this is an empty nested then-arm immediately followed
-       * by an enclosing if's else-entry label), the `jump` is the then-arm's
-       * skip-over-the-else and removing it makes the else run unconditionally
-       * (silent miscompile). Guard against that. */
       size_t after_jump = jump_index + 1;
       while (after_jump < function->instruction_count &&
              function->instructions[after_jump].op == IR_OP_NOP) {
@@ -2503,46 +2356,6 @@ static int ir_ascii_casefold_rewrite(IRFunction *function,
   return 1;
 }
 
-/* Fold the canonical short circuit form of
- *
- *   (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
- *
- * into `(unsigned)((c | 32) - 'a') <= 25`. The internal labels must have no
- * other incoming edge and every compare result must feed only its branch.
- * These checks make deleting the second range safe even after inlining and
- * earlier control flow rewrites. */
-/* `v < LO || v > HI` answered as one unsigned compare.
- *
- * Subtracting the low bound folds the two bounds into one: the values in
- * range land in 0..HI-LO, and everything else -- including everything below
- * LO, which wraps to a huge unsigned value -- lands above it. So a pair of
- * signed compares with a branch each becomes a subtract, one unsigned
- * compare, and one branch.
- *
- * word_freq tests `c < 97 || c > 122` once per byte of its document, in two
- * places, and json_parse tests `c < 48 || c > 57` three times in
- * scan_number. This runs AFTER ascii_casefold_range, which claims the
- * two-range `A-Z or a-z` shape and produces something better than this
- * would.
- *
- * The shape, as the short-circuit `||` lowers it:
- *
- *     %t   = v < LO
- *     branch_zero %t -> ELSE
- *     jump BODY
- *   ELSE:
- *     %t2  = v > HI
- *     branch_zero %t2 -> SKIP
- *   BODY:
- *
- * becomes
- *
- *     %s   = v - LO
- *     %t   = %s >u (HI - LO)
- *     branch_zero %t -> SKIP
- *   BODY:
- */
-/* How many jumps and branches name this label. */
 static size_t ir_label_reference_count(const IRFunction *function,
                                        const char *name) {
   size_t n = 0;
@@ -2572,21 +2385,16 @@ static int ir_range_test_is_foldable(const IRInstruction *lo,
   if (lo->rhs.kind != IR_OPERAND_INT || hi->rhs.kind != IR_OPERAND_INT) {
     return 0;
   }
-  /* An unsigned dividend would already compare unsigned, and the wrap the
-   * fold relies on is only equivalent for a signed one. */
   if (lo->is_unsigned || hi->is_unsigned) {
     return 0;
   }
   if (lo->rhs.int_value > hi->rhs.int_value) {
-    return 0; /* empty range: the fold would invert it */
+    return 0;
   }
-  /* Taken unsigned: the bounds are ordered, so this is their exact distance,
-   * where the signed subtraction would overflow on a pair of extreme literals
-   * and read as a small span. */
   if ((unsigned long long)hi->rhs.int_value -
           (unsigned long long)lo->rhs.int_value >
       2147483646ULL) {
-    return 0; /* the span has to stay inside the compare's width */
+    return 0;
   }
   if (lo->dest.kind != IR_OPERAND_TEMP || hi->dest.kind != IR_OPERAND_TEMP) {
     return 0;
@@ -2602,10 +2410,6 @@ int ir_fold_range_test_pass(IRFunction *function, int *changed) {
   if (!function || function->instruction_count == 0) {
     return 1;
   }
-  /* The low compare's temp stops holding a truth value and starts holding
-   * `v - LO`, and the high compare's stops meaning `v > HI` and starts
-   * meaning out-of-range. Either one read anywhere but by its own branch
-   * would read the new meaning. */
   if (!ir_temp_use_map_init(&uses)) {
     return 1;
   }
@@ -2657,18 +2461,11 @@ int ir_fold_range_test_pass(IRFunction *function, int *changed) {
           !hi_branch->text) {
         continue;
       }
-      /* Whatever control reaches when the high test passes has to be the
-       * same place the short-circuit jumped to. It is spelled two ways: the
-       * body's label sits right there (`if (...) { ... }`), or the body is
-       * itself a jump to the same target, which is how a `break` lowers. */
       if (!body_label->text ||
           (body_label->op != IR_OP_LABEL && body_label->op != IR_OP_JUMP) ||
           strcmp(body_label->text, shortcut->text) != 0) {
         continue;
       }
-      /* The short-circuit's own label is about to go. Anything else that
-       * branches to it would land on the compare and read a subtraction that
-       * never happened on its path. */
       if (ir_label_reference_count(function, else_label->text) != 1) {
         continue;
       }
@@ -2679,9 +2476,6 @@ int ir_fold_range_test_pass(IRFunction *function, int *changed) {
           ir_temp_use_map_get(&uses, hi->dest.name) != 1) {
         continue;
       }
-      /* The short-circuit block must hold nothing but its jump, or the
-       * fold would drop whatever else it does. ir_ascii_next already
-       * skipped the nops, so adjacency in the index array says so. */
       span = hi->rhs.int_value - lo->rhs.int_value;
 
       {
@@ -2695,7 +2489,6 @@ int ir_fold_range_test_pass(IRFunction *function, int *changed) {
           mettle_free_string(cmp_text);
           return 0;
         }
-        /* lo becomes the subtract, hi becomes the unsigned compare. */
         mettle_free_string(lo->text);
         lo->text = sub_text;
         ir_operand_destroy(&lo->rhs);
@@ -2711,9 +2504,6 @@ int ir_fold_range_test_pass(IRFunction *function, int *changed) {
         ir_operand_destroy(&value);
       }
 
-      /* The low branch, its short-circuit jump and the else label all go:
-       * the single compare that replaced them falls straight into the
-       * branch that used to test the high bound. */
       ir_instruction_make_nop(&function->instructions[at[1]]);
       ir_instruction_make_nop(&function->instructions[at[2]]);
       ir_instruction_make_nop(&function->instructions[at[3]]);
@@ -2825,12 +2615,6 @@ int ir_ascii_casefold_range_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* The set of label names some branch targets, collected in one walk.
- *
- * Asking ir_label_is_referenced per label scans the function per label, which
- * is quadratic in a function that is mostly labels -- anything built out of
- * if/else. Retiring a label never removes a branch, so one set answers every
- * question this pass asks. */
 typedef struct {
   const char **names;
   size_t capacity;
@@ -3142,8 +2926,6 @@ int ir_instruction_has_side_effect(const IRInstruction *instruction) {
     return 0;
   }
 
-  /* A volatile access is observable in itself, so it counts as an effect even
-   * when it is a load whose value nothing reads. */
   if (instruction->is_volatile) {
     return 1;
   }
@@ -3249,16 +3031,6 @@ int ir_symbol_read_after(const IRFunction *function, size_t start_index,
   return 0;
 }
 
-/* Liveness of a loop's induction variable PAST the loop, for the SIMD
- * recognizers (the fused kernels drop the iv). `exit_index` is the first
- * instruction after the back jump -- usually the loop's own exit label.
- * Unlike ir_symbol_read_after, a full redefinition (`i <- 0` starting the
- * NEXT loop -- iv reuse is everywhere in real code) kills the value: later
- * reads see the new definition, not the loop's final value. The scan is
- * conservative: it trusts a redefinition only while control flow is still
- * straight-line from the exit (one leading label allowed -- the exit label
- * itself); any further label/branch/jump means other paths could observe
- * the old value, and the answer falls back to "live". */
 int ir_symbol_live_after_loop(const IRFunction *function, size_t exit_index,
                               const char *symbol_name) {
   if (!function || !symbol_name) {
@@ -3275,16 +3047,13 @@ int ir_symbol_live_after_loop(const IRFunction *function, size_t exit_index,
     }
     if (ins->op == IR_OP_ASSIGN &&
         ir_operand_is_symbol_named(&ins->dest, symbol_name)) {
-      return 0; /* fully redefined before any read: the old value is dead */
+      return 0;
     }
     if (ins->op == IR_OP_RETURN) {
       return 0;
     }
     if (ins->op == IR_OP_LABEL) {
       if (labels_seen++ > 0) {
-        /* A join: another path may enter here and read the old value via
-         * code we will not scan in order. Fall back to the whole-function
-         * read scan. */
         return ir_symbol_read_after(function, i, symbol_name);
       }
       continue;
@@ -3311,9 +3080,6 @@ static int ir_symbol_read_count_after_until_write_or_control(
 
   for (size_t i = start_index; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
-    /* A jump may be a loop backedge. Converting the symbol write before it to
-     * a temp lets later loop unrolling clone several writes to one temp name,
-     * which violates the backend's single-producer rule. */
     if (instruction->op == IR_OP_JUMP) {
       return -1;
     }
@@ -3326,12 +3092,6 @@ static int ir_symbol_read_count_after_until_write_or_control(
         instruction->op == IR_OP_STORE || instruction->op == IR_OP_INLINE_ASM) {
       return -1;
     }
-    /* Count the read BEFORE the write ends the scan, because one instruction
-     * does both: `s0 = 10.0 - s0` reads the old value and then names it. Ended
-     * at the write, that read went uncounted, so a copy with two readers
-     * looked like a copy with one and its symbol became a temp. The second
-     * reader was still spelled `s0`, which nothing wrote any more, so it read
-     * whatever the symbol held on entry to the loop for every iteration. */
     if (ir_instruction_reads_symbol_operand(instruction, symbol_name)) {
       count++;
       if (only_read_index_out) {

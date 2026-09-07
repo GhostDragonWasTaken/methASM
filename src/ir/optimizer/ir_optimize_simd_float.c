@@ -1,17 +1,6 @@
 #include "ir_optimize_internal.h"
 #include "../ir_explain_ledger.h"
 
-/* -------------------------------------------------------------------------- */
-/* float64/float32 horizontal sum -> IR_OP_SIMD_SUM_F64/F32                    */
-/* float64/float32 dot product   -> IR_OP_SIMD_DOT_F64/F32                     */
-/* -------------------------------------------------------------------------- */
-
-/* Decode a temp that must be the value of `*(base + (iv << shift)) [size]`,
- * the canonical lowering of `base[iv]` for a float array. On success records
- * the array base symbol and the element width in bits: 64 for the float64
- * shape (iv<<3, load size 8) and 32 for the float32 shape (iv<<2, load size 4).
- * Any other shape is rejected so the recognizer cannot mistake an int32 index
- * expression (or a differently-strided access) for a float reduction. */
 static int ir_decode_float_indexed_load(IRFunction *function, size_t before,
                                         const char *load_temp, const char *iv,
                                         const char **base_out, int *bits_out) {
@@ -94,10 +83,6 @@ static int ir_decode_float_indexed_address(IRFunction *function, size_t before,
   return 1;
 }
 
-/* Byte twin of the two decoders above. A 1-byte element needs no scaling, so
- * the address is `base + iv` with no shift between them -- the shape the
- * decoders above are built to see through, and therefore the shape they
- * refuse. */
 static int ir_decode_byte_indexed_address(IRFunction *function, size_t before,
                                           const char *addr_temp,
                                           const char *iv,
@@ -124,7 +109,6 @@ static int ir_decode_byte_indexed_address(IRFunction *function, size_t before,
   return 0;
 }
 
-/* `%t <- *(base + iv) [1]`, with how the byte widens into the int32 lane. */
 static int ir_decode_byte_indexed_load(IRFunction *function, size_t before,
                                        const char *load_temp, const char *iv,
                                        const char **base_out,
@@ -143,41 +127,21 @@ static int ir_decode_byte_indexed_load(IRFunction *function, size_t before,
                                       base_out)) {
     return 0;
   }
-  /* The lane widens the way the scalar load does, which is the way the element
-   * type reads: a signed byte sign-extends, an unsigned one zero-extends. This
-   * was pinned to zero-extension while the scalar backends widened every byte
-   * with movzx, so an int8 -56 read back as 200 and the kernel had to match. */
   *unsigned_out = load->is_unsigned ? 1 : 0;
   return 1;
 }
 
-/* A symbol is an acceptable float-array base if it is a function parameter, a
- * declared local (covers inlined-callee parameter copies), or a GLOBAL the
- * function never writes and never takes the address of -- real programs (an
- * LLM engine's scratch buffers, a game's framebuffer pointer) keep their hot
- * arrays in global pointers, and rejecting those left every such loop
- * scalar. The strict load-shape decode above already pins element width and
- * float-ness. */
 static int ir_symbol_is_float_array_base(IRFunction *function,
                                          const char *symbol_name) {
   if (ir_function_symbol_is_parameter(function, symbol_name) ||
       ir_function_local_declared_type(function, symbol_name) != NULL) {
     return 1;
   }
-  /* Global: its VALUE must be stable across the loop. The recognizers'
-   * bodies are store/call-free, so only a direct write inside this function
-   * or an escaped address could change it mid-loop. */
   if (!symbol_name || ir_symbol_address_taken(function, symbol_name)) {
     return 0;
   }
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *ins = &function->instructions[i];
-    /* A SIMD array op carries the output array's base symbol as its dest by
-     * convention (`@a = simd_affine_map_f32(...)`, `@a = simd_fill(...)`): it
-     * writes the array ELEMENTS through the base, it does NOT reassign the
-     * base pointer's value. So such an op (typically a SIBLING loop already
-     * vectorized on the same array) must not disqualify the base -- otherwise
-     * vectorizing one `a[i]=...` loop would poison every later one on `a`. */
     if (ins->op >= IR_OP_SIMD_SUM_I32 && ins->op <= IR_OP_SIMD_LCG_U32) {
       continue;
     }
@@ -200,9 +164,6 @@ static int ir_float_sum_type_matches(const char *sum_type, int width_bits) {
   return strcmp(sum_type, "float32") == 0;
 }
 
-/* Declared type of a function parameter by name, or NULL. (Locals come from
- * ir_function_local_declared_type, which does not see params -- they aren't
- * DECLARE_LOCAL'd.) */
 static const char *ir_function_param_declared_type(const IRFunction *function,
                                                    const char *name) {
   if (!function || !name || !function->parameter_names ||
@@ -228,11 +189,6 @@ static int ir_float_scalar_operand_matches(IRFunction *function,
     if (operand->float_bits == width_bits) {
       return 1;
     }
-    /* A literal used in float32 context usually still carries the default
-     * float64 tag (`2.5` lowers as a double). The kernel broadcasts the
-     * constant at its own lane width, so accept the mismatch whenever that
-     * narrowing is exact -- then the kernel's coefficient is bit-identical to
-     * the one the scalar loop multiplies by. */
     if (width_bits == 32 &&
         (double)(float)operand->float_value == operand->float_value) {
       return 1;
@@ -240,9 +196,6 @@ static int ir_float_scalar_operand_matches(IRFunction *function,
     return 0;
   }
   if (operand->kind == IR_OPERAND_SYMBOL && operand->name) {
-    /* A scalar coefficient may be a local OR a parameter (e.g. saxpy's `a` in
-     * `y[i] = a*x[i] + y[i]` when `a` is a function arg). The kernel reads it as
-     * a symbol either way; only the float width must match. */
     const char *ty = ir_function_local_declared_type(function, operand->name);
     if (!ty) {
       ty = ir_function_param_declared_type(function, operand->name);
@@ -265,8 +218,6 @@ static int ir_try_clone_float_scalar_operand(IRFunction *function,
   *out = ir_operand_none();
   if (ir_float_scalar_operand_matches(function, operand, width_bits)) {
     if (operand->kind == IR_OPERAND_FLOAT) {
-      /* Normalize the tag to the kernel's lane width (the match may have
-       * accepted an exactly-narrowable float64-tagged literal). */
       *out = ir_operand_float_sized(operand->float_value, width_bits);
       return 1;
     }
@@ -292,11 +243,6 @@ static int ir_try_clone_float_scalar_operand(IRFunction *function,
   return 0;
 }
 
-/* Shared loop-frame matcher for the float reductions. Confirms `header_index`
- * begins a `while (iv < bound)` loop starting at iv == 0 with a unit increment
- * of `iv`, no nested while, and a back-jump, returning the body bounds and key
- * symbols. Returns 1
- * with *matched=1 on a clean frame; *matched=0 means "not this shape, skip". */
 static int ir_float_reduction_frame(IRFunction *function, size_t header_index,
                                     const char **iv_out, size_t *branch_out,
                                     size_t *jump_out, IROperand *bound_compare,
@@ -355,17 +301,12 @@ static int ir_float_reduction_frame(IRFunction *function, size_t header_index,
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, exit_label)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
   if (ir_loop_body_is_unclaimable(function, branch_index + 1, jump_index)) {
     return 1;
   }
 
-  /* Bound: a parameter/inlined-param (always invariant), or any other
-   * symbol -- a local or a GLOBAL (dimension globals like an LLM's D/HD are
-   * the norm in real code) -- that the loop region never writes and whose
-   * address never escapes. The kernel reads it once at entry; invariance
-   * makes that identical to the scalar loop's per-iteration read. */
   if (compare->rhs.kind == IR_OPERAND_SYMBOL &&
       !ir_symbol_is_sum_loop_bound(function, compare->rhs.name)) {
     if (ir_symbol_address_taken(function, compare->rhs.name)) {
@@ -392,10 +333,6 @@ static int ir_float_reduction_frame(IRFunction *function, size_t header_index,
           &function->instructions[increment_index], compare->lhs.name)) {
     return 1;
   }
-  /* Every fused kernel walks its array bases from element 0 and treats the
-   * compare bound as the element COUNT, so the loop must provably start at
-   * iv == 0. Catches `j = 3; while (j < n)` and `for i in 1..n` reductions
-   * that previously vectorized as 0..n. */
   if (!ir_iv_zero_at_header(function, header_index, compare->lhs.name)) {
     return 1;
   }
@@ -410,8 +347,6 @@ static int ir_float_reduction_frame(IRFunction *function, size_t header_index,
   return 1;
 }
 
-/* Reject body shapes that are not a pure read-only reduction (a store or call
- * would make the fused kernel unsound). */
 static int ir_float_body_is_pure_reduction(IRFunction *function, size_t lo,
                                            size_t hi) {
   for (size_t i = lo; i < hi; i++) {
@@ -490,13 +425,6 @@ static int ir_try_vectorize_sum_float_at(IRFunction *function,
   }
   sum_type = ir_function_local_declared_type(function, sum_symbol);
   {
-    /* Adding a run of floats four lanes at a time is a different sum from
-     * adding them one at a time: floating-point addition does not associate,
-     * and the two answers differ by rounding the compiler cannot bound without
-     * knowing how many terms there are. Where the accumulator carries a
-     * declared bound, that is a property the program asked the compiler to
-     * keep, and it is refused here rather than quietly traded for speed. Where
-     * it does not, the licence is real and goes on the belief ledger. */
     double bound_lo = 0.0;
     double bound_hi = 0.0;
     if (ir_lookup_float_bound(sum_type, &bound_lo, &bound_hi)) {
@@ -687,14 +615,12 @@ static void ir_affine_map_terms_destroy(IRAffineMapTerms *terms) {
   memset(terms, 0, sizeof(*terms));
 }
 
-/* An `if` in a loop body whose arms only choose a value. See the if-conversion
- * block below, which is where one is turned into a lane select. */
 typedef struct VLoopDiamond {
-  size_t branch_index; /* the branch_zero */
+  size_t branch_index;
   size_t then_lo, then_hi;
-  size_t else_lo, else_hi; /* else_lo == else_hi when there is no else arm */
-  size_t end;              /* one past the closing label */
-  const char *sym;         /* the one symbol the arms assign */
+  size_t else_lo, else_hi;
+  size_t end;
+  const char *sym;
   int has_else;
 } VLoopDiamond;
 
@@ -705,9 +631,6 @@ static int vloop_region_is_pure(const IRFunction *function, size_t lo, size_t hi
 static int vloop_region_writes_escape(IRFunction *function, size_t lo, size_t hi,
                                       size_t after);
 
-/* `allow_diamonds` admits a body whose branches all bound value diamonds. The
- * DAG builder still has the last word: a diamond it cannot fold into a select
- * returns no root, and the loop stays scalar. */
 static int ir_float_map_body_is_safe_ex(IRFunction *function, size_t lo,
                                         size_t hi, const char *iv_symbol,
                                         size_t *store_index_out,
@@ -738,14 +661,11 @@ static int ir_float_map_body_is_safe_ex(IRFunction *function, size_t lo,
         continue;
       }
       if (ins->op == IR_OP_LABEL || ins->op == IR_OP_JUMP) {
-        continue; /* the labels a matched diamond leaves behind */
+        continue;
       }
     }
     if (ir_instruction_writes_symbol(ins) &&
         !ir_operand_is_symbol_named(&ins->dest, iv_symbol)) {
-      /* A per-iteration local the DAG builder can substitute (`var x = a[i];
-       * out[i] = x*x*x`) is fine, provided it does not outlive the loop -- the
-       * fused kernel deletes the body, so a value read afterward would vanish. */
       if (ins->dest.kind != IR_OPERAND_SYMBOL || !ins->dest.name ||
           ir_symbol_live_after_loop(function, hi + 1, ins->dest.name)) {
         return 0;
@@ -950,11 +870,6 @@ static int ir_try_vectorize_affine_map_float_at(IRFunction *function,
   }
 
   store = &function->instructions[store_index];
-  /* The indexed-address decode only proves a 4/8-byte unit-stride store; it
-   * canNOT tell a float32 array from a uint32 one (both lower to base+(i<<2),
-   * size 4). Without `store->is_float` an integer copy `out[i]=a[i]` matched
-   * this FLOAT kernel, and `1.0*x` is not a bit-identity for integer data
-   * whose bits form a float NaN (the multiply canonicalizes the payload). */
   if (!store->is_float || store->dest.kind != IR_OPERAND_TEMP ||
       !store->dest.name ||
       store->lhs.kind != IR_OPERAND_TEMP || !store->lhs.name ||
@@ -1029,17 +944,11 @@ int ir_simd_affine_map_float_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* counter -> float64 chain -> (int64)trunc reduction -> IR_OP_SIMD_I2F_REDUCE  */
-/* -------------------------------------------------------------------------- */
-
-/* Op-codes for one chain step (stored as the INT operand of each argument pair;
- * the FLOAT operand is the step constant k). Applied to the running value x. */
-#define I2F_STEP_MUL 0  /* x = x * k */
-#define I2F_STEP_ADD 1  /* x = x + k */
-#define I2F_STEP_SUBR 2 /* x = x - k */
-#define I2F_STEP_SUBL 3 /* x = k - x */
-#define I2F_STEP_DIVR 4 /* x = x / k */
+#define I2F_STEP_MUL 0
+#define I2F_STEP_ADD 1
+#define I2F_STEP_SUBR 2
+#define I2F_STEP_SUBL 3
+#define I2F_STEP_DIVR 4
 #define I2F_MAX_STEPS 8
 
 typedef struct {
@@ -1047,8 +956,6 @@ typedef struct {
   double k;
 } I2fChainStep;
 
-/* Resolve the producer instruction of a temp (its definition) or a symbol (its
- * last write) before `before`. Returns NULL when none. */
 static const IRInstruction *ir_i2f_resolve_producer(IRFunction *function,
                                                     size_t before,
                                                     const IROperand *op) {
@@ -1076,9 +983,6 @@ static int ir_i2f_operand_is_f64_const(const IROperand *op, double *value_out) {
   return 1;
 }
 
-/* Walk the straight-line float64 expression `op` down to the base `(float64)iv`,
- * pushing each binary-with-constant step into `steps` in base->outermost order.
- * Returns 1 on a fully-decoded affine/constant chain rooted at the counter. */
 static int ir_i2f_extract_chain(IRFunction *function, size_t before,
                                 const IROperand *op, const char *iv,
                                 I2fChainStep *steps, int *nsteps) {
@@ -1086,7 +990,6 @@ static int ir_i2f_extract_chain(IRFunction *function, size_t before,
   if (!p) {
     return 0;
   }
-  /* Base: x0 = (float64)i (an int->float cast of the loop counter). */
   if (p->op == IR_OP_CAST && !p->is_float && p->text &&
       strcmp(p->text, "float64") == 0 &&
       ir_operand_is_symbol_named(&p->lhs, iv)) {
@@ -1119,7 +1022,6 @@ static int ir_i2f_extract_chain(IRFunction *function, size_t before,
     }
   } else if (l_const && !r_const) {
     inner = &p->rhs;
-    /* k already holds the left constant. */
     if (strcmp(p->text, "+") == 0) {
       code = I2F_STEP_ADD;
     } else if (strcmp(p->text, "*") == 0) {
@@ -1127,10 +1029,10 @@ static int ir_i2f_extract_chain(IRFunction *function, size_t before,
     } else if (strcmp(p->text, "-") == 0) {
       code = I2F_STEP_SUBL;
     } else {
-      return 0; /* k / x is not affine in x; reject */
+      return 0;
     }
   } else {
-    return 0; /* both or neither constant: not a counter-affine step */
+    return 0;
   }
 
   size_t pidx = (size_t)(p - function->instructions);
@@ -1146,7 +1048,6 @@ static int ir_i2f_extract_chain(IRFunction *function, size_t before,
   return 1;
 }
 
-/* Evaluate the decoded chain at counter value i (host double, for range proof). */
 static double ir_i2f_eval_chain(const I2fChainStep *steps, int nsteps,
                                 double i) {
   double x = i;
@@ -1164,9 +1065,6 @@ static double ir_i2f_eval_chain(const I2fChainStep *steps, int nsteps,
   return x;
 }
 
-/* Resolve a compile-time-constant trip bound from the loop compare's rhs: either
- * a direct INT, or an (int*)cast of an INT constant. Returns 1 and *out on
- * success. */
 static int ir_i2f_resolve_const_bound(IRFunction *function, size_t before,
                                       const IROperand *rhs, long long *out) {
   if (!rhs) {
@@ -1187,9 +1085,6 @@ static int ir_i2f_resolve_const_bound(IRFunction *function, size_t before,
   return 0;
 }
 
-/* The loop body may only contain the reduction's straight-line float work: local
- * decls, casts, float/assign temps, nops, and the single counter increment. Any
- * store/call/branch/jump/nested-loop makes the fused kernel unsound. */
 static int ir_i2f_body_is_safe(IRFunction *function, size_t lo, size_t hi) {
   for (size_t i = lo; i < hi; i++) {
     switch (function->instructions[i].op) {
@@ -1238,10 +1133,6 @@ static int ir_try_vectorize_i2f_reduce_at(IRFunction *function,
   }
   loop_label = header->text;
 
-  /* Find the loop's exit test. Unlike the array reductions, a constant trip
-   * bound is materialized by an (int64)const cast between the header and the
-   * compare, so locate the branch first, then its compare via the temp it
-   * tests. */
   for (size_t i = header_index + 1; i < function->instruction_count; i++) {
     IROpcode op = function->instructions[i].op;
     if (op == IR_OP_BRANCH_ZERO) {
@@ -1270,7 +1161,6 @@ static int ir_try_vectorize_i2f_reduce_at(IRFunction *function,
   iv_symbol = compare->lhs.name;
   exit_label = branch->text;
 
-  /* Trip count must be a compile-time constant so the range proof is sound. */
   if (!ir_i2f_resolve_const_bound(function, compare_index, &compare->rhs,
                                   &bound) ||
       bound < 1) {
@@ -1294,7 +1184,7 @@ static int ir_try_vectorize_i2f_reduce_at(IRFunction *function,
     return 1;
   }
   if (!ir_fused_loop_exit_is_adjacent(function, jump_index, exit_label)) {
-    return 1; /* threaded exit: fusing would delete the exit edge */
+    return 1;
   }
   if (ir_loop_body_is_unclaimable(function, branch_index + 1, jump_index)) {
     return 1;
@@ -1303,8 +1193,6 @@ static int ir_try_vectorize_i2f_reduce_at(IRFunction *function,
     return 1;
   }
 
-  /* Counter must step by +1 and be initialized to 0 before the loop (the kernel
-   * walks i = 0..bound-1). */
   increment_index = jump_index;
   while (increment_index > branch_index + 1) {
     increment_index--;
@@ -1316,13 +1204,10 @@ static int ir_try_vectorize_i2f_reduce_at(IRFunction *function,
           &function->instructions[increment_index], iv_symbol)) {
     return 1;
   }
-  /* ir_iv_zero_at_header refuses at the first control-flow join, unlike a
-   * textual last-writer scan that an if/else init upstream could fool. */
   if (!ir_iv_zero_at_header(function, header_index, iv_symbol)) {
     return 1;
   }
 
-  /* Find the reduction: acc = acc + t, acc an int64 local, t = (int64)CHAIN. */
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     const IRInstruction *cast = NULL;
@@ -1367,10 +1252,6 @@ static int ir_try_vectorize_i2f_reduce_at(IRFunction *function,
     return 1;
   }
 
-  /* Range proof: the chain is affine in i, so its extrema are at i=0 and
-   * i=bound-1. Require every truncated value to fit a signed int32 (so the
-   * packed cvttpd2dq is exact) and the integer sum to stay below 2^52 (so f64
-   * accumulation of integer addends is exact and reassociation-safe). */
   {
     double v0 = ir_i2f_eval_chain(steps, nsteps, 0.0);
     double vN = ir_i2f_eval_chain(steps, nsteps, (double)(bound - 1));
@@ -1378,18 +1259,16 @@ static int ir_try_vectorize_i2f_reduce_at(IRFunction *function,
     double vmin = v0 < vN ? v0 : vN;
     double abs_max = vmax > -vmin ? vmax : -vmin;
     if (!(vmin == vmin) || !(vmax == vmax)) {
-      return 1; /* NaN (e.g. divide by zero in the chain) */
+      return 1;
     }
     if (abs_max >= 2147483647.0) {
-      return 1; /* per-element value would overflow int32 */
+      return 1;
     }
-    if (abs_max * (double)bound >= 4503599627370496.0 /* 2^52 */) {
-      return 1; /* running integer sum could exceed exact f64 range */
+    if (abs_max * (double)bound >= 4503599627370496.0 ) {
+      return 1;
     }
   }
 
-  /* Build the fused instruction: dest = acc; arguments[0] = bound (int64),
-   * then (op_code INT, constant FLOAT64) per chain step. */
   fused.op = IR_OP_SIMD_I2F_REDUCE_F64;
   fused.location = function->instructions[header_index].location;
   fused.is_float = 0;
@@ -1425,48 +1304,34 @@ int ir_simd_i2f_reduce_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* General auto-vectorizer: float32/float64 straight-line-DAG counted loops    */
-/*   -> IR_OP_SIMD_VLOOP_F64 (width carried in float_bits: 64 or 32)           */
-/*                                                                             */
-/* Runs AFTER the per-shape recognizers (sum/dot/affine/i2f) so it only claims */
-/* loops they did not. Handles element-wise maps out[iv] = DAG(...) and '+'    */
-/* reductions over either float width; the store/accumulator type pins it.     */
-/* -------------------------------------------------------------------------- */
-
-/* Node tags , must match the kernel decoder in simd_float.c. */
-#define VLOOP_VN_LOAD 0  /* op0 = loaded-array index */
-#define VLOOP_VN_IOTA 1  /* (float64)iv, or the raw iv for int lanes */
-#define VLOOP_VN_CONST 2 /* op0 = constant index */
+#define VLOOP_VN_LOAD 0
+#define VLOOP_VN_IOTA 1
+#define VLOOP_VN_CONST 2
 #define VLOOP_VN_ADD 3
 #define VLOOP_VN_SUB 4
 #define VLOOP_VN_MUL 5
 #define VLOOP_VN_DIV 6
-#define VLOOP_VN_SCALAR 7 /* op0 = runtime loop-invariant scalar index */
-#define VLOOP_VN_AND 8    /* int lanes only */
-#define VLOOP_VN_OR 9     /* int lanes only */
-#define VLOOP_VN_XOR 10   /* int lanes only */
-#define VLOOP_VN_SHL 11   /* int lanes only; op0 = node, op1 = literal count */
-#define VLOOP_VN_SAR 12   /* int lanes only; arithmetic >> by a literal count */
-#define VLOOP_VN_SHR 13   /* int lanes only; logical >> by a literal count */
-#define VLOOP_VN_MIN 14   /* int lanes only; signed per-lane minimum */
-#define VLOOP_VN_MAX 15   /* int lanes only; signed per-lane maximum */
-/* If-conversion. CMPGT leaves an all-ones/all-zeros lane mask; SELECT consumes
- * that mask and a PAIR of values. PAIR evaluates to nothing of its own: it is
- * how a three-operand node fits a two-operand encoding, and the kernel steps
- * over it with both values already on its stack. */
-#define VLOOP_VN_CMPGT 16 /* int lanes only; signed op0 > op1 */
-#define VLOOP_VN_PAIR 17  /* op0 = then value, op1 = else value */
-#define VLOOP_VN_SELECT 18 /* op0 = mask, op1 = pair */
-#define VLOOP_VN_CMPEQ 19 /* int lanes only; op0 == op1 */
+#define VLOOP_VN_SCALAR 7
+#define VLOOP_VN_AND 8
+#define VLOOP_VN_OR 9
+#define VLOOP_VN_XOR 10
+#define VLOOP_VN_SHL 11
+#define VLOOP_VN_SAR 12
+#define VLOOP_VN_SHR 13
+#define VLOOP_VN_MIN 14
+#define VLOOP_VN_MAX 15
+#define VLOOP_VN_CMPGT 16
+#define VLOOP_VN_PAIR 17
+#define VLOOP_VN_SELECT 18
+#define VLOOP_VN_CMPEQ 19
 
 #define VLOOP_MAX_DIAMOND_DEPTH 4
 
 #define VLOOP_MAX_NODES 48
-#define VLOOP_MAX_ARRAYS 4 /* loaded bases; +dst must keep distinct bases <= 4 */
+#define VLOOP_MAX_ARRAYS 4
 #define VLOOP_MAX_CONSTS 16
 #define VLOOP_MAX_SCALARS 8
-#define VLOOP_REG_BUDGET 4 /* ymm node-eval stack depth the kernel supports */
+#define VLOOP_REG_BUDGET 4
 int code_generator_vloop_pool_size(int elem8, int has_iota);
 
 typedef struct {
@@ -1478,43 +1343,34 @@ typedef struct {
 typedef struct {
   VLoopNode nodes[VLOOP_MAX_NODES];
   int n_nodes;
-  const char *arrays[VLOOP_MAX_ARRAYS]; /* loaded base symbols (deduped) */
+  const char *arrays[VLOOP_MAX_ARRAYS];
   int n_arrays;
-  double consts[VLOOP_MAX_CONSTS];      /* deduped (bit-compare); float DAGs */
-  long long iconsts[VLOOP_MAX_CONSTS];  /* deduped; int DAGs */
+  double consts[VLOOP_MAX_CONSTS];
+  long long iconsts[VLOOP_MAX_CONSTS];
   int n_consts;
-  const char *scalars[VLOOP_MAX_SCALARS]; /* invariant scalar symbols (deduped) */
+  const char *scalars[VLOOP_MAX_SCALARS];
   int n_scalars;
   int width_bits;
-  int is_int; /* 0 = float lanes (width_bits 32/64), 1 = int32 lanes */
-  /* Element width in MEMORY, which int lanes decouple from lane width: 32 by
-   * default, or 8 for a byte map, where the loads widen into int32 lanes and
-   * the store truncates back. Every array in one DAG shares it. */
+  int is_int;
   int elem_bits;
-  int elem_unsigned; /* byte elements: zero-extend (uint8) vs sign-extend */
-  size_t body_lo; /* loop body region, for symbol-invariance checks */
+  int elem_unsigned;
+  size_t body_lo;
   size_t body_hi;
   int has_iota;
-  int overflow; /* a table limit was exceeded -> refuse */
-  int resolve_depth; /* body-local substitution recursion guard */
-  int iota_bound_known; /* the loop's trip count is a compile-time constant */
-  long long iota_bound; /* that constant (iv ranges over [0, iota_bound)) */
-  /* Enclosing if-converted arms, innermost last. A name read inside an arm
-   * resolves within that arm first; failing that, to the value that reached the
-   * arm's diamond. Without this, resolving a name in the ELSE arm walked
-   * through the THEN arm and took its write. */
+  int overflow;
+  int resolve_depth;
+  int iota_bound_known;
+  long long iota_bound;
   struct {
-    size_t lo;          /* first instruction of the arm */
-    size_t hi;          /* one past its last */
-    size_t incoming_hi; /* the diamond's branch: where the arm's input settled */
+    size_t lo;
+    size_t hi;
+    size_t incoming_hi;
   } regions[VLOOP_MAX_DIAMOND_DEPTH + 1];
   int n_regions;
 } VLoopDag;
 
 #define VLOOP_MAX_RESOLVE_DEPTH 16
 
-/* A map may go deeper when the kernel has ymm registers left over. Sized by the
- * kernel itself so the two cannot disagree about what is spendable. */
 static int vloop_map_budget(const VLoopDag *d) {
   return code_generator_vloop_pool_size(d->elem_bits == 8, d->has_iota);
 }
@@ -1580,10 +1436,6 @@ static int vloop_intern_scalar(VLoopDag *d, const char *name) {
   return d->n_scalars++;
 }
 
-/* A symbol written anywhere in the loop body is not a single value across
- * iterations (the accumulator, a rotating local): it can be neither broadcast
- * nor producer-chased (the chase would bake the loop-ENTRY value into every
- * lane). */
 static int vloop_symbol_written_in_body(const IRFunction *function,
                                         const VLoopDag *d, const char *name) {
   for (size_t i = d->body_lo; i < d->body_hi; i++) {
@@ -1613,25 +1465,10 @@ static int vloop_text_is_float_width(const char *text, int width_bits) {
          (width_bits == 32 && strcmp(text, "float32") == 0);
 }
 
-/* A float64 literal is admissible in a float32 DAG only when it narrows to
- * float32 EXACTLY (round-trips). Mettle defaults float literals to float64, so
- * `a[i] * 2.0` carries a float64 `2.0`; the f32 kernel broadcasts `(float)2.0`,
- * which for an exactly-representable value is the IDENTICAL number the literal
- * denotes. The only residual difference from the scalar loop is then the same
- * f32-lane-vs-f64-intermediate rounding the runtime-scalar reduction (`k*a[i]`)
- * already ships with -- so this is exactly as faithful as that. A non-exact
- * literal (0.1) would make the f32 coefficient differ from the value the scalar
- * loop multiplies by, so it is refused. Mirrors the affine kernel's policy. */
 static int vloop_f64_narrows_exactly(double v) {
   return (double)(float)v == v;
 }
 
-/* A compile-time float literal: a FLOAT operand of the right width (or an
- * exactly-narrowable float64 literal in a float32 DAG), or a temp that is a
- * cast of an int/float literal to that width. Crucially this does NOT match
- * loop-invariant scalar *symbols* (parameters) , those are a runtime broadcast
- * handled via VLOOP_VN_SCALAR, so leaving them here makes the pass cleanly
- * refuse rather than miscompile. */
 static int vloop_operand_is_literal(IRFunction *function, size_t before,
                                     const IROperand *op, int width_bits,
                                     double *out) {
@@ -1675,9 +1512,6 @@ static int vloop_binop_tag(const char *text) {
 static int vloop_resolve_body_local(IRFunction *function, const char *sym,
                                     const char *iv, VLoopDag *d);
 
-/* Recursively lower a float operand into the DAG; returns the node index or -1
- * to refuse. Builds a TREE (shared subexpressions are re-evaluated) so a simple
- * stack-machine kernel can replay it. */
 static int vloop_build(IRFunction *function, size_t before, const IROperand *op,
                        const char *iv, VLoopDag *d) {
   if (!op || d->overflow) {
@@ -1692,7 +1526,6 @@ static int vloop_build(IRFunction *function, size_t before, const IROperand *op,
       !op->name) {
     return -1;
   }
-  /* array load a[iv] (only a TEMP names a load result) */
   if (op->kind == IR_OPERAND_TEMP) {
     const char *base = NULL;
     int bits = 0;
@@ -1705,16 +1538,8 @@ static int vloop_build(IRFunction *function, size_t before, const IROperand *op,
   }
   if (op->kind == IR_OPERAND_SYMBOL) {
     if (vloop_symbol_written_in_body(function, d, op->name)) {
-      /* A symbol written in the body is not a stable broadcast value, but if
-       * it is a single-assignment per-iteration LOCAL (`var d = a[i]-b[i]`),
-       * substitute its defining expression into the DAG -- this is what makes
-       * SSD / variance / `var x=...; x*x*x` shapes vectorize. */
       return vloop_resolve_body_local(function, op->name, iv, d);
     }
-    /* Loop-invariant float scalar of the lane width (a local or parameter,
-     * e.g. saxpy's runtime `a`): read once at loop entry and broadcast.
-     * Preferred over chasing its pre-loop producer -- one slot beats
-     * re-evaluating an invariant expression per lane. */
     if (ir_float_scalar_operand_matches(function, op, d->width_bits) &&
         !ir_symbol_address_taken(function, op->name)) {
       int si = vloop_intern_scalar(d, op->name);
@@ -1726,20 +1551,12 @@ static int vloop_build(IRFunction *function, size_t before, const IROperand *op,
     return -1;
   }
   size_t pidx = (size_t)(p - function->instructions);
-  /* (float64)iv */
   if (p->op == IR_OP_CAST && !p->is_float && p->text &&
       vloop_text_is_float_width(p->text, d->width_bits) &&
       ir_operand_is_symbol_named(&p->lhs, iv)) {
     d->has_iota = 1;
     return vloop_add_node(d, VLOOP_VN_IOTA, 0, 0);
   }
-  /* (float64)(C +/- iv) / (float64)(iv +/- C): an INTEGER affine function of the
-   * induction var cast to float64. Sound to evaluate in the f64 domain as
-   * `IOTA +/- (float64)C` because every int32 value (and the int32 sum/difference
-   * when it does not overflow) is exactly representable in float64, so the f64
-   * op is bit-identical to casting the integer result. Gated to float64 (the
-   * equivalence fails for float32 once |value| >= 2^24) and to a compile-time
-   * trip count, so the no-overflow range check is decidable. */
   if (p->op == IR_OP_CAST && !p->is_float && p->text && d->width_bits == 64 &&
       vloop_text_is_float_width(p->text, d->width_bits) && d->iota_bound_known &&
       d->iota_bound > 0 &&
@@ -1758,12 +1575,12 @@ static int vloop_build(IRFunction *function, size_t before, const IROperand *op,
         C = q->lhs.int_value; have = 1; on_left = 0;
       }
       if (have) {
-        long long hi = d->iota_bound - 1; /* max iv */
+        long long hi = d->iota_bound - 1;
         long long rmin, rmax;
-        if (on_left) { /* iv (+/-) C */
+        if (on_left) {
           rmin = is_sub ? -C : C;
           rmax = is_sub ? hi - C : hi + C;
-        } else { /* C (+/-) iv */
+        } else {
           rmin = is_sub ? C - hi : C;
           rmax = is_sub ? C : C + hi;
         }
@@ -1771,16 +1588,12 @@ static int vloop_build(IRFunction *function, size_t before, const IROperand *op,
           int tag = vloop_binop_tag(q->text);
           int ci = vloop_intern_const(d, (double)C);
           if (tag < 0 || ci < 0) return -1;
-          /* The kernel is a postorder stack machine: a binary node pops the two
-           * most-recently built results as (left, right) and computes left OP
-           * right. So build the LEFT operand first to preserve subtraction order
-           * (`iv - C` vs `C - iv`). */
           int a, b;
-          if (on_left) { /* iv OP C : left = iota */
+          if (on_left) {
             d->has_iota = 1;
             a = vloop_add_node(d, VLOOP_VN_IOTA, 0, 0);
             b = vloop_add_node(d, VLOOP_VN_CONST, ci, 0);
-          } else { /* C OP iv : left = const */
+          } else {
             a = vloop_add_node(d, VLOOP_VN_CONST, ci, 0);
             d->has_iota = 1;
             b = vloop_add_node(d, VLOOP_VN_IOTA, 0, 0);
@@ -1791,7 +1604,6 @@ static int vloop_build(IRFunction *function, size_t before, const IROperand *op,
       }
     }
   }
-  /* binary float op */
   if (p->op == IR_OP_BINARY && p->is_float && p->text) {
     int tag = vloop_binop_tag(p->text);
     if (tag < 0) {
@@ -1810,20 +1622,6 @@ static int vloop_build(IRFunction *function, size_t before, const IROperand *op,
   return -1;
 }
 
-/* Substitute a single-assignment loop-body local into the DAG by building from
- * its defining expression in place of the symbol. This is what lets
- * `var d = a[i] - b[i]; s = s + d*d` (sum-of-squared-differences / variance)
- * and `var x = a[i]; out[i] = x*x*x` vectorize: the local is not a broadcast
- * value, it is an alias for a per-iteration expression. Guards keep it sound:
- *   - exactly ONE in-body definition (else it could be a recurrence or a
- *     conditionally-set value, neither of which is a pure alias);
- *   - not live after the loop (the fused kernel deletes the body);
- *   - bounded substitution depth, so a cycle of mutually-referential locals
- *     (or the accumulator referring to itself) refuses instead of recursing
- *     without end.
- * Re-evaluating the aliased subexpression at each use is correct (the local
- * held exactly that value); it only costs redundant compute the kernel could
- * later CSE. */
 static int vloop_resolve_body_local(IRFunction *function, const char *sym,
                                     const char *iv, VLoopDag *d) {
   if (!sym || d->resolve_depth >= VLOOP_MAX_RESOLVE_DEPTH || d->overflow) {
@@ -1837,7 +1635,7 @@ static int vloop_resolve_body_local(IRFunction *function, const char *sym,
         ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
         strcmp(ins->dest.name, sym) == 0) {
       if (def) {
-        return -1; /* written more than once: not a simple per-iteration alias */
+        return -1;
       }
       def = ins;
       def_idx = i;
@@ -1863,8 +1661,6 @@ static int vloop_resolve_body_local(IRFunction *function, const char *sym,
              def->lhs.kind == IR_OPERAND_TEMP && def->lhs.name &&
              def->rhs.kind == IR_OPERAND_INT &&
              def->rhs.int_value == d->width_bits / 8) {
-    /* `var x = a[i]` lowers to a LOAD straight into the symbol; rebuild it as
-     * an indexed array load by decoding the address. */
     const char *base = NULL;
     int bits = 0;
     if (ir_decode_float_indexed_address(function, def_idx, def->lhs.name, iv,
@@ -1878,20 +1674,16 @@ static int vloop_resolve_body_local(IRFunction *function, const char *sym,
   return result;
 }
 
-/* Stack-machine evaluation depth (= ymm registers the kernel needs). Matches
- * the kernel's naive left-then-right post-order: eval a, hold it while eval b,
- * then combine. */
 static int vloop_eval_depth(const VLoopDag *d, int node) {
   const VLoopNode *n = &d->nodes[node];
   if (vloop_tag_is_leaf(n->tag)) {
-    return 1; /* leaf: LOAD / IOTA / CONST / SCALAR */
+    return 1;
   }
   if (n->tag == VLOOP_VN_SHL || n->tag == VLOOP_VN_SAR ||
       n->tag == VLOOP_VN_SHR) {
-    return vloop_eval_depth(d, n->op0); /* unary, evaluated in place */
+    return vloop_eval_depth(d, n->op0);
   }
   if (n->tag == VLOOP_VN_SELECT) {
-    /* mask, then and else are all live at once, in that order. */
     const VLoopNode *pair = &d->nodes[n->op1];
     int dm = vloop_eval_depth(d, n->op0);
     int dt = 1 + vloop_eval_depth(d, pair->op0);
@@ -1905,13 +1697,11 @@ static int vloop_eval_depth(const VLoopDag *d, int node) {
   return da > alt ? da : alt;
 }
 
-/* Count distinct base pointers the kernel must keep in GP registers: the loaded
- * arrays plus the destination if it is not already among them. */
 static int vloop_distinct_bases(const VLoopDag *d, const char *dst_base) {
   int n = d->n_arrays;
   for (int i = 0; i < d->n_arrays; i++) {
     if (strcmp(d->arrays[i], dst_base) == 0) {
-      return n; /* dst is a loaded array too */
+      return n;
     }
   }
   return n + 1;
@@ -1983,8 +1773,6 @@ static int ir_try_vectorize_map_at(IRFunction *function, size_t header_index,
   }
 
   store = &function->instructions[store_index];
-  /* `store->is_float` gate: a uint32 store has the same base+(i<<2) shape as a
-   * float32 one, so without this an integer map would build a float DAG. */
   if (!store->is_float || store->dest.kind != IR_OPERAND_TEMP ||
       !store->dest.name ||
       (store->lhs.kind != IR_OPERAND_TEMP && store->lhs.kind != IR_OPERAND_SYMBOL &&
@@ -1999,7 +1787,7 @@ static int ir_try_vectorize_map_at(IRFunction *function, size_t header_index,
   }
 
   memset(&d, 0, sizeof(d));
-  d.width_bits = store_bits; /* 64 (float64) or 32 (float32) */
+  d.width_bits = store_bits;
   d.body_lo = branch_index + 1;
   d.body_hi = jump_index;
   if (bound.kind == IR_OPERAND_INT) {
@@ -2012,7 +1800,6 @@ static int ir_try_vectorize_map_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* Gates. */
   if (!ir_symbol_is_float_array_base(function, dst_base)) {
     ir_operand_destroy(&bound);
     return 1;
@@ -2039,8 +1826,8 @@ static int ir_try_vectorize_map_at(IRFunction *function, size_t header_index,
   fused.is_float = 1;
   fused.float_bits = store_bits;
   fused.dest = ir_operand_symbol(dst_base);
-  fused.lhs = bound; /* take ownership of the cloned bound operand */
-  if (!vloop_serialize_into(&fused, &d, /*reduce_op=*/0, root, depth)) {
+  fused.lhs = bound;
+  if (!vloop_serialize_into(&fused, &d, 0, root, depth)) {
     ir_instruction_destroy_storage(&fused);
     return 0;
   }
@@ -2049,9 +1836,6 @@ static int ir_try_vectorize_map_at(IRFunction *function, size_t header_index,
   return 1;
 }
 
-/* '+' reduction over a float64 DAG: acc = acc + DAG(a_k[iv], (float64)iv,
- * consts). Picks up reductions the sum/dot recognizers (which run earlier) did
- * not claim: sum-of-products, polynomial-in-iv, multi-array combinations. */
 static int ir_try_vectorize_reduce_at(IRFunction *function, size_t header_index,
                                       int *changed) {
   const char *iv_symbol = NULL;
@@ -2082,14 +1866,6 @@ static int ir_try_vectorize_reduce_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* The accumulation appears in one of two equivalent IR forms:
-   *   direct       `acc = acc + X`              (dest is the acc symbol)
-   *   temp+ASSIGN  `%t = acc + X; acc <- %t`    (dest is a temp, then copied)
-   * The latter survives when X is a float64-tracked expression narrowed to a
-   * float32 acc (e.g. `s += a[i] * 2.0`): copy-prop won't fold the temp across
-   * the narrowing, so the direct form never forms. Both are the same reduction;
-   * `assign_index` records the trailing ASSIGN so it is exempted from the
-   * written-once check below. */
   size_t assign_index = (size_t)-1;
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
@@ -2108,8 +1884,6 @@ static int ir_try_vectorize_reduce_at(IRFunction *function, size_t header_index,
       found++;
     } else if (ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
                ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name) {
-      /* `%t = acc + X`: confirm the next non-NOP copies %t straight back into
-       * the same symbol (`acc <- %t`). */
       size_t j = i + 1;
       while (j < jump_index && function->instructions[j].op == IR_OP_NOP) {
         j++;
@@ -2143,25 +1917,17 @@ static int ir_try_vectorize_reduce_at(IRFunction *function, size_t header_index,
       return 1;
     }
   }
-  /* acc must be written only by the single reduction instruction, and no
-   * OTHER symbol may be written in the body besides the iv increment -- a
-   * rotating local would be lost when the loop is fused away. */
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (i == reduce_index || i == assign_index) {
-      continue; /* the accumulation itself (temp+ASSIGN spans two slots) */
+      continue;
     }
     if (ir_instruction_writes_destination(ins) &&
         ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name) {
-      /* The accumulator may be written ONLY by the reduction. */
       if (strcmp(ins->dest.name, acc_symbol) == 0) {
         ir_operand_destroy(&bound);
         return 1;
       }
-      /* A non-iv symbol write is tolerated only when the symbol is a
-       * per-iteration LOCAL that does not outlive the loop: the DAG builder
-       * substitutes it (`var d = a[i]-b[i]; s += d*d`), and the fused kernel
-       * deletes the body, so a value live afterward would be lost. */
       if (strcmp(ins->dest.name, iv_symbol) != 0 &&
           ir_symbol_live_after_loop(function, jump_index + 1, ins->dest.name)) {
         ir_operand_destroy(&bound);
@@ -2171,7 +1937,7 @@ static int ir_try_vectorize_reduce_at(IRFunction *function, size_t header_index,
   }
 
   memset(&d, 0, sizeof(d));
-  d.width_bits = width_bits; /* 64 (float64) or 32 (float32) */
+  d.width_bits = width_bits;
   d.body_lo = branch_index + 1;
   d.body_hi = jump_index;
   if (bound.kind == IR_OPERAND_INT) {
@@ -2194,7 +1960,7 @@ static int ir_try_vectorize_reduce_at(IRFunction *function, size_t header_index,
     return 1;
   }
   depth = vloop_eval_depth(&d, root);
-  if (depth > VLOOP_REG_BUDGET - 1 /* ymm2 reserved as accumulator */ ||
+  if (depth > VLOOP_REG_BUDGET - 1  ||
       d.n_arrays > VLOOP_MAX_ARRAYS) {
     ir_operand_destroy(&bound);
     return 1;
@@ -2205,8 +1971,8 @@ static int ir_try_vectorize_reduce_at(IRFunction *function, size_t header_index,
   fused.is_float = 1;
   fused.float_bits = width_bits;
   fused.dest = ir_operand_symbol(acc_symbol);
-  fused.lhs = bound; /* take ownership */
-  if (!vloop_serialize_into(&fused, &d, /*reduce_op=*/1, root, depth)) {
+  fused.lhs = bound;
+  if (!vloop_serialize_into(&fused, &d, 1, root, depth)) {
     ir_instruction_destroy_storage(&fused);
     return 0;
   }
@@ -2214,15 +1980,6 @@ static int ir_try_vectorize_reduce_at(IRFunction *function, size_t header_index,
                              changed);
   return 1;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Multi-store map fission: a counted loop whose body is K>=2 independent       */
-/* unit-stride float stores (e.g. saxpy init `x[i]=f(i); y[i]=g(i)`). Each      */
-/* store is emitted as its own full-count IR_OP_SIMD_VLOOP_F64 -- semantically  */
-/* loop fission (all of store_1, then all of store_2) -- reusing the proven     */
-/* single-store kernel unchanged. SOUND ONLY when the destinations are disjoint */
-/* (reordering writes across the lane window is otherwise observable), so it is */
-/* gated on a conservative non-aliasing proof below.                            */
 
 #define MULTISTORE_MAX 8
 
@@ -2236,18 +1993,11 @@ static int ir_msf_name_is_allocator(const char *n) {
   return 0;
 }
 
-/* The single instruction that defines symbol/temp `name`, or -1 if there is not
- * exactly one (a conservative "give up" for the disjointness proof). */
 static int ir_msf_single_def(IRFunction *function, const char *name,
                              int is_symbol) {
   int found = -1;
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *ins = &function->instructions[i];
-    /* A SIMD array op carries the output array's base symbol as its dest by
-     * convention (`@a = simd_vloop_f64(...)`): it writes the array ELEMENTS, not
-     * the base pointer's value, so it must not count as a (re)definition of the
-     * pointer -- otherwise a sibling already-vectorized loop on the same array
-     * (e.g. saxpy's hot loop on @y) would mask its fresh-allocation provenance. */
     if (ins->op >= IR_OP_SIMD_SUM_I32 && ins->op <= IR_OP_SIMD_LCG_U32) continue;
     if (!ir_instruction_writes_destination(ins)) continue;
     const IROperand *d = &ins->dest;
@@ -2264,8 +2014,6 @@ static int ir_msf_single_def(IRFunction *function, const char *name,
   return found;
 }
 
-/* True if `v` provably holds the result of a fresh heap allocation, following
- * cast/assign hops through singly-defined temps (bounded depth). */
 static int ir_msf_value_is_fresh_alloc(IRFunction *function, const IROperand *v,
                                        int depth) {
   if (depth <= 0 || !v ||
@@ -2283,9 +2031,6 @@ static int ir_msf_value_is_fresh_alloc(IRFunction *function, const IROperand *v,
   return 0;
 }
 
-/* Every destination is a distinct local pointer, address never taken, defined
- * exactly once from a fresh allocation -- two distinct allocations never alias,
- * so the per-store full-count rewrite preserves the scalar memory state. */
 static int ir_msf_bases_disjoint(IRFunction *function, const char **bases,
                                  int k) {
   for (int i = 0; i < k; i++) {
@@ -2310,9 +2055,6 @@ static int ir_msf_bases_disjoint(IRFunction *function, const char **bases,
   return 1;
 }
 
-/* Collect the store indices of a multi-store map body; require it otherwise
- * pure (no loads -- so the only memory dependence is between the stores -- no
- * calls/branches, and any per-iteration local does not outlive the loop). */
 static int ir_msf_body_is_safe(IRFunction *function, size_t lo, size_t hi,
                                const char *iv_symbol, size_t *stores,
                                int *nstores) {
@@ -2343,9 +2085,6 @@ static int ir_msf_body_is_safe(IRFunction *function, size_t lo, size_t hi,
   return ns >= 2;
 }
 
-/* Build the IR_OP_SIMD_VLOOP_F64 fused op for one store of a multi-store loop,
- * mirroring the single-store path. Returns 1 (filling *fused and *dst_base) or 0
- * to reject the whole loop. `bound` is cloned into the fused op. */
 static int ir_msf_build_store(IRFunction *function, size_t store_index,
                               const char *iv_symbol, size_t body_lo,
                               size_t body_hi, const IROperand *bound,
@@ -2395,7 +2134,7 @@ static int ir_msf_build_store(IRFunction *function, size_t store_index,
   fused->float_bits = store_bits;
   fused->dest = ir_operand_symbol(dst_base);
   if (!ir_operand_clone(bound, &fused->lhs) ||
-      !vloop_serialize_into(fused, &d, /*reduce_op=*/0, root, depth)) {
+      !vloop_serialize_into(fused, &d, 0, root, depth)) {
     ir_instruction_destroy_storage(fused);
     return 0;
   }
@@ -2412,18 +2151,6 @@ static int ir_msf_build_store(IRFunction *function, size_t store_index,
   }
   return 1;
 }
-
-/* -------------------------------------------------------------------------- */
-/* A run-time overlap test, so a proof can be what removes one                  */
-/*                                                                              */
-/* Fission turns K stores in one loop into K full-length kernels, which is only  */
-/* the same program when the regions they touch do not overlap. Where the        */
-/* compiler can prove that, nothing is emitted. Where it cannot, the loop is     */
-/* kept and a test is emitted in front of it: disjoint takes the kernels, and    */
-/* anything else falls into the loop that was already there. That is what makes  */
-/* a disjointness proof worth having -- it deletes a test rather than deciding   */
-/* whether the optimization happens at all.                                      */
-/* -------------------------------------------------------------------------- */
 
 #define MSF_GUARD_MAX_REGIONS (MULTISTORE_MAX + VLOOP_MAX_ARRAYS * MULTISTORE_MAX)
 
@@ -2470,8 +2197,6 @@ static void msf_emit(MsfGuard *g, IROpcode op, const IROperand *dest,
   insn->text = (char *)text;
 }
 
-/* `base + count * bytes`, the one-past-the-end address of what a kernel over
- * `base` touches. */
 static IROperand msf_region_end(IRFunction *function, MsfGuard *g,
                                 const char *base, const IROperand *bound,
                                 int bytes, SourceLocation location) {
@@ -2489,7 +2214,6 @@ static IROperand msf_region_end(IRFunction *function, MsfGuard *g,
   return end;
 }
 
-/* `p + span_p <= q || q + span_q <= p`: the two regions do not touch. */
 static IROperand msf_pair_disjoint(IRFunction *function, MsfGuard *g,
                                    const char *p, int p_bytes, const char *q,
                                    int q_bytes, const IROperand *bound,
@@ -2507,11 +2231,6 @@ static IROperand msf_pair_disjoint(IRFunction *function, MsfGuard *g,
   return either;
 }
 
-/* Put the kernels in front of the loop behind a test, and leave the loop where
- * it was. Disjoint takes the kernels and jumps past the loop; anything else
- * falls through into the loop that was already there, which is the program
- * this pass started with. Two regions only have to be tested against each
- * other when at least one of them is written: two readers cannot disagree. */
 static int ir_msf_guard_and_version(IRFunction *function, size_t header_index,
                                     size_t jump_index,
                                     IRInstruction *fused, int ns,
@@ -2536,11 +2255,6 @@ static int ir_msf_guard_and_version(IRFunction *function, size_t header_index,
   }
   header_label = function->instructions[header_index].text;
   {
-    /* The loop's end label, past anything that is not an instruction. Under
-     * `--explain` every loop carries a marker NOP on the way out, and reading
-     * that as the label would refuse the versioning and quietly leave the
-     * loop scalar. A flag that asks the compiler what it did may not change
-     * what it does. */
     size_t end_index = 0;
     if (!ir_find_next_non_nop(function, jump_index + 1, &end_index) ||
         function->instructions[end_index].op != IR_OP_LABEL ||
@@ -2554,7 +2268,6 @@ static int ir_msf_guard_and_version(IRFunction *function, size_t header_index,
     if (!regions[i] || region_bytes[i] <= 0) {
       return 0;
     }
-    /* A region the guard cannot name is one the guard cannot test. */
     if (ir_symbol_address_taken(function, regions[i])) {
       return 0;
     }
@@ -2568,8 +2281,6 @@ static int ir_msf_guard_and_version(IRFunction *function, size_t header_index,
         continue;
       }
       if (strcmp(regions[i], regions[j]) == 0) {
-        /* One name reached from two kernels is one region, and a kernel over
-         * it in two passes is not the loop that interleaved them. */
         return 0;
       }
       pair = msf_pair_disjoint(function, &g, regions[i], region_bytes[i],
@@ -2651,7 +2362,6 @@ static int ir_try_vectorize_multistore_map_at(IRFunction *function,
     ir_operand_destroy(&bound);
     return 1;
   }
-  /* Room to place ns fused ops in the loop's instruction range. */
   if ((size_t)ns > jump_index - header_index + 1) {
     ir_operand_destroy(&bound);
     return 1;
@@ -2701,7 +2411,6 @@ static int ir_try_vectorize_multistore_map_at(IRFunction *function,
                         NULL, NULL);
       ir_explain_remark_code("multistore-disjoint-proven");
     }
-    /* Commit: one full-count store-kernel per destination, then NOP the loop. */
     for (int k = 0; k < ns; k++) {
       ir_instruction_destroy_storage(&function->instructions[header_index + k]);
       function->instructions[header_index + k] = fused[k];
@@ -2742,8 +2451,6 @@ int ir_auto_vectorize_pass(IRFunction *function, int *changed) {
     return 0;
   }
   for (size_t i = 0; i < function->instruction_count; i++) {
-    /* Multi-store map fission runs first: it claims K>=2 store loops the
-     * single-store recognizer would reject, lowering each to its own kernel. */
     if (function->instructions[i].op == IR_OP_LABEL &&
         ir_label_is_while_header(function->instructions[i].text)) {
       if (!ir_try_vectorize_multistore_map_at(function, i, changed)) {
@@ -2756,9 +2463,6 @@ int ir_auto_vectorize_pass(IRFunction *function, int *changed) {
         return 0;
       }
     }
-    /* map may have fused (and NOP'd) the loop; reduce re-checks the header and
-     * no-ops if so. The two shapes are mutually exclusive (map stores, reduce
-     * accumulates). */
     if (function->instructions[i].op == IR_OP_LABEL &&
         ir_label_is_while_header(function->instructions[i].text)) {
       if (!ir_try_vectorize_reduce_at(function, i, changed)) {
@@ -2769,37 +2473,19 @@ int ir_auto_vectorize_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Running extrema: `if (v > best) { best = v; }` -> a min/max VLOOP reduction  */
-/*                                                                             */
-/* The one loop shape a writer cannot phrase without a branch. Every other      */
-/* reduction is an expression (`s = s + x`), so the straight-line-body rule     */
-/* costs nothing; a running max has no operator to write, so the same rule      */
-/* used to send every peak-finder, extent scan and clamp bound down the scalar  */
-/* path. The diamond IS the operator here, so this recognizer reads it as one   */
-/* rather than asking the body to be branchless first.                          */
-/*                                                                             */
-/* Both accumulators of a min-and-max scan are claimed, each as its own kernel  */
-/* (two passes over the array, still far ahead of one scalar pass).             */
-/* -------------------------------------------------------------------------- */
 #define IR_MINMAX_MAX_ACCUMULATORS 2
 
-/* The integer DAG builder lives with the integer vectorizer below. */
 static int vloop_build_int(IRFunction *function, size_t before,
                            const IROperand *op, const char *iv, VLoopDag *d);
 
 typedef struct {
-  const char *acc;    /* the accumulator symbol the diamond updates */
-  int is_max;         /* 1: keeps the larger; 0: keeps the smaller */
-  IROperand value;    /* the compared element, owned */
-  size_t cmp_index;   /* where to build the value's DAG from */
-  size_t end;         /* one past the diamond's last instruction */
+  const char *acc;
+  int is_max;
+  IROperand value;
+  size_t cmp_index;
+  size_t end;
 } IRMinMaxDiamond;
 
-/* Two operands naming the same value. The compare and the assignment often
- * disagree textually: `var v = a[i]; if (v < lo) { lo = v; }` compares the
- * local but assigns the load temp it was copied from, because copy propagation
- * reaches the assignment and not the compare. */
 static int ir_minmax_same_operand(const IRFunction *function, size_t body_lo,
                                   size_t before, const IROperand *a,
                                   const IROperand *b) {
@@ -2809,7 +2495,6 @@ static int ir_minmax_same_operand(const IRFunction *function, size_t body_lo,
   if (a->kind == b->kind && strcmp(a->name, b->name) == 0) {
     return 1;
   }
-  /* Chase a body-local copy in either direction. */
   for (size_t i = body_lo; i < before; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op != IR_OP_ASSIGN || ins->dest.kind != IR_OPERAND_SYMBOL ||
@@ -2826,14 +2511,6 @@ static int ir_minmax_same_operand(const IRFunction *function, size_t body_lo,
   return 0;
 }
 
-/* Does the taken arm write back the very value the compare tested?
- *
- * Written plainly -- `if (a[i] > m) { m = a[i]; }` -- it does not look like it
- * in the IR: the arm is its own basic block, so nothing folds its `a[i]` into
- * the one the compare already loaded, and the arm re-derives the index, re-adds
- * the base and loads again. Both halves are still the same element, which is
- * what has to be proven: decode each side's address back to a base indexed by
- * the loop counter and require the pair to agree. */
 static int ir_minmax_arm_restates_value(IRFunction *function, size_t body_lo,
                                         const IRInstruction *arm,
                                         size_t arm_index,
@@ -2859,11 +2536,6 @@ static int ir_minmax_arm_restates_value(IRFunction *function, size_t body_lo,
   return 0;
 }
 
-/* Match `if (v REL acc) { acc = v; }` starting at `at`, which must be the
- * compare. Fills `out` and returns 1; returns 0 if the shape is anything else.
- *
- * The lowered form is fixed: compare, branch-past, assign, jump-to-end, then
- * the two empty labels the `if` leaves behind. */
 static int ir_match_minmax_diamond(IRFunction *function, size_t at,
                                    size_t body_lo, size_t body_hi,
                                    const char *iv, IRMinMaxDiamond *out) {
@@ -2887,8 +2559,6 @@ static int ir_match_minmax_diamond(IRFunction *function, size_t at,
         !ir_operand_is_temp_named(&br->lhs, cmp->dest.name)) {
       return 0;
     }
-    /* The arm runs to its jump-to-end. It is a block, not one instruction: a
-     * plainly written `m = a[i]` re-derives the address there. */
     for (jump = branch + 1; jump < body_hi; jump++) {
       IROpcode op = function->instructions[jump].op;
       if (op == IR_OP_JUMP) {
@@ -2903,14 +2573,13 @@ static int ir_match_minmax_diamond(IRFunction *function, size_t at,
     if (jump >= body_hi) {
       return 0;
     }
-    /* The accumulator's update is the arm's last act. */
     assign = jump;
     while (assign > branch + 1 &&
            function->instructions[assign - 1].op == IR_OP_NOP) {
       assign--;
     }
     if (assign == branch + 1) {
-      return 0; /* empty arm */
+      return 0;
     }
     assign--;
     if (!ir_find_next_non_nop(function, jump + 1, &next_label) ||
@@ -2933,8 +2602,6 @@ static int ir_match_minmax_diamond(IRFunction *function, size_t at,
         el->op != IR_OP_LABEL || !el->text || strcmp(el->text, jp->text) != 0) {
       return 0;
     }
-    /* Nothing else in the arm may write a symbol -- the kernel keeps only the
-     * accumulator, so any other surviving effect would be dropped. */
     for (size_t i = branch + 1; i < jump; i++) {
       const IRInstruction *ins = &function->instructions[i];
       if (i != assign && ir_instruction_writes_destination(ins) &&
@@ -2942,7 +2609,6 @@ static int ir_match_minmax_diamond(IRFunction *function, size_t at,
         return 0;
       }
     }
-    /* The accumulator is whichever compare operand the arm writes back. */
     if (ir_operand_is_symbol_named(&cmp->lhs, as->dest.name)) {
       acc_side = &cmp->lhs;
       val_side = &cmp->rhs;
@@ -2958,8 +2624,6 @@ static int ir_match_minmax_diamond(IRFunction *function, size_t at,
       return 0;
     }
     out->acc = acc_side->name;
-    /* `acc < v` and `v > acc` both keep the larger; the operand order is what
-     * flips the sense, not the operator. */
     out->is_max = acc_is_left ? (strcmp(cmp->text, "<") == 0)
                               : (strcmp(cmp->text, ">") == 0);
     out->cmp_index = at;
@@ -2971,8 +2635,6 @@ static int ir_match_minmax_diamond(IRFunction *function, size_t at,
   return 1;
 }
 
-/* An accumulator whose lanes the kernel can carry: a float of the loop's width,
- * or a signed int32 (vpmaxsd/vpminsd are signed, so uint32 is refused). */
 static int ir_minmax_acc_width(const IRFunction *function, const char *acc,
                                int *is_int_out) {
   const char *ty = ir_function_local_declared_type(function, acc);
@@ -3022,9 +2684,6 @@ static int ir_try_vectorize_minmax_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* Walk the body once: collect the diamonds, and refuse anything else that
-   * carries control flow or touches memory. Everything between them must be
-   * the plain load/compute the value is built from. */
   for (size_t i = branch_index + 1; i < jump_index && ok;) {
     const IRInstruction *ins = &function->instructions[i];
     IRMinMaxDiamond d;
@@ -3053,8 +2712,6 @@ static int ir_try_vectorize_minmax_at(IRFunction *function, size_t header_index,
     goto refuse;
   }
 
-  /* One width for every accumulator: the kernels share the loop's element
-   * layout, and a float32 extremum next to a float64 one would need two. */
   for (int k = 0; k < n_diamonds; k++) {
     int k_int = 0;
     int w = ir_minmax_acc_width(function, diamonds[k].acc, &k_int);
@@ -3069,19 +2726,14 @@ static int ir_try_vectorize_minmax_at(IRFunction *function, size_t header_index,
     }
     for (int j = 0; j < k; j++) {
       if (strcmp(diamonds[j].acc, diamonds[k].acc) == 0) {
-        goto refuse; /* two diamonds racing on one accumulator */
+        goto refuse;
       }
     }
   }
-  /* An int32 scan tracking BOTH extrema has a dedicated kernel downstream that
-   * folds them in one pass; two passes here would be the worse trade. */
   if (is_int && n_diamonds == 2) {
     goto refuse;
   }
 
-  /* No symbol may be written in the body except the induction variable, the
-   * accumulators (by their own arm), and per-iteration locals the DAG builder
-   * will substitute away. */
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     int is_acc_write = 0;
@@ -3092,7 +2744,6 @@ static int ir_try_vectorize_minmax_at(IRFunction *function, size_t header_index,
     for (int k = 0; k < n_diamonds; k++) {
       if (strcmp(ins->dest.name, diamonds[k].acc) == 0) {
         is_acc_write = 1;
-        /* Only the diamond's own arm may write it. */
         if (i < diamonds[k].cmp_index || i >= diamonds[k].end) {
           goto refuse;
         }
@@ -3116,7 +2767,7 @@ static int ir_try_vectorize_minmax_at(IRFunction *function, size_t header_index,
     memset(&d, 0, sizeof(d));
     d.width_bits = width_bits;
     d.is_int = is_int;
-    d.elem_bits = 32; /* lane width == element width for these */
+    d.elem_bits = 32;
     d.body_lo = branch_index + 1;
     d.body_hi = jump_index;
     if (bound.kind == IR_OPERAND_INT) {
@@ -3135,8 +2786,6 @@ static int ir_try_vectorize_minmax_at(IRFunction *function, size_t header_index,
         goto refuse;
       }
     }
-    /* An accumulator reaching a DAG would make the kernels depend on each
-     * other's running value, which separate passes cannot reproduce. */
     for (int s = 0; s < d.n_scalars; s++) {
       for (int j = 0; j < n_diamonds; j++) {
         if (d.scalars[s] && strcmp(d.scalars[s], diamonds[j].acc) == 0) {
@@ -3160,8 +2809,6 @@ static int ir_try_vectorize_minmax_at(IRFunction *function, size_t header_index,
     }
   }
 
-  /* Install: one kernel per accumulator, in the slots the loop's header and
-   * first body instruction occupied. */
   for (int k = 0; k < n_diamonds; k++) {
     ir_instruction_destroy_storage(&function->instructions[header_index + k]);
     function->instructions[header_index + k] = fused[k];
@@ -3208,22 +2855,7 @@ int ir_simd_minmax_reduce_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Integer twin of the general auto-vectorizer -> IR_OP_SIMD_VLOOP_I32         */
-/*                                                                             */
-/* int32/uint32 unit-stride maps and '+' reductions over + - * & | ^ and       */
-/* <<literal DAGs. Every supported op is congruent mod 2^32, intermediates     */
-/* are truncated to the 4-byte store / int32 accumulator anyway, and integer   */
-/* '+' is associative -- so unlike the float form, maps AND reductions are     */
-/* BIT-EXACT against the scalar loop. Division, %, and >> are never taken      */
-/* (not congruent / trapping). Runs after auto_vectorize (a float32 store      */
-/* shape that pass refused has float-tagged BINARYs and refuses here too).     */
-/* -------------------------------------------------------------------------- */
-
 static int vloop_int_scalar_type_ok(const char *ty) {
-  /* Any plain integer type: the kernel uses only the low 32 bits and every
-   * supported op is congruent mod 2^32, so width and signedness don't matter
-   * (operand_load extends per the declared type; bits >= 32 are irrelevant). */
   return ty && (strcmp(ty, "int8") == 0 || strcmp(ty, "uint8") == 0 ||
                 strcmp(ty, "int16") == 0 || strcmp(ty, "uint16") == 0 ||
                 strcmp(ty, "int32") == 0 || strcmp(ty, "uint32") == 0 ||
@@ -3231,30 +2863,13 @@ static int vloop_int_scalar_type_ok(const char *ty) {
                 strcmp(ty, "int") == 0);
 }
 
-/* An int->int cast whose target keeps at least 32 bits only changes bits the
- * 32-bit lanes never see (trunc-to-32 / sign- or zero-extension), so it is
- * transparent to the DAG. Casts to int8/int16 fold sign back into the low 32
- * bits and are refused. */
 static int vloop_int_cast_is_transparent(const char *ty) {
   return ty && (strcmp(ty, "int32") == 0 || strcmp(ty, "uint32") == 0 ||
                 strcmp(ty, "int64") == 0 || strcmp(ty, "uint64") == 0 ||
                 strcmp(ty, "int") == 0);
 }
 
-/* The value range a DAG node can take, or 0 when this cannot bound it.
- *
- * `+ - * & | ^ <<` are all congruent mod 2^32: the low 32 bits of a result
- * depend only on the low 32 bits of its inputs, so 32-bit lanes reproduce them
- * whatever width the scalar code used. `>>` is the exception -- it reads bits
- * back DOWN, so a lane that wrapped where the scalar did not shifts different
- * bits in. Bounding the shifted value inside int32 rules that out: no wrap can
- * have happened, so both sides shift the same number.
- *
- * That bound is exactly what an image kernel's weighted sum has -- byte
- * elements times constant weights, `(r*77 + g*150 + b*29) >> 8` reaching 65280
- * at the very most. A runtime weight is unbounded and refused, which is the
- * honest answer: nothing here can prove that one did not overflow. */
-#define VLOOP_RANGE_LIMIT 1099511627776LL /* 2^40: past this, give up */
+#define VLOOP_RANGE_LIMIT 1099511627776LL
 
 static int vloop_int_node_range(const VLoopDag *d, int node, long long *lo_out,
                                 long long *hi_out, int depth) {
@@ -3291,13 +2906,11 @@ static int vloop_int_node_range(const VLoopDag *d, int node, long long *lo_out,
     *hi_out = d->iota_bound - 1;
     return 1;
   case VLOOP_VN_SCALAR:
-    return 0; /* a runtime invariant: nothing here bounds it */
+    return 0;
   default:
     break;
   }
   {
-    /* A mask bounds its result however unbounded the other side was, so the
-     * operands' ranges are looked up but not required up front. */
     int a_known = vloop_int_node_range(d, n->op0, &alo, &ahi, depth + 1);
     b_known = vloop_int_node_range(d, n->op1, &blo, &bhi, depth + 1);
     if (n->tag == VLOOP_VN_AND) {
@@ -3332,7 +2945,6 @@ static int vloop_int_node_range(const VLoopDag *d, int node, long long *lo_out,
     if (n->op1 < 0 || n->op1 > 31) {
       return 0;
     }
-    /* A shift only shrinks magnitude; the bounds hold either way round. */
     *lo_out = alo >> n->op1 < 0 ? alo : alo >> n->op1;
     *hi_out = ahi >> n->op1;
     if (*lo_out > *hi_out) {
@@ -3368,8 +2980,6 @@ static int vloop_int_node_range(const VLoopDag *d, int node, long long *lo_out,
   }
   case VLOOP_VN_OR:
   case VLOOP_VN_XOR: {
-    /* Non-negative operands keep the result below the next power of two above
-     * either bound; anything with a sign bit in play is not worth modelling. */
     if (!b_known || alo < 0 || blo < 0) {
       return 0;
     }
@@ -3393,8 +3003,6 @@ static int vloop_int_node_range(const VLoopDag *d, int node, long long *lo_out,
   return 1;
 }
 
-/* Is this node's value provably inside int32, so a right shift of it reads the
- * same bits in a lane as it does in the scalar loop? */
 static int vloop_int_fits_int32(const VLoopDag *d, int node) {
   long long lo = 0, hi = 0;
   if (!vloop_int_node_range(d, node, &lo, &hi, 0)) {
@@ -3403,10 +3011,6 @@ static int vloop_int_fits_int32(const VLoopDag *d, int node) {
   return lo >= -2147483648LL && hi <= 2147483647LL;
 }
 
-/* Which right shift a `>>` becomes: an unsigned expression shifts zeros in
- * (vpsrld), a signed one replicates the sign (vpsrad). The lowerer records that
- * on the instruction so its constant folder does not fold a shift with the
- * wrong signedness, and the same bit answers it here. */
 static int vloop_int_shift_right_kind(const IRInstruction *ins) {
   return ins->is_unsigned ? VLOOP_VN_SHR : VLOOP_VN_SAR;
 }
@@ -3427,25 +3031,19 @@ static int vloop_int_is_comparison(const char *text) {
          strcmp(text, "==") == 0 || strcmp(text, "!=") == 0;
 }
 
-/* A comparison read as a value: `c = c + (a[i] > t)` counts, and `x * (a[i] !=
- * 0)` masks. The lanes hold the compare's own answer, which is all-ones or
- * zero, so `& 1` narrows it to the 0 or 1 the source means and `^ 1` negates
- * it. Both extra nodes take a broadcast constant, no register. */
 static int vloop_compare_value_node(IRFunction *function, size_t before,
                                     const IRInstruction *cmp, const char *iv,
                                     VLoopDag *d) {
   int equality = strcmp(cmp->text, "==") == 0 || strcmp(cmp->text, "!=") == 0;
   int negate = strcmp(cmp->text, "!=") == 0 || strcmp(cmp->text, "<=") == 0 ||
                strcmp(cmp->text, ">=") == 0;
-  /* Only `>` and `==` exist in the lanes. `<` is `>` with the operands the
-   * other way round; `<=` and `>=` are the strict compare negated. */
   int gt_left = strcmp(cmp->text, ">") == 0 || strcmp(cmp->text, "<=") == 0;
   const IROperand *first = (equality || gt_left) ? &cmp->lhs : &cmp->rhs;
   const IROperand *second = (equality || gt_left) ? &cmp->rhs : &cmp->lhs;
   int a, b, mask, one, value;
 
   if (cmp->is_unsigned) {
-    return -1; /* the lane compares are signed */
+    return -1;
   }
   a = vloop_build_int(function, before, first, iv, d);
   if (a < 0) {
@@ -3479,34 +3077,9 @@ static int vloop_compare_value_node(IRFunction *function, size_t before,
   return one < 0 ? -1 : vloop_add_node(d, VLOOP_VN_XOR, value, one);
 }
 
-/* ---- if-conversion: a conditional assignment becomes a lane select --------
- *
- * `if (v < lo) { v = lo; }` is a value, not control flow: every lane computes
- * both sides and keeps one. Deciding that here rather than in a per-kernel
- * recognizer is what lets a clamp, a saturation, a ReLU and a running extremum
- * share one path, whatever order the source writes them in.
- *
- * The lowered form of an `if` is fixed:
- *
- *     %t = <condition>
- *     branch_zero %t -> Lelse
- *     <then arm>
- *     jump Lend
- *   Lelse:
- *     <else arm, possibly empty>
- *   Lend:
- *
- * An arm may hold another diamond. `if (x < lo) return lo; if (x > hi) return
- * hi; return x;` is what a clamp helper looks like once it is inlined, and its
- * second test sits inside the first one's else arm, so arms resolve
- * recursively. What refuses is an effect a masked lane must not have: a store,
- * a call, or anything the kernel cannot replay for every lane. */
-
 static int vloop_region_is_pure(const IRFunction *function, size_t lo, size_t hi,
                                 int depth);
 
-/* Match a value diamond whose branch sits at `at`. Structure only: which name
- * the arms choose between is the resolver's question, not this one's. */
 static int vloop_match_diamond(const IRFunction *function, size_t at,
                                size_t body_hi, VLoopDiamond *out) {
   const IRInstruction *br = &function->instructions[at];
@@ -3517,8 +3090,6 @@ static int vloop_match_diamond(const IRFunction *function, size_t at,
       br->lhs.kind != IR_OPERAND_TEMP || !br->lhs.name) {
     return 0;
   }
-  /* The then arm ends at its jump to the join. A nested diamond has a jump of
-   * its own, so count the branches it opens and skip their jumps. */
   for (jump = at + 1; jump < body_hi; jump++) {
     IROpcode op = function->instructions[jump].op;
     if (op == IR_OP_BRANCH_ZERO) {
@@ -3545,8 +3116,6 @@ static int vloop_match_diamond(const IRFunction *function, size_t at,
       return 0;
     }
   }
-  /* Everything from the else label to the label the then arm jumps to is the
-   * else arm. With no else, the two labels are adjacent. */
   end_label = else_label;
   for (probe = else_label + 1; probe < body_hi; probe++) {
     const IRInstruction *ins = &function->instructions[probe];
@@ -3557,9 +3126,6 @@ static int vloop_match_diamond(const IRFunction *function, size_t at,
     }
   }
   if (end_label == else_label) {
-    /* An else-if chain has no join of its own: each arm jumps to the one join
-     * the whole chain shares, which sits just past this region. Accept that
-     * label as the closing one so a nested test resolves like a lone `if`. */
     const IRInstruction *outer = body_hi < function->instruction_count
                                      ? &function->instructions[body_hi]
                                      : NULL;
@@ -3585,8 +3151,6 @@ static int vloop_match_diamond(const IRFunction *function, size_t at,
   return 1;
 }
 
-/* True if [lo,hi) is a well-formed nest of value diamonds over straight-line
- * arithmetic: nothing in it escapes a lane. */
 static int vloop_region_is_pure(const IRFunction *function, size_t lo, size_t hi,
                                 int depth) {
   if (depth > VLOOP_MAX_DIAMOND_DEPTH) {
@@ -3625,8 +3189,6 @@ static int vloop_region_is_pure(const IRFunction *function, size_t lo, size_t hi
   return 1;
 }
 
-/* Every symbol a region writes, checked dead after the loop: the kernel deletes
- * the body, so a value chosen inside it and read later would vanish with it. */
 static int vloop_region_writes_escape(IRFunction *function, size_t lo, size_t hi,
                                       size_t after) {
   for (size_t i = lo; i < hi; i++) {
@@ -3658,7 +3220,6 @@ static int vloop_instruction_writes_name(const IRInstruction *ins,
          ins->dest.name && strcmp(ins->dest.name, name) == 0;
 }
 
-/* Does [lo,hi) assign `name` on some path, nested diamonds included? */
 static int vloop_region_assigns(const IRFunction *function, size_t lo, size_t hi,
                                 const char *name) {
   for (size_t i = lo; i < hi; i++) {
@@ -3669,8 +3230,6 @@ static int vloop_region_assigns(const IRFunction *function, size_t lo, size_t hi
   return 0;
 }
 
-/* Two operands naming the same value. Enough to tell `v = lo` from `v = hi`
- * when both sit beside the compare that chose between them. */
 static int vloop_operand_same(const IROperand *a, const IROperand *b) {
   if (!a || !b || a->kind != b->kind) {
     return 0;
@@ -3686,9 +3245,6 @@ static int vloop_operand_same(const IROperand *a, const IROperand *b) {
   }
 }
 
-/* The single instruction an arm uses to hand `name` back, when the arm is just
- * that: `v = lo`. NULL when the arm computes something less direct, or nothing
- * at all. */
 static const IRInstruction *vloop_arm_simple_assign(const IRFunction *function,
                                                     size_t lo, size_t hi,
                                                     const char *name) {
@@ -3700,7 +3256,7 @@ static const IRInstruction *vloop_arm_simple_assign(const IRFunction *function,
     }
     if (!vloop_instruction_writes_name(ins, name)) {
       if (ir_instruction_writes_destination(ins)) {
-        return NULL; /* the arm computes; leave it to the region resolver */
+        return NULL;
       }
       continue;
     }
@@ -3712,9 +3268,6 @@ static const IRInstruction *vloop_arm_simple_assign(const IRFunction *function,
   return found;
 }
 
-/* Which compare operand an arm hands back: 0 = the compare's left, 1 = its
- * right, -1 = neither. An arm that assigns nothing hands back the value that
- * reached the diamond, which is what the compare's own read of `name` is. */
 static int vloop_arm_side(const IRFunction *function, const IRInstruction *cmp,
                           const VLoopDiamond *dm, int is_then,
                           const char *name) {
@@ -3745,15 +3298,12 @@ static int vloop_arm_side(const IRFunction *function, const IRInstruction *cmp,
   return -1;
 }
 
-/* The value of `name` where the diamond is entered. */
 static int vloop_incoming_node(IRFunction *function, const VLoopDiamond *dm,
                                const char *name, const char *iv, VLoopDag *d) {
   return vloop_resolve_region_int(function, name, d->body_lo, dm->branch_index,
                                   iv, d);
 }
 
-/* The value one arm hands back: what it assigns, or, when it assigns nothing,
- * the value that reached the diamond. */
 static int vloop_arm_value(IRFunction *function, const VLoopDiamond *dm,
                            int is_then, const char *name, const char *iv,
                            VLoopDag *d) {
@@ -3768,8 +3318,6 @@ static int vloop_arm_value(IRFunction *function, const VLoopDiamond *dm,
   if (as) {
     return vloop_build_int(function, dm->branch_index, &as->lhs, iv, d);
   }
-  /* The arm computes. Anything it reads resolves inside the arm, or from
-   * before the diamond; never from the other arm. */
   if (d->n_regions >= VLOOP_MAX_DIAMOND_DEPTH) {
     return -1;
   }
@@ -3782,14 +3330,6 @@ static int vloop_arm_value(IRFunction *function, const VLoopDiamond *dm,
   return result;
 }
 
-/* Fold one value diamond into the DAG.
- *
- * A select whose arms are the two compared values IS a minimum or a maximum,
- * which is one instruction instead of a compare and a blend, and two ymm
- * registers shallower. Take that shape first, decided off the compare's
- * operands rather than off the spelling of the source, so a clamp, a floor and
- * a running extremum in either operand order all reach the same vpmaxsd.
- * Anything else becomes a general lane select. */
 static int vloop_diamond_node(IRFunction *function, const VLoopDiamond *dm,
                               const char *name, const char *iv, VLoopDag *d) {
   const IRInstruction *br = &function->instructions[dm->branch_index];
@@ -3802,7 +3342,7 @@ static int vloop_diamond_node(IRFunction *function, const VLoopDiamond *dm,
   cmp = ir_find_temp_producer_before(function, dm->branch_index, br->lhs.name);
   if (!cmp || cmp->op != IR_OP_BINARY || cmp->is_float || !cmp->text ||
       cmp->is_unsigned) {
-    return -1; /* a signed int32 compare is what the lanes carry */
+    return -1;
   }
   lt = strcmp(cmp->text, "<") == 0 || strcmp(cmp->text, "<=") == 0;
   gt = strcmp(cmp->text, ">") == 0 || strcmp(cmp->text, ">=") == 0;
@@ -3813,8 +3353,6 @@ static int vloop_diamond_node(IRFunction *function, const VLoopDiamond *dm,
   then_side = vloop_arm_side(function, cmp, dm, 1, name);
   else_side = vloop_arm_side(function, cmp, dm, 0, name);
   if (then_side >= 0 && else_side >= 0 && then_side != else_side) {
-    /* `a < b ? a : b` keeps the smaller; flipping the operator or the arm
-     * order flips which side survives. */
     int keeps_min = (then_side == 0) ? lt : gt;
     int a = vloop_build_int(function, dm->branch_index, &cmp->lhs, iv, d);
     int b = (a < 0) ? -1
@@ -3826,15 +3364,12 @@ static int vloop_diamond_node(IRFunction *function, const VLoopDiamond *dm,
     return vloop_add_node(d, keeps_min ? VLOOP_VN_MIN : VLOOP_VN_MAX, a, b);
   }
 
-  /* General select. The mask is `left > right`, so `<` swaps the operands and
-   * `<=` / `>=` are the negation of the strict compare the other way round,
-   * which is the same select with its arms exchanged. */
   {
     int strict = strcmp(cmp->text, "<") == 0 || strcmp(cmp->text, ">") == 0;
-    int gt_left = gt; /* mask operand order: 1 = lhs > rhs */
+    int gt_left = gt;
     int ma, mb;
     if (!strict) {
-      gt_left = !gt_left; /* `a <= b` is `!(a > b)`; `a >= b` is `!(b > a)` */
+      gt_left = !gt_left;
     }
     ma = vloop_build_int(function, dm->branch_index,
                          gt_left ? &cmp->lhs : &cmp->rhs, iv, d);
@@ -3852,9 +3387,6 @@ static int vloop_diamond_node(IRFunction *function, const VLoopDiamond *dm,
     }
   }
   {
-    /* The kernel reads its three operands off the stack in the order they were
-     * built, so a negated mask has to swap which ARM is built first, not just
-     * which field of the pair it lands in. */
     int swap = strcmp(cmp->text, "<=") == 0 || strcmp(cmp->text, ">=") == 0;
     then_node = vloop_arm_value(function, dm, swap ? 0 : 1, name, iv, d);
     if (then_node < 0) {
@@ -3872,9 +3404,6 @@ static int vloop_diamond_node(IRFunction *function, const VLoopDiamond *dm,
   }
 }
 
-/* Resolve `name` over [lo,hi): find the last construct that assigns it and
- * build from there. The kernel replays the node list as a tree, so this builds
- * only the nodes the value actually needs. */
 static int vloop_resolve_region_int(IRFunction *function, const char *name,
                                     size_t lo, size_t hi, const char *iv,
                                     VLoopDag *d) {
@@ -3893,9 +3422,6 @@ static int vloop_resolve_region_int(IRFunction *function, const char *name,
     VLoopDiamond dm;
     if (ins->op == IR_OP_BRANCH_ZERO) {
       if (!vloop_match_diamond(function, i, hi, &dm)) {
-        /* A diamond that does not close inside this region means the region
-         * ends mid-arm. Walking on would read the other arm's writes as if
-         * they had happened. */
         return -1;
       }
       if (vloop_region_assigns(function, dm.then_lo, dm.else_hi, name)) {
@@ -3925,7 +3451,6 @@ static int vloop_resolve_region_int(IRFunction *function, const char *name,
   return result;
 }
 
-/* Fold one definition of a per-iteration local into the DAG. */
 static int vloop_resolve_def_int(IRFunction *function, const IRInstruction *def,
                                  size_t def_idx, const char *iv, VLoopDag *d) {
   int result = -1;
@@ -3961,24 +3486,18 @@ static int vloop_resolve_def_int(IRFunction *function, const IRInstruction *def,
                                     (int)def->rhs.int_value);
     }
   } else if (def->op == IR_OP_ASSIGN || def->op == IR_OP_CAST) {
-    /* A cast into the local is transparent when it keeps at least the 32 bits
-     * the lanes carry; narrower ones fold sign back in and are refused. */
     if (def->op == IR_OP_ASSIGN ||
         (def->text && vloop_int_cast_is_transparent(def->text))) {
       result = vloop_build_int(function, def_idx, &def->lhs, iv, d);
     }
   } else if (def->op == IR_OP_LOAD && def->lhs.kind == IR_OPERAND_TEMP &&
              def->lhs.name && def->rhs.kind == IR_OPERAND_INT) {
-    /* `var x = a[i]` lowers to a LOAD straight into the symbol; rebuild it as
-     * an indexed array load by decoding the address. */
     const char *base = NULL;
     int bits = 0;
     int ai = -1;
     if (d->elem_bits == 8 && def->rhs.int_value == 1 &&
         ir_decode_byte_indexed_address(function, def_idx, def->lhs.name, iv,
                                        &base)) {
-      /* Byte lanes are zero-extended regardless of declared signedness (the
-       * movzx convention; see ir_decode_byte_indexed_load). */
       int is_unsigned = 1;
       if (d->elem_unsigned < 0) {
         d->elem_unsigned = is_unsigned;
@@ -4000,11 +3519,6 @@ static int vloop_resolve_def_int(IRFunction *function, const IRInstruction *def,
   return result;
 }
 
-/* Integer twin of vloop_resolve_body_local: fold a per-iteration local's
- * defining expression into the DAG in place of the symbol. The local must be
- * dead after the loop, since the fused kernel deletes the body. The region
- * resolver takes the last write to reach the point of the read, which is what
- * lets several guarded writes to one local compose. */
 static int vloop_resolve_body_local_int(IRFunction *function, const char *sym,
                                         const char *iv, size_t read_at,
                                         VLoopDag *d) {
@@ -4017,8 +3531,6 @@ static int vloop_resolve_body_local_int(IRFunction *function, const char *sym,
   if (read_at > d->body_hi) {
     read_at = d->body_hi;
   }
-  /* Innermost arm outwards: what this arm assigned, else what reached its
-   * diamond, and so on out to the loop body. */
   for (int k = d->n_regions - 1; k >= 0; k--) {
     size_t stop = read_at < d->regions[k].hi ? read_at : d->regions[k].hi;
     if (stop > d->regions[k].lo) {
@@ -4047,18 +3559,11 @@ static int vloop_build_int(IRFunction *function, size_t before,
     return -1;
   }
   if (op->kind == IR_OPERAND_SYMBOL) {
-    /* the counter used directly as a value: out[i] = a[i] + i */
     if (strcmp(op->name, iv) == 0) {
       d->has_iota = 1;
       return vloop_add_node(d, VLOOP_VN_IOTA, 0, 0);
     }
     if (vloop_symbol_written_in_body(function, d, op->name)) {
-      /* Same substitution the float builder does: a per-iteration local
-       * (`var v: int32 = (int32)src[i];`) is not a broadcast value, but its
-       * defining expression can be folded into the DAG. Hoisting the
-       * declaration out of the body -- which the compiler now does -- leaves
-       * the WRITE inside it, so without this the named-intermediate form of
-       * every int map stays scalar. */
       return vloop_resolve_body_local_int(function, op->name, iv, before, d);
     }
     {
@@ -4073,17 +3578,11 @@ static int vloop_build_int(IRFunction *function, size_t before,
       }
     }
   }
-  /* array load a[iv]. Whether that is a 4-byte element read straight into the
-   * lane or a byte widened into it is fixed for the whole DAG by the store the
-   * matcher found: one loop cannot mix the two, because the kernel walks every
-   * base by the same element stride. */
   if (op->kind == IR_OPERAND_TEMP && d->elem_bits == 8) {
     const char *base = NULL;
     int is_unsigned = 0;
     if (ir_decode_byte_indexed_load(function, before, op->name, iv, &base,
                                     &is_unsigned)) {
-      /* One widening rule per kernel: a uint8 array beside an int8 one would
-       * need two, and the lanes carry only the one. */
       if (d->elem_unsigned < 0) {
         d->elem_unsigned = is_unsigned;
       } else if (is_unsigned != d->elem_unsigned) {
@@ -4095,8 +3594,6 @@ static int vloop_build_int(IRFunction *function, size_t before,
       }
     }
     {
-      /* Any OTHER load in a byte kernel is an element the lanes cannot walk
-       * alongside the rest. Arithmetic temps fall through to the DAG below. */
       const IRInstruction *from =
           ir_find_temp_producer_before(function, before, op->name);
       if (from && from->op == IR_OP_LOAD) {
@@ -4113,10 +3610,6 @@ static int vloop_build_int(IRFunction *function, size_t before,
       int ai = vloop_intern_array(d, base);
       return ai < 0 ? -1 : vloop_add_node(d, VLOOP_VN_LOAD, ai, 0);
     }
-    /* A temp written on more than one path is an inlined callee's return
-     * value: `return lo` and `return x` land in the same temp from different
-     * arms. Resolving it by its nearest producer would take one arm's value
-     * for all lanes, so hand it to the region resolver instead. */
     {
       int defs = 0;
       for (size_t k = d->body_lo; k < d->body_hi && defs < 2; k++) {
@@ -4177,11 +3670,6 @@ static int vloop_build_int(IRFunction *function, size_t before,
   return -1;
 }
 
-/* Shared matcher for the int32 map shape. Fills the DAG and the loop facts;
- * *claim_out = 1 when every gate passes (the loop WOULD be fused). The bound
- * operand is cloned into *bound on a successful frame match regardless and
- * must be destroyed by the caller unless ownership is taken. Returns 0 only
- * on allocation failure. */
 static int ir_match_int_map_at(IRFunction *function, size_t header_index,
                                VLoopDag *d, IROperand *bound,
                                size_t *jump_index_out, const char **dst_base_out,
@@ -4227,14 +3715,9 @@ static int ir_match_int_map_at(IRFunction *function, size_t header_index,
   d->body_hi = jump_index;
 
   if (store->rhs.int_value == 1) {
-    /* A byte map: the lanes are still int32 (every op congruent mod 2^32, so
-     * the arithmetic is the scalar loop's exactly), and only the traffic at
-     * either end narrows -- widen on load, truncate on store. That truncation
-     * is what the store does anyway, so a `(uint8)` cast in front of it is an
-     * identity and must not be read as a narrowing the lanes have to model. */
     const IROperand *value = &store->lhs;
     d->elem_bits = 8;
-    d->elem_unsigned = -1; /* the first byte load fixes it for the kernel */
+    d->elem_unsigned = -1;
     if (!ir_decode_byte_indexed_address(function, store_index,
                                         store->dest.name, iv_symbol,
                                         &dst_base)) {
@@ -4251,7 +3734,7 @@ static int ir_match_int_map_at(IRFunction *function, size_t header_index,
     }
     root = vloop_build_int(function, store_index, value, iv_symbol, d);
     if (d->elem_unsigned < 0) {
-      return 1; /* nothing widened: a fill, which has its own kernel */
+      return 1;
     }
   } else if (store->rhs.int_value == 4 &&
              ir_decode_float_indexed_address(function, store_index,
@@ -4265,9 +3748,6 @@ static int ir_match_int_map_at(IRFunction *function, size_t header_index,
   if (root < 0 || d->overflow) {
     return 1;
   }
-  /* Trivial bodies (a plain copy or a constant splat) belong to the tuned
-   * memory-map/fill kernels; claiming them here would only swap one kernel
-   * for a slower one. */
   if (d->n_nodes < 2) {
     return 1;
   }
@@ -4297,8 +3777,6 @@ static int ir_match_int_map_at(IRFunction *function, size_t header_index,
   return 1;
 }
 
-/* Read-only probe for other passes (pointer-induction must not convert a loop
- * this vectorizer would claim -- the kernel needs the indexed form). */
 int ir_auto_vectorize_int_claimable(IRFunction *function, size_t header_index) {
   VLoopDag d;
   IROperand bound = {0};
@@ -4337,14 +3815,11 @@ static int ir_try_vectorize_int_map_at(IRFunction *function,
 
   fused.op = IR_OP_SIMD_VLOOP_I32;
   fused.location = function->instructions[header_index].location;
-  /* float_bits carries the ELEMENT width for this opcode: 32 for int32
-   * elements, 8 for a byte map (int32 lanes either way). is_unsigned then says
-   * how the byte widens into the lane. */
   fused.float_bits = d.elem_bits;
   fused.is_unsigned = (d.elem_bits == 8) ? (d.elem_unsigned != 0) : 0;
   fused.dest = ir_operand_symbol(dst_base);
-  fused.lhs = bound; /* take ownership of the cloned bound operand */
-  if (!vloop_serialize_into(&fused, &d, /*reduce_op=*/0, root, depth)) {
+  fused.lhs = bound;
+  if (!vloop_serialize_into(&fused, &d, 0, root, depth)) {
     ir_instruction_destroy_storage(&fused);
     return 0;
   }
@@ -4401,10 +3876,6 @@ static int ir_try_vectorize_int_reduce_at(IRFunction *function,
     return 1;
   }
   {
-    /* The kernel accumulates in 32-bit lanes and stores 32 bits back, which
-     * is only congruent when the accumulator itself is 32-bit. A widening
-     * int64 += int32 sum keeps high bits the lanes never compute -- refuse
-     * (the dedicated sum_i32 kernel handles the bare-load form of that). */
     const char *acc_type = ir_function_local_declared_type(function, acc_symbol);
     if (!acc_type) {
       acc_type = ir_function_param_declared_type(function, acc_symbol);
@@ -4414,12 +3885,8 @@ static int ir_try_vectorize_int_reduce_at(IRFunction *function,
       ir_operand_destroy(&bound);
       return 1;
     }
-    /* The kernel re-extends the folded 32-bit sum into the accumulator's
-     * 8-byte stack home, and the extension must match the declared
-     * signedness (homes hold canonically-extended values). */
     fused.is_unsigned = (strcmp(acc_type, "uint32") == 0);
   }
-  /* acc written only by the reduction; no other symbol writes besides iv. */
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (i != reduce_index && ir_instruction_writes_destination(ins) &&
@@ -4434,7 +3901,7 @@ static int ir_try_vectorize_int_reduce_at(IRFunction *function,
   memset(&d, 0, sizeof(d));
   d.width_bits = 32;
   d.is_int = 1;
-  d.elem_bits = 32; /* byte reductions belong to the vpsadbw sum kernel */
+  d.elem_bits = 32;
   d.body_lo = branch_index + 1;
   d.body_hi = jump_index;
   root = vloop_build_int(function, reduce_index, addend, iv_symbol, &d);
@@ -4442,7 +3909,7 @@ static int ir_try_vectorize_int_reduce_at(IRFunction *function,
     ir_operand_destroy(&bound);
     return 1;
   }
-  if (d.n_nodes < 2) { /* a bare-load sum belongs to the tuned sum kernels */
+  if (d.n_nodes < 2) {
     ir_operand_destroy(&bound);
     return 1;
   }
@@ -4457,7 +3924,7 @@ static int ir_try_vectorize_int_reduce_at(IRFunction *function,
     return 1;
   }
   depth = vloop_eval_depth(&d, root);
-  if (depth > VLOOP_REG_BUDGET - 1 /* ymm2 reserved as accumulator */ ||
+  if (depth > VLOOP_REG_BUDGET - 1  ||
       d.n_arrays > VLOOP_MAX_ARRAYS) {
     ir_operand_destroy(&bound);
     return 1;
@@ -4467,8 +3934,8 @@ static int ir_try_vectorize_int_reduce_at(IRFunction *function,
   fused.location = function->instructions[header_index].location;
   fused.float_bits = 32;
   fused.dest = ir_operand_symbol(acc_symbol);
-  fused.lhs = bound; /* take ownership */
-  if (!vloop_serialize_into(&fused, &d, /*reduce_op=*/1, root, depth)) {
+  fused.lhs = bound;
+  if (!vloop_serialize_into(&fused, &d, 1, root, depth)) {
     ir_instruction_destroy_storage(&fused);
     return 0;
   }
@@ -4498,32 +3965,6 @@ int ir_auto_vectorize_int_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Early-exit search skip-ahead -> IR_OP_SIMD_FIND                             */
-/*                                                                             */
-/* Vectorizes find / memchr / mismatch loops WITHOUT touching their control    */
-/* flow: only the counter's zero-init is replaced by a kernel that computes    */
-/* the exact first index where the exit predicate holds (else n). The scalar   */
-/* loop survives and re-runs from that index, so it executes at most the hit   */
-/* iteration plus the sub-block tail, and every exit path (break, return, a    */
-/* flag store) replays natively. Soundness needs only two facts, both proved   */
-/* here: iterations BEFORE the first hit are observably pure (address math +   */
-/* the decoded loads + the compare + the increment, nothing trapping), and     */
-/* the kernel's predicate is exactly the loop's exit predicate.                */
-/*                                                                             */
-/* Two source shapes:                                                          */
-/*   Form A: while (i < n) { if (a[i] PRED rhs) { <anything that returns or   */
-/*           breaks> } i++; }      -- hit when the condition is TRUE.          */
-/*   Form B: while (i < n) { <pure> if (!(...)) -> exits via the condition    */
-/*           branch jumping OUT of the body (e.g. `while (i < n && a[i] !=    */
-/*           key)`) -- hit when the condition is FALSE (predicate inverted).   */
-/* rhs forms: int literal, loop-invariant scalar symbol, or b[i] (mismatch).   */
-/* Elements: int32 (8 lanes) or bytes (32 lanes; == / != only). Ordered        */
-/* predicates are signed-gated; literals/scalars are width/signedness-gated    */
-/* so the 32-bit lane compare agrees with the scalar 64-bit compare.           */
-/* -------------------------------------------------------------------------- */
-
-/* Predicate codes -- must match the kernel decoder in simd_int.c. */
 #define VFIND_P_EQ 0
 #define VFIND_P_NE 1
 #define VFIND_P_LT 2
@@ -4552,19 +3993,16 @@ static int vfind_pred_invert(int p) {
   }
 }
 
-static int vfind_pred_mirror(int p) { /* a P b == b P' a */
+static int vfind_pred_mirror(int p) {
   switch (p) {
   case VFIND_P_LT: return VFIND_P_GT;
   case VFIND_P_GT: return VFIND_P_LT;
   case VFIND_P_LE: return VFIND_P_GE;
   case VFIND_P_GE: return VFIND_P_LE;
-  default: return p; /* EQ / NE symmetric */
+  default: return p;
   }
 }
 
-/* Decode `temp` as the canonical a[iv] load for int32 (addr = base + (iv<<2),
- * size 4) or byte (addr = base + iv, size 1) elements. Returns the LOAD
- * instruction so callers can pin identity and signedness. */
 static int vfind_decode_indexed_load(IRFunction *function, size_t before,
                                      const char *temp, const char *iv,
                                      const char **base_out, int *u8_out,
@@ -4587,7 +4025,7 @@ static int vfind_decode_indexed_load(IRFunction *function, size_t before,
       !addr->lhs.name) {
     return 0;
   }
-  if (load->rhs.int_value == 4) { /* int32: index temp = iv << 2 */
+  if (load->rhs.int_value == 4) {
     const IRInstruction *shl = NULL;
     if (addr->rhs.kind != IR_OPERAND_TEMP || !addr->rhs.name) {
       return 0;
@@ -4601,7 +4039,7 @@ static int vfind_decode_indexed_load(IRFunction *function, size_t before,
       return 0;
     }
     *u8_out = 0;
-  } else if (load->rhs.int_value == 1) { /* byte: addr = base + iv */
+  } else if (load->rhs.int_value == 1) {
     if (!ir_operand_is_symbol_named(&addr->rhs, iv)) {
       return 0;
     }
@@ -4627,11 +4065,6 @@ static int vfind_symbol_written_in(const IRFunction *function, size_t lo,
   return 0;
 }
 
-/* The lexer style `alpha || digit || '_'` loop has several short circuit
- * branches, so the scalar predicate matcher below cannot claim it. After the
- * ASCII range fold it has one stable, exact shape. Recognize that shape and
- * plant a class search before the loop. The loop stays intact and checks the
- * stop byte itself, just like every other find skip ahead. */
 #define VFIND_P_ASCII_IDENT_END 6
 
 static int vfind_same_operand(const IROperand *a, const IROperand *b) {
@@ -4847,18 +4280,12 @@ static int ir_try_vectorize_ascii_ident_find_at(IRFunction *function,
     return 1;
   }
 
-  /* The kernel advances in 64 bits. Signed int32 endpoints prove that this is
-   * exact even for a negative start: a unit step cannot wrap before reaching
-   * an int32 bound. */
   if (!vfind_symbol_is_signed_i32(function, iv) ||
       !vfind_operand_fits_signed_i32(function, header_index,
                                      &bound_cmp->rhs)) {
     return 1;
   }
 
-  /* Skipping assignments to the source local is safe only when its value does
-   * not escape the loop. The stop iteration still replays and writes it on the
-   * hit path; this check also covers the no-hit path. */
   for (size_t i = jump_index + 1; i < function->instruction_count; i++) {
     if (vfind_instruction_reads_symbol(&function->instructions[i],
                                        assign->dest.name)) {
@@ -4866,7 +4293,6 @@ static int ir_try_vectorize_ascii_ident_find_at(IRFunction *function,
     }
   }
 
-  /* A second pass over the inserted loop must not plant a second kernel. */
   for (size_t i = header_index; i-- > 0;) {
     IRInstruction *ins = &function->instructions[i];
     if (ins->op == IR_OP_LABEL) break;
@@ -4912,9 +4338,9 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
   size_t jump_index = 0;
   IROperand bound = {0};
   int matched = 0;
-  size_t cb = 0;            /* the single conditional branch in the body */
+  size_t cb = 0;
   int n_cond = 0;
-  size_t exit_lo = 0, exit_hi = 0; /* Form A exit region (cb+1 .. L_idx) */
+  size_t exit_lo = 0, exit_hi = 0;
   size_t l_idx = 0;
   int form_b = 0;
   const IRInstruction *br = NULL;
@@ -4944,7 +4370,6 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* exactly one conditional branch in the body */
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     IROpcode op = function->instructions[i].op;
     if (op == IR_OP_BRANCH_EQ) {
@@ -4967,8 +4392,6 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* locate the branch target inside the body (Form A) or not (Form B), and
-   * refuse any other label in the body. */
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op != IR_OP_LABEL) {
@@ -4985,11 +4408,6 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
   if (!form_b) {
     exit_lo = cb + 1;
     exit_hi = l_idx;
-    /* The exit region runs ONLY on a hit (the kernel never skips a hit), so
-     * its contents are unconstrained -- but it must actually EXIT: exactly
-     * one terminator (RETURN, or JUMP out of the loop) as its last real
-     * instruction, no other control flow, so a hit can never fall through
-     * into the increment as if nothing happened with iterations skipped. */
     int saw_term = 0;
     for (size_t i = exit_lo; i < exit_hi; i++) {
       const IRInstruction *e = &function->instructions[i];
@@ -5005,7 +4423,6 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
         continue;
       }
       if (e->op == IR_OP_JUMP) {
-        /* must leave the loop: target label not within [header, jump] */
         int inside = 0;
         for (size_t k = header_index; k <= jump_index; k++) {
           const IRInstruction *lab = &function->instructions[k];
@@ -5027,7 +4444,6 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
         ir_operand_destroy(&bound);
         return 1;
       }
-      /* anything else (stores, calls, math) is fine: it only runs on a hit */
     }
     if (!saw_term) {
       ir_operand_destroy(&bound);
@@ -5035,12 +4451,10 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
     }
   }
 
-  /* decode the condition: load CMP rhs, or the folded `load != 0` form
-   * (x != 0 lowers to branching on the raw loaded value -- the strlen shape) */
   if (vfind_decode_indexed_load(function, cb, br->lhs.name, iv_symbol, &a_base,
                                 &a_u8, &a_load)) {
-    pred = VFIND_P_NE; /* branch condition == the value: "value != 0" */
-    other = NULL;      /* implicit literal 0 */
+    pred = VFIND_P_NE;
+    other = NULL;
   } else {
     cmp = ir_find_temp_producer_before(function, cb, br->lhs.name);
     if (!cmp || cmp->op != IR_OP_BINARY || cmp->is_float || !cmp->text) {
@@ -5066,14 +4480,12 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
       return 1;
     }
   }
-  /* the load must be the loop's own (in-body), not a stale pre-loop value */
   if ((size_t)(a_load - function->instructions) <= branch_index) {
     ir_operand_destroy(&bound);
     return 1;
   }
 
-  /* classify the other side */
-  if (!other) { /* implicit `!= 0` */
+  if (!other) {
     rhs_kind = 0;
     rhs_arg = ir_operand_int(0);
   } else if (other->kind == IR_OPERAND_INT) {
@@ -5131,7 +4543,6 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* ordered predicates: signed 32-bit only (vpcmpgtd is signed) */
   if (pred != VFIND_P_EQ && pred != VFIND_P_NE &&
       (a_u8 || a_load->is_unsigned ||
        (rhs_kind == 2 && b_load->is_unsigned))) {
@@ -5146,15 +4557,10 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* continue-path purity: outside the exit region, only the decoded loads,
-   * non-trapping address math (+, <<), temp copies, the compare, the branch,
-   * the increment, and the back-jump may appear. A stray load (a page the
-   * kernel never touches) or a trapping op (/) in a SKIPPED iteration would
-   * be an observable difference, so anything else refuses. */
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (!form_b && i >= exit_lo && i < exit_hi) {
-      continue; /* exit region: runs only on a hit, checked above */
+      continue;
     }
     if (ins->op == IR_OP_NOP || i == cb || (!form_b && i == l_idx)) {
       continue;
@@ -5183,13 +4589,10 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* Form B: the branch exits when the condition is FALSE */
   if (form_b) {
     pred = vfind_pred_invert(pred);
   }
 
-  /* locate the zero-init to replace (the frame already proved it exists on
-   * the straight-line path into the header) */
   for (size_t i = header_index; i-- > 0;) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op == IR_OP_LABEL) {
@@ -5207,11 +4610,6 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  /* The kernel replaces the zero-init, so everything it reads must already
-   * hold its loop-entry value THERE. `run = 0; a = src + cand; while (run <
-   * limit && a[run] == b[run])` puts the bases after the init, and the kernel
-   * would scan the previous iteration's buffers -- or uninitialized ones on
-   * the first pass. */
   {
     const char *reads[4];
     size_t read_count = 0;
@@ -5238,7 +4636,7 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
   if (claimed_out) {
     *claimed_out = 1;
   }
-  if (!install) { /* read-only probe (pointer-induction asks before converting) */
+  if (!install) {
     ir_operand_destroy(&bound);
     ir_operand_destroy(&rhs_arg);
     return 1;
@@ -5247,7 +4645,7 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
   fused.op = IR_OP_SIMD_FIND;
   fused.location = function->instructions[header_index].location;
   fused.dest = ir_operand_symbol(iv_symbol);
-  fused.lhs = bound; /* take ownership */
+  fused.lhs = bound;
   fused.rhs = ir_operand_symbol(a_base);
   fused.arguments = calloc(4, sizeof(IROperand));
   if (!fused.arguments) {
@@ -5259,9 +4657,8 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
   fused.arguments[0] = ir_operand_int(pred);
   fused.arguments[1] = ir_operand_int(a_u8);
   fused.arguments[2] = ir_operand_int(rhs_kind);
-  fused.arguments[3] = rhs_arg; /* take ownership */
+  fused.arguments[3] = rhs_arg;
 
-  /* Replace ONLY the init; the loop itself is untouched. */
   ir_instruction_destroy_storage(&function->instructions[init_index]);
   function->instructions[init_index] = fused;
   if (changed) {
@@ -5270,8 +4667,6 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
   return 1;
 }
 
-/* Read-only probe for pointer-induction: converting a claimable find loop to
- * a pointer walk would hide the indexed shape and leave it scalar. */
 int ir_auto_vectorize_find_claimable(IRFunction *function, size_t header_index) {
   int claimed = 0;
   if (!ir_try_vectorize_find_at(function, header_index, NULL, &claimed, 0)) {
@@ -5295,17 +4690,6 @@ int ir_auto_vectorize_find_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Phase B: outer-loop lane vectorizer -> IR_OP_SIMD_OUTER_LANE_F64            */
-/*                                                                             */
-/* Recognizes `while(p<P){ <inner counted loop carrying float64 iacc>;         */
-/*   total += iacc; p++ }` where the inner loop is outer-IV-invariant and its  */
-/*   body is a serial recurrence iacc = CHAIN(iacc, uniform-of-i terms). Runs  */
-/*   4 outer iterations in lockstep f64x4 lanes to hide the recurrence latency.*/
-/* -------------------------------------------------------------------------- */
-
-/* uniform-of-i linear micro-program ops (applied left to right, starting at i
- * in the integer domain; OL_U_CVT switches to the float domain). */
 #define OL_U_AND 1
 #define OL_U_OR 2
 #define OL_U_XOR 3
@@ -5319,7 +4703,6 @@ int ir_auto_vectorize_find_pass(IRFunction *function, int *changed) {
 #define OL_U_FSUB 11
 #define OL_U_FMUL 12
 #define OL_U_FDIV 13
-/* inner-recurrence chain ops */
 #define OL_C_ADD 0
 #define OL_C_SUB 1
 #define OL_C_MUL 2
@@ -5332,16 +4715,16 @@ int ir_auto_vectorize_find_pass(IRFunction *function, int *changed) {
 
 typedef struct {
   int op;
-  long long imm; /* int literal for int ops; fconst index for float ops */
+  long long imm;
 } OlMicro;
 typedef struct {
   OlMicro micro[OL_MAX_MICRO];
   int n_micro;
 } OlUniform;
 typedef struct {
-  int op;        /* OL_C_* */
-  int side;      /* 0: iacc OP term ; 1: term OP iacc */
-  int term_kind; /* 0: const (fconst idx) ; 1: uniform (unif idx) */
+  int op;
+  int side;
+  int term_kind;
   int term_idx;
 } OlChainStep;
 typedef struct {
@@ -5351,11 +4734,6 @@ typedef struct {
   int n_unif;
   double fconst[OL_MAX_FCONST];
   int n_fconst;
-  /* init_mode 0: the inner accumulator starts at a compile-time float const
-   * (iacc_init) -> all outer iterations identical (lane0 fast path, bit-exact).
-   * init_mode 1: the seed is a function of the outer index p (a uniform program
-   * over p in init_prog) -> outer iterations differ; lanes diverge and are
-   * summed by per-lane extraction in p order (still bit-exact). */
   int init_mode;
   double iacc_init;
   OlUniform init_prog;
@@ -5376,7 +4754,6 @@ static int ol_intern_fconst(OlDag *d, double v) {
   return d->n_fconst++;
 }
 
-/* float64 literal (direct or cast-of-literal), like vloop_operand_is_literal. */
 static int ol_operand_is_fconst(IRFunction *fn, size_t before,
                                 const IROperand *op, double *out) {
   if (op->kind == IR_OPERAND_FLOAT && op->float_bits == 64) {
@@ -5393,7 +4770,6 @@ static int ol_operand_is_fconst(IRFunction *fn, size_t before,
   return 0;
 }
 
-/* True if operand's expression references symbol `sym` (bounded walk). */
 static int ol_contains_symbol(IRFunction *fn, size_t before, const IROperand *op,
                               const char *sym, int depth) {
   if (!op || depth > 24) {
@@ -5421,16 +4797,13 @@ static int ol_contains_symbol(IRFunction *fn, size_t before, const IROperand *op
   return 0;
 }
 
-/* Build a linear uniform-of-i program for `op` (a value derived from the inner
- * counter `iv` and constants only). Emits micro-ops in i-first apply order. */
 static int ol_build_uniform(IRFunction *fn, size_t before, const IROperand *op,
                             const char *iv, OlDag *d, OlUniform *prog) {
   if (!op || d->overflow) {
     return 0;
   }
-  /* base: the inner counter i */
   if (op->kind == IR_OPERAND_SYMBOL && op->name && strcmp(op->name, iv) == 0) {
-    return 1; /* program starts implicitly at i (int domain) */
+    return 1;
   }
   if ((op->kind != IR_OPERAND_TEMP && op->kind != IR_OPERAND_SYMBOL) ||
       !op->name) {
@@ -5443,7 +4816,6 @@ static int ol_build_uniform(IRFunction *fn, size_t before, const IROperand *op,
   size_t pidx = (size_t)(p - fn->instructions);
   if (p->op == IR_OP_CAST && !p->is_float && p->text &&
       strcmp(p->text, "float64") == 0) {
-    /* int -> float64 cast */
     if (!ol_build_uniform(fn, pidx, &p->lhs, iv, d, prog)) return 0;
     if (prog->n_micro >= OL_MAX_MICRO) { d->overflow = 1; return 0; }
     prog->micro[prog->n_micro].op = OL_U_CVT;
@@ -5454,7 +4826,6 @@ static int ol_build_uniform(IRFunction *fn, size_t before, const IROperand *op,
   if (p->op != IR_OP_BINARY || !p->text) {
     return 0;
   }
-  /* Identify the i-bearing operand and the constant operand. */
   const IROperand *L = &p->lhs;
   const IROperand *R = &p->rhs;
   int l_has = ol_contains_symbol(fn, pidx, L, iv, 0);
@@ -5473,7 +4844,7 @@ static int ol_build_uniform(IRFunction *fn, size_t before, const IROperand *op,
     if (strcmp(p->text, "+") == 0) { op_code = OL_U_FADD; }
     else if (strcmp(p->text, "*") == 0) { op_code = OL_U_FMUL; }
     else if (strcmp(p->text, "-") == 0) {
-      if (!cst_on_right) return 0; /* c - x not supported */
+      if (!cst_on_right) return 0;
       op_code = OL_U_FSUB;
     } else if (strcmp(p->text, "/") == 0) {
       if (!cst_on_right) return 0;
@@ -5488,7 +4859,6 @@ static int ol_build_uniform(IRFunction *fn, size_t before, const IROperand *op,
     prog->n_micro++;
     return 1;
   }
-  /* integer op with an integer-literal constant */
   if (cst->kind != IR_OPERAND_INT) return 0;
   long long imm = cst->int_value;
   int op_code;
@@ -5515,7 +4885,6 @@ static int ol_build_uniform(IRFunction *fn, size_t before, const IROperand *op,
   return 1;
 }
 
-/* Extract one chain term (const or uniform-of-i) into the dag; sets *kind/*idx. */
 static int ol_extract_term(IRFunction *fn, size_t before, const IROperand *op,
                            const char *iv, OlDag *d, int *kind, int *idx) {
   double cv = 0.0;
@@ -5536,16 +4905,13 @@ static int ol_extract_term(IRFunction *fn, size_t before, const IROperand *op,
   return 1;
 }
 
-/* Walk the inner accumulator update expression into the recurrence chain
- * (base-first). Exactly one operand at each binary leads to iacc; the other is a
- * uniform term. */
 static int ol_build_chain(IRFunction *fn, size_t before, const IROperand *op,
                           const char *iacc, const char *iv, OlDag *d) {
   if (!op || d->overflow) {
     return 0;
   }
   if (op->kind == IR_OPERAND_SYMBOL && op->name && strcmp(op->name, iacc) == 0) {
-    return 1; /* base: the carried accumulator */
+    return 1;
   }
   if ((op->kind != IR_OPERAND_TEMP && op->kind != IR_OPERAND_SYMBOL) ||
       !op->name) {
@@ -5576,7 +4942,7 @@ static int ol_build_chain(IRFunction *fn, size_t before, const IROperand *op,
   if (!ol_extract_term(fn, pidx, term, iv, d, &kind, &idx)) {
     return 0;
   }
-  if (!ol_build_chain(fn, pidx, inner, iacc, iv, d)) { /* recurse base-side first */
+  if (!ol_build_chain(fn, pidx, inner, iacc, iv, d)) {
     return 0;
   }
   if (d->n_chain >= OL_MAX_CHAIN) { d->overflow = 1; return 0; }
@@ -5588,9 +4954,6 @@ static int ol_build_chain(IRFunction *fn, size_t before, const IROperand *op,
   return 1;
 }
 
-/* The inner loop body must be pure straight-line float/int work (the recurrence
- * + the uniform computations + the counter increment). No memory, calls, or
- * control flow. */
 static int ol_inner_body_pure(IRFunction *fn, size_t lo, size_t hi) {
   for (size_t i = lo; i < hi; i++) {
     switch (fn->instructions[i].op) {
@@ -5614,8 +4977,6 @@ static int ol_inner_body_pure(IRFunction *fn, size_t lo, size_t hi) {
   return 1;
 }
 
-/* Scan [lo,hi) for the first BRANCH_ZERO, returning its index or -1 (stops at a
- * jump/second label so it stays within the loop header region). */
 static long long ol_find_branch_zero(IRFunction *fn, size_t lo, size_t hi) {
   for (size_t i = lo; i < hi; i++) {
     IROpcode op = fn->instructions[i].op;
@@ -5625,7 +4986,6 @@ static long long ol_find_branch_zero(IRFunction *fn, size_t lo, size_t hi) {
   return -1;
 }
 
-/* Find a JUMP to `label` in [lo,hi); returns index or -1. */
 static long long ol_find_jump_to(IRFunction *fn, size_t lo, size_t hi,
                                  const char *label) {
   for (size_t i = lo; i < hi; i++) {
@@ -5637,8 +4997,6 @@ static long long ol_find_jump_to(IRFunction *fn, size_t lo, size_t hi,
   return -1;
 }
 
-/* Decode a `iv <cmp> N` loop compare feeding the branch at branch_index. Returns
- * 1 with *iv_out/*bound_out/*cmp_out (0:<, 1:<=) on success. */
 static int ol_decode_loop_compare(IRFunction *fn, size_t branch_index,
                                   const char **iv_out, IROperand *bound_out,
                                   int *cmp_out) {
@@ -5671,7 +5029,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   }
   const char *outer_label = header->text;
   size_t n = function->instruction_count;
-/* Diagnostic hook (no-op in production); set to an fprintf during bring-up. */
 #define OL_DBG(msg) ((void)0)
 
   long long ob = ol_find_branch_zero(function, header_index + 1, n);
@@ -5701,9 +5058,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   }
   size_t outer_jump = (size_t)oj;
 
-  /* Find the (single) inner while header in the outer body. ir_label_is_while_header
-   * also matches the loop's *end* label (it contains "_lbl_ir_while_"), so skip
-   * any label naming a while-end marker , only true headers count. */
   long long inner_hdr = -1;
   for (size_t i = outer_branch + 1; i < outer_jump; i++) {
     const IRInstruction *ins = &function->instructions[i];
@@ -5743,7 +5097,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   if (ij < 0) { OL_DBG("no inner back-jump"); ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1; }
   size_t inner_jump = (size_t)ij;
 
-  /* Inner increment: i = i + istep (unit). */
   {
     size_t inc = inner_jump;
     while (inc > inner_branch + 1) {
@@ -5756,7 +5109,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
       ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
     }
   }
-  /* Outer increment: p = p + 1 (unit), just before the outer back-jump. */
   {
     size_t inc = outer_jump;
     while (inc > inner_jump) {
@@ -5774,16 +5126,10 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
   }
 
-  /* The kernel replays the outer iterations as p = 0..P-1, so the outer iv
-   * must provably start at 0. */
   if (!ir_iv_zero_at_header(function, header_index, p_sym)) {
     OL_DBG("outer iv does not start at 0");
     ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
   }
-  /* The per-outer-iteration init region (outer branch -> inner header) must be
-   * straight-line: the i0 and iacc-seed scans below take the textually-last
-   * writer, which is only the executed value when no label/jump/branch can
-   * reorder control flow through the region. */
   for (size_t i = outer_branch + 1; i < inner_header; i++) {
     IROpcode op = function->instructions[i].op;
     if (op == IR_OP_LABEL || op == IR_OP_JUMP || op == IR_OP_BRANCH_ZERO ||
@@ -5793,7 +5139,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     }
   }
 
-  /* The outer reduction total = total + iacc, after the inner loop. */
   const char *total_sym = NULL;
   const char *iacc_sym = NULL;
   for (size_t i = inner_jump + 1; i < outer_jump; i++) {
@@ -5819,9 +5164,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
   }
 
-  /* i init (i0) before the inner header: the LAST write to i in the init
-   * region must be a constant assign (a later non-constant write would make
-   * the recorded i0 stale). */
   long long i0 = 0;
   int found_i0 = 0;
   for (size_t i = outer_branch + 1; i < inner_header; i++) {
@@ -5841,9 +5183,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
   }
 
-  /* The inner accumulator seed: either a compile-time float const (all outer
-   * iterations identical -> lane0 fast path) or a function of the outer index p
-   * (iterations differ -> divergent lanes). */
   OlDag d;
   memset(&d, 0, sizeof(d));
   {
@@ -5851,9 +5190,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     if (!ir_find_last_writer_before(function, inner_header, IR_OPERAND_SYMBOL,
                                     iacc_sym, &init_idx) ||
         init_idx <= outer_branch) {
-      /* The seed must be written INSIDE the per-outer-iteration init region;
-       * a writer before the outer loop would mean iacc carries across outer
-       * iterations (a serial dependence the per-lane reseed would break). */
       OL_DBG("no iacc init writer in the outer init region");
       ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
     }
@@ -5862,14 +5198,12 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
       d.init_mode = 0;
       d.iacc_init = init_ins->lhs.float_value;
     } else {
-      /* Build a uniform program over the OUTER index p for the seed value. For
-       * `iacc <- value` walk the value; for `iacc = a OP b` walk the binary. */
       const IROperand *seed_op = NULL;
       IROperand iacc_op = ir_operand_symbol(iacc_sym);
       if (init_ins->op == IR_OP_ASSIGN) {
         seed_op = &init_ins->lhs;
       } else {
-        seed_op = &iacc_op; /* ol_build_uniform resolves iacc's producer */
+        seed_op = &iacc_op;
       }
       d.init_prog.n_micro = 0;
       if (!ol_build_uniform(function, inner_header, seed_op, p_sym, &d,
@@ -5882,7 +5216,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     }
   }
 
-  /* The single inner recurrence write: iacc = <expr>. */
   long long iacc_upd = -1;
   for (size_t i = inner_branch + 1; i < inner_jump; i++) {
     const IRInstruction *ins = &function->instructions[i];
@@ -5891,7 +5224,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
       if (iacc_upd >= 0) { iacc_upd = -2; break; }
       iacc_upd = (long long)i;
     } else if (ir_operand_is_symbol_named(&ins->dest, iacc_sym)) {
-      iacc_upd = -2; /* iacc written by a non-float-binary -> reject */
+      iacc_upd = -2;
       break;
     }
   }
@@ -5900,20 +5233,13 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
   }
 
-  /* Body purity: no stores/calls/branches/etc. in the inner body. */
   if (!ol_inner_body_pure(function, inner_branch + 1, inner_jump)) {
     OL_DBG("inner body not pure");
     ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
   }
 
-  /* Build the recurrence chain from the iacc update RHS (which is the full
-   * expression; reconstruct it from dest = lhs OP rhs of the update). */
   {
-    /* The update is `iacc = A OP B` (a float binary). Treat its result as the
-     * chain root expression by walking from a synthetic temp == the update. */
     const IRInstruction *upd = &function->instructions[iacc_upd];
-    /* Re-express: build chain over the binary `upd`. We emulate ol_build_chain
-     * on the update by handling its top node directly. */
     int l_has = ol_contains_symbol(function, (size_t)iacc_upd, &upd->lhs,
                                    iacc_sym, 0);
     int r_has = ol_contains_symbol(function, (size_t)iacc_upd, &upd->rhs,
@@ -5950,10 +5276,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     ir_operand_destroy(&outerP); ir_operand_destroy(&innerN); return 1;
   }
 
-  /* The INNER loop must be invariant in p (p may only feed the seed, in the init
-   * region before inner_header): reject any p reference in [inner_header,
-   * inner_jump]. And `total` must be touched only by the reduction (after
-   * inner_jump): reject it anywhere in [outer_branch+1, inner_jump]. */
   for (size_t i = inner_header; i <= inner_jump; i++) {
     const IRInstruction *ins = &function->instructions[i];
     const IROperand *ops[3] = {&ins->lhs, &ins->rhs, &ins->dest};
@@ -5977,12 +5299,6 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     }
   }
 
-  /* Serialize and install. Layout (mirror in the kernel):
-   * header: [0]inner_cmp [1]istep [2]n_chain [3]n_unif [4]n_fconst [5]i0
-   *         [6]init_mode [7]iacc_init(FLOAT)
-   * then n_chain*4 INT chain steps; then n_unif chain-uniform programs
-   * (n_micro INT + n_micro*2 INT); then IF init_mode==1 the seed program
-   * (same shape); then n_fconst FLOAT. dest=total, lhs=P, rhs=N. */
   IRInstruction fused = {0};
   size_t argc = 8 + (size_t)(4 * d.n_chain);
   for (int u = 0; u < d.n_unif; u++) {
@@ -5999,7 +5315,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   fused.argument_count = argc;
   size_t k = 0;
   fused.arguments[k++] = ir_operand_int(inner_cmp);
-  fused.arguments[k++] = ir_operand_int(1); /* istep */
+  fused.arguments[k++] = ir_operand_int(1);
   fused.arguments[k++] = ir_operand_int(d.n_chain);
   fused.arguments[k++] = ir_operand_int(d.n_unif);
   fused.arguments[k++] = ir_operand_int(d.n_fconst);
@@ -6034,8 +5350,8 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
   fused.is_float = 1;
   fused.float_bits = 64;
   fused.dest = ir_operand_symbol(total_sym);
-  fused.lhs = outerP; /* take ownership */
-  fused.rhs = innerN; /* take ownership */
+  fused.lhs = outerP;
+  fused.rhs = innerN;
   OL_DBG("INSTALLED outer-lane fusion");
   ir_install_fused_reduction(function, header_index, outer_jump, &fused,
                              changed);

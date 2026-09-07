@@ -130,7 +130,6 @@ int type_checker_check_match_statement(TypeChecker *checker,
   return 1;
 }
 
-// exhaustive (no implicit fallthrough is allowed when a value is required).
 Type *type_checker_check_match_expression(TypeChecker *checker,
                                                  ASTNode *expression) {
   MatchStatement *match = (MatchStatement *)expression->data;
