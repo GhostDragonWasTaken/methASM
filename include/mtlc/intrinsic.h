@@ -1,4 +1,4 @@
-/* mtlc/intrinsic.h - target-neutral operations with backend-defined lowering. */
+
 #ifndef MTLC_INTRINSIC_H
 #define MTLC_INTRINSIC_H
 
@@ -6,9 +6,6 @@
 extern "C" {
 #endif
 
-/* These are semantic IR identities, not source-level function names and not
- * PTX/SPIR-V opcodes. Backends must switch on the enum; a frontend may expose
- * any syntax or spelling it chooses. */
 typedef enum {
   MTLC_INTRINSIC_NONE = 0,
   MTLC_INTRINSIC_GPU_LOCAL_ID_X,
@@ -52,35 +49,25 @@ typedef enum {
   MTLC_INTRINSIC_GPU_EXP_F32,
   MTLC_INTRINSIC_GPU_F16_BITS_TO_F32,
   MTLC_INTRINSIC_GPU_F32_TO_F16_BITS,
-  /* Bit reinterpretation between an f32 value and its IEEE-754 encoding. */
+
   MTLC_INTRINSIC_GPU_F32_FROM_BITS,
   MTLC_INTRINSIC_GPU_F32_TO_BITS,
-  /* Four-way packed-byte dot product with 32-bit accumulate:
-   * dest = a0*b0 + a1*b1 + a2*b2 + a3*b3 + c over the four bytes of a and b,
-   * unsigned (U32) or signed (S32) byte interpretation. */
+
   MTLC_INTRINSIC_GPU_DP4A_U32,
   MTLC_INTRINSIC_GPU_DP4A_S32,
-  /* Four-way packed dot product over 16-bit halves, low or high pair, with
-   * 32-bit accumulate. The building block dp4a is for byte lanes. */
+
   MTLC_INTRINSIC_GPU_DP2A_LO_U32,
   MTLC_INTRINSIC_GPU_DP2A_LO_S32,
   MTLC_INTRINSIC_GPU_DP2A_HI_U32,
   MTLC_INTRINSIC_GPU_DP2A_HI_S32,
-  /* Byte permute: gather four bytes from a 64-bit value pair by a selector
-   * nibble each. The nibble-unpacking primitive quantized decode wants. */
+
   MTLC_INTRINSIC_GPU_PRMT_B32,
-  /* 128-bit vector load/store: four consecutive 32-bit elements moved in one
-   * memory transaction. (src, dst) pointers; the element count is the name. */
+
   MTLC_INTRINSIC_GPU_LOAD4_F32,
   MTLC_INTRINSIC_GPU_LOAD4_U32,
   MTLC_INTRINSIC_GPU_STORE4_F32,
   MTLC_INTRINSIC_GPU_STORE4_U32,
-  /* Kernel-side diagnostics. printf writes through the device print buffer;
-   * the format is a literal and the argument shape is in the name. assert
-   * traps the launch when its condition is false. */
-  /* Packed half precision: two fp16 lanes in one 32-bit value, with native
-   * two-at-a-time arithmetic, plus the lane extraction and packing around it.
-   * bfloat16 rides the same carrier with its own conversions. */
+
   MTLC_INTRINSIC_GPU_HADD2,
   MTLC_INTRINSIC_GPU_HMUL2,
   MTLC_INTRINSIC_GPU_HFMA2,
@@ -123,4 +110,4 @@ typedef enum {
 }
 #endif
 
-#endif /* MTLC_INTRINSIC_H */
+#endif

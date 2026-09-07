@@ -70,7 +70,6 @@
     "src/codegen/ptx_emitter.c::ptx_select_wmma_profile": 91,
     "src/codegen/ptx_emitter.c::ptx_tensor_matmul_capability": 81,
     "src/codegen/spirv_emitter.c::emit_binary": 48,
-    "src/codegen/spirv_emitter.c::emit_device_function": 155,
     "src/frontend/mtlc_lower_module.c::eval_numeric": 89,
     "src/ir/ir.c::ir_gpu_async_copy_signature_matches": 59,
     "src/ir/ir.c::ir_gpu_graph_visit": 46,

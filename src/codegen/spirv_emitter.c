@@ -2243,72 +2243,97 @@ static void register_values(SpvFn *fn, IRFunction *func) {
   }
 }
 
-static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
-                                     size_t function_index) {
-  SpvFn fn = {0};
-  fn.m = m;
-  fn.function = func;
-  fn.function_index = function_index;
-  const IRModuleSymbol *function_symbol =
-      m->program ? ir_program_lookup_symbol(m->program, func->name) : NULL;
+typedef struct {
+  SpvMod *m;
+  IRFunction *func;
+  size_t function_index;
+  SpvFn fn;
+  const IRModuleSymbol *symbol;
+  size_t *starts;
+  SpvBlock *blocks;
+  size_t nblocks;
+  uint32_t *block_id;
+  uint32_t func_id;
+  uint32_t entry_id;
+  uint32_t exit_id;
+  int exit_used;
+  const IRInstruction *dynamic_view;
+  size_t parameter_count;
+  size_t dynamic_parameter;
+  uint32_t *ptypes;
+  uint32_t *pids;
+  SpvDesc *pdesc;
+  uint32_t return_type;
+} SpvEmit;
+
+static const char *spv_function_name(const SpvEmit *e) {
+  return e->func->name ? e->func->name : "?";
+}
+
+static const MtlcType *spv_parameter_type(const SpvEmit *e, size_t p) {
+  return e->symbol && e->symbol->kind == IR_MODSYM_FUNCTION &&
+                 p < e->symbol->param_count
+             ? e->symbol->param_types[p]
+             : NULL;
+}
+
+static int spv_device_check_signature(SpvEmit *e) {
   const MtlcType *return_type =
-      spv_function_return_type(m->program, func, function_symbol);
-  fn.returns_void =
-      spv_type_is_void(return_type, func ? func->return_type_name : NULL);
-  fn.return_desc =
-      fn.returns_void
+      spv_function_return_type(e->m->program, e->func, e->symbol);
+  e->fn.returns_void = spv_type_is_void(
+      return_type, e->func ? e->func->return_type_name : NULL);
+  e->fn.return_desc =
+      e->fn.returns_void
           ? (SpvDesc){.kind = MTLC_TYPE_VOID}
           : (return_type ? desc_from_type(return_type)
-                         : desc_from_typename(func->return_type_name));
-  if (func->is_kernel && !fn.returns_void) {
-    mod_error(m, "SPIR-V: kernel '%s' must return void",
-              func->name ? func->name : "?");
+                         : desc_from_typename(e->func->return_type_name));
+  if (e->func->is_kernel && !e->fn.returns_void) {
+    mod_error(e->m, "SPIR-V: kernel '%s' must return void",
+              spv_function_name(e));
     return 0;
   }
   if (spv_type_is_aggregate(return_type)) {
-    mod_error(m,
+    mod_error(e->m,
               "SPIR-V OpenCL 2.0 profile has no by-value record call ABI; "
               "'%s' returns a record, so pass it through a pointer parameter",
-              func->name ? func->name : "?");
+              spv_function_name(e));
     return 0;
   }
-  for (size_t p = 0; p < func->parameter_count; p++) {
-    const MtlcType *pt = function_symbol &&
-                                 function_symbol->kind == IR_MODSYM_FUNCTION &&
-                                 p < function_symbol->param_count
-                             ? function_symbol->param_types[p]
-                             : NULL;
-    if (spv_type_is_aggregate(pt)) {
-      mod_error(m,
+  for (size_t p = 0; p < e->func->parameter_count; p++) {
+    if (spv_type_is_aggregate(spv_parameter_type(e, p))) {
+      mod_error(e->m,
                 "SPIR-V OpenCL 2.0 profile has no by-value record parameter "
                 "ABI; parameter %zu of '%s' is a record, so pass a pointer to "
                 "it instead",
-                p, func->name ? func->name : "?");
+                p, spv_function_name(e));
       return 0;
     }
   }
+  return 1;
+}
 
+static void spv_device_split_blocks(SpvEmit *e) {
+  IRFunction *func = e->func;
   size_t count = func->instruction_count;
-  size_t *starts = calloc(count + 1, sizeof(size_t));
   size_t nstarts = 0;
-  starts[nstarts++] = 0;
+  e->starts = calloc(count + 1, sizeof(size_t));
+  e->starts[nstarts++] = 0;
   for (size_t i = 0; i < count; i++) {
     IROpcode op = func->instructions[i].op;
-    if (op == IR_OP_LABEL && (nstarts == 0 || starts[nstarts - 1] != i)) {
-      starts[nstarts++] = i;
+    if (op == IR_OP_LABEL && (nstarts == 0 || e->starts[nstarts - 1] != i)) {
+      e->starts[nstarts++] = i;
     }
     if (is_terminator(op) && i + 1 < count &&
-        (nstarts == 0 || starts[nstarts - 1] != i + 1)) {
-      starts[nstarts++] = i + 1;
+        (nstarts == 0 || e->starts[nstarts - 1] != i + 1)) {
+      e->starts[nstarts++] = i + 1;
     }
   }
-  SpvBlock *blocks = calloc(nstarts ? nstarts : 1, sizeof(SpvBlock));
-  size_t nblocks = 0;
+  e->blocks = calloc(nstarts ? nstarts : 1, sizeof(SpvBlock));
   for (size_t k = 0; k < nstarts; k++) {
-    size_t lo = starts[k];
-    size_t hi = (k + 1 < nstarts) ? starts[k + 1] : count;
+    size_t lo = e->starts[k];
+    size_t hi = (k + 1 < nstarts) ? e->starts[k + 1] : count;
     if (lo >= hi) continue;
-    SpvBlock *bl = &blocks[nblocks++];
+    SpvBlock *bl = &e->blocks[e->nblocks++];
     bl->lo = lo;
     bl->hi = hi;
     bl->label = (func->instructions[lo].op == IR_OP_LABEL)
@@ -2318,12 +2343,12 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
                    ? &func->instructions[hi - 1]
                    : NULL;
   }
+}
 
-  register_values(&fn, func);
-
-  const IRInstruction *dynamic_workgroup_abi_view = NULL;
-  size_t dynamic_workgroup_alignment = 0;
-  for (size_t i = 0; i < func->instruction_count && !m->error; i++) {
+static void spv_device_find_dynamic_view(SpvEmit *e) {
+  IRFunction *func = e->func;
+  size_t best_alignment = 0;
+  for (size_t i = 0; i < func->instruction_count && !e->m->error; i++) {
     const IRInstruction *in = &func->instructions[i];
     if (in->op != IR_OP_ADDRESS_SPACE_ALLOC ||
         in->rhs.kind != IR_OPERAND_INT || in->rhs.int_value != 0) {
@@ -2335,329 +2360,425 @@ static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
         in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP ||
         in->value_type->address_space != MTLC_ADDRESS_SPACE_WORKGROUP ||
         mtlc_type_size(in->value_type->base_type) == 0) {
-      mod_error(m, "SPIR-V: invalid dynamic workgroup view in '%s'",
-                func->name ? func->name : "?");
+      mod_error(e->m, "SPIR-V: invalid dynamic workgroup view in '%s'",
+                spv_function_name(e));
       break;
     }
     size_t alignment = mtlc_type_alignment(in->value_type->base_type);
-    if (!dynamic_workgroup_abi_view ||
-        alignment > dynamic_workgroup_alignment) {
-      dynamic_workgroup_abi_view = in;
-      dynamic_workgroup_alignment = alignment;
+    if (!e->dynamic_view || alignment > best_alignment) {
+      e->dynamic_view = in;
+      best_alignment = alignment;
     }
   }
+}
 
-  uint32_t func_id = m->device_function_ids[function_index];
-  uint32_t entry_id = new_id(m);
-  uint32_t exit_id = new_id(m);
-  int exit_used = 0;
-  uint32_t *block_id = calloc(nblocks ? nblocks : 1, sizeof(uint32_t));
-  for (size_t i = 0; i < nblocks; i++) block_id[i] = new_id(m);
+static uint32_t spv_kernel_pointer_type(SpvEmit *e, size_t p, SpvDesc d) {
+  int sc = spv_storage_class(d.address_space);
+  if (sc < 0 || d.address_space == MTLC_ADDRESS_SPACE_PRIVATE ||
+      d.address_space == MTLC_ADDRESS_SPACE_CONSTANT) {
+    mod_error(e->m,
+              "SPIR-V OpenCL 2.0: kernel parameter %zu has unsupported address space %d",
+              p, (int)d.address_space);
+    sc = SC_CrossWorkgroup;
+  }
+  return type_pointer(e->m, sc, kind_type(e->m, d.elem));
+}
 
-  uint32_t voidt = type_void(m);
-  uint32_t function_return_type =
-      fn.returns_void ? voidt : kind_type(m, fn.return_desc.kind);
-  size_t total_parameter_count =
-      func->parameter_count + (dynamic_workgroup_abi_view ? 1u : 0u);
-  size_t dynamic_workgroup_parameter = func->parameter_count;
-  uint32_t *ptypes = calloc(total_parameter_count + 1, sizeof(uint32_t));
-  uint32_t *pids = calloc(total_parameter_count + 1, sizeof(uint32_t));
-  SpvDesc *pdesc = calloc(total_parameter_count + 1, sizeof(SpvDesc));
+static void spv_device_parameters(SpvEmit *e) {
+  IRFunction *func = e->func;
+  e->dynamic_parameter = func->parameter_count;
+  e->parameter_count = func->parameter_count + (e->dynamic_view ? 1u : 0u);
+  e->ptypes = calloc(e->parameter_count + 1, sizeof(uint32_t));
+  e->pids = calloc(e->parameter_count + 1, sizeof(uint32_t));
+  e->pdesc = calloc(e->parameter_count + 1, sizeof(SpvDesc));
   for (size_t p = 0; p < func->parameter_count; p++) {
     const char *tn = func->parameter_types ? func->parameter_types[p] : NULL;
-    const MtlcType *pt = function_symbol &&
-                                 function_symbol->kind == IR_MODSYM_FUNCTION &&
-                                 p < function_symbol->param_count
-                             ? function_symbol->param_types[p]
-                             : NULL;
+    const MtlcType *pt = spv_parameter_type(e, p);
     SpvDesc d = pt ? desc_from_type(pt) : desc_from_typename(tn);
-    pdesc[p] = d;
-    if (func->is_kernel && d.is_ptr) {
-      int sc = spv_storage_class(d.address_space);
-      if (sc < 0 || d.address_space == MTLC_ADDRESS_SPACE_PRIVATE ||
-          d.address_space == MTLC_ADDRESS_SPACE_CONSTANT) {
-        mod_error(m,
-                  "SPIR-V OpenCL 2.0: kernel parameter %zu has unsupported address space %d",
-                  p, (int)d.address_space);
-        sc = SC_CrossWorkgroup;
-      }
-      ptypes[p] = type_pointer(m, sc, kind_type(m, d.elem));
-    } else {
-      ptypes[p] = kind_type(m, d.kind);
-    }
-    pids[p] = new_id(m);
+    e->pdesc[p] = d;
+    e->ptypes[p] = (func->is_kernel && d.is_ptr)
+                       ? spv_kernel_pointer_type(e, p, d)
+                       : kind_type(e->m, d.kind);
+    e->pids[p] = new_id(e->m);
   }
-  if (dynamic_workgroup_abi_view) {
-    SpvDesc dynamic_desc =
-        desc_from_type(dynamic_workgroup_abi_view->value_type);
-    ptypes[dynamic_workgroup_parameter] =
-        type_pointer(m, SC_Workgroup, kind_type(m, dynamic_desc.elem));
-    pids[dynamic_workgroup_parameter] = new_id(m);
+  if (e->dynamic_view) {
+    SpvDesc dynamic_desc = desc_from_type(e->dynamic_view->value_type);
+    e->ptypes[e->dynamic_parameter] =
+        type_pointer(e->m, SC_Workgroup, kind_type(e->m, dynamic_desc.elem));
+    e->pids[e->dynamic_parameter] = new_id(e->m);
   }
-  Wb ftops = {0};
-  wb_push(&ftops, function_return_type);
-  for (size_t p = 0; p < total_parameter_count; p++)
-    wb_push(&ftops, ptypes[p]);
+}
+
+static uint32_t spv_device_function_type(SpvEmit *e, uint32_t return_type) {
   char ftkey[256];
-  int kn = snprintf(ftkey, sizeof(ftkey), "fn:%u", function_return_type);
-  for (size_t p = 0;
-       p < total_parameter_count && kn < (int)sizeof(ftkey) - 12; p++) {
-    kn += snprintf(ftkey + kn, sizeof(ftkey) - (size_t)kn, ":%u", ptypes[p]);
+  int kn = snprintf(ftkey, sizeof(ftkey), "fn:%u", return_type);
+  uint32_t functype = 0;
+  for (size_t p = 0; p < e->parameter_count && kn < (int)sizeof(ftkey) - 12;
+       p++) {
+    kn += snprintf(ftkey + kn, sizeof(ftkey) - (size_t)kn, ":%u", e->ptypes[p]);
   }
-  uint32_t functype = cache_get(m, ftkey);
+  functype = cache_get(e->m, ftkey);
   if (!functype) {
-    functype = new_id(m);
     Wb ft = {0};
+    functype = new_id(e->m);
     wb_push(&ft, functype);
-    wb_push(&ft, function_return_type);
-    for (size_t p = 0; p < total_parameter_count; p++)
-      wb_push(&ft, ptypes[p]);
-    emit_ops(&m->typesconsts, Op_TypeFunction, &ft);
+    wb_push(&ft, return_type);
+    for (size_t p = 0; p < e->parameter_count; p++) wb_push(&ft, e->ptypes[p]);
+    emit_ops(&e->m->typesconsts, Op_TypeFunction, &ft);
     wb_free(&ft);
-    cache_put(m, ftkey, functype);
+    cache_put(e->m, ftkey, functype);
   }
-  wb_free(&ftops);
+  return functype;
+}
 
-  emitv(&m->functions, Op_Function, 4, function_return_type, func_id, 0u,
+static void spv_device_return_type(SpvEmit *e) {
+  uint32_t voidt = type_void(e->m);
+  e->return_type =
+      e->fn.returns_void ? voidt : kind_type(e->m, e->fn.return_desc.kind);
+}
+
+static void spv_device_open(SpvEmit *e) {
+  uint32_t functype = spv_device_function_type(e, e->return_type);
+  emitv(&e->m->functions, Op_Function, 4, e->return_type, e->func_id, 0u,
         functype);
-  for (size_t p = 0; p < total_parameter_count; p++) {
-    emitv(&m->functions, Op_FunctionParameter, 2, ptypes[p], pids[p]);
+  for (size_t p = 0; p < e->parameter_count; p++) {
+    emitv(&e->m->functions, Op_FunctionParameter, 2, e->ptypes[p], e->pids[p]);
   }
+  emitv(&e->m->functions, Op_Label, 1, e->entry_id);
+}
 
-  emitv(&m->functions, Op_Label, 1, entry_id);
-  for (size_t i = 0; i < fn.nbinds; i++) {
-    SpvBind *b = &fn.binds[i];
-    uint32_t vt = kind_type(m, b->d.kind);
-    uint32_t pt = type_pointer(m, SC_Function, vt);
-    b->var_id = new_id(m);
-    emitv(&m->functions, Op_Variable, 3, pt, b->var_id, (unsigned)SC_Function);
+static void spv_device_emit_locals(SpvEmit *e) {
+  for (size_t i = 0; i < e->fn.nbinds; i++) {
+    SpvBind *b = &e->fn.binds[i];
+    uint32_t vt = kind_type(e->m, b->d.kind);
+    uint32_t pt = type_pointer(e->m, SC_Function, vt);
+    b->var_id = new_id(e->m);
+    emitv(&e->m->functions, Op_Variable, 3, pt, b->var_id,
+          (unsigned)SC_Function);
   }
-  for (size_t i = 0; i < fn.nbinds; i++) {
-    SpvBind *b = &fn.binds[i];
+  for (size_t i = 0; i < e->fn.nbinds; i++) {
+    SpvBind *b = &e->fn.binds[i];
+    uint32_t bytes_type = 0, array_type = 0, pointer_type = 0, storage = 0;
     if (!b->record_bytes) continue;
-    uint32_t bytes_type = kind_type(m, MTLC_TYPE_UINT8);
-    uint32_t array_type = type_array(m, bytes_type, b->record_bytes);
-    uint32_t pointer_type = type_pointer(m, SC_Function, array_type);
-    uint32_t storage = new_id(m);
-    emitv(&m->functions, Op_Variable, 3, pointer_type, storage,
+    bytes_type = kind_type(e->m, MTLC_TYPE_UINT8);
+    array_type = type_array(e->m, bytes_type, b->record_bytes);
+    pointer_type = type_pointer(e->m, SC_Function, array_type);
+    storage = new_id(e->m);
+    emitv(&e->m->functions, Op_Variable, 3, pointer_type, storage,
           (unsigned)SC_Function);
     b->record_storage = storage;
   }
-  uint32_t *allocation_variables =
-      calloc(func->instruction_count ? func->instruction_count : 1,
-             sizeof(uint32_t));
-  for (size_t i = 0; i < func->instruction_count && !m->error; i++) {
+}
+
+static int spv_allocation_is_valid(SpvEmit *e, const IRInstruction *in,
+                                   int is_dynamic) {
+  if (!e->func->is_kernel || !in->dest.name || !in->value_type ||
+      in->value_type->kind != MTLC_TYPE_POINTER ||
+      !in->value_type->base_type || in->rhs.kind != IR_OPERAND_INT ||
+      in->rhs.int_value < 0 || in->rhs.int_value > UINT32_MAX ||
+      (in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP &&
+       in->address_space != MTLC_ADDRESS_SPACE_PRIVATE) ||
+      in->value_type->address_space != in->address_space ||
+      (is_dynamic && in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP)) {
+    mod_error(e->m, "SPIR-V: invalid address-space allocation in '%s'",
+              spv_function_name(e));
+    return 0;
+  }
+  return 1;
+}
+
+static void spv_device_declare_allocations(SpvEmit *e, uint32_t *variables) {
+  IRFunction *func = e->func;
+  for (size_t i = 0; i < func->instruction_count && !e->m->error; i++) {
     const IRInstruction *in = &func->instructions[i];
+    SpvBind *binding = NULL;
+    SpvDesc descriptor;
+    int storage_class = 0;
+    int is_dynamic = 0;
     if (in->op != IR_OP_ADDRESS_SPACE_ALLOC) continue;
-    int is_dynamic =
-        in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 0;
-    if (!func->is_kernel || !in->dest.name || !in->value_type ||
-        in->value_type->kind != MTLC_TYPE_POINTER ||
-        !in->value_type->base_type || in->rhs.kind != IR_OPERAND_INT ||
-        in->rhs.int_value < 0 || in->rhs.int_value > UINT32_MAX ||
-        (in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP &&
-         in->address_space != MTLC_ADDRESS_SPACE_PRIVATE) ||
-        in->value_type->address_space != in->address_space ||
-        (is_dynamic && in->address_space != MTLC_ADDRESS_SPACE_WORKGROUP)) {
-      mod_error(m, "SPIR-V: invalid address-space allocation in '%s'",
-                func->name ? func->name : "?");
-      break;
-    }
-    SpvBind *binding = find_bind(&fn, in->dest.name);
-    SpvDesc descriptor = desc_from_type(in->value_type);
-    int storage_class = spv_storage_class(in->address_space);
+    is_dynamic = in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 0;
+    if (!spv_allocation_is_valid(e, in, is_dynamic)) break;
+    binding = find_bind(&e->fn, in->dest.name);
+    descriptor = desc_from_type(in->value_type);
+    storage_class = spv_storage_class(in->address_space);
     if (!binding || !descriptor.is_ptr || storage_class < 0 ||
         mtlc_type_size(in->value_type->base_type) == 0) {
-      mod_error(m, "SPIR-V: allocation '%s' has an unsupported element type",
+      mod_error(e->m, "SPIR-V: allocation '%s' has an unsupported element type",
                 in->dest.name);
       break;
     }
     if (is_dynamic) continue;
-    uint32_t element_type = kind_type(m, descriptor.elem);
-    uint32_t array_type =
-        type_array(m, element_type, (uint32_t)in->rhs.int_value);
-    uint32_t pointer_type = type_pointer(m, storage_class, array_type);
-    uint32_t variable = new_id(m);
-    Wb *variable_section = storage_class == SC_Function ? &m->functions
-                                                        : &m->typesconsts;
-    emitv(variable_section, Op_Variable, 3, pointer_type, variable,
-          (unsigned)storage_class);
-    allocation_variables[i] = variable;
+    {
+      uint32_t element_type = kind_type(e->m, descriptor.elem);
+      uint32_t array_type =
+          type_array(e->m, element_type, (uint32_t)in->rhs.int_value);
+      uint32_t pointer_type = type_pointer(e->m, storage_class, array_type);
+      uint32_t variable = new_id(e->m);
+      Wb *section = storage_class == SC_Function ? &e->m->functions
+                                                 : &e->m->typesconsts;
+      emitv(section, Op_Variable, 3, pointer_type, variable,
+            (unsigned)storage_class);
+      variables[i] = variable;
+    }
   }
-  for (size_t i = 0; i < func->instruction_count && !m->error; i++) {
+}
+
+static void spv_device_bind_allocations(SpvEmit *e, const uint32_t *variables) {
+  IRFunction *func = e->func;
+  for (size_t i = 0; i < func->instruction_count && !e->m->error; i++) {
     const IRInstruction *in = &func->instructions[i];
+    SpvBind *binding = NULL;
+    uint32_t as_integer = 0;
+    uint32_t source = 0;
     if (in->op != IR_OP_ADDRESS_SPACE_ALLOC) continue;
-    SpvBind *binding = find_bind(&fn, in->dest.name);
-    int is_dynamic = in->rhs.int_value == 0;
-    if (is_dynamic) {
-      if (!dynamic_workgroup_abi_view ||
-          dynamic_workgroup_parameter >= total_parameter_count) {
-        mod_error(m, "SPIR-V: dynamic workgroup ABI was not materialized");
+    binding = find_bind(&e->fn, in->dest.name);
+    if (in->rhs.int_value == 0) {
+      if (!e->dynamic_view || e->dynamic_parameter >= e->parameter_count) {
+        mod_error(e->m, "SPIR-V: dynamic workgroup ABI was not materialized");
         break;
       }
-      uint32_t as_integer = new_id(m);
-      emitv(&m->functions, Op_ConvertPtrToU, 3, type_int(m, 64),
-            as_integer, pids[dynamic_workgroup_parameter]);
-      emitv(&m->functions, Op_Store, 2, binding->var_id, as_integer);
-      continue;
+      source = e->pids[e->dynamic_parameter];
+    } else {
+      source = variables[i];
+      if (!source) {
+        mod_error(e->m, "SPIR-V: allocation '%s' was not declared",
+                  in->dest.name);
+        break;
+      }
     }
-    uint32_t variable = allocation_variables[i];
-    if (!variable) {
-      mod_error(m, "SPIR-V: allocation '%s' was not declared", in->dest.name);
+    as_integer = new_id(e->m);
+    emitv(&e->m->functions, Op_ConvertPtrToU, 3, type_int(e->m, 64), as_integer,
+          source);
+    emitv(&e->m->functions, Op_Store, 2, binding->var_id, as_integer);
+  }
+}
+
+static void spv_device_emit_allocations(SpvEmit *e) {
+  uint32_t *variables =
+      calloc(e->func->instruction_count ? e->func->instruction_count : 1,
+             sizeof(uint32_t));
+  spv_device_declare_allocations(e, variables);
+  spv_device_bind_allocations(e, variables);
+  free(variables);
+  for (size_t i = 0; i < e->fn.nbinds && !e->m->error; i++) {
+    SpvBind *b = &e->fn.binds[i];
+    uint32_t as_integer = 0;
+    if (!b->record_storage) continue;
+    as_integer = new_id(e->m);
+    emitv(&e->m->functions, Op_ConvertPtrToU, 3, type_int(e->m, 64), as_integer,
+          b->record_storage);
+    emitv(&e->m->functions, Op_Store, 2, b->var_id, as_integer);
+  }
+}
+
+static void spv_device_store_parameters(SpvEmit *e) {
+  IRFunction *func = e->func;
+  for (size_t p = 0; p < func->parameter_count; p++) {
+    SpvBind *b = NULL;
+    if (!func->parameter_names || !func->parameter_names[p]) continue;
+    b = find_bind(&e->fn, func->parameter_names[p]);
+    if (!b) continue;
+    if (func->is_kernel && e->pdesc[p].is_ptr) {
+      uint32_t u64 = type_int(e->m, 64);
+      uint32_t asint = new_id(e->m);
+      emitv(&e->m->functions, Op_ConvertPtrToU, 3, u64, asint, e->pids[p]);
+      emitv(&e->m->functions, Op_Store, 2, b->var_id, asint);
+    } else {
+      emitv(&e->m->functions, Op_Store, 2, b->var_id, e->pids[p]);
+    }
+  }
+  if (e->nblocks > 0) {
+    emitv(&e->m->functions, Op_Branch, 1, e->block_id[0]);
+  } else if (e->fn.returns_void) {
+    emitv(&e->m->functions, Op_Return, 0);
+  } else {
+    mod_error(e->m, "SPIR-V: non-void device function '%s' has no return",
+              spv_function_name(e));
+  }
+}
+
+static int spv_device_emit_return(SpvEmit *e, const IRInstruction *term) {
+  if (e->fn.returns_void) {
+    if (term->lhs.kind != IR_OPERAND_NONE) {
+      mod_error(e->m, "SPIR-V: void device function '%s' returns a value",
+                spv_function_name(e));
+      return 0;
+    }
+    emitv(&e->m->functions, Op_Return, 0);
+    return 1;
+  }
+  if (term->lhs.kind == IR_OPERAND_NONE) {
+    mod_error(e->m, "SPIR-V: non-void device function '%s' has an empty return",
+              spv_function_name(e));
+    return 0;
+  }
+  emitv(&e->m->functions, Op_ReturnValue, 1,
+        materialize(&e->fn, &term->lhs, e->fn.return_desc.kind));
+  return 1;
+}
+
+static int spv_device_fallthrough(SpvEmit *e, size_t index, uint32_t *id_out) {
+  if (index + 1 < e->nblocks) {
+    *id_out = e->block_id[index + 1];
+    return 1;
+  }
+  if (!e->fn.returns_void) {
+    mod_error(e->m, "SPIR-V: non-void device function '%s' can fall through",
+              spv_function_name(e));
+    return 0;
+  }
+  *id_out = e->exit_id;
+  e->exit_used = 1;
+  return 1;
+}
+
+static int spv_device_emit_conditional(SpvEmit *e, size_t index,
+                                       const IRInstruction *term) {
+  long taken = block_of_label(e->blocks, e->nblocks, term->text);
+  uint32_t fall_id = 0;
+  uint32_t taken_id = 0;
+  uint32_t cond = 0;
+  if (taken < 0) {
+    mod_error(e->m, "SPIR-V: branch to unknown label '%s'",
+              term->text ? term->text : "?");
+    return 0;
+  }
+  if (!spv_device_fallthrough(e, index, &fall_id)) {
+    return 0;
+  }
+  taken_id = e->block_id[taken];
+  cond = branch_cond_bool(&e->fn, term);
+  emitv(&e->m->functions, Op_BranchConditional, 3, cond,
+        (term->op == IR_OP_BRANCH_ZERO) ? fall_id : taken_id,
+        (term->op == IR_OP_BRANCH_ZERO) ? taken_id : fall_id);
+  return 1;
+}
+
+static int spv_device_emit_terminator(SpvEmit *e, size_t index,
+                                      const IRInstruction *term) {
+  if (term && term->op == IR_OP_RETURN) {
+    return spv_device_emit_return(e, term);
+  }
+  if (term && term->op == IR_OP_JUMP) {
+    long t = block_of_label(e->blocks, e->nblocks, term->text);
+    if (t < 0) {
+      mod_error(e->m, "SPIR-V: jump to unknown label '%s'",
+                term->text ? term->text : "?");
+      return 0;
+    }
+    emitv(&e->m->functions, Op_Branch, 1, e->block_id[t]);
+    return 1;
+  }
+  if (term && (term->op == IR_OP_BRANCH_ZERO || term->op == IR_OP_BRANCH_EQ)) {
+    return spv_device_emit_conditional(e, index, term);
+  }
+  if (index + 1 < e->nblocks) {
+    emitv(&e->m->functions, Op_Branch, 1, e->block_id[index + 1]);
+    return 1;
+  }
+  if (e->fn.returns_void) {
+    emitv(&e->m->functions, Op_Return, 0);
+    return 1;
+  }
+  mod_error(e->m, "SPIR-V: non-void device function '%s' can fall through",
+            spv_function_name(e));
+  return 0;
+}
+
+static void spv_device_emit_blocks(SpvEmit *e) {
+  for (size_t i = 0; i < e->nblocks && !e->m->error; i++) {
+    SpvBlock *bl = &e->blocks[i];
+    emitv(&e->m->functions, Op_Label, 1, e->block_id[i]);
+    for (size_t j = bl->lo; j < bl->hi && !e->m->error; j++) {
+      const IRInstruction *in = &e->func->instructions[j];
+      if (in == bl->term) break;
+      emit_body_instr(&e->fn, in);
+    }
+    if (!spv_device_emit_terminator(e, i, bl->term)) {
       break;
     }
-    uint32_t as_integer = new_id(m);
-    emitv(&m->functions, Op_ConvertPtrToU, 3, type_int(m, 64), as_integer,
-          variable);
-    emitv(&m->functions, Op_Store, 2, binding->var_id, as_integer);
   }
-  free(allocation_variables);
-  for (size_t i = 0; i < fn.nbinds && !m->error; i++) {
-    SpvBind *b = &fn.binds[i];
-    if (!b->record_storage) continue;
-    uint32_t as_integer = new_id(m);
-    emitv(&m->functions, Op_ConvertPtrToU, 3, type_int(m, 64), as_integer,
-          b->record_storage);
-    emitv(&m->functions, Op_Store, 2, b->var_id, as_integer);
+  if (e->exit_used) {
+    emitv(&e->m->functions, Op_Label, 1, e->exit_id);
+    emitv(&e->m->functions, Op_Return, 0);
   }
-  for (size_t p = 0; p < func->parameter_count; p++) {
-    if (!func->parameter_names || !func->parameter_names[p]) continue;
-    SpvBind *b = find_bind(&fn, func->parameter_names[p]);
-    if (!b) continue;
-    if (func->is_kernel && pdesc[p].is_ptr) {
-      uint32_t u64 = type_int(m, 64);
-      uint32_t asint = new_id(m);
-      emitv(&m->functions, Op_ConvertPtrToU, 3, u64, asint, pids[p]);
-      emitv(&m->functions, Op_Store, 2, b->var_id, asint);
-    } else {
-      emitv(&m->functions, Op_Store, 2, b->var_id, pids[p]);
+  emitv(&e->m->functions, Op_FunctionEnd, 0);
+}
+
+static void spv_device_emit_entry_point(SpvEmit *e) {
+  static const int gpu_builtins[] = {
+      BI_NumWorkgroups, BI_WorkgroupSize, BI_WorkgroupId,
+      BI_LocalInvocationId, BI_SubgroupSize, BI_SubgroupLocalInvocationId};
+  IRFunction *func = e->func;
+  Wb ep = {0};
+  if (e->m->error || !func->is_kernel) {
+    return;
+  }
+  wb_push(&ep, (uint32_t)ExecModel_Kernel);
+  wb_push(&ep, e->func_id);
+  wb_str(&ep, func->name ? func->name : "kernel");
+  for (size_t i = 0; i < sizeof(gpu_builtins) / sizeof(gpu_builtins[0]); i++) {
+    int builtin = gpu_builtins[i];
+    if (e->fn.builtin_mask & (UINT64_C(1) << builtin)) {
+      wb_push(&ep, builtin_var(e->m, builtin));
     }
   }
-  if (nblocks > 0) {
-    emitv(&m->functions, Op_Branch, 1, block_id[0]);
-  } else if (fn.returns_void) {
-    emitv(&m->functions, Op_Return, 0);
-  } else {
-    mod_error(m, "SPIR-V: non-void device function '%s' has no return",
-              func->name ? func->name : "?");
+  emit_ops(&e->m->entrypoints, Op_EntryPoint, &ep);
+  wb_free(&ep);
+  if (func->kernel_block[0] > 0) {
+    emitv(&e->m->execmodes, Op_ExecutionMode, 5, e->func_id, 17u,
+          (uint32_t)func->kernel_block[0],
+          (uint32_t)(func->kernel_block[1] > 0 ? func->kernel_block[1] : 1),
+          (uint32_t)(func->kernel_block[2] > 0 ? func->kernel_block[2] : 1));
   }
+}
 
-  for (size_t i = 0; i < nblocks && !m->error; i++) {
-    SpvBlock *bl = &blocks[i];
-    emitv(&m->functions, Op_Label, 1, block_id[i]);
-    for (size_t j = bl->lo; j < bl->hi && !m->error; j++) {
-      const IRInstruction *in = &func->instructions[j];
-      if (in == bl->term) break;
-      emit_body_instr(&fn, in);
-    }
-    const IRInstruction *term = bl->term;
-    if (term && term->op == IR_OP_RETURN) {
-      if (fn.returns_void) {
-        if (term->lhs.kind != IR_OPERAND_NONE) {
-          mod_error(m, "SPIR-V: void device function '%s' returns a value",
-                    func->name ? func->name : "?");
-          break;
-        }
-        emitv(&m->functions, Op_Return, 0);
-      } else if (term->lhs.kind == IR_OPERAND_NONE) {
-        mod_error(m,
-                  "SPIR-V: non-void device function '%s' has an empty return",
-                  func->name ? func->name : "?");
-        break;
-      } else {
-        uint32_t value = materialize(&fn, &term->lhs, fn.return_desc.kind);
-        emitv(&m->functions, Op_ReturnValue, 1, value);
-      }
-    } else if (term && term->op == IR_OP_JUMP) {
-      long t = block_of_label(blocks, nblocks, term->text);
-      if (t < 0) {
-        mod_error(m, "SPIR-V: jump to unknown label '%s'",
-                  term->text ? term->text : "?");
-        break;
-      }
-      emitv(&m->functions, Op_Branch, 1, block_id[t]);
-    } else if (term &&
-               (term->op == IR_OP_BRANCH_ZERO || term->op == IR_OP_BRANCH_EQ)) {
-      long taken = block_of_label(blocks, nblocks, term->text);
-      if (taken < 0) {
-        mod_error(m, "SPIR-V: branch to unknown label '%s'",
-                  term->text ? term->text : "?");
-        break;
-      }
-      uint32_t fall_id;
-      if (i + 1 < nblocks) {
-        fall_id = block_id[i + 1];
-      } else {
-        if (!fn.returns_void) {
-          mod_error(m,
-                    "SPIR-V: non-void device function '%s' can fall through",
-                    func->name ? func->name : "?");
-          break;
-        }
-        fall_id = exit_id;
-        exit_used = 1;
-      }
-      uint32_t taken_id = block_id[taken];
-      uint32_t cond = branch_cond_bool(&fn, term);
-      uint32_t t_true = (term->op == IR_OP_BRANCH_ZERO) ? fall_id : taken_id;
-      uint32_t t_false = (term->op == IR_OP_BRANCH_ZERO) ? taken_id : fall_id;
-      emitv(&m->functions, Op_BranchConditional, 3, cond, t_true, t_false);
-    } else {
-      if (i + 1 < nblocks) {
-        emitv(&m->functions, Op_Branch, 1, block_id[i + 1]);
-      } else if (fn.returns_void) {
-        emitv(&m->functions, Op_Return, 0);
-      } else {
-        mod_error(m,
-                  "SPIR-V: non-void device function '%s' can fall through",
-                  func->name ? func->name : "?");
-        break;
-      }
-    }
+static void spv_device_release(SpvEmit *e) {
+  for (size_t i = 0; i < e->fn.nbinds; i++) free(e->fn.binds[i].name);
+  free(e->fn.binds);
+  free(e->starts);
+  free(e->blocks);
+  free(e->block_id);
+  free(e->ptypes);
+  free(e->pids);
+  free(e->pdesc);
+}
+
+static uint32_t emit_device_function(SpvMod *m, IRFunction *func,
+                                     size_t function_index) {
+  SpvEmit e = {0};
+  e.m = m;
+  e.func = func;
+  e.function_index = function_index;
+  e.fn.m = m;
+  e.fn.function = func;
+  e.fn.function_index = function_index;
+  e.symbol = m->program ? ir_program_lookup_symbol(m->program, func->name)
+                        : NULL;
+  if (!spv_device_check_signature(&e)) {
+    return 0;
   }
+  spv_device_split_blocks(&e);
+  register_values(&e.fn, func);
+  spv_device_find_dynamic_view(&e);
 
-  if (exit_used) {
-    emitv(&m->functions, Op_Label, 1, exit_id);
-    emitv(&m->functions, Op_Return, 0);
-  }
-  emitv(&m->functions, Op_FunctionEnd, 0);
+  e.func_id = m->device_function_ids[function_index];
+  e.entry_id = new_id(m);
+  e.exit_id = new_id(m);
+  e.block_id = calloc(e.nblocks ? e.nblocks : 1, sizeof(uint32_t));
+  for (size_t i = 0; i < e.nblocks; i++) e.block_id[i] = new_id(m);
 
-  m->function_builtin_masks[function_index] = fn.builtin_mask;
-
-  if (!m->error && func->is_kernel) {
-    Wb ep = {0};
-    wb_push(&ep, (uint32_t)ExecModel_Kernel);
-    wb_push(&ep, func_id);
-    wb_str(&ep, func->name ? func->name : "kernel");
-    static const int gpu_builtins[] = {
-        BI_NumWorkgroups, BI_WorkgroupSize, BI_WorkgroupId,
-        BI_LocalInvocationId, BI_SubgroupSize,
-        BI_SubgroupLocalInvocationId};
-    for (size_t i = 0; i < sizeof(gpu_builtins) / sizeof(gpu_builtins[0]); i++) {
-      int builtin = gpu_builtins[i];
-      if (fn.builtin_mask & (UINT64_C(1) << builtin)) {
-        wb_push(&ep, builtin_var(m, builtin));
-      }
-    }
-    emit_ops(&m->entrypoints, Op_EntryPoint, &ep);
-    wb_free(&ep);
-    if (func->kernel_block[0] > 0) {
-      emitv(&m->execmodes, Op_ExecutionMode, 5, func_id,
-            17u , (uint32_t)func->kernel_block[0],
-            (uint32_t)(func->kernel_block[1] > 0 ? func->kernel_block[1] : 1),
-            (uint32_t)(func->kernel_block[2] > 0 ? func->kernel_block[2] : 1));
-    }
-  }
-
-  for (size_t i = 0; i < fn.nbinds; i++) free(fn.binds[i].name);
-  free(fn.binds);
-  free(starts);
-  free(blocks);
-  free(block_id);
-  free(ptypes);
-  free(pids);
-  free(pdesc);
-  return m->error ? 0 : func_id;
+  spv_device_return_type(&e);
+  spv_device_parameters(&e);
+  spv_device_open(&e);
+  spv_device_emit_locals(&e);
+  spv_device_emit_allocations(&e);
+  spv_device_store_parameters(&e);
+  spv_device_emit_blocks(&e);
+  m->function_builtin_masks[function_index] = e.fn.builtin_mask;
+  spv_device_emit_entry_point(&e);
+  spv_device_release(&e);
+  return m->error ? 0 : e.func_id;
 }
 
 static void write_word_le(FILE *out, uint32_t w) {
