@@ -4517,6 +4517,38 @@ catch {
   Write-CaseResult -Name "const_computed_by_a_function" -Passed $false -Reason $_.Exception.Message
 }
 
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $reportSource = "examples/json_parse/json_parse.mettle"
+  $reportModes = @(
+    @{ Name = "plain"; Args = @() },
+    @{ Name = "explain"; Args = @("--explain") },
+    @{ Name = "annotate_asm"; Args = @("--annotate-asm") },
+    @{ Name = "annotate_hot"; Args = @("--annotate-hot") }
+  )
+  $reportHashes = @{}
+  foreach ($mode in $reportModes) {
+    $stem = "report_mode_" + $mode.Name
+    Get-ChildItem $tmpDir -Filter "$stem.*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    $obj = Join-Path $tmpDir "$stem.obj"
+    $modeArgs = @("--release") + $mode.Args + @($reportSource, "-o", $obj)
+    $out = & $CompilerPath @modeArgs 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $obj)) { throw "the $($mode.Name) build failed: $out" }
+    $reportHashes[$mode.Name] = Get-Sha256FileHash -Path $obj
+  }
+  foreach ($mode in $reportModes) {
+    if ($reportHashes[$mode.Name] -ne $reportHashes["plain"]) {
+      throw "the $($mode.Name) build produced a different object from the plain build; a reporting flag changed codegen"
+    }
+  }
+  Write-CaseResult -Name "report_flags_leave_codegen_unchanged" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "report_flags_leave_codegen_unchanged" -Passed $false -Reason $_.Exception.Message
+}
+
 # The three shapes the premise names an abstraction for, as programs. Enforce:
 # each builds and runs, `mettle expand` prints what was generated as ordinary
 # Mettle, and the completeness check fails the build when a variant is added

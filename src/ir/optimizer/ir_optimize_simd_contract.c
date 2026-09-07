@@ -2265,12 +2265,21 @@ static int ir_explain_simulate_inline_fix(const IRFunction *function,
 }
 
 static void ir_clear_simd_markers(IRFunction *function) {
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    IRInstruction *instruction = &function->instructions[i];
+  size_t write = 0;
+  for (size_t read = 0; read < function->instruction_count; read++) {
+    IRInstruction *instruction = &function->instructions[read];
     if (ir_instruction_is_simd_marker(instruction)) {
-      mettle_free_string(instruction->text);
-      instruction->text = NULL;
+      ir_instruction_destroy_storage(instruction);
+      continue;
     }
+    if (write != read) {
+      function->instructions[write] = *instruction;
+    }
+    write++;
+  }
+  if (write != function->instruction_count) {
+    function->instruction_count = write;
+    function->cfg_valid = 0;
   }
 }
 
