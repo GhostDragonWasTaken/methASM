@@ -34,6 +34,7 @@
 #include "semantic/target_desc.h"
 #include "ir/ir_rules.h"
 #include "ir/ir_deadline.h"
+#include "ir/ir_opt_cost.h"
 #include "ir/ir_trace_record.h"
 #include "semantic/machine_desc.h"
 #include "ir/ir_effects.h"
@@ -4884,9 +4885,32 @@ static int compile_targets_arm64_object(const CompilerOptions *options) {
 #endif
 }
 
+static void compile_publish_optimizer_costs(void) {
+  const MtlcTargetDescription *machine = mtlc_target_current_description();
+  IROptCost cost;
+  if (!machine) {
+    ir_opt_cost_reset();
+    return;
+  }
+  cost.op = machine->cost_op;
+  cost.load = machine->cost_load;
+  cost.store = machine->cost_store;
+  cost.branch = machine->cost_branch;
+  cost.multiply = machine->cost_multiply;
+  cost.multiply_float = machine->cost_multiply_float;
+  cost.divide = machine->cost_divide;
+  cost.divide_float = machine->cost_divide_float;
+  cost.call = machine->cost_call;
+  cost.allocate = machine->cost_allocate;
+  cost.vector_width = machine->vector_width;
+  cost.subgroup_width = machine->subgroup_width;
+  ir_opt_cost_describe(&cost);
+}
+
 static int compile_optimize_ir(IRProgram *ir_program, ASTNode *ast_program,
                                CompilerOptions *options) {
   IROptimizeOptions ir_optimize_options = {0};
+  compile_publish_optimizer_costs();
   int target_neutral = options->emit_arm64 || options->emit_ptx ||
                        options->emit_spirv ||
                        compile_targets_arm64_object(options);
@@ -6134,18 +6158,20 @@ static int compile_stage_safety(CompileContext *ctx) {
 
 static void compile_deadline_costs(const CompilerOptions *options,
                                    IRDeadlineCosts *costs) {
-  const MtlcTargetDescription *machine = mtlc_target_current_description();
+  const IROptCost *cost;
+  compile_publish_optimizer_costs();
+  cost = ir_opt_cost();
   memset(costs, 0, sizeof(*costs));
-  costs->op = machine ? machine->cost_op : 1;
-  costs->load = machine ? machine->cost_load : 4;
-  costs->store = machine ? machine->cost_store : 1;
-  costs->branch = machine ? machine->cost_branch : 1;
-  costs->multiply = machine ? machine->cost_multiply : 3;
-  costs->multiply_float = machine ? machine->cost_multiply_float : 4;
-  costs->divide = machine ? machine->cost_divide : 26;
-  costs->divide_float = machine ? machine->cost_divide_float : 14;
-  costs->call = machine ? machine->cost_call : 4;
-  costs->allocate = machine ? machine->cost_allocate : 120;
+  costs->op = cost->op;
+  costs->load = cost->load;
+  costs->store = cost->store;
+  costs->branch = cost->branch;
+  costs->multiply = cost->multiply;
+  costs->multiply_float = cost->multiply_float;
+  costs->divide = cost->divide;
+  costs->divide_float = cost->divide_float;
+  costs->call = cost->call;
+  costs->allocate = cost->allocate;
   costs->described = options->target_desc_path != NULL;
 }
 
