@@ -667,689 +667,7 @@ static int ir_overflow_check_wanted(IRLoweringContext *context,
   return 1;
 }
 
-int ir_lower_call_expression(IRLoweringContext *context,
-                                    IRFunction *function, ASTNode *expression,
-                                    IROperand *out_value) {
-  CallExpression *call = (CallExpression *)expression->data;
-  Symbol *callee_symbol = NULL;
-  if (!call || !call->function_name) {
-    ir_set_error(context, "Malformed call expression");
-    return 0;
-  }
-
-  if (context->emit_task_checks &&
-      call->task_capture_argument != SIZE_MAX &&
-      !ir_emit_task_capture_check(context, function, expression, call)) {
-    return 0;
-  }
-
-  if (strcmp(call->function_name, "layout_copy") == 0 &&
-      call->argument_count == 2) {
-    *out_value = ir_operand_int(0);
-    return ir_lower_layout_copy(context, function, expression, call);
-  }
-
-  if (strcmp(call->function_name, "typeof") == 0) {
-    if (context->type_checker && context->type_checker->builtin_type) {
-      type_checker_reject_comptime_escape(context->type_checker,
-                                          expression->location,
-                                          context->type_checker->builtin_type);
-    }
-    ir_set_error(context,
-                 "value of type 'Type' cannot escape into runtime code");
-    return 0;
-  }
-
-  if (strcmp(call->function_name, "offsetof") == 0) {
-    long long offset = 0;
-    if (!context->type_checker ||
-        !type_checker_eval_offsetof(context->type_checker, call,
-                                    expression->location, &offset)) {
-      ir_set_error(context, "Unable to lower offsetof expression");
-      return 0;
-    }
-    *out_value = ir_operand_int(offset);
-    return 1;
-  }
-
-  if (strcmp(call->function_name, "layoutof") == 0) {
-    long long digest = 0;
-    if (!context->type_checker ||
-        !type_checker_eval_layoutof(context->type_checker, call,
-                                    expression->location, &digest)) {
-      ir_set_error(context, "Unable to lower layoutof expression");
-      return 0;
-    }
-    *out_value = ir_operand_int(digest);
-    return 1;
-  }
-
-  if (strcmp(call->function_name, "fieldof") == 0) {
-    if (context->type_checker && context->type_checker->builtin_field) {
-      type_checker_reject_comptime_escape(
-          context->type_checker, expression->location,
-          context->type_checker->builtin_field);
-    }
-    ir_set_error(context,
-                 "value of type 'Field' cannot escape into runtime code");
-    return 0;
-  }
-
-  if (strcmp(call->function_name, "sizeof") == 0) {
-    if (call->argument_count != 1 || !call->arguments ||
-        !call->arguments[0] || call->arguments[0]->type != AST_IDENTIFIER) {
-      ir_set_error(context, "Malformed sizeof expression");
-      return 0;
-    }
-
-    Identifier *type_id = (Identifier *)call->arguments[0]->data;
-    Type *type = (context->type_checker && type_id && type_id->name)
-                     ? type_checker_get_type_by_name(context->type_checker,
-                                                     type_id->name)
-                     : NULL;
-    if (!type || type->size > (size_t)LLONG_MAX) {
-      ir_set_error(context, "Unable to lower sizeof expression");
-      return 0;
-    }
-    if (type_contains_comptime_only(type)) {
-      if (context->type_checker) {
-        type_checker_reject_no_runtime_repr(context->type_checker,
-                                            expression->location, type);
-      }
-      ir_set_error(context, "type '%s' has no runtime representation",
-                   type->name ? type->name : "Type");
-      return 0;
-    }
-
-    *out_value = ir_operand_int((long long)type->size);
-    return 1;
-  }
-
-  if (strcmp(call->function_name, "static_assert") == 0) {
-    *out_value = ir_operand_none();
-    return 1;
-  }
-
-  if (strcmp(call->function_name, "syscall") == 0) {
-    if (call->argument_count == 0) {
-      ir_set_error(context, "Malformed system call reached IR lowering");
-      return 0;
-    }
-    IROperand destination = ir_operand_none();
-    if (!ir_make_temp_operand(context, &destination)) {
-      return 0;
-    }
-    IROperand *operands = calloc(call->argument_count, sizeof(IROperand));
-    if (!operands) {
-      ir_operand_destroy(&destination);
-      ir_set_error(context, "Out of memory while lowering a system call");
-      return 0;
-    }
-    for (size_t i = 0; i < call->argument_count; i++) {
-      if (!ir_lower_expression(context, function, call->arguments[i],
-                               &operands[i])) {
-        for (size_t j = 0; j < i; j++) {
-          ir_operand_destroy(&operands[j]);
-        }
-        free(operands);
-        ir_operand_destroy(&destination);
-        return 0;
-      }
-    }
-    IRInstruction instruction = {0};
-    instruction.op = IR_OP_CALL;
-    instruction.text = (char *)IR_SYSCALL_CALL_NAME;
-    instruction.location = expression->location;
-    instruction.dest = destination;
-    instruction.arguments = operands;
-    instruction.argument_count = call->argument_count;
-    instruction.value_type =
-        expression->resolved_type
-            ? mtlc_type_from_frontend(expression->resolved_type)
-            : NULL;
-    int emitted = ir_emit(context, function, &instruction);
-    for (size_t i = 0; i < call->argument_count; i++) {
-      ir_operand_destroy(&operands[i]);
-    }
-    free(operands);
-    if (!emitted) {
-      ir_operand_destroy(&destination);
-      return 0;
-    }
-    *out_value = destination;
-    return 1;
-  }
-
-  if (strcmp(call->function_name, "__mtl_interp") == 0) {
-    return ir_lower_interpolation(context, function, expression, out_value);
-  }
-
-  if (call->is_gpu_async_copy) {
-    IRInstruction instruction = {0};
-    instruction.location = expression->location;
-    if (!strcmp(call->function_name, "async_copy_workgroup")) {
-      instruction.async_copy_element_count = call->async_copy_element_count;
-      instruction.async_copy_transaction_bytes =
-          call->async_copy_transaction_bytes;
-      instruction.async_copy_cache = call->async_copy_cache;
-      if (call->argument_count < 3 ||
-          instruction.async_copy_element_count == 0) {
-        ir_set_error(context,
-                     "Invalid asynchronous workgroup copy reached IR lowering");
-        return 0;
-      }
-      instruction.op = IR_OP_ASYNC_COPY;
-      instruction.argument_count = 2;
-      instruction.arguments = calloc(2, sizeof(*instruction.arguments));
-      instruction.argument_types =
-          calloc(2, sizeof(*instruction.argument_types));
-      if (!instruction.arguments || !instruction.argument_types) {
-        free(instruction.arguments);
-        free(instruction.argument_types);
-        ir_set_error(context, "Out of memory lowering asynchronous copy");
-        return 0;
-      }
-      for (size_t i = 0; i < 2; i++) {
-        ASTNode *argument = call->arguments[i];
-        if (!argument ||
-            !ir_lower_expression(context, function, argument,
-                                 &instruction.arguments[i])) {
-          for (size_t j = 0; j < i; j++)
-            ir_operand_destroy(&instruction.arguments[j]);
-          free(instruction.arguments);
-          free(instruction.argument_types);
-          return 0;
-        }
-        instruction.argument_types[i] =
-            argument->resolved_type
-                ? mtlc_type_from_frontend(argument->resolved_type)
-                : NULL;
-      }
-    } else if (!strcmp(call->function_name, "async_copy_commit")) {
-      instruction.op = IR_OP_ASYNC_COMMIT;
-    } else if (!strcmp(call->function_name, "async_copy_wait")) {
-      instruction.op = IR_OP_ASYNC_WAIT;
-      instruction.async_copy_pending_groups =
-          call->async_copy_pending_groups;
-    } else {
-      ir_set_error(context,
-                   "Unknown asynchronous workgroup copy operation reached IR lowering");
-      return 0;
-    }
-    if (!ir_emit(context, function, &instruction)) {
-      for (size_t i = 0; i < instruction.argument_count; i++)
-        ir_operand_destroy(&instruction.arguments[i]);
-      free(instruction.arguments);
-      free(instruction.argument_types);
-      return 0;
-    }
-    for (size_t i = 0; i < instruction.argument_count; i++)
-      ir_operand_destroy(&instruction.arguments[i]);
-    free(instruction.arguments);
-    free(instruction.argument_types);
-    *out_value = ir_operand_none();
-    return 1;
-  }
-
-  if (call->is_tensor_transfer) {
-    int has_view = call->tensor_transfer_view_argument != SIZE_MAX;
-    size_t count = ir_tensor_transfer_operand_count(
-        &call->tensor_transfer_desc, has_view);
-    size_t source_indices[3 + MTLC_TENSOR_MAX_RANK] = {0};
-    size_t source_count = 0;
-    IROperand *arguments = NULL;
-    MtlcType **argument_types = NULL;
-    source_indices[source_count++] = 0;
-    source_indices[source_count++] = 1;
-    if (has_view)
-      source_indices[source_count++] = call->tensor_transfer_view_argument;
-    for (uint8_t dimension = 0;
-         dimension < call->tensor_transfer_desc.rank; dimension++)
-      source_indices[source_count++] =
-          call->tensor_transfer_coordinate_arguments[dimension];
-    if (!count || count != source_count) {
-      ir_set_error(context,
-                   "Invalid tensor transfer descriptor reached IR lowering");
-      return 0;
-    }
-    arguments = calloc(count, sizeof(*arguments));
-    argument_types = calloc(count, sizeof(*argument_types));
-    if (!arguments || !argument_types) {
-      free(arguments);
-      free(argument_types);
-      ir_set_error(context, "Out of memory lowering tensor transfer");
-      return 0;
-    }
-    for (size_t i = 0; i < count; i++) {
-      size_t source_index = source_indices[i];
-      ASTNode *source = source_index < call->argument_count
-                            ? call->arguments[source_index]
-                            : NULL;
-      if (!source || !ir_lower_expression(context, function, source,
-                                          &arguments[i])) {
-        for (size_t j = 0; j < i; j++) ir_operand_destroy(&arguments[j]);
-        free(arguments);
-        free(argument_types);
-        return 0;
-      }
-      argument_types[i] = source->resolved_type
-                              ? mtlc_type_from_frontend(source->resolved_type)
-                              : NULL;
-    }
-    IRInstruction instruction = {0};
-    IRTensorAux tensor;
-    ir_instruction_tensor_attach(&instruction, &tensor);
-    tensor.transfer = call->tensor_transfer_desc;
-    instruction.op = IR_OP_TENSOR_TRANSFER;
-    instruction.location = expression->location;
-    instruction.arguments = arguments;
-    instruction.argument_types = argument_types;
-    instruction.argument_count = count;
-    instruction.tensor_transfer_has_prepared_view = has_view;
-    if (!ir_emit(context, function, &instruction)) {
-      for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
-      free(arguments);
-      free(argument_types);
-      return 0;
-    }
-    for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
-    free(arguments);
-    free(argument_types);
-    *out_value = ir_operand_none();
-    return 1;
-  }
-
-  if (call->is_tensor_epilogue) {
-    size_t count =
-        ir_tensor_epilogue_operand_count(&call->tensor_epilogue_desc);
-    size_t source_indices[8] = {0, SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX,
-                                SIZE_MAX, SIZE_MAX, SIZE_MAX};
-    size_t source_count = 1;
-    IROperand *arguments = NULL;
-    MtlcType **argument_types = NULL;
-    if (call->tensor_epilogue_bias_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_epilogue_bias_argument;
-    if (call->tensor_epilogue_alpha_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_epilogue_alpha_argument;
-    if (call->tensor_epilogue_beta_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_epilogue_beta_argument;
-    if (call->tensor_epilogue_clamp_min_argument != SIZE_MAX)
-      source_indices[source_count++] =
-          call->tensor_epilogue_clamp_min_argument;
-    if (call->tensor_epilogue_clamp_max_argument != SIZE_MAX)
-      source_indices[source_count++] =
-          call->tensor_epilogue_clamp_max_argument;
-    if (call->tensor_epilogue_stride_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_epilogue_stride_argument;
-    if (call->tensor_epilogue_bias_stride_argument != SIZE_MAX)
-      source_indices[source_count++] =
-          call->tensor_epilogue_bias_stride_argument;
-    if (!count || count != source_count) {
-      ir_set_error(context,
-                   "Invalid tensor epilogue descriptor reached IR lowering");
-      return 0;
-    }
-    arguments = calloc(count, sizeof(*arguments));
-    argument_types = calloc(count, sizeof(*argument_types));
-    if (!arguments || !argument_types) {
-      free(arguments);
-      free(argument_types);
-      ir_set_error(context, "Out of memory lowering tensor epilogue");
-      return 0;
-    }
-    for (size_t i = 0; i < count; i++) {
-      size_t source_index = source_indices[i];
-      ASTNode *source = source_index < call->argument_count
-                            ? call->arguments[source_index]
-                            : NULL;
-      if (!source || !ir_lower_expression(context, function, source,
-                                          &arguments[i])) {
-        for (size_t j = 0; j < i; j++) ir_operand_destroy(&arguments[j]);
-        free(arguments);
-        free(argument_types);
-        return 0;
-      }
-      argument_types[i] = source->resolved_type
-                              ? mtlc_type_from_frontend(source->resolved_type)
-                              : NULL;
-    }
-    IRInstruction instruction = {0};
-    IRTensorAux tensor;
-    ir_instruction_tensor_attach(&instruction, &tensor);
-    tensor.epilogue = call->tensor_epilogue_desc;
-    instruction.op = IR_OP_TENSOR_EPILOGUE;
-    instruction.location = expression->location;
-    instruction.arguments = arguments;
-    instruction.argument_types = argument_types;
-    instruction.argument_count = count;
-    if (!ir_emit(context, function, &instruction)) {
-      for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
-      free(arguments);
-      free(argument_types);
-      return 0;
-    }
-    for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
-    free(arguments);
-    free(argument_types);
-    *out_value = ir_operand_none();
-    return 1;
-  }
-
-  if (call->is_tensor_mma || call->is_tensor_matmul) {
-    size_t count = call->is_tensor_matmul
-                       ? ir_tensor_matmul_operand_count(&call->tensor_mma_desc)
-                       : ir_tensor_mma_operand_count(&call->tensor_mma_desc);
-    size_t source_indices[16] = {0, 1, 2, 3, SIZE_MAX, SIZE_MAX, SIZE_MAX,
-                                 SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX,
-                                 SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX,
-                                 SIZE_MAX};
-    size_t source_count = 4;
-    IROperand *arguments = NULL;
-    MtlcType **argument_types = NULL;
-    if (call->tensor_metadata_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_metadata_argument;
-    if (call->tensor_a_scale_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_a_scale_argument;
-    if (call->tensor_b_scale_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_b_scale_argument;
-    if (call->tensor_a_stride_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_a_stride_argument;
-    if (call->tensor_b_stride_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_b_stride_argument;
-    if (call->tensor_c_stride_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_c_stride_argument;
-    if (call->tensor_d_stride_argument != SIZE_MAX)
-      source_indices[source_count++] = call->tensor_d_stride_argument;
-    if (call->is_tensor_matmul) {
-      for (size_t i = 4; i < 9; i++) source_indices[source_count++] = i;
-    }
-    if (!count || count != source_count) {
-      ir_set_error(context,
-                   "Invalid tensor matrix descriptor reached IR lowering");
-      return 0;
-    }
-    arguments = calloc(count, sizeof(*arguments));
-    argument_types = calloc(count, sizeof(*argument_types));
-    if (!arguments || !argument_types) {
-      free(arguments);
-      free(argument_types);
-      ir_set_error(context, "Out of memory lowering tensor matrix operation");
-      return 0;
-    }
-    for (size_t i = 0; i < count; i++) {
-      size_t source_index = source_indices[i];
-      ASTNode *source = source_index < call->argument_count
-                            ? call->arguments[source_index]
-                            : NULL;
-      if (!source || !ir_lower_expression(context, function, source,
-                                          &arguments[i])) {
-        for (size_t j = 0; j < i; j++) ir_operand_destroy(&arguments[j]);
-        free(arguments);
-        free(argument_types);
-        return 0;
-      }
-      argument_types[i] = source->resolved_type
-                              ? mtlc_type_from_frontend(source->resolved_type)
-                              : NULL;
-    }
-    IRInstruction instruction = {0};
-    IRTensorAux tensor;
-    ir_instruction_tensor_attach(&instruction, &tensor);
-    tensor.mma = call->tensor_mma_desc;
-    instruction.op = call->is_tensor_matmul ? IR_OP_TENSOR_MATMUL
-                                            : IR_OP_TENSOR_MMA;
-    instruction.location = expression->location;
-    instruction.arguments = arguments;
-    instruction.argument_types = argument_types;
-    instruction.argument_count = count;
-    if (!ir_emit(context, function, &instruction)) {
-      for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
-      free(arguments);
-      free(argument_types);
-      return 0;
-    }
-    for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
-    free(arguments);
-    free(argument_types);
-    *out_value = ir_operand_none();
-    return 1;
-  }
-
-  if (call->is_gpu_atomic) {
-    MtlcIntrinsic intrinsic = ir_intrinsic_from_name(call->function_name);
-    int arity = ir_intrinsic_arity(intrinsic);
-    int returns_void =
-        ir_intrinsic_atomic_result_kind(intrinsic) == MTLC_TYPE_VOID;
-    IROperand destination = ir_operand_none();
-    IROperand *arguments = NULL;
-    if (!ir_intrinsic_is_atomic(intrinsic) || arity < 0 ||
-        call->argument_count < (size_t)arity ||
-        call->atomic_address_space == MTLC_ADDRESS_SPACE_DEFAULT ||
-        call->atomic_memory_order == MTLC_MEMORY_ORDER_DEFAULT ||
-        call->atomic_memory_scope == MTLC_MEMORY_SCOPE_DEFAULT) {
-      ir_set_error(context, "Invalid native atomic reached IR lowering");
-      return 0;
-    }
-    if (!returns_void && !ir_make_temp_operand(context, &destination))
-      return 0;
-    arguments = calloc((size_t)arity, sizeof(*arguments));
-    if (!arguments) {
-      ir_operand_destroy(&destination);
-      ir_set_error(context, "Out of memory lowering native atomic");
-      return 0;
-    }
-    for (int i = 0; i < arity; i++) {
-      if (!ir_lower_expression(context, function, call->arguments[i],
-                               &arguments[i])) {
-        for (int j = 0; j < i; j++) ir_operand_destroy(&arguments[j]);
-        free(arguments);
-        ir_operand_destroy(&destination);
-        return 0;
-      }
-    }
-    IRInstruction instruction = {0};
-    instruction.op = IR_OP_CALL;
-    instruction.location = expression->location;
-    instruction.dest = destination;
-    instruction.arguments = arguments;
-    instruction.argument_count = (size_t)arity;
-    instruction.text = call->function_name;
-    instruction.intrinsic = intrinsic;
-    instruction.address_space = call->atomic_address_space;
-    instruction.memory_order = call->atomic_memory_order;
-    instruction.failure_memory_order = call->atomic_failure_order;
-    instruction.memory_scope = call->atomic_memory_scope;
-    instruction.value_type = expression->resolved_type
-                                 ? mtlc_type_from_frontend(
-                                       expression->resolved_type)
-                                 : NULL;
-    int ok = ir_emit(context, function, &instruction);
-    for (int i = 0; i < arity; i++) ir_operand_destroy(&arguments[i]);
-    free(arguments);
-    if (!ok) {
-      ir_operand_destroy(&destination);
-      return 0;
-    }
-    *out_value = destination;
-    return 1;
-  }
-
-  callee_symbol = context->symbol_table
-                      ? symbol_table_lookup(context->symbol_table,
-                                            call->function_name)
-                      : NULL;
-  if (callee_symbol &&
-      callee_symbol->kind == SYMBOL_TAGGED_ENUM_CONSTRUCTOR) {
-    return ir_lower_tagged_enum_constructor_call(
-        context, function, expression, callee_symbol, out_value);
-  }
-
-  int is_func_ptr_var = call->is_indirect_call;
-
-  IROperand destination = ir_operand_none();
-  int returns_void = expression->resolved_type &&
-                     expression->resolved_type->kind == TYPE_VOID;
-  if (!returns_void && !ir_make_temp_operand(context, &destination)) {
-    return 0;
-  }
-
-  IROperand *arguments = NULL;
-  if (call->argument_count > 0) {
-    arguments = calloc(call->argument_count, sizeof(IROperand));
-    if (!arguments) {
-      ir_operand_destroy(&destination);
-      ir_set_error(context, "Out of memory while lowering call arguments");
-      return 0;
-    }
-  }
-
-  for (size_t i = 0; i < call->argument_count; i++) {
-    if (call->arguments[i] &&
-        call->arguments[i]->type == AST_AGGREGATE_LITERAL &&
-        call->arguments[i]->resolved_type) {
-      Type *literal_type = call->arguments[i]->resolved_type;
-      char *home = ir_new_label_name(context, "arg_literal");
-      if (!home ||
-          !ir_emit_local_declaration(context, function, home,
-                                     literal_type->name,
-                                     call->arguments[i]->location) ||
-          !ir_emit_aggregate_literal_copy_to_symbol(
-              context, function, home, call->arguments[i], literal_type,
-              call->arguments[i]->location)) {
-        free(home);
-        for (size_t j = 0; j < i; j++) {
-          ir_operand_destroy(&arguments[j]);
-        }
-        free(arguments);
-        ir_operand_destroy(&destination);
-        return 0;
-      }
-      arguments[i] = ir_operand_symbol(home);
-      free(home);
-      if (!arguments[i].name) {
-        for (size_t j = 0; j < i; j++) {
-          ir_operand_destroy(&arguments[j]);
-        }
-        free(arguments);
-        ir_operand_destroy(&destination);
-        return 0;
-      }
-      continue;
-    }
-    if (!ir_lower_expression(context, function, call->arguments[i],
-                             &arguments[i])) {
-      for (size_t j = 0; j < i; j++) {
-        ir_operand_destroy(&arguments[j]);
-      }
-      free(arguments);
-      ir_operand_destroy(&destination);
-      return 0;
-    }
-  }
-
-  Type **call_param_types = NULL;
-  size_t call_param_count = 0;
-  if (callee_symbol && callee_symbol->kind == SYMBOL_FUNCTION) {
-    call_param_types = callee_symbol->data.function.parameter_types;
-    call_param_count = callee_symbol->data.function.parameter_count;
-  } else if (is_func_ptr_var) {
-    const IRLocalBinding *fp_binding =
-        ir_local_binding_find(context, call->function_name);
-    Type *fp_type = ir_lookup_symbol_type(context, call->function_name);
-    if (!fp_type && fp_binding) {
-      fp_type = ir_resolve_named_type(context, fp_binding->type_text);
-    }
-    if (fp_type && fp_type->kind == TYPE_FUNCTION_POINTER) {
-      call_param_types = fp_type->fn_param_types;
-      call_param_count = fp_type->fn_param_count;
-    }
-  }
-  if (call_param_types) {
-    size_t typed = call_param_count;
-    for (size_t i = 0; i < call->argument_count && i < typed; i++) {
-      Type *ptype = call_param_types[i];
-      if (ir_should_decay_array_to_address(ptype, call->arguments[i])) {
-        if (!ir_decay_array_operand_to_address(
-                context, function, &arguments[i],
-                call->arguments[i]->location)) {
-          for (size_t j = 0; j < call->argument_count; j++) {
-            ir_operand_destroy(&arguments[j]);
-          }
-          free(arguments);
-          ir_operand_destroy(&destination);
-          return 0;
-        }
-        continue;
-      }
-      if (ir_should_build_slice_from_array(ptype, call->arguments[i])) {
-        if (!ir_build_slice_operand_from_array(
-                context, function, &arguments[i],
-                call->arguments[i]->resolved_type, ptype,
-                call->arguments[i]->location)) {
-          for (size_t j = 0; j < call->argument_count; j++) {
-            ir_operand_destroy(&arguments[j]);
-          }
-          free(arguments);
-          ir_operand_destroy(&destination);
-          return 0;
-        }
-        continue;
-      }
-      if (ir_should_coerce_string_to_cstring(context, ptype,
-                                             call->arguments[i])) {
-        if (!ir_coerce_string_operand_to_cstring(
-                context, function, &arguments[i], call->arguments[i]->location)) {
-          for (size_t j = 0; j < call->argument_count; j++) {
-            ir_operand_destroy(&arguments[j]);
-          }
-          free(arguments);
-          ir_operand_destroy(&destination);
-          return 0;
-        }
-        continue;
-      }
-      if (ptype && (ptype->kind == TYPE_FLOAT32 ||
-                    ptype->kind == TYPE_FLOAT64 ||
-                    ptype->kind == TYPE_FLOAT16 ||
-                    ptype->kind == TYPE_BFLOAT16)) {
-        ir_operand_apply_float_bits(&arguments[i], ir_type_float_bits(ptype));
-      }
-    }
-  }
-
-  if (call->callee_closure_env || is_func_ptr_var) {
-    for (size_t i = 0; i < call->argument_count; i++) {
-      Type *argument_type =
-          call->arguments[i] ? call->arguments[i]->resolved_type : NULL;
-      if (!ir_indirect_arg_passes_by_address(argument_type)) {
-        continue;
-      }
-      if (!ir_pass_aggregate_argument_by_address(context, function,
-                                                 &arguments[i], argument_type,
-                                                 call->arguments[i]->location)) {
-        for (size_t j = 0; j < call->argument_count; j++) {
-          ir_operand_destroy(&arguments[j]);
-        }
-        free(arguments);
-        ir_operand_destroy(&destination);
-        return 0;
-      }
-    }
-  }
-
-  IROperand indirect_return_address = ir_operand_none();
-  if ((call->callee_closure_env || is_func_ptr_var) &&
-      ir_indirect_return_passes_by_pointer(expression->resolved_type) &&
-      !ir_make_indirect_return_slot(context, function,
-                                    expression->resolved_type,
-                                    expression->location,
-                                    &indirect_return_address)) {
-    for (size_t i = 0; i < call->argument_count; i++)
-      ir_operand_destroy(&arguments[i]);
-    free(arguments);
-    ir_operand_destroy(&destination);
-    return 0;
-  }
+static int ir_lower_call_through_env(IRLoweringContext *context, IRFunction *function, ASTNode *expression, IROperand *out_value, CallExpression *call, int is_func_ptr_var, IROperand destination, IROperand *arguments, IROperand indirect_return_address) {
 
   if (call->callee_closure_env) {
     size_t lead = 1;
@@ -1537,6 +855,724 @@ int ir_lower_call_expression(IRLoweringContext *context,
 
   *out_value = destination;
   return 1;
+}
+
+static int ir_lower_call_emit(IRLoweringContext *context, IRFunction *function, ASTNode *expression, IROperand *out_value, CallExpression *call, int is_func_ptr_var, IROperand destination, IROperand *arguments) {
+  if (call->callee_closure_env || is_func_ptr_var) {
+    for (size_t i = 0; i < call->argument_count; i++) {
+      Type *argument_type =
+          call->arguments[i] ? call->arguments[i]->resolved_type : NULL;
+      if (!ir_indirect_arg_passes_by_address(argument_type)) {
+        continue;
+      }
+      if (!ir_pass_aggregate_argument_by_address(context, function,
+                                                 &arguments[i], argument_type,
+                                                 call->arguments[i]->location)) {
+        for (size_t j = 0; j < call->argument_count; j++) {
+          ir_operand_destroy(&arguments[j]);
+        }
+        free(arguments);
+        ir_operand_destroy(&destination);
+        return 0;
+      }
+    }
+  }
+
+  IROperand indirect_return_address = ir_operand_none();
+  if ((call->callee_closure_env || is_func_ptr_var) &&
+      ir_indirect_return_passes_by_pointer(expression->resolved_type) &&
+      !ir_make_indirect_return_slot(context, function,
+                                    expression->resolved_type,
+                                    expression->location,
+                                    &indirect_return_address)) {
+    for (size_t i = 0; i < call->argument_count; i++)
+      ir_operand_destroy(&arguments[i]);
+    free(arguments);
+    ir_operand_destroy(&destination);
+    return 0;
+  }
+  return ir_lower_call_through_env(context, function, expression, out_value, call, is_func_ptr_var, destination, arguments, indirect_return_address);
+}
+
+static int ir_lower_call_arguments(IRLoweringContext *context, IRFunction *function, ASTNode *expression, IROperand *out_value, CallExpression *call, int is_func_ptr_var, IROperand destination, IROperand *arguments, Type **call_param_types, size_t call_param_count) {
+  if (call_param_types) {
+    size_t typed = call_param_count;
+    for (size_t i = 0; i < call->argument_count && i < typed; i++) {
+      Type *ptype = call_param_types[i];
+      if (ir_should_decay_array_to_address(ptype, call->arguments[i])) {
+        if (!ir_decay_array_operand_to_address(
+                context, function, &arguments[i],
+                call->arguments[i]->location)) {
+          for (size_t j = 0; j < call->argument_count; j++) {
+            ir_operand_destroy(&arguments[j]);
+          }
+          free(arguments);
+          ir_operand_destroy(&destination);
+          return 0;
+        }
+        continue;
+      }
+      if (ir_should_build_slice_from_array(ptype, call->arguments[i])) {
+        if (!ir_build_slice_operand_from_array(
+                context, function, &arguments[i],
+                call->arguments[i]->resolved_type, ptype,
+                call->arguments[i]->location)) {
+          for (size_t j = 0; j < call->argument_count; j++) {
+            ir_operand_destroy(&arguments[j]);
+          }
+          free(arguments);
+          ir_operand_destroy(&destination);
+          return 0;
+        }
+        continue;
+      }
+      if (ir_should_coerce_string_to_cstring(context, ptype,
+                                             call->arguments[i])) {
+        if (!ir_coerce_string_operand_to_cstring(
+                context, function, &arguments[i], call->arguments[i]->location)) {
+          for (size_t j = 0; j < call->argument_count; j++) {
+            ir_operand_destroy(&arguments[j]);
+          }
+          free(arguments);
+          ir_operand_destroy(&destination);
+          return 0;
+        }
+        continue;
+      }
+      if (ptype && (ptype->kind == TYPE_FLOAT32 ||
+                    ptype->kind == TYPE_FLOAT64 ||
+                    ptype->kind == TYPE_FLOAT16 ||
+                    ptype->kind == TYPE_BFLOAT16)) {
+        ir_operand_apply_float_bits(&arguments[i], ir_type_float_bits(ptype));
+      }
+    }
+  }
+
+  return ir_lower_call_emit(context, function, expression, out_value, call, is_func_ptr_var, destination, arguments);
+}
+
+static int ir_lower_ordinary_call(IRLoweringContext *context, IRFunction *function, ASTNode *expression, IROperand *out_value, CallExpression *call, Symbol *callee_symbol) {
+  callee_symbol = context->symbol_table
+                      ? symbol_table_lookup(context->symbol_table,
+                                            call->function_name)
+                      : NULL;
+  if (callee_symbol &&
+      callee_symbol->kind == SYMBOL_TAGGED_ENUM_CONSTRUCTOR) {
+    return ir_lower_tagged_enum_constructor_call(
+        context, function, expression, callee_symbol, out_value);
+  }
+
+  int is_func_ptr_var = call->is_indirect_call;
+
+  IROperand destination = ir_operand_none();
+  int returns_void = expression->resolved_type &&
+                     expression->resolved_type->kind == TYPE_VOID;
+  if (!returns_void && !ir_make_temp_operand(context, &destination)) {
+    return 0;
+  }
+
+  IROperand *arguments = NULL;
+  if (call->argument_count > 0) {
+    arguments = calloc(call->argument_count, sizeof(IROperand));
+    if (!arguments) {
+      ir_operand_destroy(&destination);
+      ir_set_error(context, "Out of memory while lowering call arguments");
+      return 0;
+    }
+  }
+
+  for (size_t i = 0; i < call->argument_count; i++) {
+    if (call->arguments[i] &&
+        call->arguments[i]->type == AST_AGGREGATE_LITERAL &&
+        call->arguments[i]->resolved_type) {
+      Type *literal_type = call->arguments[i]->resolved_type;
+      char *home = ir_new_label_name(context, "arg_literal");
+      if (!home ||
+          !ir_emit_local_declaration(context, function, home,
+                                     literal_type->name,
+                                     call->arguments[i]->location) ||
+          !ir_emit_aggregate_literal_copy_to_symbol(
+              context, function, home, call->arguments[i], literal_type,
+              call->arguments[i]->location)) {
+        free(home);
+        for (size_t j = 0; j < i; j++) {
+          ir_operand_destroy(&arguments[j]);
+        }
+        free(arguments);
+        ir_operand_destroy(&destination);
+        return 0;
+      }
+      arguments[i] = ir_operand_symbol(home);
+      free(home);
+      if (!arguments[i].name) {
+        for (size_t j = 0; j < i; j++) {
+          ir_operand_destroy(&arguments[j]);
+        }
+        free(arguments);
+        ir_operand_destroy(&destination);
+        return 0;
+      }
+      continue;
+    }
+    if (!ir_lower_expression(context, function, call->arguments[i],
+                             &arguments[i])) {
+      for (size_t j = 0; j < i; j++) {
+        ir_operand_destroy(&arguments[j]);
+      }
+      free(arguments);
+      ir_operand_destroy(&destination);
+      return 0;
+    }
+  }
+
+  Type **call_param_types = NULL;
+  size_t call_param_count = 0;
+  if (callee_symbol && callee_symbol->kind == SYMBOL_FUNCTION) {
+    call_param_types = callee_symbol->data.function.parameter_types;
+    call_param_count = callee_symbol->data.function.parameter_count;
+  } else if (is_func_ptr_var) {
+    const IRLocalBinding *fp_binding =
+        ir_local_binding_find(context, call->function_name);
+    Type *fp_type = ir_lookup_symbol_type(context, call->function_name);
+    if (!fp_type && fp_binding) {
+      fp_type = ir_resolve_named_type(context, fp_binding->type_text);
+    }
+    if (fp_type && fp_type->kind == TYPE_FUNCTION_POINTER) {
+      call_param_types = fp_type->fn_param_types;
+      call_param_count = fp_type->fn_param_count;
+    }
+  }
+  return ir_lower_call_arguments(context, function, expression, out_value, call, is_func_ptr_var, destination, arguments, call_param_types, call_param_count);
+}
+
+static int ir_lower_tensor_mma_call(IRLoweringContext *context, IRFunction *function, ASTNode *expression, IROperand *out_value, CallExpression *call, Symbol *callee_symbol) {
+
+  if (call->is_gpu_atomic) {
+    MtlcIntrinsic intrinsic = ir_intrinsic_from_name(call->function_name);
+    int arity = ir_intrinsic_arity(intrinsic);
+    int returns_void =
+        ir_intrinsic_atomic_result_kind(intrinsic) == MTLC_TYPE_VOID;
+    IROperand destination = ir_operand_none();
+    IROperand *arguments = NULL;
+    if (!ir_intrinsic_is_atomic(intrinsic) || arity < 0 ||
+        call->argument_count < (size_t)arity ||
+        call->atomic_address_space == MTLC_ADDRESS_SPACE_DEFAULT ||
+        call->atomic_memory_order == MTLC_MEMORY_ORDER_DEFAULT ||
+        call->atomic_memory_scope == MTLC_MEMORY_SCOPE_DEFAULT) {
+      ir_set_error(context, "Invalid native atomic reached IR lowering");
+      return 0;
+    }
+    if (!returns_void && !ir_make_temp_operand(context, &destination))
+      return 0;
+    arguments = calloc((size_t)arity, sizeof(*arguments));
+    if (!arguments) {
+      ir_operand_destroy(&destination);
+      ir_set_error(context, "Out of memory lowering native atomic");
+      return 0;
+    }
+    for (int i = 0; i < arity; i++) {
+      if (!ir_lower_expression(context, function, call->arguments[i],
+                               &arguments[i])) {
+        for (int j = 0; j < i; j++) ir_operand_destroy(&arguments[j]);
+        free(arguments);
+        ir_operand_destroy(&destination);
+        return 0;
+      }
+    }
+    IRInstruction instruction = {0};
+    instruction.op = IR_OP_CALL;
+    instruction.location = expression->location;
+    instruction.dest = destination;
+    instruction.arguments = arguments;
+    instruction.argument_count = (size_t)arity;
+    instruction.text = call->function_name;
+    instruction.intrinsic = intrinsic;
+    instruction.address_space = call->atomic_address_space;
+    instruction.memory_order = call->atomic_memory_order;
+    instruction.failure_memory_order = call->atomic_failure_order;
+    instruction.memory_scope = call->atomic_memory_scope;
+    instruction.value_type = expression->resolved_type
+                                 ? mtlc_type_from_frontend(
+                                       expression->resolved_type)
+                                 : NULL;
+    int ok = ir_emit(context, function, &instruction);
+    for (int i = 0; i < arity; i++) ir_operand_destroy(&arguments[i]);
+    free(arguments);
+    if (!ok) {
+      ir_operand_destroy(&destination);
+      return 0;
+    }
+    *out_value = destination;
+    return 1;
+  }
+
+  return ir_lower_ordinary_call(context, function, expression, out_value, call, callee_symbol);
+}
+
+static int ir_lower_tensor_call(IRLoweringContext *context, IRFunction *function, ASTNode *expression, IROperand *out_value, CallExpression *call, Symbol *callee_symbol) {
+  if (call->is_tensor_mma || call->is_tensor_matmul) {
+    size_t count = call->is_tensor_matmul
+                       ? ir_tensor_matmul_operand_count(&call->tensor_mma_desc)
+                       : ir_tensor_mma_operand_count(&call->tensor_mma_desc);
+    size_t source_indices[16] = {0, 1, 2, 3, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+                                 SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+                                 SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+                                 SIZE_MAX};
+    size_t source_count = 4;
+    IROperand *arguments = NULL;
+    MtlcType **argument_types = NULL;
+    if (call->tensor_metadata_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_metadata_argument;
+    if (call->tensor_a_scale_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_a_scale_argument;
+    if (call->tensor_b_scale_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_b_scale_argument;
+    if (call->tensor_a_stride_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_a_stride_argument;
+    if (call->tensor_b_stride_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_b_stride_argument;
+    if (call->tensor_c_stride_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_c_stride_argument;
+    if (call->tensor_d_stride_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_d_stride_argument;
+    if (call->is_tensor_matmul) {
+      for (size_t i = 4; i < 9; i++) source_indices[source_count++] = i;
+    }
+    if (!count || count != source_count) {
+      ir_set_error(context,
+                   "Invalid tensor matrix descriptor reached IR lowering");
+      return 0;
+    }
+    arguments = calloc(count, sizeof(*arguments));
+    argument_types = calloc(count, sizeof(*argument_types));
+    if (!arguments || !argument_types) {
+      free(arguments);
+      free(argument_types);
+      ir_set_error(context, "Out of memory lowering tensor matrix operation");
+      return 0;
+    }
+    for (size_t i = 0; i < count; i++) {
+      size_t source_index = source_indices[i];
+      ASTNode *source = source_index < call->argument_count
+                            ? call->arguments[source_index]
+                            : NULL;
+      if (!source || !ir_lower_expression(context, function, source,
+                                          &arguments[i])) {
+        for (size_t j = 0; j < i; j++) ir_operand_destroy(&arguments[j]);
+        free(arguments);
+        free(argument_types);
+        return 0;
+      }
+      argument_types[i] = source->resolved_type
+                              ? mtlc_type_from_frontend(source->resolved_type)
+                              : NULL;
+    }
+    IRInstruction instruction = {0};
+    IRTensorAux tensor;
+    ir_instruction_tensor_attach(&instruction, &tensor);
+    tensor.mma = call->tensor_mma_desc;
+    instruction.op = call->is_tensor_matmul ? IR_OP_TENSOR_MATMUL
+                                            : IR_OP_TENSOR_MMA;
+    instruction.location = expression->location;
+    instruction.arguments = arguments;
+    instruction.argument_types = argument_types;
+    instruction.argument_count = count;
+    if (!ir_emit(context, function, &instruction)) {
+      for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
+      free(arguments);
+      free(argument_types);
+      return 0;
+    }
+    for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
+    free(arguments);
+    free(argument_types);
+    *out_value = ir_operand_none();
+    return 1;
+  }
+  return ir_lower_tensor_mma_call(context, function, expression, out_value, call, callee_symbol);
+}
+
+static int ir_lower_tensor_epilogue_call(IRLoweringContext *context, IRFunction *function, ASTNode *expression, IROperand *out_value, CallExpression *call, Symbol *callee_symbol) {
+  if (call->is_tensor_epilogue) {
+    size_t count =
+        ir_tensor_epilogue_operand_count(&call->tensor_epilogue_desc);
+    size_t source_indices[8] = {0, SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+                                SIZE_MAX, SIZE_MAX, SIZE_MAX};
+    size_t source_count = 1;
+    IROperand *arguments = NULL;
+    MtlcType **argument_types = NULL;
+    if (call->tensor_epilogue_bias_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_epilogue_bias_argument;
+    if (call->tensor_epilogue_alpha_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_epilogue_alpha_argument;
+    if (call->tensor_epilogue_beta_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_epilogue_beta_argument;
+    if (call->tensor_epilogue_clamp_min_argument != SIZE_MAX)
+      source_indices[source_count++] =
+          call->tensor_epilogue_clamp_min_argument;
+    if (call->tensor_epilogue_clamp_max_argument != SIZE_MAX)
+      source_indices[source_count++] =
+          call->tensor_epilogue_clamp_max_argument;
+    if (call->tensor_epilogue_stride_argument != SIZE_MAX)
+      source_indices[source_count++] = call->tensor_epilogue_stride_argument;
+    if (call->tensor_epilogue_bias_stride_argument != SIZE_MAX)
+      source_indices[source_count++] =
+          call->tensor_epilogue_bias_stride_argument;
+    if (!count || count != source_count) {
+      ir_set_error(context,
+                   "Invalid tensor epilogue descriptor reached IR lowering");
+      return 0;
+    }
+    arguments = calloc(count, sizeof(*arguments));
+    argument_types = calloc(count, sizeof(*argument_types));
+    if (!arguments || !argument_types) {
+      free(arguments);
+      free(argument_types);
+      ir_set_error(context, "Out of memory lowering tensor epilogue");
+      return 0;
+    }
+    for (size_t i = 0; i < count; i++) {
+      size_t source_index = source_indices[i];
+      ASTNode *source = source_index < call->argument_count
+                            ? call->arguments[source_index]
+                            : NULL;
+      if (!source || !ir_lower_expression(context, function, source,
+                                          &arguments[i])) {
+        for (size_t j = 0; j < i; j++) ir_operand_destroy(&arguments[j]);
+        free(arguments);
+        free(argument_types);
+        return 0;
+      }
+      argument_types[i] = source->resolved_type
+                              ? mtlc_type_from_frontend(source->resolved_type)
+                              : NULL;
+    }
+    IRInstruction instruction = {0};
+    IRTensorAux tensor;
+    ir_instruction_tensor_attach(&instruction, &tensor);
+    tensor.epilogue = call->tensor_epilogue_desc;
+    instruction.op = IR_OP_TENSOR_EPILOGUE;
+    instruction.location = expression->location;
+    instruction.arguments = arguments;
+    instruction.argument_types = argument_types;
+    instruction.argument_count = count;
+    if (!ir_emit(context, function, &instruction)) {
+      for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
+      free(arguments);
+      free(argument_types);
+      return 0;
+    }
+    for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
+    free(arguments);
+    free(argument_types);
+    *out_value = ir_operand_none();
+    return 1;
+  }
+
+  return ir_lower_tensor_call(context, function, expression, out_value, call, callee_symbol);
+}
+
+static int ir_lower_device_call(IRLoweringContext *context, IRFunction *function, ASTNode *expression, IROperand *out_value, CallExpression *call, Symbol *callee_symbol) {
+  if (call->is_gpu_async_copy) {
+    IRInstruction instruction = {0};
+    instruction.location = expression->location;
+    if (!strcmp(call->function_name, "async_copy_workgroup")) {
+      instruction.async_copy_element_count = call->async_copy_element_count;
+      instruction.async_copy_transaction_bytes =
+          call->async_copy_transaction_bytes;
+      instruction.async_copy_cache = call->async_copy_cache;
+      if (call->argument_count < 3 ||
+          instruction.async_copy_element_count == 0) {
+        ir_set_error(context,
+                     "Invalid asynchronous workgroup copy reached IR lowering");
+        return 0;
+      }
+      instruction.op = IR_OP_ASYNC_COPY;
+      instruction.argument_count = 2;
+      instruction.arguments = calloc(2, sizeof(*instruction.arguments));
+      instruction.argument_types =
+          calloc(2, sizeof(*instruction.argument_types));
+      if (!instruction.arguments || !instruction.argument_types) {
+        free(instruction.arguments);
+        free(instruction.argument_types);
+        ir_set_error(context, "Out of memory lowering asynchronous copy");
+        return 0;
+      }
+      for (size_t i = 0; i < 2; i++) {
+        ASTNode *argument = call->arguments[i];
+        if (!argument ||
+            !ir_lower_expression(context, function, argument,
+                                 &instruction.arguments[i])) {
+          for (size_t j = 0; j < i; j++)
+            ir_operand_destroy(&instruction.arguments[j]);
+          free(instruction.arguments);
+          free(instruction.argument_types);
+          return 0;
+        }
+        instruction.argument_types[i] =
+            argument->resolved_type
+                ? mtlc_type_from_frontend(argument->resolved_type)
+                : NULL;
+      }
+    } else if (!strcmp(call->function_name, "async_copy_commit")) {
+      instruction.op = IR_OP_ASYNC_COMMIT;
+    } else if (!strcmp(call->function_name, "async_copy_wait")) {
+      instruction.op = IR_OP_ASYNC_WAIT;
+      instruction.async_copy_pending_groups =
+          call->async_copy_pending_groups;
+    } else {
+      ir_set_error(context,
+                   "Unknown asynchronous workgroup copy operation reached IR lowering");
+      return 0;
+    }
+    if (!ir_emit(context, function, &instruction)) {
+      for (size_t i = 0; i < instruction.argument_count; i++)
+        ir_operand_destroy(&instruction.arguments[i]);
+      free(instruction.arguments);
+      free(instruction.argument_types);
+      return 0;
+    }
+    for (size_t i = 0; i < instruction.argument_count; i++)
+      ir_operand_destroy(&instruction.arguments[i]);
+    free(instruction.arguments);
+    free(instruction.argument_types);
+    *out_value = ir_operand_none();
+    return 1;
+  }
+
+  if (call->is_tensor_transfer) {
+    int has_view = call->tensor_transfer_view_argument != SIZE_MAX;
+    size_t count = ir_tensor_transfer_operand_count(
+        &call->tensor_transfer_desc, has_view);
+    size_t source_indices[3 + MTLC_TENSOR_MAX_RANK] = {0};
+    size_t source_count = 0;
+    IROperand *arguments = NULL;
+    MtlcType **argument_types = NULL;
+    source_indices[source_count++] = 0;
+    source_indices[source_count++] = 1;
+    if (has_view)
+      source_indices[source_count++] = call->tensor_transfer_view_argument;
+    for (uint8_t dimension = 0;
+         dimension < call->tensor_transfer_desc.rank; dimension++)
+      source_indices[source_count++] =
+          call->tensor_transfer_coordinate_arguments[dimension];
+    if (!count || count != source_count) {
+      ir_set_error(context,
+                   "Invalid tensor transfer descriptor reached IR lowering");
+      return 0;
+    }
+    arguments = calloc(count, sizeof(*arguments));
+    argument_types = calloc(count, sizeof(*argument_types));
+    if (!arguments || !argument_types) {
+      free(arguments);
+      free(argument_types);
+      ir_set_error(context, "Out of memory lowering tensor transfer");
+      return 0;
+    }
+    for (size_t i = 0; i < count; i++) {
+      size_t source_index = source_indices[i];
+      ASTNode *source = source_index < call->argument_count
+                            ? call->arguments[source_index]
+                            : NULL;
+      if (!source || !ir_lower_expression(context, function, source,
+                                          &arguments[i])) {
+        for (size_t j = 0; j < i; j++) ir_operand_destroy(&arguments[j]);
+        free(arguments);
+        free(argument_types);
+        return 0;
+      }
+      argument_types[i] = source->resolved_type
+                              ? mtlc_type_from_frontend(source->resolved_type)
+                              : NULL;
+    }
+    IRInstruction instruction = {0};
+    IRTensorAux tensor;
+    ir_instruction_tensor_attach(&instruction, &tensor);
+    tensor.transfer = call->tensor_transfer_desc;
+    instruction.op = IR_OP_TENSOR_TRANSFER;
+    instruction.location = expression->location;
+    instruction.arguments = arguments;
+    instruction.argument_types = argument_types;
+    instruction.argument_count = count;
+    instruction.tensor_transfer_has_prepared_view = has_view;
+    if (!ir_emit(context, function, &instruction)) {
+      for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
+      free(arguments);
+      free(argument_types);
+      return 0;
+    }
+    for (size_t i = 0; i < count; i++) ir_operand_destroy(&arguments[i]);
+    free(arguments);
+    free(argument_types);
+    *out_value = ir_operand_none();
+    return 1;
+  }
+
+  return ir_lower_tensor_epilogue_call(context, function, expression, out_value, call, callee_symbol);
+}
+
+static int ir_lower_builtin_call(IRLoweringContext *context, IRFunction *function, ASTNode *expression, IROperand *out_value, CallExpression *call, Symbol *callee_symbol) {
+
+  if (strcmp(call->function_name, "sizeof") == 0) {
+    if (call->argument_count != 1 || !call->arguments ||
+        !call->arguments[0] || call->arguments[0]->type != AST_IDENTIFIER) {
+      ir_set_error(context, "Malformed sizeof expression");
+      return 0;
+    }
+
+    Identifier *type_id = (Identifier *)call->arguments[0]->data;
+    Type *type = (context->type_checker && type_id && type_id->name)
+                     ? type_checker_get_type_by_name(context->type_checker,
+                                                     type_id->name)
+                     : NULL;
+    if (!type || type->size > (size_t)LLONG_MAX) {
+      ir_set_error(context, "Unable to lower sizeof expression");
+      return 0;
+    }
+    if (type_contains_comptime_only(type)) {
+      if (context->type_checker) {
+        type_checker_reject_no_runtime_repr(context->type_checker,
+                                            expression->location, type);
+      }
+      ir_set_error(context, "type '%s' has no runtime representation",
+                   type->name ? type->name : "Type");
+      return 0;
+    }
+
+    *out_value = ir_operand_int((long long)type->size);
+    return 1;
+  }
+
+  if (strcmp(call->function_name, "static_assert") == 0) {
+    *out_value = ir_operand_none();
+    return 1;
+  }
+
+  if (strcmp(call->function_name, "syscall") == 0) {
+    if (call->argument_count == 0) {
+      ir_set_error(context, "Malformed system call reached IR lowering");
+      return 0;
+    }
+    IROperand destination = ir_operand_none();
+    if (!ir_make_temp_operand(context, &destination)) {
+      return 0;
+    }
+    IROperand *operands = calloc(call->argument_count, sizeof(IROperand));
+    if (!operands) {
+      ir_operand_destroy(&destination);
+      ir_set_error(context, "Out of memory while lowering a system call");
+      return 0;
+    }
+    for (size_t i = 0; i < call->argument_count; i++) {
+      if (!ir_lower_expression(context, function, call->arguments[i],
+                               &operands[i])) {
+        for (size_t j = 0; j < i; j++) {
+          ir_operand_destroy(&operands[j]);
+        }
+        free(operands);
+        ir_operand_destroy(&destination);
+        return 0;
+      }
+    }
+    IRInstruction instruction = {0};
+    instruction.op = IR_OP_CALL;
+    instruction.text = (char *)IR_SYSCALL_CALL_NAME;
+    instruction.location = expression->location;
+    instruction.dest = destination;
+    instruction.arguments = operands;
+    instruction.argument_count = call->argument_count;
+    instruction.value_type =
+        expression->resolved_type
+            ? mtlc_type_from_frontend(expression->resolved_type)
+            : NULL;
+    int emitted = ir_emit(context, function, &instruction);
+    for (size_t i = 0; i < call->argument_count; i++) {
+      ir_operand_destroy(&operands[i]);
+    }
+    free(operands);
+    if (!emitted) {
+      ir_operand_destroy(&destination);
+      return 0;
+    }
+    *out_value = destination;
+    return 1;
+  }
+
+  if (strcmp(call->function_name, "__mtl_interp") == 0) {
+    return ir_lower_interpolation(context, function, expression, out_value);
+  }
+
+  return ir_lower_device_call(context, function, expression, out_value, call, callee_symbol);
+}
+
+int ir_lower_call_expression(IRLoweringContext *context,
+                                    IRFunction *function, ASTNode *expression,
+                                    IROperand *out_value) {
+  CallExpression *call = (CallExpression *)expression->data;
+  Symbol *callee_symbol = NULL;
+  if (!call || !call->function_name) {
+    ir_set_error(context, "Malformed call expression");
+    return 0;
+  }
+
+  if (context->emit_task_checks &&
+      call->task_capture_argument != SIZE_MAX &&
+      !ir_emit_task_capture_check(context, function, expression, call)) {
+    return 0;
+  }
+
+  if (strcmp(call->function_name, "layout_copy") == 0 &&
+      call->argument_count == 2) {
+    *out_value = ir_operand_int(0);
+    return ir_lower_layout_copy(context, function, expression, call);
+  }
+
+  if (strcmp(call->function_name, "typeof") == 0) {
+    if (context->type_checker && context->type_checker->builtin_type) {
+      type_checker_reject_comptime_escape(context->type_checker,
+                                          expression->location,
+                                          context->type_checker->builtin_type);
+    }
+    ir_set_error(context,
+                 "value of type 'Type' cannot escape into runtime code");
+    return 0;
+  }
+
+  if (strcmp(call->function_name, "offsetof") == 0) {
+    long long offset = 0;
+    if (!context->type_checker ||
+        !type_checker_eval_offsetof(context->type_checker, call,
+                                    expression->location, &offset)) {
+      ir_set_error(context, "Unable to lower offsetof expression");
+      return 0;
+    }
+    *out_value = ir_operand_int(offset);
+    return 1;
+  }
+
+  if (strcmp(call->function_name, "layoutof") == 0) {
+    long long digest = 0;
+    if (!context->type_checker ||
+        !type_checker_eval_layoutof(context->type_checker, call,
+                                    expression->location, &digest)) {
+      ir_set_error(context, "Unable to lower layoutof expression");
+      return 0;
+    }
+    *out_value = ir_operand_int(digest);
+    return 1;
+  }
+
+  if (strcmp(call->function_name, "fieldof") == 0) {
+    if (context->type_checker && context->type_checker->builtin_field) {
+      type_checker_reject_comptime_escape(
+          context->type_checker, expression->location,
+          context->type_checker->builtin_field);
+    }
+    ir_set_error(context,
+                 "value of type 'Field' cannot escape into runtime code");
+    return 0;
+  }
+  return ir_lower_builtin_call(context, function, expression, out_value, call, callee_symbol);
 }
 
 static int ir_lower_interpolation(IRLoweringContext *context,
