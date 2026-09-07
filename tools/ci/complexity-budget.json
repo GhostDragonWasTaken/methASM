@@ -185,7 +185,6 @@
     "src/linker/pe_emitter.c::pe_emit_executable": 58,
     "src/linker/pe_emitter.c::pe_write_headers": 63,
     "src/linker/symbol_resolve.c::link_resolution_gc_sections": 56,
-    "src/main.c::compile_file": 240,
     "src/main.c::main": 90,
     "src/main.c::mettle_link_elf_executable": 44,
     "src/main.c::report_ptx_occupancy": 46,

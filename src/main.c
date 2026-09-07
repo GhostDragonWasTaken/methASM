@@ -5596,193 +5596,153 @@ static int compile_run_rules(IRProgram *ir_program, TypeChecker *type_checker,
   return 1;
 }
 
-int compile_file(const char *input_filename, const char *output_filename,
-                 CompilerOptions *options) {
+#define COMPILE_CONTINUE (-1)
+
+typedef struct {
+  const char *input_filename;
+  const char *output_filename;
+  CompilerOptions *options;
   CompilerProfile profile;
-  double phase_start = 0.0;
-  const int arm64_object_output = compile_targets_arm64_object(options);
-  IREffectResults *effect_results = NULL;
-  int compile_effects_stage = 1;
-  IRTwinSnapshots *twin_snapshots = NULL;
-  int machine_rules_pending = 0;
-  int explain_forced_for_rules = 0;
+  double phase_start;
+  char *source;
+  ErrorReporter *error_reporter;
+  Lexer *lexer;
+  Parser *parser;
+  SymbolTable *symbol_table;
+  TypeChecker *type_checker;
+  RegisterAllocator *register_allocator;
+  DebugInfo *debug_info;
+  CodeGenerator *code_generator;
+  ASTNode *program;
+  IRProgram *ir_program;
+  char *ir_error_message;
+  IREffectResults *effect_results;
+  IRTwinSnapshots *twin_snapshots;
+  int arm64_object_output;
+  int machine_rules_pending;
+  int explain_forced_for_rules;
+  int emit_safety_checks;
+} CompileContext;
 
-  compiler_profile_init(&profile, options && options->profile);
+typedef int (*CompileStage)(CompileContext *ctx);
 
-  mettle_compiler_ctx_reset();
-  mettle_compiler_ctx_set_input_filename(input_filename);
-  mettle_compiler_ctx_set_current_filename(input_filename);
-  if (options) {
-    mettle_compiler_ctx_set_options(options->debug_compiler, options->dump_ir);
+static const char *compile_session_open(CompileContext *ctx) {
+  ctx->lexer = lexer_create(ctx->source);
+  ctx->symbol_table = symbol_table_create();
+  ctx->register_allocator = register_allocator_create();
+  if (!ctx->lexer || !ctx->symbol_table || !ctx->register_allocator) {
+    return "Failed to initialize compiler components";
   }
 
-  mettle_trust_mode_announce();
-  compiler_set_phase(PROFILE_PHASE_READ_INPUT);
-  phase_start = compiler_profile_begin(&profile);
-  char *source = NULL;
-  int read_ok = compile_read_source(input_filename, &source);
-  compiler_profile_add(&profile, PROFILE_PHASE_READ_INPUT, phase_start);
-  if (!read_ok) {
-    compiler_profile_print_compile(&profile, input_filename, 1);
-    return 1;
+  ctx->parser =
+      parser_create_with_error_reporter(ctx->lexer, ctx->error_reporter);
+  if (ctx->parser) {
+    ctx->parser->gpu_mode =
+        ctx->options->emit_ptx || ctx->options->emit_spirv;
+  }
+  ctx->type_checker = type_checker_create_with_error_reporter(
+      ctx->symbol_table, ctx->error_reporter);
+  type_checker_set_launch_report(ctx->options->report_launches);
+  type_checker_set_gpu_type_report(ctx->options->report_gpu_types ||
+                                   ctx->options->explain ||
+                                   ctx->options->explain_all);
+  if (!ctx->parser || !ctx->type_checker) {
+    return "Failed to initialize parser or type checker";
   }
 
-  compiler_set_phase(PROFILE_PHASE_INIT);
-  phase_start = compiler_profile_begin(&profile);
-  ErrorReporter *error_reporter = error_reporter_create(input_filename, source);
-  compiler_profile_add(&profile, PROFILE_PHASE_INIT, phase_start);
-  if (!error_reporter) {
-    fprintf(stderr, "Error: Could not initialize error reporter\n");
-    free(source);
-    compiler_profile_print_compile(&profile, input_filename, 1);
-    return 1;
-  }
-
-  compiler_set_phase(PROFILE_PHASE_LEXICAL_VALIDATION);
-  phase_start = compiler_profile_begin(&profile);
-  compiler_profile_add(&profile, PROFILE_PHASE_LEXICAL_VALIDATION, phase_start);
-
-  compiler_set_phase(PROFILE_PHASE_INIT);
-  phase_start = compiler_profile_begin(&profile);
-  Lexer *lexer = lexer_create(source);
-  Parser *parser = NULL;
-  SymbolTable *symbol_table = symbol_table_create();
-  TypeChecker *type_checker = NULL;
-  RegisterAllocator *register_allocator = register_allocator_create();
-  ASTNode *program = NULL;
-
-  DebugInfo *debug_info = NULL;
-  CodeGenerator *code_generator = NULL;
-  IRProgram *ir_program = NULL;
-  char *ir_error_message = NULL;
-
-  if (!lexer || !symbol_table || !register_allocator) {
-    compiler_profile_add(&profile, PROFILE_PHASE_INIT, phase_start);
-    error_reporter_add_error(error_reporter, ERROR_INTERNAL,
-                             source_location_create(0, 0),
-                             "Failed to initialize compiler components");
-    error_reporter_print_errors(error_reporter);
-    if (lexer)
-      lexer_destroy(lexer);
-    if (symbol_table)
-      symbol_table_destroy(symbol_table);
-    if (register_allocator)
-      register_allocator_destroy(register_allocator);
-    error_reporter_destroy(error_reporter);
-    free(source);
-    compiler_profile_print_compile(&profile, input_filename, 1);
-    return 1;
-  }
-
-  parser = parser_create_with_error_reporter(lexer, error_reporter);
-  if (parser) {
-    parser->gpu_mode = options->emit_ptx || options->emit_spirv;
-  }
-  type_checker =
-      type_checker_create_with_error_reporter(symbol_table, error_reporter);
-  type_checker_set_launch_report(options->report_launches);
-  type_checker_set_gpu_type_report(options->report_gpu_types ||
-                                   options->explain || options->explain_all);
-  if (!parser || !type_checker) {
-    compiler_profile_add(&profile, PROFILE_PHASE_INIT, phase_start);
-    error_reporter_add_error(error_reporter, ERROR_INTERNAL,
-                             source_location_create(0, 0),
-                             "Failed to initialize parser or type checker");
-    error_reporter_print_errors(error_reporter);
-    if (parser)
-      parser_destroy(parser);
-    if (type_checker)
-      type_checker_destroy(type_checker);
-    register_allocator_destroy(register_allocator);
-    symbol_table_destroy(symbol_table);
-    lexer_destroy(lexer);
-    error_reporter_destroy(error_reporter);
-    free(source);
-    compiler_profile_print_compile(&profile, input_filename, 1);
-    return 1;
-  }
-
-  if (compile_wants_debug_info(options)) {
-    debug_info = debug_info_create(input_filename, output_filename);
-    if (!debug_info) {
-      compiler_profile_add(&profile, PROFILE_PHASE_INIT, phase_start);
-      error_reporter_add_error(error_reporter, ERROR_INTERNAL,
-                               source_location_create(0, 0),
-                               "Failed to initialize debug information");
-      error_reporter_print_errors(error_reporter);
-      parser_destroy(parser);
-      type_checker_destroy(type_checker);
-      register_allocator_destroy(register_allocator);
-      symbol_table_destroy(symbol_table);
-      lexer_destroy(lexer);
-      error_reporter_destroy(error_reporter);
-      free(source);
-      compiler_profile_print_compile(&profile, input_filename, 1);
-      return 1;
+  if (compile_wants_debug_info(ctx->options)) {
+    ctx->debug_info =
+        debug_info_create(ctx->input_filename, ctx->output_filename);
+    if (!ctx->debug_info) {
+      return "Failed to initialize debug information";
     }
-    code_generator = code_generator_create_with_debug(debug_info);
+    ctx->code_generator = code_generator_create_with_debug(ctx->debug_info);
   } else {
-    code_generator = code_generator_create();
+    ctx->code_generator = code_generator_create();
   }
-
-  if (!code_generator) {
-    compiler_profile_add(&profile, PROFILE_PHASE_INIT, phase_start);
-    error_reporter_add_error(error_reporter, ERROR_INTERNAL,
-                             source_location_create(0, 0),
-                             "Failed to initialize code generator");
-    error_reporter_print_errors(error_reporter);
-    parser_destroy(parser);
-    type_checker_destroy(type_checker);
-    register_allocator_destroy(register_allocator);
-    symbol_table_destroy(symbol_table);
-    lexer_destroy(lexer);
-    if (debug_info)
-      debug_info_destroy(debug_info);
-    error_reporter_destroy(error_reporter);
-    free(source);
-    compiler_profile_print_compile(&profile, input_filename, 1);
-    return 1;
+  if (!ctx->code_generator) {
+    return "Failed to initialize code generator";
   }
+  return NULL;
+}
 
-  if (debug_info) {
+static void compile_session_configure(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
+  if (ctx->debug_info) {
     code_generator_set_debug_sidecar_emission(
-        code_generator,
-        compile_wants_debug_sidecar(options));
+        ctx->code_generator, compile_wants_debug_sidecar(options));
   }
   code_generator_set_stack_trace_support(
-      code_generator, options->generate_stack_trace_support ? 1 : 0);
+      ctx->code_generator, options->generate_stack_trace_support ? 1 : 0);
   code_generator_set_crash_report(
-      code_generator,
+      ctx->code_generator,
       (options->generate_crash_report && options->building_executable &&
        !options->flat_output && !mtlc_target()->freestanding)
           ? 1
           : 0);
   code_generator_set_eliminate_unreachable_functions(
-      code_generator, options->release ? 1 : 0);
-  code_generator_set_profile_runtime(code_generator,
-                                     compiler_options_use_profile_runtime(options)
-                                         ? 1
-                                         : 0);
-  code_generator_set_debug_hooks(code_generator, options->debug_hooks ? 1 : 0);
-  code_generator->whole_program = options->building_executable ? 1 : 0;
-  compiler_profile_add(&profile, PROFILE_PHASE_INIT, phase_start);
+      ctx->code_generator, options->release ? 1 : 0);
+  code_generator_set_profile_runtime(
+      ctx->code_generator,
+      compiler_options_use_profile_runtime(options) ? 1 : 0);
+  code_generator_set_debug_hooks(ctx->code_generator,
+                                 options->debug_hooks ? 1 : 0);
+  ctx->code_generator->whole_program = options->building_executable ? 1 : 0;
+}
 
-  int result = 0;
-  options->emit_object = 1;
+static void compile_session_close(CompileContext *ctx) {
+  ir_machine_set_collect(0);
+  ir_machine_reset();
+  ir_explain_set_quiet(0);
+  if (ctx->options && ctx->options->explain && !ctx->options->optimize) {
+    ir_explain_ledger_standalone(ctx->input_filename);
+  }
+  ir_twins_snapshots_free(ctx->twin_snapshots);
+  ctx->twin_snapshots = NULL;
+  compiler_set_phase(PROFILE_PHASE_CLEANUP);
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  if (getenv("METTLE_FULL_CLEANUP")) {
+    if (ctx->program)
+      ast_destroy_node(ctx->program);
+    if (ctx->ir_program)
+      ir_program_destroy(ctx->ir_program);
+    type_checker_destroy(ctx->type_checker);
+    symbol_table_destroy(ctx->symbol_table);
+  }
+  free(ctx->ir_error_message);
+  ir_effect_results_free(ctx->effect_results);
+  code_generator_destroy(ctx->code_generator);
+  register_allocator_destroy(ctx->register_allocator);
+  parser_destroy(ctx->parser);
+  lexer_destroy(ctx->lexer);
+  if (ctx->debug_info)
+    debug_info_destroy(ctx->debug_info);
+  error_reporter_destroy(ctx->error_reporter);
+  free(ctx->source);
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_CLEANUP, ctx->phase_start);
+}
 
+static int compile_stage_parse(CompileContext *ctx) {
+  int parse_ok = 0;
+  ctx->options->emit_object = 1;
   compiler_set_phase(PROFILE_PHASE_PARSE);
-  phase_start = compiler_profile_begin(&profile);
-  int parse_ok = compile_lex_and_parse(parser, error_reporter, &program);
-  compiler_profile_add(&profile, PROFILE_PHASE_PARSE, phase_start);
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  parse_ok =
+      compile_lex_and_parse(ctx->parser, ctx->error_reporter, &ctx->program);
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_PARSE, ctx->phase_start);
   if (!parse_ok) {
-    result = 1;
-    goto cleanup;
+    return 1;
   }
-  if (options->dump_ast) {
-    compile_dump_ast(program, output_filename);
+  if (ctx->options->dump_ast) {
+    compile_dump_ast(ctx->program, ctx->output_filename);
   }
+  return COMPILE_CONTINUE;
+}
 
+static int compile_stage_imports(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
   ImportResolverOptions import_options = {0};
+  int imports_ok = 0;
   if (options) {
     import_options.import_directories = options->import_directories;
     import_options.import_directory_count = options->import_directory_count;
@@ -5798,129 +5758,150 @@ int compile_file(const char *input_filename, const char *output_filename,
       host_target_is_elf();
 
   compiler_set_phase(PROFILE_PHASE_PRELUDE);
-  phase_start = compiler_profile_begin(&profile);
-  compile_prepend_auto_imports(options, program);
-  compiler_profile_add(&profile, PROFILE_PHASE_PRELUDE, phase_start);
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  compile_prepend_auto_imports(options, ctx->program);
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_PRELUDE, ctx->phase_start);
 
   compiler_set_phase(PROFILE_PHASE_IMPORTS);
-  phase_start = compiler_profile_begin(&profile);
-  int imports_ok = compile_resolve_imports(program, input_filename,
-                                           error_reporter, &import_options);
-  compiler_profile_add(&profile, PROFILE_PHASE_IMPORTS, phase_start);
-  if (!imports_ok) {
-    result = 1;
-    goto cleanup;
-  }
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  imports_ok = compile_resolve_imports(ctx->program, ctx->input_filename,
+                                       ctx->error_reporter, &import_options);
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_IMPORTS, ctx->phase_start);
+  return imports_ok ? COMPILE_CONTINUE : 1;
+}
 
+static int compile_stage_monomorphize(CompileContext *ctx) {
+  int mono_ok = 0;
   compiler_set_phase(PROFILE_PHASE_MONOMORPHIZE);
-  phase_start = compiler_profile_begin(&profile);
-  int mono_ok = compile_monomorphize(program, error_reporter);
-  compiler_profile_add(&profile, PROFILE_PHASE_MONOMORPHIZE, phase_start);
-  if (!mono_ok) {
-    result = 1;
-    goto cleanup;
-  }
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  mono_ok = compile_monomorphize(ctx->program, ctx->error_reporter);
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_MONOMORPHIZE,
+                       ctx->phase_start);
+  return mono_ok ? COMPILE_CONTINUE : 1;
+}
 
-  ir_explain_ledger_set_collect(options->explain);
-  ir_explain_memory_set_collect(options->explain && options->optimize,
-                                options->explain_all ? NULL
-                                                     : options->input_filename);
+static int compile_stage_type_check(CompileContext *ctx) {
+  int tc_ok = 0;
+  ir_explain_ledger_set_collect(ctx->options->explain);
+  ir_explain_memory_set_collect(
+      ctx->options->explain && ctx->options->optimize,
+      ctx->options->explain_all ? NULL : ctx->options->input_filename);
 
   compiler_set_phase(PROFILE_PHASE_TYPE_CHECK);
-  phase_start = compiler_profile_begin(&profile);
-  int tc_ok = compile_type_check(type_checker, program, error_reporter);
-  compiler_profile_add(&profile, PROFILE_PHASE_TYPE_CHECK, phase_start);
-  if (!tc_ok) {
-    result = 1;
-    goto cleanup;
-  }
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  tc_ok = compile_type_check(ctx->type_checker, ctx->program,
+                             ctx->error_reporter);
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_TYPE_CHECK,
+                       ctx->phase_start);
+  return tc_ok ? COMPILE_CONTINUE : 1;
+}
 
-  if (options->expansion_budget_set &&
-      !type_checker_check_expansion_budget(type_checker,
-                                           options->expansion_budget)) {
-    error_reporter_print_errors(error_reporter);
-    result = 1;
-    goto cleanup;
-  }
-  if (options->report_expansion) {
-    type_checker_report_expansion(type_checker, stdout);
-  }
-  if (options->report_proofs) {
-    type_checker_report_proofs(type_checker, stdout);
-  }
-  if (options->report_gpu_types || options->explain || options->explain_all) {
-    type_checker_print_gpu_type_report(stderr);
-  }
-  if (options->why_mode && options->why_subject &&
-      (options->why_subject[0] >= '0' && options->why_subject[0] <= '9')) {
-    result = type_checker_why_proof(type_checker, options->why_subject,
-                                    options->why_what, stdout)
-                 ? 0
-                 : 1;
-    goto cleanup;
-  }
-  if (type_checker_proof_ceiling_hit(type_checker)) {
+static int compile_stage_proof_budget(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
+  if (type_checker_proof_ceiling_hit(ctx->type_checker)) {
     fprintf(stderr,
             "warning[P0004]: the declared-type prover stopped after %lld "
             "steps and answered the rest as unknown\n",
-            type_checker_proof_steps(type_checker));
+            type_checker_proof_steps(ctx->type_checker));
     fprintf(stderr,
             "  help: a proof that needed more than that refuses here the same "
             "way it would if it were false; --report-proofs prints what each "
             "one cost\n");
   }
   if (options->proof_budget_set &&
-      type_checker_proof_steps(type_checker) > options->proof_budget) {
+      type_checker_proof_steps(ctx->type_checker) > options->proof_budget) {
     fprintf(stderr,
             "error[P0003]: the declared-type prover spent %lld steps, more "
             "than the %lld --proof-budget allows\n",
-            type_checker_proof_steps(type_checker), options->proof_budget);
+            type_checker_proof_steps(ctx->type_checker),
+            options->proof_budget);
     fprintf(stderr,
             "  help: --report-proofs prints what each proof cost\n");
-    result = 1;
-    goto cleanup;
+    return 1;
   }
-  if (options->expand_mode) {
-    size_t unprintable =
-        ast_print_program(stdout, program, expand_annotate, type_checker);
-    if (unprintable > 0) {
-      fprintf(stderr,
-              "\nnote: %zu node%s had no source form and were printed as "
-              "marked comments; this output is not a complete program\n",
-              unprintable, unprintable == 1 ? "" : "s");
-    }
-    result = 0;
-    goto cleanup;
-  }
+  return COMPILE_CONTINUE;
+}
 
-  if (!options->test_mode) {
-    Program *prog_data = (Program *)program->data;
-    if (prog_data) {
-      size_t kept = 0;
-      for (size_t i = 0; i < prog_data->declaration_count; i++) {
-        ASTNode *decl = prog_data->declarations[i];
-        FunctionDeclaration *fd =
-            decl && decl->type == AST_FUNCTION_DECLARATION && decl->data
-                ? (FunctionDeclaration *)decl->data
-                : NULL;
-        if (fd && fd->is_test) {
-          size_t child_kept = 0;
-          for (size_t c = 0; c < program->child_count; c++) {
-            if (program->children[c] == decl) {
-              continue;
-            }
-            program->children[child_kept++] = program->children[c];
-          }
-          program->child_count = child_kept;
-          ast_destroy_node(decl);
+static int compile_stage_type_reports(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
+  if (options->expansion_budget_set &&
+      !type_checker_check_expansion_budget(ctx->type_checker,
+                                           options->expansion_budget)) {
+    error_reporter_print_errors(ctx->error_reporter);
+    return 1;
+  }
+  if (options->report_expansion) {
+    type_checker_report_expansion(ctx->type_checker, stdout);
+  }
+  if (options->report_proofs) {
+    type_checker_report_proofs(ctx->type_checker, stdout);
+  }
+  if (options->report_gpu_types || options->explain || options->explain_all) {
+    type_checker_print_gpu_type_report(stderr);
+  }
+  if (options->why_mode && options->why_subject &&
+      (options->why_subject[0] >= '0' && options->why_subject[0] <= '9')) {
+    return type_checker_why_proof(ctx->type_checker, options->why_subject,
+                                  options->why_what, stdout)
+               ? 0
+               : 1;
+  }
+  return COMPILE_CONTINUE;
+}
+
+static int compile_stage_expand(CompileContext *ctx) {
+  size_t unprintable = 0;
+  if (!ctx->options->expand_mode) {
+    return COMPILE_CONTINUE;
+  }
+  unprintable = ast_print_program(stdout, ctx->program, expand_annotate,
+                                  ctx->type_checker);
+  if (unprintable > 0) {
+    fprintf(stderr,
+            "\nnote: %zu node%s had no source form and were printed as "
+            "marked comments; this output is not a complete program\n",
+            unprintable, unprintable == 1 ? "" : "s");
+  }
+  return 0;
+}
+
+static int compile_stage_drop_tests(CompileContext *ctx) {
+  Program *prog_data = NULL;
+  size_t kept = 0;
+  size_t i = 0;
+  if (ctx->options->test_mode) {
+    return COMPILE_CONTINUE;
+  }
+  prog_data = (Program *)ctx->program->data;
+  if (!prog_data) {
+    return COMPILE_CONTINUE;
+  }
+  for (i = 0; i < prog_data->declaration_count; i++) {
+    ASTNode *decl = prog_data->declarations[i];
+    FunctionDeclaration *fd =
+        decl && decl->type == AST_FUNCTION_DECLARATION && decl->data
+            ? (FunctionDeclaration *)decl->data
+            : NULL;
+    if (fd && fd->is_test) {
+      size_t child_kept = 0;
+      for (size_t c = 0; c < ctx->program->child_count; c++) {
+        if (ctx->program->children[c] == decl) {
           continue;
         }
-        prog_data->declarations[kept++] = decl;
+        ctx->program->children[child_kept++] = ctx->program->children[c];
       }
-      prog_data->declaration_count = kept;
+      ctx->program->child_count = child_kept;
+      ast_destroy_node(decl);
+      continue;
     }
+    prog_data->declarations[kept++] = decl;
   }
+  prog_data->declaration_count = kept;
+  return COMPILE_CONTINUE;
+}
 
+static int compile_stage_lowering_modes(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
   if (options->explain && !options->optimize) {
     fprintf(stderr,
             "note: --explain without -O/--release reports only what does not "
@@ -5928,605 +5909,750 @@ int compile_file(const char *input_filename, const char *output_filename,
             "rules run, the checks a declared type deleted, and the beliefs "
             "the build rested on\n");
   }
-  if (program_declares_machine_rule(program)) {
-    machine_rules_pending = 1;
+  if (program_declares_machine_rule(ctx->program)) {
+    ctx->machine_rules_pending = 1;
     ir_machine_set_collect(1);
     if (!options->explain) {
       ir_explain_set_quiet(1);
       options->explain = 1;
-      explain_forced_for_rules = 1;
+      ctx->explain_forced_for_rules = 1;
     }
   }
   ir_lowering_set_explain(options->explain && options->optimize &&
                           !options->emit_ptx && !options->emit_spirv);
-  ir_lowering_set_refinement_checks(options->check_proofs || options->test_mode ||
-                                    options->trace_function != NULL ||
-                                    ir_verify_enabled());
+  ir_lowering_set_refinement_checks(
+      options->check_proofs || options->test_mode ||
+      options->trace_function != NULL || ir_verify_enabled());
   ir_lowering_set_task_checks(options->check_tasks);
   ir_lowering_set_overflow_checks(options->check_overflow);
   ir_explain_safety_set_collect(options->explain && options->optimize,
-                                input_filename);
+                                ctx->input_filename);
+  return COMPILE_CONTINUE;
+}
 
+static int compile_stage_lower_ir(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
   int emit_runtime_checks =
       (options->release || options->emit_ptx || options->emit_spirv ||
        mtlc_target()->freestanding)
           ? 0
           : 1;
-  int emit_safety_checks =
+  int ir_ok = 0;
+  ctx->emit_safety_checks =
       options->safe && !options->emit_ptx && !options->emit_spirv;
   compiler_set_phase(PROFILE_PHASE_IR_LOWERING);
-  phase_start = compiler_profile_begin(&profile);
-  int ir_ok = compile_lower_to_ir(program, type_checker, symbol_table,
-                                   emit_runtime_checks, emit_safety_checks,
-                                   &ir_program, &ir_error_message);
-  compiler_profile_add(&profile, PROFILE_PHASE_IR_LOWERING, phase_start);
-  if (!ir_ok) {
-    result = 1;
-    goto cleanup;
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  ir_ok = compile_lower_to_ir(ctx->program, ctx->type_checker,
+                              ctx->symbol_table, emit_runtime_checks,
+                              ctx->emit_safety_checks, &ctx->ir_program,
+                              &ctx->ir_error_message);
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_IR_LOWERING,
+                       ctx->phase_start);
+  return ir_ok ? COMPILE_CONTINUE : 1;
+}
+
+static int compile_stage_swap_check(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
+  if (!options->swap_check_mode) {
+    return COMPILE_CONTINUE;
   }
-
-  if (options->swap_check_mode) {
-    if (!options->swap_old_name || !options->swap_new_name) {
-      fprintf(stderr,
-              "swap-check needs both functions: --old <fn> --new <fn>\n");
-      result = 1;
-      goto cleanup;
-    }
-    result = compile_run_swap_check(ir_program, options->swap_old_name,
-                                    options->swap_new_name);
-    goto cleanup;
+  if (!options->swap_old_name || !options->swap_new_name) {
+    fprintf(stderr, "swap-check needs both functions: --old <fn> --new <fn>\n");
+    return 1;
   }
+  return compile_run_swap_check(ctx->ir_program, options->swap_old_name,
+                                options->swap_new_name);
+}
 
-  compile_effects_stage = compile_run_effects(ir_program, type_checker,
-                                              options, error_reporter,
-                                              &effect_results);
-  if (compile_effects_stage != 1) {
-    result = compile_effects_stage == 0 ? 1 : 0;
-    goto cleanup;
+static int compile_stage_effects(CompileContext *ctx) {
+  int stage = compile_run_effects(ctx->ir_program, ctx->type_checker,
+                                  ctx->options, ctx->error_reporter,
+                                  &ctx->effect_results);
+  if (stage == 1) {
+    return COMPILE_CONTINUE;
   }
+  return stage == 0 ? 1 : 0;
+}
 
-  if (ir_program_has_twins(ir_program) || options->report_twins) {
-    IRTwinStats twin_stats;
-    if (!ir_twins_check(ir_program, error_reporter,
-                        options->report_twins ? stdout : NULL,
-                        "as written", &twin_stats)) {
-      error_reporter_print_errors(error_reporter);
-      result = 1;
-      goto cleanup;
-    }
-    if (error_reporter_has_errors(error_reporter)) {
-      error_reporter_print_errors(error_reporter);
-    }
-    if (ir_verify_enabled()) {
-      twin_snapshots = ir_twins_capture(ir_program);
-    }
+static int compile_stage_twins(CompileContext *ctx) {
+  IRTwinStats twin_stats;
+  if (!ir_program_has_twins(ctx->ir_program) && !ctx->options->report_twins) {
+    return COMPILE_CONTINUE;
   }
-
-  {
-    IRPurityStats purity_stats;
-    if (!ir_purity_check_contracts(ir_program, error_reporter,
-                                   &purity_stats)) {
-      error_reporter_print_errors(error_reporter);
-      result = 1;
-      goto cleanup;
-    }
+  if (!ir_twins_check(ctx->ir_program, ctx->error_reporter,
+                      ctx->options->report_twins ? stdout : NULL, "as written",
+                      &twin_stats)) {
+    error_reporter_print_errors(ctx->error_reporter);
+    return 1;
   }
-
-  if (!compile_run_rules(ir_program, type_checker, options,
-                         error_reporter, program, input_filename,
-                         effect_results, &machine_rules_pending)) {
-    result = 1;
-    goto cleanup;
+  if (error_reporter_has_errors(ctx->error_reporter)) {
+    error_reporter_print_errors(ctx->error_reporter);
   }
+  if (ir_verify_enabled()) {
+    ctx->twin_snapshots = ir_twins_capture(ctx->ir_program);
+  }
+  return COMPILE_CONTINUE;
+}
 
-  mettle_compiler_ctx_set_ir_program(ir_program);
-  options->main_wants_argc_argv = ir_program->main_wants_argc_argv;
+static int compile_stage_purity(CompileContext *ctx) {
+  IRPurityStats purity_stats;
+  if (!ir_purity_check_contracts(ctx->ir_program, ctx->error_reporter,
+                                 &purity_stats)) {
+    error_reporter_print_errors(ctx->error_reporter);
+    return 1;
+  }
+  return COMPILE_CONTINUE;
+}
 
-  if (options->pgo) {
-    ir_pgo_profile_program(ir_program);
+static int compile_stage_rules(CompileContext *ctx) {
+  if (!compile_run_rules(ctx->ir_program, ctx->type_checker, ctx->options,
+                         ctx->error_reporter, ctx->program,
+                         ctx->input_filename, ctx->effect_results,
+                         &ctx->machine_rules_pending)) {
+    return 1;
+  }
+  return COMPILE_CONTINUE;
+}
+
+static int compile_stage_instrument_program(CompileContext *ctx) {
+  size_t trace_sites = 0;
+  mettle_compiler_ctx_set_ir_program(ctx->ir_program);
+  ctx->options->main_wants_argc_argv = ctx->ir_program->main_wants_argc_argv;
+  if (ctx->options->pgo) {
+    ir_pgo_profile_program(ctx->ir_program);
     ir_pgo_print_summary();
   }
-
-  if (options->record_trace) {
-    size_t trace_sites = 0;
-    if (!ir_trace_record_instrument(ir_program, &trace_sites)) {
-      mettle_compiler_ice_report("Trace recording instrumentation failed",
-                                 NULL);
-      result = 1;
-      goto cleanup;
-    }
+  if (ctx->options->record_trace &&
+      !ir_trace_record_instrument(ctx->ir_program, &trace_sites)) {
+    mettle_compiler_ice_report("Trace recording instrumentation failed", NULL);
+    return 1;
   }
+  return COMPILE_CONTINUE;
+}
 
-  if (options->machine_mode || options->emulate_mode) {
-    MachineDesc desc;
-    char error[256];
-    SourceLocation where;
-    if (!machine_desc_read(program, &desc, error, sizeof(error), &where)) {
-      if (where.line) {
-        error_reporter_add_error(error_reporter, ERROR_SEMANTIC, where, error);
-        error_reporter_set_last_code(error_reporter, "N0001");
-        error_reporter_print_errors(error_reporter);
-      } else {
-        fprintf(stderr, "error[N0001]: %s\n", error);
-      }
-      result = 1;
-      goto cleanup;
-    }
-    if (options->machine_mode) {
-      machine_desc_print(stdout, &desc);
-      result = 0;
-      goto cleanup;
-    }
-    result = machine_emulate(&desc, program, ir_program);
-    goto cleanup;
+static int compile_stage_machine(CompileContext *ctx) {
+  MachineDesc desc;
+  char error[256];
+  SourceLocation where;
+  if (!ctx->options->machine_mode && !ctx->options->emulate_mode) {
+    return COMPILE_CONTINUE;
   }
-
-  if (options->check_trace_path) {
-    size_t events = 0;
-    size_t dropped = 0;
-    if (!ir_program_has_rules_of(ir_program, IR_RULE_OVER_TRACE)) {
-      fprintf(stderr,
-              "Error: '%s' declares no `@rule fn f(t: Trace) -> Verdict`, so "
-              "there is nothing to hold a recorded run to\n",
-              input_filename);
-      result = 1;
-      goto cleanup;
+  if (!machine_desc_read(ctx->program, &desc, error, sizeof(error), &where)) {
+    if (where.line) {
+      error_reporter_add_error(ctx->error_reporter, ERROR_SEMANTIC, where,
+                               error);
+      error_reporter_set_last_code(ctx->error_reporter, "N0001");
+      error_reporter_print_errors(ctx->error_reporter);
+    } else {
+      fprintf(stderr, "error[N0001]: %s\n", error);
     }
-    if (!trace_file_load(options->check_trace_path, &events, &dropped)) {
-      result = 1;
-      goto cleanup;
-    }
-    g_trace_rule_context.program = ir_program;
-    g_trace_rule_context.type_checker = type_checker;
-    g_trace_rule_context.reporter = error_reporter;
-    g_trace_rule_context.filename = input_filename;
-    g_trace_rule_context.report = options->report_rules ? stdout : NULL;
-    g_trace_rule_context.budget = options->rule_budget_set
-                                      ? options->rule_budget
-                                      : 0;
-    printf("trace: %zu events from '%s'%s\n", events,
-           options->check_trace_path,
-           dropped ? ", and the run said it dropped some" : "");
-    result = compile_run_trace_rules(&g_trace_rule_context, NULL) ? 0 : 1;
-    ir_trace_reset();
-    goto cleanup;
+    return 1;
   }
-
-  if (options->test_mode || options->trace_function) {
-    options->trace_rule_checker = type_checker;
-    result = compile_run_comptime(ir_program, program, options, error_reporter,
-                                  input_filename, source);
-    goto cleanup;
+  if (ctx->options->machine_mode) {
+    machine_desc_print(stdout, &desc);
+    return 0;
   }
+  return machine_emulate(&desc, ctx->program, ctx->ir_program);
+}
 
-  if (options->native_heap && !ir_program_route_to_native_heap(ir_program)) {
+static int compile_stage_trace_rules(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
+  size_t events = 0;
+  size_t dropped = 0;
+  int verdict = 0;
+  if (!options->check_trace_path) {
+    return COMPILE_CONTINUE;
+  }
+  if (!ir_program_has_rules_of(ctx->ir_program, IR_RULE_OVER_TRACE)) {
+    fprintf(stderr,
+            "Error: '%s' declares no `@rule fn f(t: Trace) -> Verdict`, so "
+            "there is nothing to hold a recorded run to\n",
+            ctx->input_filename);
+    return 1;
+  }
+  if (!trace_file_load(options->check_trace_path, &events, &dropped)) {
+    return 1;
+  }
+  g_trace_rule_context.program = ctx->ir_program;
+  g_trace_rule_context.type_checker = ctx->type_checker;
+  g_trace_rule_context.reporter = ctx->error_reporter;
+  g_trace_rule_context.filename = ctx->input_filename;
+  g_trace_rule_context.report = options->report_rules ? stdout : NULL;
+  g_trace_rule_context.budget =
+      options->rule_budget_set ? options->rule_budget : 0;
+  printf("trace: %zu events from '%s'%s\n", events, options->check_trace_path,
+         dropped ? ", and the run said it dropped some" : "");
+  verdict = compile_run_trace_rules(&g_trace_rule_context, NULL) ? 0 : 1;
+  ir_trace_reset();
+  return verdict;
+}
+
+static int compile_stage_comptime(CompileContext *ctx) {
+  if (!ctx->options->test_mode && !ctx->options->trace_function) {
+    return COMPILE_CONTINUE;
+  }
+  ctx->options->trace_rule_checker = ctx->type_checker;
+  return compile_run_comptime(ctx->ir_program, ctx->program, ctx->options,
+                              ctx->error_reporter, ctx->input_filename,
+                              ctx->source);
+}
+
+static int compile_stage_safety(CompileContext *ctx) {
+  IRSafetyStats safety_stats = {0};
+  if (ctx->options->native_heap &&
+      !ir_program_route_to_native_heap(ctx->ir_program)) {
     fprintf(stderr, "Error: Failed to route allocation to the native heap\n");
-    result = 1;
-    goto cleanup;
+    return 1;
   }
-  if (emit_safety_checks && !ir_safety_register_allocations(ir_program)) {
+  if (!ctx->emit_safety_checks) {
+    return COMPILE_CONTINUE;
+  }
+  if (!ir_safety_register_allocations(ctx->ir_program)) {
     fprintf(stderr, "Error: Failed to instrument allocations for --safe\n");
-    result = 1;
-    goto cleanup;
+    return 1;
   }
-  if (emit_safety_checks && options->optimize &&
-      (!ir_safety_analyze_origins(ir_program) ||
-       !ir_optimize_safety_analysis(ir_program,
-          compiler_options_use_profile_runtime(options)))) {
+  if (ctx->options->optimize &&
+      (!ir_safety_analyze_origins(ctx->ir_program) ||
+       !ir_optimize_safety_analysis(
+           ctx->ir_program,
+           compiler_options_use_profile_runtime(ctx->options)))) {
     mettle_compiler_ice_report("Safety analysis failed", NULL);
-    result = 1;
-    goto cleanup;
+    return 1;
   }
-
-  if (emit_safety_checks) {
-    ir_explain_safety_set_collect(options->explain && options->optimize,
-                                  input_filename);
-    IRSafetyStats safety_stats = {0};
-    if (!ir_safety_resolve_program(ir_program, &safety_stats)) {
-      mettle_compiler_ice_report("Safety check resolution failed", NULL);
-      result = 1;
-      goto cleanup;
-    }
-    ir_explain_safety_totals(safety_stats.emitted, safety_stats.proved,
-                             safety_stats.hoisted, safety_stats.spanned,
-                             safety_stats.exempt, safety_stats.extent_tests,
-                             safety_stats.region_calls);
+  ir_explain_safety_set_collect(ctx->options->explain && ctx->options->optimize,
+                                ctx->input_filename);
+  if (!ir_safety_resolve_program(ctx->ir_program, &safety_stats)) {
+    mettle_compiler_ice_report("Safety check resolution failed", NULL);
+    return 1;
   }
+  ir_explain_safety_totals(safety_stats.emitted, safety_stats.proved,
+                           safety_stats.hoisted, safety_stats.spanned,
+                           safety_stats.exempt, safety_stats.extent_tests,
+                           safety_stats.region_calls);
+  return COMPILE_CONTINUE;
+}
 
-  if (!options->test_mode) {
-    IRDeadlineStats deadline_stats;
-    IRDeadlineCosts deadline_costs;
-    const MtlcTargetDescription *machine = mtlc_target_current_description();
-    memset(&deadline_costs, 0, sizeof(deadline_costs));
-    deadline_costs.op = machine ? machine->cost_op : 1;
-    deadline_costs.load = machine ? machine->cost_load : 4;
-    deadline_costs.store = machine ? machine->cost_store : 1;
-    deadline_costs.branch = machine ? machine->cost_branch : 1;
-    deadline_costs.multiply = machine ? machine->cost_multiply : 3;
-    deadline_costs.multiply_float = machine ? machine->cost_multiply_float : 4;
-    deadline_costs.divide = machine ? machine->cost_divide : 26;
-    deadline_costs.divide_float = machine ? machine->cost_divide_float : 14;
-    deadline_costs.call = machine ? machine->cost_call : 4;
-    deadline_costs.allocate = machine ? machine->cost_allocate : 120;
-    deadline_costs.described = options->target_desc_path != NULL;
-    int deadline_instrumented =
-        options->record_trace || options->check_overflow ||
-        options->check_tasks || options->check_effects ||
-        options->check_proofs || options->safe || ir_verify_enabled();
-    if (!ir_deadline_run(ir_program, error_reporter, &deadline_costs,
-                         options->check_deadlines, deadline_instrumented,
-                         options->report_deadlines ? stdout : NULL,
-                         &deadline_stats)) {
-      if (error_reporter_has_errors(error_reporter)) {
-        error_reporter_print_errors(error_reporter);
-      }
-      result = 1;
-      goto cleanup;
-    }
+static void compile_deadline_costs(const CompilerOptions *options,
+                                   IRDeadlineCosts *costs) {
+  const MtlcTargetDescription *machine = mtlc_target_current_description();
+  memset(costs, 0, sizeof(*costs));
+  costs->op = machine ? machine->cost_op : 1;
+  costs->load = machine ? machine->cost_load : 4;
+  costs->store = machine ? machine->cost_store : 1;
+  costs->branch = machine ? machine->cost_branch : 1;
+  costs->multiply = machine ? machine->cost_multiply : 3;
+  costs->multiply_float = machine ? machine->cost_multiply_float : 4;
+  costs->divide = machine ? machine->cost_divide : 26;
+  costs->divide_float = machine ? machine->cost_divide_float : 14;
+  costs->call = machine ? machine->cost_call : 4;
+  costs->allocate = machine ? machine->cost_allocate : 120;
+  costs->described = options->target_desc_path != NULL;
+}
+
+static int compile_stage_deadlines(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
+  IRDeadlineStats deadline_stats;
+  IRDeadlineCosts deadline_costs;
+  int instrumented = 0;
+  if (options->test_mode) {
+    return COMPILE_CONTINUE;
   }
+  compile_deadline_costs(options, &deadline_costs);
+  instrumented = options->record_trace || options->check_overflow ||
+                 options->check_tasks || options->check_effects ||
+                 options->check_proofs || options->safe || ir_verify_enabled();
+  if (ir_deadline_run(ctx->ir_program, ctx->error_reporter, &deadline_costs,
+                      options->check_deadlines, instrumented,
+                      options->report_deadlines ? stdout : NULL,
+                      &deadline_stats)) {
+    return COMPILE_CONTINUE;
+  }
+  if (error_reporter_has_errors(ctx->error_reporter)) {
+    error_reporter_print_errors(ctx->error_reporter);
+  }
+  return 1;
+}
 
+static int compile_stage_device_targets(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
   if (options->emit_ptx) {
-    result = compile_emit_ptx(ir_program, program, code_generator, options,
-                              input_filename, output_filename, &profile);
-    goto cleanup;
+    return compile_emit_ptx(ctx->ir_program, ctx->program, ctx->code_generator,
+                            options, ctx->input_filename, ctx->output_filename,
+                            &ctx->profile);
   }
-
   if (options->emit_spirv) {
-    result = compile_emit_spirv(ir_program, program, code_generator, options,
-                                output_filename, &profile);
-    goto cleanup;
+    return compile_emit_spirv(ctx->ir_program, ctx->program,
+                              ctx->code_generator, options,
+                              ctx->output_filename, &ctx->profile);
   }
-
-  if (!ir_program_lower_gpu_launches(ir_program)) {
-    fprintf(stderr, "Error: Failed to lower GPU launches for the host runtime\n");
-    result = 1;
-    goto cleanup;
+  if (!ir_program_lower_gpu_launches(ctx->ir_program)) {
+    fprintf(stderr,
+            "Error: Failed to lower GPU launches for the host runtime\n");
+    return 1;
   }
-
   if (options->emit_arm64) {
-    result = compile_emit_arm64(ir_program, program, options, output_filename);
-    goto cleanup;
+    return compile_emit_arm64(ctx->ir_program, ctx->program, options,
+                              ctx->output_filename);
   }
+  return COMPILE_CONTINUE;
+}
 
+static int compile_stage_hooks(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
+  if (compiler_options_use_profile_runtime(options) &&
+      !ir_profile_instrument_program(ctx->ir_program)) {
+    fprintf(stderr, "Error: Failed to instrument IR for runtime profiling\n");
+    return 1;
+  }
+  if (!options->debug_hooks) {
+    return COMPILE_CONTINUE;
+  }
   if (compiler_options_use_profile_runtime(options)) {
-    if (!ir_profile_instrument_program(ir_program)) {
-      fprintf(stderr, "Error: Failed to instrument IR for runtime profiling\n");
-      result = 1;
-      goto cleanup;
-    }
+    fprintf(stderr,
+            "Error: --debug-hooks and --profile-runtime are mutually "
+            "exclusive\n");
+    return 1;
   }
-
-  if (options->debug_hooks) {
-    if (compiler_options_use_profile_runtime(options)) {
-      fprintf(stderr,
-              "Error: --debug-hooks and --profile-runtime are mutually "
-              "exclusive\n");
-      result = 1;
-      goto cleanup;
-    }
-    if (options->optimize) {
-      fprintf(stderr,
-              "Error: --debug-hooks requires an unoptimized build (drop "
-              "--release/-O; optimized code moves and deletes the hooks)\n");
-      result = 1;
-      goto cleanup;
-    }
-    if (!ir_debug_hooks_instrument_program(ir_program)) {
-      fprintf(stderr, "Error: Failed to instrument IR for debugging\n");
-      result = 1;
-      goto cleanup;
-    }
+  if (options->optimize) {
+    fprintf(stderr,
+            "Error: --debug-hooks requires an unoptimized build (drop "
+            "--release/-O; optimized code moves and deletes the hooks)\n");
+    return 1;
   }
+  if (!ir_debug_hooks_instrument_program(ctx->ir_program)) {
+    fprintf(stderr, "Error: Failed to instrument IR for debugging\n");
+    return 1;
+  }
+  return COMPILE_CONTINUE;
+}
 
-  int sweep_dead_functions = options->building_executable && !options->tracy &&
-                             !compiler_options_use_profile_runtime(options) &&
-                             !options->debug_hooks;
+static int compile_wants_dead_function_sweep(const CompilerOptions *options) {
+  return options->building_executable && !options->tracy &&
+         !compiler_options_use_profile_runtime(options) &&
+         !options->debug_hooks;
+}
+
+static int compile_sweep_dead_functions(CompileContext *ctx) {
+  const CompilerOptions *options = ctx->options;
   int keep_exports = options->link_argument_count > 0 ||
                      options->shared_output || options->export_dynamic;
-
-  if (sweep_dead_functions &&
-      !ir_program_eliminate_dead_functions(ir_program, keep_exports)) {
-    fprintf(stderr, "Error: Failed to eliminate dead functions\n");
-    result = 1;
-    goto cleanup;
+  if (!compile_wants_dead_function_sweep(options)) {
+    return 1;
   }
+  if (ir_program_eliminate_dead_functions(ctx->ir_program, keep_exports)) {
+    return 1;
+  }
+  fprintf(stderr, "Error: Failed to eliminate dead functions\n");
+  return 0;
+}
 
-  if (options->optimize) {
+static int compile_stage_optimize(CompileContext *ctx) {
+  size_t i = 0;
+  if (!compile_sweep_dead_functions(ctx)) {
+    return 1;
+  }
+  if (ctx->options->optimize) {
+    int opt_ok = 0;
     compiler_set_phase(PROFILE_PHASE_IR_OPTIMIZATION);
-    phase_start = compiler_profile_begin(&profile);
-    int opt_ok = compile_optimize_ir(ir_program, program, options);
-    compiler_profile_add(&profile, PROFILE_PHASE_IR_OPTIMIZATION, phase_start);
+    ctx->phase_start = compiler_profile_begin(&ctx->profile);
+    opt_ok = compile_optimize_ir(ctx->ir_program, ctx->program, ctx->options);
+    compiler_profile_add(&ctx->profile, PROFILE_PHASE_IR_OPTIMIZATION,
+                         ctx->phase_start);
     if (!opt_ok) {
-      result = 1;
-      goto cleanup;
+      return 1;
     }
   } else {
-    ir_note_simd_contracts_unverified(ir_program);
+    ir_note_simd_contracts_unverified(ctx->ir_program);
   }
 
-  if (twin_snapshots) {
+  if (ctx->twin_snapshots) {
     IRTwinStats twin_stats;
-    int twins_ok = ir_twins_recheck(ir_program, twin_snapshots, error_reporter,
-                                    options->report_twins ? stdout : NULL,
-                                    "after the optimizer", &twin_stats);
-    ir_twins_snapshots_free(twin_snapshots);
-    twin_snapshots = NULL;
+    int twins_ok = ir_twins_recheck(
+        ctx->ir_program, ctx->twin_snapshots, ctx->error_reporter,
+        ctx->options->report_twins ? stdout : NULL, "after the optimizer",
+        &twin_stats);
+    ir_twins_snapshots_free(ctx->twin_snapshots);
+    ctx->twin_snapshots = NULL;
     if (!twins_ok) {
-      error_reporter_print_errors(error_reporter);
-      result = 1;
-      goto cleanup;
+      error_reporter_print_errors(ctx->error_reporter);
+      return 1;
     }
   }
-  ir_program_drop_rewrite_rules(ir_program);
+  ir_program_drop_rewrite_rules(ctx->ir_program);
 
-  if (sweep_dead_functions &&
-      !ir_program_eliminate_dead_functions(ir_program, keep_exports)) {
-    fprintf(stderr, "Error: Failed to eliminate dead functions\n");
-    result = 1;
-    goto cleanup;
+  if (!compile_sweep_dead_functions(ctx)) {
+    return 1;
   }
-
-  for (size_t i = 0; i < ir_program->function_count; i++) {
-    ir_function_drop_dead_nops(ir_program->functions[i]);
+  for (i = 0; i < ctx->ir_program->function_count; i++) {
+    ir_function_drop_dead_nops(ctx->ir_program->functions[i]);
   }
+  return COMPILE_CONTINUE;
+}
 
-  if (options->profile_runtime_ops) {
-    if (!ir_profile_instrument_operation_counters(ir_program)) {
-      fprintf(stderr,
-              "Error: Failed to instrument IR operation counters for runtime profiling\n");
-      result = 1;
-      goto cleanup;
-    }
+static int compile_stage_counters(CompileContext *ctx) {
+  if (ctx->options->profile_runtime_ops &&
+      !ir_profile_instrument_operation_counters(ctx->ir_program)) {
+    fprintf(stderr, "Error: Failed to instrument IR operation counters for "
+                    "runtime profiling\n");
+    return 1;
   }
-
-  if (options->profile_blocks) {
-    if (!ir_profile_instrument_blocks(ir_program)) {
-      fprintf(stderr,
-              "Error: Failed to instrument IR basic-block counters for the "
-              "codegen profile view\n");
-      result = 1;
-      goto cleanup;
-    }
+  if (ctx->options->profile_blocks &&
+      !ir_profile_instrument_blocks(ctx->ir_program)) {
+    fprintf(stderr,
+            "Error: Failed to instrument IR basic-block counters for the "
+            "codegen profile view\n");
+    return 1;
   }
+  code_generator_set_ir_program(ctx->code_generator, ctx->ir_program);
+  return COMPILE_CONTINUE;
+}
 
-  code_generator_set_ir_program(code_generator, ir_program);
-
-  if (options->debug_mode || options->dump_ir) {
-    compiler_set_phase(PROFILE_PHASE_IR_DUMP);
-    phase_start = compiler_profile_begin(&profile);
-    char *ir_output = build_sidecar_filename(output_filename, ".ir");
-    if (!ir_output) {
-      fprintf(stderr,
-              "Warning: Failed to allocate IR output filename for '%s'\n",
-              output_filename);
-    } else {
-      FILE *ir_file = fopen(ir_output, "w");
-      if (!ir_file) {
-        fprintf(stderr, "Warning: Could not create IR file '%s': %s\n",
-                ir_output, strerror(errno));
-      } else {
-        if (!ir_program_dump(ir_program, ir_file)) {
-          fprintf(stderr, "Warning: Failed to write IR dump to '%s'\n",
-                  ir_output);
-        }
-        fclose(ir_file);
-        if (options->debug_mode) {
-          printf("Generated IR dump: %s\n", ir_output);
-        }
-      }
-      free(ir_output);
-    }
-    compiler_profile_add(&profile, PROFILE_PHASE_IR_DUMP, phase_start);
+static void compile_write_ir_dump(CompileContext *ctx, const char *path) {
+  FILE *ir_file = fopen(path, "w");
+  if (!ir_file) {
+    fprintf(stderr, "Warning: Could not create IR file '%s': %s\n", path,
+            strerror(errno));
+    return;
   }
+  if (!ir_program_dump(ctx->ir_program, ir_file)) {
+    fprintf(stderr, "Warning: Failed to write IR dump to '%s'\n", path);
+  }
+  fclose(ir_file);
+  if (ctx->options->debug_mode) {
+    printf("Generated IR dump: %s\n", path);
+  }
+}
 
+static int compile_stage_dump_ir(CompileContext *ctx) {
+  char *ir_output = NULL;
+  if (!ctx->options->debug_mode && !ctx->options->dump_ir) {
+    return COMPILE_CONTINUE;
+  }
+  compiler_set_phase(PROFILE_PHASE_IR_DUMP);
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  ir_output = build_sidecar_filename(ctx->output_filename, ".ir");
+  if (!ir_output) {
+    fprintf(stderr, "Warning: Failed to allocate IR output filename for '%s'\n",
+            ctx->output_filename);
+  } else {
+    compile_write_ir_dump(ctx, ir_output);
+    free(ir_output);
+  }
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_IR_DUMP, ctx->phase_start);
+  return COMPILE_CONTINUE;
+}
+
+static int compile_stage_codegen(CompileContext *ctx) {
+  int codegen_ok = 0;
   compiler_set_phase(PROFILE_PHASE_CODEGEN);
-  phase_start = compiler_profile_begin(&profile);
-  int codegen_ok = arm64_object_output ? 1
-                                       : compile_generate_code(code_generator);
-  compiler_profile_add(&profile, PROFILE_PHASE_CODEGEN, phase_start);
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  codegen_ok = ctx->arm64_object_output
+                   ? 1
+                   : compile_generate_code(ctx->code_generator);
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_CODEGEN, ctx->phase_start);
   if (!codegen_ok) {
-    result = 1;
-    goto cleanup;
+    return 1;
   }
-
-  if (options->annotate_asm || (options->explain_json && mir_annotate_enabled())) {
+  if (ctx->options->annotate_asm ||
+      (ctx->options->explain_json && mir_annotate_enabled())) {
     mir_annotate_flush();
   }
-
-  if (options->explain && options->optimize) {
+  if (ctx->options->explain && ctx->options->optimize) {
     ir_explain_backend_flush();
   }
+  return COMPILE_CONTINUE;
+}
 
-  if (machine_rules_pending) {
-    IRRuleImage machine_image;
-    char *machine_error = NULL;
-    IRRuleStats machine_stats;
-    int machine_ok;
-    if (explain_forced_for_rules) {
-      options->explain = 0;
-    }
-    if (!rule_reflect_build_machine(type_checker, ir_program, input_filename,
-                                    mtlc_target()->triple, effect_results,
-                                    &machine_image, &machine_error)) {
-      fprintf(stderr, "Error: %s\n",
-              machine_error ? machine_error
-                            : "could not reflect the machine");
-      free(machine_error);
-      result = 1;
-      goto cleanup;
-    }
-    machine_ok = ir_rules_run_kind(
-        ir_program, &machine_image, error_reporter,
-        options->report_rules ? stdout : NULL,
-        options->rule_budget_set ? options->rule_budget : 0, 0,
-        IR_RULE_OVER_MACHINE, &machine_stats);
-    ir_rule_image_free(&machine_image);
-    ir_program_drop_rules(ir_program);
-    machine_rules_pending = 0;
-    if (!machine_ok) {
-      error_reporter_print_errors(error_reporter);
-      result = 1;
-      goto cleanup;
+static int compile_stage_machine_rules(CompileContext *ctx) {
+  IRRuleImage machine_image;
+  IRRuleStats machine_stats;
+  char *machine_error = NULL;
+  int machine_ok = 0;
+  if (!ctx->machine_rules_pending) {
+    return COMPILE_CONTINUE;
+  }
+  if (ctx->explain_forced_for_rules) {
+    ctx->options->explain = 0;
+  }
+  if (!rule_reflect_build_machine(ctx->type_checker, ctx->ir_program,
+                                  ctx->input_filename, mtlc_target()->triple,
+                                  ctx->effect_results, &machine_image,
+                                  &machine_error)) {
+    fprintf(stderr, "Error: %s\n",
+            machine_error ? machine_error : "could not reflect the machine");
+    free(machine_error);
+    return 1;
+  }
+  machine_ok = ir_rules_run_kind(
+      ctx->ir_program, &machine_image, ctx->error_reporter,
+      ctx->options->report_rules ? stdout : NULL,
+      ctx->options->rule_budget_set ? ctx->options->rule_budget : 0, 0,
+      IR_RULE_OVER_MACHINE, &machine_stats);
+  ir_rule_image_free(&machine_image);
+  ir_program_drop_rules(ctx->ir_program);
+  ctx->machine_rules_pending = 0;
+  if (!machine_ok) {
+    error_reporter_print_errors(ctx->error_reporter);
+    return 1;
+  }
+  return COMPILE_CONTINUE;
+}
+
+static const char *compile_flat_entry_symbol(const IRProgram *ir_program) {
+  for (size_t i = 0; i < ir_program->function_count; i++) {
+    if (ir_program->functions[i] && ir_program->functions[i]->name &&
+        strcmp(ir_program->functions[i]->name, "_start") == 0) {
+      return "_start";
     }
   }
+  return "main";
+}
 
+static int compile_write_flat_image(CompileContext *ctx) {
+  BinaryEmitter *binary_emitter =
+      code_generator_get_binary_emitter(ctx->code_generator);
+  char flat_error[512] = {0};
+  const unsigned char boot_signature[2] = {0x55, 0xAA};
+  const unsigned char *trailer = NULL;
+  size_t pad_to = 0;
+  size_t trailer_size = 0;
+  if (mtlc_target()->image_base == 0x7C00ull) {
+    pad_to = 512;
+    trailer = boot_signature;
+    trailer_size = sizeof(boot_signature);
+  }
+  if (!binary_emitter_write_flat(binary_emitter, ctx->options->flat_output,
+                                 mtlc_target()->image_base,
+                                 compile_flat_entry_symbol(ctx->ir_program),
+                                 pad_to, 0x00, trailer, trailer_size,
+                                 flat_error, sizeof(flat_error))) {
+    fprintf(stderr, "Error: Could not create flat image '%s': %s\n",
+            ctx->options->flat_output,
+            flat_error[0] ? flat_error : "Unknown error");
+    return 0;
+  }
+  fprintf(stderr, "Wrote flat image '%s' at 0x%llx\n",
+          ctx->options->flat_output,
+          (unsigned long long)mtlc_target()->image_base);
+  return 1;
+}
+
+static int compile_write_object(CompileContext *ctx) {
+  BinaryEmitter *binary_emitter =
+      code_generator_get_binary_emitter(ctx->code_generator);
+  if (binary_emitter_write_object_file(binary_emitter, ctx->output_filename)) {
+    return 1;
+  }
+  fprintf(stderr, "Error: Could not create object file '%s': %s\n",
+          ctx->output_filename,
+          binary_emitter_get_error(binary_emitter)
+              ? binary_emitter_get_error(binary_emitter)
+              : "Unknown error");
+  return 0;
+}
+
+static int compile_write_arm64_object(CompileContext *ctx) {
+  char arm64_error[512] = {0};
+  if (arm64_ir_write_object(ctx->ir_program, ctx->output_filename, arm64_error,
+                            sizeof(arm64_error))) {
+    return 1;
+  }
+  fprintf(stderr, "Error: Could not create AArch64 object file '%s': %s\n",
+          ctx->output_filename,
+          arm64_error[0] ? arm64_error : "Unknown error");
+  return 0;
+}
+
+static int compile_stage_write_output(CompileContext *ctx) {
+  int written = 0;
   compiler_set_phase(PROFILE_PHASE_WRITE_OUTPUT);
-  phase_start = compiler_profile_begin(&profile);
-  if (arm64_object_output) {
-    char arm64_error[512] = {0};
-    if (!arm64_ir_write_object(ir_program, output_filename, arm64_error,
-                               sizeof(arm64_error))) {
-      compiler_profile_add(&profile, PROFILE_PHASE_WRITE_OUTPUT, phase_start);
-      fprintf(stderr, "Error: Could not create AArch64 object file '%s': %s\n",
-              output_filename,
-              arm64_error[0] ? arm64_error : "Unknown error");
-      result = 1;
-      goto cleanup;
-    }
-  } else if (options->flat_output) {
-    BinaryEmitter *binary_emitter =
-        code_generator_get_binary_emitter(code_generator);
-    const char *flat_entry_symbol = "main";
-    for (size_t fi = 0; fi < ir_program->function_count; fi++) {
-      if (ir_program->functions[fi] && ir_program->functions[fi]->name &&
-          strcmp(ir_program->functions[fi]->name, "_start") == 0) {
-        flat_entry_symbol = "_start";
-        break;
-      }
-    }
-    char flat_error[512] = {0};
-    const unsigned char boot_signature[2] = {0x55, 0xAA};
-    const unsigned char *trailer = NULL;
-    size_t pad_to = 0;
-    size_t trailer_size = 0;
-    if (mtlc_target()->image_base == 0x7C00ull) {
-      pad_to = 512;
-      trailer = boot_signature;
-      trailer_size = sizeof(boot_signature);
-    }
-    if (!binary_emitter_write_flat(binary_emitter, options->flat_output,
-                                   mtlc_target()->image_base,
-                                   flat_entry_symbol, pad_to, 0x00, trailer,
-                                   trailer_size, flat_error,
-                                   sizeof(flat_error))) {
-      compiler_profile_add(&profile, PROFILE_PHASE_WRITE_OUTPUT, phase_start);
-      fprintf(stderr, "Error: Could not create flat image '%s': %s\n",
-              options->flat_output,
-              flat_error[0] ? flat_error : "Unknown error");
-      result = 1;
-      goto cleanup;
-    }
-    fprintf(stderr, "Wrote flat image '%s' at 0x%llx\n", options->flat_output,
-            (unsigned long long)mtlc_target()->image_base);
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  if (ctx->arm64_object_output) {
+    written = compile_write_arm64_object(ctx);
+  } else if (ctx->options->flat_output) {
+    written = compile_write_flat_image(ctx);
   } else {
-    BinaryEmitter *binary_emitter =
-        code_generator_get_binary_emitter(code_generator);
-    if (!binary_emitter_write_object_file(binary_emitter, output_filename)) {
-      compiler_profile_add(&profile, PROFILE_PHASE_WRITE_OUTPUT, phase_start);
-      fprintf(stderr, "Error: Could not create object file '%s': %s\n",
-              output_filename,
-              binary_emitter_get_error(binary_emitter)
-                  ? binary_emitter_get_error(binary_emitter)
-                  : "Unknown error");
-      result = 1;
-      goto cleanup;
-    }
+    written = compile_write_object(ctx);
   }
-  compiler_profile_add(&profile, PROFILE_PHASE_WRITE_OUTPUT, phase_start);
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_WRITE_OUTPUT,
+                       ctx->phase_start);
+  return written ? COMPILE_CONTINUE : 1;
+}
 
+static const char *compile_debug_suffix(const char *format) {
+  if (strcasecmp(format, "stabs") == 0) {
+    return ".stabs";
+  }
+  if (strcasecmp(format, "map") == 0) {
+    return ".map";
+  }
+  if (strcasecmp(format, "dwarf") != 0) {
+    fprintf(stderr, "Warning: Unknown debug format '%s', defaulting to dwarf\n",
+            format);
+  }
+  return ".dwarf";
+}
+
+static int compile_write_debug_sidecar(CompileContext *ctx) {
+  const char *format = (ctx->options->debug_format &&
+                        ctx->options->debug_format[0] != '\0')
+                           ? ctx->options->debug_format
+                           : "dwarf";
+  const char *suffix = compile_debug_suffix(format);
+  char *debug_output = build_sidecar_filename(ctx->output_filename, suffix);
+  if (!debug_output) {
+    fprintf(stderr,
+            "Error: Failed to allocate debug output filename for '%s'\n",
+            ctx->output_filename);
+    return 0;
+  }
+  if (strcasecmp(format, "stabs") == 0) {
+    debug_info_generate_stabs(ctx->debug_info, debug_output);
+  } else if (strcasecmp(format, "map") == 0) {
+    debug_info_generate_debug_map(ctx->debug_info, debug_output);
+  } else {
+    debug_info_generate_dwarf(ctx->debug_info, debug_output);
+  }
+  if (ctx->options->debug_mode) {
+    printf("Generated debug info: %s\n", debug_output);
+  }
+  free(debug_output);
+  return 1;
+}
+
+static int compile_stage_debug_info(CompileContext *ctx) {
+  CompilerOptions *options = ctx->options;
+  int written = 1;
   compiler_set_phase(PROFILE_PHASE_DEBUG_INFO);
-  phase_start = compiler_profile_begin(&profile);
-  if (debug_info) {
+  ctx->phase_start = compiler_profile_begin(&ctx->profile);
+  if (ctx->debug_info) {
     if (options->debug_mode || options->generate_debug_symbols ||
         options->generate_line_mapping) {
-      const char *format =
-          (options->debug_format && options->debug_format[0] != '\0')
-              ? options->debug_format
-              : "dwarf";
-      const char *suffix = ".dwarf";
-
-      if (strcasecmp(format, "stabs") == 0) {
-        suffix = ".stabs";
-      } else if (strcasecmp(format, "map") == 0) {
-        suffix = ".map";
-      } else if (strcasecmp(format, "dwarf") != 0) {
-        fprintf(stderr,
-                "Warning: Unknown debug format '%s', defaulting to dwarf\n",
-                format);
-      }
-
-      char *debug_output = build_sidecar_filename(output_filename, suffix);
-      if (!debug_output) {
-        compiler_profile_add(&profile, PROFILE_PHASE_DEBUG_INFO, phase_start);
-        fprintf(stderr,
-                "Error: Failed to allocate debug output filename for '%s'\n",
-                output_filename);
-        result = 1;
-        goto cleanup;
-      }
-
-      if (strcasecmp(format, "stabs") == 0) {
-        debug_info_generate_stabs(debug_info, debug_output);
-      } else if (strcasecmp(format, "map") == 0) {
-        debug_info_generate_debug_map(debug_info, debug_output);
-      } else {
-        debug_info_generate_dwarf(debug_info, debug_output);
-      }
-
-      if (options->debug_mode) {
-        printf("Generated debug info: %s\n", debug_output);
-      }
-      free(debug_output);
+      written = compile_write_debug_sidecar(ctx);
     }
-
-    if (options->generate_stack_trace_support && options->debug_mode) {
+    if (written && options->generate_stack_trace_support &&
+        options->debug_mode) {
       printf("Embedded runtime stack trace support enabled\n");
     }
   }
-  compiler_profile_add(&profile, PROFILE_PHASE_DEBUG_INFO, phase_start);
+  compiler_profile_add(&ctx->profile, PROFILE_PHASE_DEBUG_INFO,
+                       ctx->phase_start);
+  return written ? COMPILE_CONTINUE : 1;
+}
 
-  if (options->debug_mode) {
-    if (error_reporter->count > 0) {
-      error_reporter_print_errors(error_reporter);
+static int compile_stage_report(CompileContext *ctx) {
+  if (ctx->error_reporter->count > 0) {
+    error_reporter_print_errors(ctx->error_reporter);
+  }
+  if (ctx->options->debug_mode) {
+    printf("Successfully compiled '%s' to '%s'\n", ctx->input_filename,
+           ctx->output_filename);
+  }
+  return COMPILE_CONTINUE;
+}
+
+static const CompileStage COMPILE_STAGES[] = {
+    compile_stage_parse,
+    compile_stage_imports,
+    compile_stage_monomorphize,
+    compile_stage_type_check,
+    compile_stage_type_reports,
+    compile_stage_proof_budget,
+    compile_stage_expand,
+    compile_stage_drop_tests,
+    compile_stage_lowering_modes,
+    compile_stage_lower_ir,
+    compile_stage_swap_check,
+    compile_stage_effects,
+    compile_stage_twins,
+    compile_stage_purity,
+    compile_stage_rules,
+    compile_stage_instrument_program,
+    compile_stage_machine,
+    compile_stage_trace_rules,
+    compile_stage_comptime,
+    compile_stage_safety,
+    compile_stage_deadlines,
+    compile_stage_device_targets,
+    compile_stage_hooks,
+    compile_stage_optimize,
+    compile_stage_counters,
+    compile_stage_dump_ir,
+    compile_stage_codegen,
+    compile_stage_machine_rules,
+    compile_stage_write_output,
+    compile_stage_debug_info,
+    compile_stage_report,
+};
+
+int compile_file(const char *input_filename, const char *output_filename,
+                 CompilerOptions *options) {
+  CompileContext ctx = {0};
+  const char *open_error = NULL;
+  int result = 0;
+  size_t i = 0;
+
+  ctx.input_filename = input_filename;
+  ctx.output_filename = output_filename;
+  ctx.options = options;
+  ctx.arm64_object_output = compile_targets_arm64_object(options);
+  compiler_profile_init(&ctx.profile, options && options->profile);
+
+  mettle_compiler_ctx_reset();
+  mettle_compiler_ctx_set_input_filename(input_filename);
+  mettle_compiler_ctx_set_current_filename(input_filename);
+  if (options) {
+    mettle_compiler_ctx_set_options(options->debug_compiler, options->dump_ir);
+  }
+
+  mettle_trust_mode_announce();
+  compiler_set_phase(PROFILE_PHASE_READ_INPUT);
+  ctx.phase_start = compiler_profile_begin(&ctx.profile);
+  result = compile_read_source(input_filename, &ctx.source) ? 0 : 1;
+  compiler_profile_add(&ctx.profile, PROFILE_PHASE_READ_INPUT, ctx.phase_start);
+  if (result) {
+    compiler_profile_print_compile(&ctx.profile, input_filename, 1);
+    return 1;
+  }
+
+  compiler_set_phase(PROFILE_PHASE_INIT);
+  ctx.phase_start = compiler_profile_begin(&ctx.profile);
+  ctx.error_reporter = error_reporter_create(input_filename, ctx.source);
+  if (!ctx.error_reporter) {
+    fprintf(stderr, "Error: Could not initialize error reporter\n");
+    free(ctx.source);
+    compiler_profile_print_compile(&ctx.profile, input_filename, 1);
+    return 1;
+  }
+  compiler_set_phase(PROFILE_PHASE_LEXICAL_VALIDATION);
+  ctx.phase_start = compiler_profile_begin(&ctx.profile);
+  compiler_profile_add(&ctx.profile, PROFILE_PHASE_LEXICAL_VALIDATION,
+                       ctx.phase_start);
+
+  compiler_set_phase(PROFILE_PHASE_INIT);
+  ctx.phase_start = compiler_profile_begin(&ctx.profile);
+  open_error = compile_session_open(&ctx);
+  if (open_error) {
+    error_reporter_add_error(ctx.error_reporter, ERROR_INTERNAL,
+                             source_location_create(0, 0), open_error);
+    error_reporter_print_errors(ctx.error_reporter);
+    result = 1;
+  } else {
+    compile_session_configure(&ctx);
+  }
+  compiler_profile_add(&ctx.profile, PROFILE_PHASE_INIT, ctx.phase_start);
+
+  for (i = 0; !result && i < sizeof(COMPILE_STAGES) / sizeof(COMPILE_STAGES[0]);
+       i++) {
+    int stage = COMPILE_STAGES[i](&ctx);
+    if (stage != COMPILE_CONTINUE) {
+      result = stage;
+      break;
     }
-    printf("Successfully compiled '%s' to '%s'\n", input_filename,
-           output_filename);
-  } else if (error_reporter->count > 0) {
-    error_reporter_print_errors(error_reporter);
   }
 
-cleanup:
-  ir_machine_set_collect(0);
-  ir_machine_reset();
-  ir_explain_set_quiet(0);
-  if (options && options->explain && !options->optimize) {
-    ir_explain_ledger_standalone(input_filename);
-  }
-  ir_twins_snapshots_free(twin_snapshots);
-  twin_snapshots = NULL;
-  compiler_set_phase(PROFILE_PHASE_CLEANUP);
-  phase_start = compiler_profile_begin(&profile);
-  if (getenv("METTLE_FULL_CLEANUP")) {
-    if (program)
-      ast_destroy_node(program);
-    if (ir_program)
-      ir_program_destroy(ir_program);
-    type_checker_destroy(type_checker);
-    symbol_table_destroy(symbol_table);
-  }
-  free(ir_error_message);
-  ir_effect_results_free(effect_results);
-  code_generator_destroy(code_generator);
-  register_allocator_destroy(register_allocator);
-  parser_destroy(parser);
-  lexer_destroy(lexer);
-  if (debug_info)
-    debug_info_destroy(debug_info);
-  error_reporter_destroy(error_reporter);
-  free(source);
-  compiler_profile_add(&profile, PROFILE_PHASE_CLEANUP, phase_start);
-  compiler_profile_print_compile(&profile, input_filename, result);
-
+  compile_session_close(&ctx);
+  compiler_profile_print_compile(&ctx.profile, input_filename, result);
   return result;
 }
 
