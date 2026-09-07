@@ -5866,12 +5866,138 @@ done:
   return ok;
 }
 
+static int compile_run_effects(IRProgram *ir_program, TypeChecker *type_checker,
+                               const CompilerOptions *options,
+                               ErrorReporter *error_reporter,
+                               IREffectResults **effect_results) {
+  if (!ir_program_declares_effects(ir_program) &&
+      type_checker->effect_obligation_count == 0 && !options->report_effects &&
+      !options->effect_budget_set && !options->explain && !options->why_mode) {
+    return 1;
+  }
+  IREffectInput effect_input;
+  long long effect_steps = 0;
+  IREffectDecl *effect_decls =
+      calloc(type_checker->effect_count ? type_checker->effect_count : 1,
+             sizeof(IREffectDecl));
+  IREffectObligation *obligations = calloc(
+      type_checker->effect_obligation_count
+          ? type_checker->effect_obligation_count
+          : 1,
+      sizeof(IREffectObligation));
+  int effects_ok = effect_decls && obligations;
+  if (effects_ok) {
+    for (size_t i = 0; i < type_checker->effect_count; i++) {
+      effect_decls[i].name = type_checker->effects[i].name;
+      effect_decls[i].site = type_checker->effects[i].site;
+      effect_decls[i].is_builtin = type_checker->effects[i].is_builtin;
+      effect_decls[i].is_exported = type_checker->effects[i].is_exported;
+    }
+    for (size_t i = 0; i < type_checker->effect_obligation_count; i++) {
+      obligations[i].function = type_checker->effect_obligations[i].function;
+      obligations[i].signature =
+          type_checker->effect_obligations[i].signature;
+      obligations[i].location = type_checker->effect_obligations[i].location;
+    }
+    memset(&effect_input, 0, sizeof(effect_input));
+    effect_input.effects = effect_decls;
+    effect_input.effect_count = type_checker->effect_count;
+    effect_input.obligations = obligations;
+    effect_input.obligation_count = type_checker->effect_obligation_count;
+    effect_input.instrument = options->check_effects || options->test_mode ||
+                              options->trace_function != NULL ||
+                              ir_verify_enabled();
+    effect_input.library_build = options->shared_output;
+    effect_input.report = options->report_effects ? stdout : NULL;
+    if (options->why_mode) {
+      effect_input.why_function = options->why_subject;
+      effect_input.why_effect = options->why_what;
+      effect_input.why_out = stdout;
+    }
+    effects_ok = ir_effects_run(ir_program, &effect_input, error_reporter,
+                                effect_results, &effect_steps);
+  }
+  free(effect_decls);
+  free(obligations);
+  if (!effects_ok) {
+    if (error_reporter_has_errors(error_reporter)) {
+      error_reporter_print_errors(error_reporter);
+    } else {
+      fprintf(stderr, "Error: could not analyse the program's effects\n");
+    }
+    return 0;
+  }
+  if (options->why_mode) {
+    return 2;
+  }
+  if (options->effect_budget_set && effect_steps > options->effect_budget) {
+    fprintf(stderr,
+            "error[F0005]: the effect pass spent %lld steps, more than the "
+            "%lld --effect-budget allows\n",
+            effect_steps, options->effect_budget);
+    fprintf(stderr,
+            "  help: --report-effects prints what the pass settled\n");
+    return 0;
+  }
+  return 1;
+}
+
+static int compile_run_rules(IRProgram *ir_program, TypeChecker *type_checker,
+                             const CompilerOptions *options,
+                             ErrorReporter *error_reporter, ASTNode *program,
+                             const char *input_filename,
+                             IREffectResults *effect_results,
+                             int *machine_rules_pending) {
+  if (!ir_program_has_rules(ir_program) && !options->report_rules) {
+    return 1;
+  }
+  IRRuleImage rule_image;
+  char *rule_error = NULL;
+  IRRuleStats rule_stats;
+  int rules_ok;
+  if (!rule_reflect_build(type_checker, program, input_filename,
+                          mtlc_target()->triple, effect_results, &rule_image,
+                          &rule_error)) {
+    fprintf(stderr, "Error: %s\n",
+            rule_error ? rule_error : "could not reflect the program");
+    free(rule_error);
+    return 0;
+  }
+  ir_rules_set_apply_fixes(options->apply_rule_fixes);
+  rules_ok = ir_rules_run_kind(
+      ir_program, &rule_image, error_reporter,
+      options->report_rules ? stdout : NULL,
+      options->rule_budget_set ? options->rule_budget : 0,
+      options->test_mode, IR_RULE_OVER_PROGRAM, &rule_stats);
+  ir_rule_image_free(&rule_image);
+  if ((*machine_rules_pending) ||
+      ir_program_has_rules_of(ir_program, IR_RULE_OVER_TRACE)) {
+    ir_program_drop_rules_except(ir_program, main_keep_machine_rule);
+  } else {
+    ir_program_drop_rules(ir_program);
+  }
+  if (!rules_ok) {
+    error_reporter_print_errors(error_reporter);
+    if (options->apply_rule_fixes && ir_rules_proposal_count() > 0) {
+      int applied = ir_rules_apply_fixes(stdout);
+      if (applied > 0) {
+        fprintf(stdout,
+                "%d line%s rewritten; build again to check the result\n",
+                applied, applied == 1 ? "" : "s");
+      }
+    }
+    return 0;
+  }
+  return 1;
+}
+
 int compile_file(const char *input_filename, const char *output_filename,
                  CompilerOptions *options) {
   CompilerProfile profile;
   double phase_start = 0.0;
   const int arm64_object_output = compile_targets_arm64_object(options);
   IREffectResults *effect_results = NULL;
+  int compile_effects_stage = 1;
   IRTwinSnapshots *twin_snapshots = NULL;
   int machine_rules_pending = 0;
   int explain_forced_for_rules = 0;
@@ -6246,76 +6372,12 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  if (ir_program_declares_effects(ir_program) ||
-      type_checker->effect_obligation_count > 0 || options->report_effects ||
-      options->effect_budget_set || options->explain || options->why_mode) {
-    IREffectInput effect_input;
-    long long effect_steps = 0;
-    IREffectDecl *effect_decls =
-        calloc(type_checker->effect_count ? type_checker->effect_count : 1,
-               sizeof(IREffectDecl));
-    IREffectObligation *obligations = calloc(
-        type_checker->effect_obligation_count
-            ? type_checker->effect_obligation_count
-            : 1,
-        sizeof(IREffectObligation));
-    int effects_ok = effect_decls && obligations;
-    if (effects_ok) {
-      for (size_t i = 0; i < type_checker->effect_count; i++) {
-        effect_decls[i].name = type_checker->effects[i].name;
-        effect_decls[i].site = type_checker->effects[i].site;
-        effect_decls[i].is_builtin = type_checker->effects[i].is_builtin;
-        effect_decls[i].is_exported = type_checker->effects[i].is_exported;
-      }
-      for (size_t i = 0; i < type_checker->effect_obligation_count; i++) {
-        obligations[i].function = type_checker->effect_obligations[i].function;
-        obligations[i].signature =
-            type_checker->effect_obligations[i].signature;
-        obligations[i].location = type_checker->effect_obligations[i].location;
-      }
-      memset(&effect_input, 0, sizeof(effect_input));
-      effect_input.effects = effect_decls;
-      effect_input.effect_count = type_checker->effect_count;
-      effect_input.obligations = obligations;
-      effect_input.obligation_count = type_checker->effect_obligation_count;
-      effect_input.instrument = options->check_effects || options->test_mode ||
-                                options->trace_function != NULL ||
-                                ir_verify_enabled();
-      effect_input.library_build = options->shared_output;
-      effect_input.report = options->report_effects ? stdout : NULL;
-      if (options->why_mode) {
-        effect_input.why_function = options->why_subject;
-        effect_input.why_effect = options->why_what;
-        effect_input.why_out = stdout;
-      }
-      effects_ok = ir_effects_run(ir_program, &effect_input, error_reporter,
-                                  &effect_results, &effect_steps);
-    }
-    free(effect_decls);
-    free(obligations);
-    if (!effects_ok) {
-      if (error_reporter_has_errors(error_reporter)) {
-        error_reporter_print_errors(error_reporter);
-      } else {
-        fprintf(stderr, "Error: could not analyse the program's effects\n");
-      }
-      result = 1;
-      goto cleanup;
-    }
-    if (options->why_mode) {
-      result = effects_ok ? 0 : 1;
-      goto cleanup;
-    }
-    if (options->effect_budget_set && effect_steps > options->effect_budget) {
-      fprintf(stderr,
-              "error[F0005]: the effect pass spent %lld steps, more than the "
-              "%lld --effect-budget allows\n",
-              effect_steps, options->effect_budget);
-      fprintf(stderr,
-              "  help: --report-effects prints what the pass settled\n");
-      result = 1;
-      goto cleanup;
-    }
+  compile_effects_stage = compile_run_effects(ir_program, type_checker,
+                                              options, error_reporter,
+                                              &effect_results);
+  if (compile_effects_stage != 1) {
+    result = compile_effects_stage == 0 ? 1 : 0;
+    goto cleanup;
   }
 
   if (ir_program_has_twins(ir_program) || options->report_twins) {
@@ -6345,46 +6407,11 @@ int compile_file(const char *input_filename, const char *output_filename,
     }
   }
 
-  if (ir_program_has_rules(ir_program) || options->report_rules) {
-    IRRuleImage rule_image;
-    char *rule_error = NULL;
-    IRRuleStats rule_stats;
-    int rules_ok;
-    if (!rule_reflect_build(type_checker, program, input_filename,
-                            mtlc_target()->triple, effect_results, &rule_image,
-                            &rule_error)) {
-      fprintf(stderr, "Error: %s\n",
-              rule_error ? rule_error : "could not reflect the program");
-      free(rule_error);
-      result = 1;
-      goto cleanup;
-    }
-    ir_rules_set_apply_fixes(options->apply_rule_fixes);
-    rules_ok = ir_rules_run_kind(
-        ir_program, &rule_image, error_reporter,
-        options->report_rules ? stdout : NULL,
-        options->rule_budget_set ? options->rule_budget : 0,
-        options->test_mode, IR_RULE_OVER_PROGRAM, &rule_stats);
-    ir_rule_image_free(&rule_image);
-    if (machine_rules_pending ||
-        ir_program_has_rules_of(ir_program, IR_RULE_OVER_TRACE)) {
-      ir_program_drop_rules_except(ir_program, main_keep_machine_rule);
-    } else {
-      ir_program_drop_rules(ir_program);
-    }
-    if (!rules_ok) {
-      error_reporter_print_errors(error_reporter);
-      if (options->apply_rule_fixes && ir_rules_proposal_count() > 0) {
-        int applied = ir_rules_apply_fixes(stdout);
-        if (applied > 0) {
-          fprintf(stdout,
-                  "%d line%s rewritten; build again to check the result\n",
-                  applied, applied == 1 ? "" : "s");
-        }
-      }
-      result = 1;
-      goto cleanup;
-    }
+  if (!compile_run_rules(ir_program, type_checker, options,
+                         error_reporter, program, input_filename,
+                         effect_results, &machine_rules_pending)) {
+    result = 1;
+    goto cleanup;
   }
 
   mettle_compiler_ctx_set_ir_program(ir_program);

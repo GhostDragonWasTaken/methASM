@@ -485,416 +485,445 @@ static void ir_sroa_rec_add_addr(IRSroaRec *recs, size_t owner,
   rec->addr_count++;
 }
 
+static int ir_sroa_scan_uses(IRFunction *function, size_t i, IRSroaRec *recs,
+                             size_t rec_count, IRSroaHash *rec_hash,
+                             IRSroaHash *addr_hash) {
+  const IRInstruction *insn = &function->instructions[i];
+  if ((insn->op == IR_OP_ADDRESS_OF || insn->op == IR_OP_BINARY) &&
+      insn->dest.kind == IR_OPERAND_TEMP &&
+      ir_sroa_hash_get(addr_hash, insn->dest.name)) {
+    return 1;
+  }
+  if (insn->op == IR_OP_LOAD) {
+    const IRSroaHashEnt *ae = ir_sroa_hash_get(addr_hash, insn->lhs.name);
+    if (ae) {
+      IRSroaRec *rec = &recs[ae->member];
+      if (ir_operand_is_temp_named(&insn->dest, insn->lhs.name) ||
+          ir_operand_is_temp_named(&insn->rhs, insn->lhs.name)) {
+        rec->eligible = 0;
+        return 1;
+      }
+      if (insn->dest.kind == IR_OPERAND_TEMP && insn->dest.name) {
+        const IRSroaHashEnt *o =
+            ir_sroa_hash_get(addr_hash, insn->dest.name);
+        if (o) {
+          recs[o->member].eligible = 0;
+        }
+      }
+      if (insn->rhs.kind == IR_OPERAND_TEMP && insn->rhs.name) {
+        const IRSroaHashEnt *o =
+            ir_sroa_hash_get(addr_hash, insn->rhs.name);
+        if (o) {
+          recs[o->member].eligible = 0;
+        }
+      }
+      int size = (insn->rhs.kind == IR_OPERAND_INT)
+                     ? (int)insn->rhs.int_value
+                     : 8;
+      if (!ir_sroa_scalar_access_width(size)) {
+        rec->eligible = 0;
+        return 1;
+      }
+      if (!ir_sroa_note_slot(rec->slots, &rec->slot_count, ae->offset,
+                             size, insn->is_float, insn->float_bits,
+                             insn->is_unsigned, insn->alias_class)) {
+        rec->eligible = 0;
+      }
+      return 1;
+    }
+  }
+  if (insn->op == IR_OP_STORE) {
+    const IRSroaHashEnt *ae =
+        ir_sroa_hash_get(addr_hash, insn->dest.name);
+    if (ae) {
+      IRSroaRec *rec = &recs[ae->member];
+      if (ir_operand_is_temp_named(&insn->lhs, insn->dest.name)) {
+        rec->eligible = 0;
+        return 1;
+      }
+      if (insn->lhs.kind == IR_OPERAND_TEMP && insn->lhs.name) {
+        const IRSroaHashEnt *o =
+            ir_sroa_hash_get(addr_hash, insn->lhs.name);
+        if (o) {
+          recs[o->member].eligible = 0;
+        }
+      }
+      if (insn->rhs.kind == IR_OPERAND_TEMP && insn->rhs.name) {
+        const IRSroaHashEnt *o =
+            ir_sroa_hash_get(addr_hash, insn->rhs.name);
+        if (o) {
+          recs[o->member].eligible = 0;
+        }
+      }
+      int size = (insn->rhs.kind == IR_OPERAND_INT)
+                     ? (int)insn->rhs.int_value
+                     : 8;
+      if (!ir_sroa_scalar_access_width(size)) {
+        rec->eligible = 0;
+        return 1;
+      }
+      if (!ir_sroa_note_slot(rec->slots, &rec->slot_count, ae->offset,
+                             size, insn->is_float, insn->float_bits,
+                             insn->is_unsigned, insn->alias_class)) {
+        rec->eligible = 0;
+      }
+      return 1;
+    }
+  }
+  if (insn->dest.kind == IR_OPERAND_TEMP && insn->dest.name) {
+    const IRSroaHashEnt *ae =
+        ir_sroa_hash_get(addr_hash, insn->dest.name);
+    if (ae) {
+      recs[ae->member].eligible = 0;
+    }
+  }
+  if (insn->lhs.kind == IR_OPERAND_TEMP && insn->lhs.name) {
+    const IRSroaHashEnt *ae = ir_sroa_hash_get(addr_hash, insn->lhs.name);
+    if (ae) {
+      recs[ae->member].eligible = 0;
+    }
+  }
+  if (insn->rhs.kind == IR_OPERAND_TEMP && insn->rhs.name) {
+    const IRSroaHashEnt *ae = ir_sroa_hash_get(addr_hash, insn->rhs.name);
+    if (ae) {
+      recs[ae->member].eligible = 0;
+    }
+  }
+  for (size_t a = 0; a < insn->argument_count; a++) {
+    const IROperand *arg = &insn->arguments[a];
+    if (arg->kind == IR_OPERAND_TEMP && arg->name) {
+      const IRSroaHashEnt *ae = ir_sroa_hash_get(addr_hash, arg->name);
+      if (ae) {
+        recs[ae->member].eligible = 0;
+      }
+    }
+  }
+  return 1;
+}
+
+static int ir_sroa_collect_records(IRFunction *function, size_t i,
+                                   IRSroaRec **recs, size_t *rec_count,
+                                   size_t *rec_cap, IRSroaHash *rec_hash,
+                                   IRSroaHash *addr_hash) {
+  const IRInstruction *insn = &function->instructions[i];
+  if (insn->op == IR_OP_ADDRESS_OF &&
+      insn->lhs.kind == IR_OPERAND_SYMBOL && insn->lhs.name &&
+      insn->dest.kind == IR_OPERAND_TEMP && insn->dest.name) {
+    const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, insn->lhs.name);
+    if (m) {
+      ir_sroa_rec_add_addr(*recs, m->member, addr_hash, insn->dest.name,
+                           0);
+      return 1;
+    }
+  }
+  if (insn->op == IR_OP_DECLARE_LOCAL &&
+      insn->dest.kind == IR_OPERAND_SYMBOL && insn->dest.name) {
+    const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, insn->dest.name);
+    if (m && (*recs)[m->member].decl_index == i) {
+      return 1;
+    }
+  }
+  if (insn->op == IR_OP_ASSIGN && insn->dest.kind == IR_OPERAND_SYMBOL &&
+      insn->dest.name && insn->lhs.kind == IR_OPERAND_SYMBOL &&
+      insn->lhs.name) {
+    const IRSroaHashEnt *de = ir_sroa_hash_get(rec_hash, insn->dest.name);
+    const IRSroaHashEnt *se = ir_sroa_hash_get(rec_hash, insn->lhs.name);
+    if (de || se) {
+      if (strcmp(insn->dest.name, insn->lhs.name) == 0) {
+        (*recs)[(de ? de : se)->member].eligible = 0;
+        return 1;
+      }
+      if (de && se) {
+        ir_sroa_rec_add_partner(*recs, de->member, se->member);
+        ir_sroa_rec_add_partner(*recs, se->member, de->member);
+      } else {
+        (*recs)[(de ? de : se)->member].comp_fail = 1;
+      }
+      return 1;
+    }
+  }
+  if (insn->dest.kind == IR_OPERAND_SYMBOL && insn->dest.name) {
+    const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, insn->dest.name);
+    if (m) {
+      (*recs)[m->member].eligible = 0;
+    }
+  }
+  if (insn->lhs.kind == IR_OPERAND_SYMBOL && insn->lhs.name) {
+    const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, insn->lhs.name);
+    if (m) {
+      (*recs)[m->member].eligible = 0;
+    }
+  }
+  if (insn->rhs.kind == IR_OPERAND_SYMBOL && insn->rhs.name) {
+    const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, insn->rhs.name);
+    if (m) {
+      (*recs)[m->member].eligible = 0;
+    }
+  }
+  for (size_t a = 0; a < insn->argument_count; a++) {
+    const IROperand *arg = &insn->arguments[a];
+    if (arg->kind == IR_OPERAND_SYMBOL && arg->name) {
+      const IRSroaHashEnt *m = ir_sroa_hash_get(rec_hash, arg->name);
+      if (m) {
+        (*recs)[m->member].eligible = 0;
+      }
+    }
+  }
+  return 1;
+}
+
+static int ir_sroa_round(IRFunction *function, int *changed,
+                         int iter) {
+  IRSroaRec *recs = NULL;
+  size_t rec_count = 0, rec_cap = 0;
+  IRSroaHash rec_hash = {0};
+  IRSroaHash addr_hash = {0};
+
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *insn = &function->instructions[i];
+    if (insn->op != IR_OP_DECLARE_LOCAL ||
+        insn->dest.kind != IR_OPERAND_SYMBOL || !insn->dest.name ||
+        !insn->text || ir_sroa_is_scalar_type_name(insn->text)) {
+      continue;
+    }
+    if (rec_count >= rec_cap) {
+      size_t nc = rec_cap ? rec_cap * 2 : 16;
+      IRSroaRec *grown = (IRSroaRec *)realloc(recs, nc * sizeof(IRSroaRec));
+      if (!grown) {
+        free(recs);
+        return 0;
+      }
+      recs = grown;
+      rec_cap = nc;
+    }
+    IRSroaRec *rec = &recs[rec_count];
+    memset(rec, 0, sizeof(*rec));
+    rec->name = insn->dest.name;
+    rec->decl_index = i;
+    rec->eligible = 1;
+    rec_count++;
+  }
+  if (rec_count == 0) {
+    free(recs);
+    return 0;
+  }
+  if (!ir_sroa_hash_init(&rec_hash, rec_count) ||
+      !ir_sroa_hash_init(&addr_hash, rec_count * IR_SROA_MAX_SLOTS * 2)) {
+    free(rec_hash.ents);
+    free(addr_hash.ents);
+    free(recs);
+    return 0;
+  }
+  for (size_t r = 0; r < rec_count; r++) {
+    const IRSroaHashEnt *dup = ir_sroa_hash_get(&rec_hash, recs[r].name);
+    if (dup) {
+      recs[dup->member].eligible = 0;
+      recs[r].eligible = 0;
+      continue;
+    }
+    ir_sroa_hash_put(&rec_hash, recs[r].name, r, 0);
+  }
+
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    if (!ir_sroa_collect_records(function, i, &recs, &rec_count, &rec_cap,
+                                 &rec_hash, &addr_hash)) {
+      return 1;
+    }
+  }
+
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *insn = &function->instructions[i];
+    if (insn->op == IR_OP_BINARY && insn->text &&
+        strcmp(insn->text, "+") == 0 && !insn->is_float &&
+        insn->dest.kind == IR_OPERAND_TEMP && insn->dest.name &&
+        insn->lhs.kind == IR_OPERAND_TEMP && insn->lhs.name &&
+        insn->rhs.kind == IR_OPERAND_INT) {
+      const IRSroaHashEnt *base =
+          ir_sroa_hash_get(&addr_hash, insn->lhs.name);
+      if (base) {
+        ir_sroa_rec_add_addr(recs, base->member, &addr_hash,
+                             insn->dest.name,
+                             base->offset + insn->rhs.int_value);
+      }
+    }
+  }
+
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    if (!ir_sroa_scan_uses(function, i, recs, rec_count, &rec_hash,
+                           &addr_hash)) {
+      return 1;
+    }
+  }
+
+  for (size_t r = 0; r < rec_count; r++) {
+    if (recs[r].addr_count == 0 || recs[r].slot_count == 0) {
+      recs[r].eligible = 0;
+    }
+    ir_sroa_sort_slots(recs[r].slots, recs[r].slot_count);
+  }
+  static int sroa_debug = -1;
+  if (sroa_debug < 0) {
+    sroa_debug = getenv("METTLE_SROA_DEBUG") ? 1 : 0;
+  }
+  if (sroa_debug) {
+    for (size_t r = 0; r < rec_count; r++) {
+      fprintf(stderr,
+              "SROA rec %zu name=%s decl=%zu elig=%d comp_fail=%d "
+              "partners=%zu addrs=%zu slots=%zu\n",
+              r, recs[r].name, recs[r].decl_index, recs[r].eligible,
+              recs[r].comp_fail, recs[r].partner_count, recs[r].addr_count,
+              recs[r].slot_count);
+    }
+  }
+  free(addr_hash.ents);
+  addr_hash.ents = NULL;
+  addr_hash.bucket_count = 0;
+
+  IRSroaFlatMember *members = NULL;
+  IRSroaLayout *layouts = NULL;
+  size_t member_count = 0, member_cap = 0;
+  size_t layout_count = 0, layout_cap = 0;
+  size_t comp[IR_SROA_MAX_GROUP];
+  size_t stack[IR_SROA_MAX_GROUP];
+  int oom = 0;
+
+  for (size_t r = 0; r < rec_count && !oom; r++) {
+    if (recs[r].visited) {
+      continue;
+    }
+    size_t comp_count = 0, stack_count = 0;
+    int comp_ok = 1;
+    recs[r].visited = 1;
+    stack[stack_count++] = r;
+    while (stack_count > 0) {
+      size_t cur = stack[--stack_count];
+      if (comp_count >= IR_SROA_MAX_GROUP) {
+        comp_ok = 0;
+        break;
+      }
+      comp[comp_count++] = cur;
+      for (size_t p = 0; p < recs[cur].partner_count; p++) {
+        size_t nxt = recs[cur].partners[p];
+        if (!recs[nxt].visited) {
+          recs[nxt].visited = 1;
+          if (stack_count >= IR_SROA_MAX_GROUP) {
+            comp_ok = 0;
+            break;
+          }
+          stack[stack_count++] = nxt;
+        }
+      }
+      if (!comp_ok) {
+        break;
+      }
+    }
+    if (comp_ok) {
+      const IRSroaRec *seed = &recs[comp[0]];
+      for (size_t c = 0; c < comp_count && comp_ok; c++) {
+        const IRSroaRec *m = &recs[comp[c]];
+        if (!m->eligible || m->comp_fail ||
+            !ir_sroa_slots_match(seed->slots, seed->slot_count, m->slots,
+                                 m->slot_count)) {
+          comp_ok = 0;
+        }
+      }
+    }
+    if (!comp_ok) {
+      continue;
+    }
+
+    if (layout_count >= layout_cap) {
+      size_t nc = layout_cap ? layout_cap * 2 : 8;
+      IRSroaLayout *grown =
+          (IRSroaLayout *)realloc(layouts, nc * sizeof(IRSroaLayout));
+      if (!grown) {
+        oom = 1;
+        break;
+      }
+      layouts = grown;
+      layout_cap = nc;
+    }
+    memcpy(layouts[layout_count].slots, recs[comp[0]].slots,
+           sizeof(layouts[layout_count].slots));
+    layouts[layout_count].slot_count = recs[comp[0]].slot_count;
+
+    if (member_count + comp_count > member_cap) {
+      size_t nc = member_cap ? member_cap * 2 : 16;
+      while (nc < member_count + comp_count) {
+        nc *= 2;
+      }
+      IRSroaFlatMember *grown = (IRSroaFlatMember *)realloc(
+          members, nc * sizeof(IRSroaFlatMember));
+      if (!grown) {
+        oom = 1;
+        break;
+      }
+      members = grown;
+      member_cap = nc;
+    }
+    for (size_t c = 0; c < comp_count; c++) {
+      IRSroaFlatMember *fm = &members[member_count++];
+      fm->name = recs[comp[c]].name;
+      fm->decl_index = recs[comp[c]].decl_index;
+      fm->layout = layout_count;
+      fm->addr_count = 0;
+    }
+    layout_count++;
+  }
+
+  free(rec_hash.ents);
+  free(recs);
+  if (oom) {
+    free(members);
+    free(layouts);
+    return 0;
+  }
+  if (sroa_debug) {
+    fprintf(stderr, "SROA fn=%s iter=%d members=%zu layouts=%zu\n",
+            function->name ? function->name : "?", iter, member_count,
+            layout_count);
+  }
+  if (member_count == 0) {
+    free(members);
+    free(layouts);
+    return 0;
+  }
+
+  IRSroaHash member_hash = {0};
+  IRSroaHash xform_addr_hash = {0};
+  int rc = ir_sroa_hash_init(&member_hash, member_count) &&
+           ir_sroa_hash_init(&xform_addr_hash,
+                             member_count * IR_SROA_MAX_SLOTS * 2);
+  if (rc) {
+    for (size_t m = 0; m < member_count; m++) {
+      ir_sroa_hash_put(&member_hash, members[m].name, m, 0);
+    }
+    ir_sroa_collect_all_addrs(function, members, &member_hash,
+                              &xform_addr_hash);
+    rc = ir_sroa_transform_all(function, members, member_count, layouts,
+                               &member_hash, &xform_addr_hash);
+  }
+  free(member_hash.ents);
+  free(xform_addr_hash.ents);
+  free(members);
+  free(layouts);
+  if (!rc) {
+    return 0;
+  }
+  if (changed) {
+    *changed = 1;
+  }
+  return 1;
+}
+
 int ir_sroa_pass(IRFunction *function, int *changed) {
   if (!function) {
     return 0;
   }
 
   for (int iter = 0; iter < 32; iter++) {
-    IRSroaRec *recs = NULL;
-    size_t rec_count = 0, rec_cap = 0;
-    IRSroaHash rec_hash = {0};
-    IRSroaHash addr_hash = {0};
-
-    for (size_t i = 0; i < function->instruction_count; i++) {
-      const IRInstruction *insn = &function->instructions[i];
-      if (insn->op != IR_OP_DECLARE_LOCAL ||
-          insn->dest.kind != IR_OPERAND_SYMBOL || !insn->dest.name ||
-          !insn->text || ir_sroa_is_scalar_type_name(insn->text)) {
-        continue;
-      }
-      if (rec_count >= rec_cap) {
-        size_t nc = rec_cap ? rec_cap * 2 : 16;
-        IRSroaRec *grown = (IRSroaRec *)realloc(recs, nc * sizeof(IRSroaRec));
-        if (!grown) {
-          free(recs);
-          return 0;
-        }
-        recs = grown;
-        rec_cap = nc;
-      }
-      IRSroaRec *rec = &recs[rec_count];
-      memset(rec, 0, sizeof(*rec));
-      rec->name = insn->dest.name;
-      rec->decl_index = i;
-      rec->eligible = 1;
-      rec_count++;
-    }
-    if (rec_count == 0) {
-      free(recs);
+    if (!ir_sroa_round(function, changed, iter)) {
       break;
-    }
-    if (!ir_sroa_hash_init(&rec_hash, rec_count) ||
-        !ir_sroa_hash_init(&addr_hash, rec_count * IR_SROA_MAX_SLOTS * 2)) {
-      free(rec_hash.ents);
-      free(addr_hash.ents);
-      free(recs);
-      return 0;
-    }
-    for (size_t r = 0; r < rec_count; r++) {
-      const IRSroaHashEnt *dup = ir_sroa_hash_get(&rec_hash, recs[r].name);
-      if (dup) {
-        recs[dup->member].eligible = 0;
-        recs[r].eligible = 0;
-        continue;
-      }
-      ir_sroa_hash_put(&rec_hash, recs[r].name, r, 0);
-    }
-
-    for (size_t i = 0; i < function->instruction_count; i++) {
-      const IRInstruction *insn = &function->instructions[i];
-      if (insn->op == IR_OP_ADDRESS_OF &&
-          insn->lhs.kind == IR_OPERAND_SYMBOL && insn->lhs.name &&
-          insn->dest.kind == IR_OPERAND_TEMP && insn->dest.name) {
-        const IRSroaHashEnt *m = ir_sroa_hash_get(&rec_hash, insn->lhs.name);
-        if (m) {
-          ir_sroa_rec_add_addr(recs, m->member, &addr_hash, insn->dest.name,
-                               0);
-          continue;
-        }
-      }
-      if (insn->op == IR_OP_DECLARE_LOCAL &&
-          insn->dest.kind == IR_OPERAND_SYMBOL && insn->dest.name) {
-        const IRSroaHashEnt *m = ir_sroa_hash_get(&rec_hash, insn->dest.name);
-        if (m && recs[m->member].decl_index == i) {
-          continue;
-        }
-      }
-      if (insn->op == IR_OP_ASSIGN && insn->dest.kind == IR_OPERAND_SYMBOL &&
-          insn->dest.name && insn->lhs.kind == IR_OPERAND_SYMBOL &&
-          insn->lhs.name) {
-        const IRSroaHashEnt *de = ir_sroa_hash_get(&rec_hash, insn->dest.name);
-        const IRSroaHashEnt *se = ir_sroa_hash_get(&rec_hash, insn->lhs.name);
-        if (de || se) {
-          if (strcmp(insn->dest.name, insn->lhs.name) == 0) {
-            recs[(de ? de : se)->member].eligible = 0;
-            continue;
-          }
-          if (de && se) {
-            ir_sroa_rec_add_partner(recs, de->member, se->member);
-            ir_sroa_rec_add_partner(recs, se->member, de->member);
-          } else {
-            recs[(de ? de : se)->member].comp_fail = 1;
-          }
-          continue;
-        }
-      }
-      if (insn->dest.kind == IR_OPERAND_SYMBOL && insn->dest.name) {
-        const IRSroaHashEnt *m = ir_sroa_hash_get(&rec_hash, insn->dest.name);
-        if (m) {
-          recs[m->member].eligible = 0;
-        }
-      }
-      if (insn->lhs.kind == IR_OPERAND_SYMBOL && insn->lhs.name) {
-        const IRSroaHashEnt *m = ir_sroa_hash_get(&rec_hash, insn->lhs.name);
-        if (m) {
-          recs[m->member].eligible = 0;
-        }
-      }
-      if (insn->rhs.kind == IR_OPERAND_SYMBOL && insn->rhs.name) {
-        const IRSroaHashEnt *m = ir_sroa_hash_get(&rec_hash, insn->rhs.name);
-        if (m) {
-          recs[m->member].eligible = 0;
-        }
-      }
-      for (size_t a = 0; a < insn->argument_count; a++) {
-        const IROperand *arg = &insn->arguments[a];
-        if (arg->kind == IR_OPERAND_SYMBOL && arg->name) {
-          const IRSroaHashEnt *m = ir_sroa_hash_get(&rec_hash, arg->name);
-          if (m) {
-            recs[m->member].eligible = 0;
-          }
-        }
-      }
-    }
-
-    for (size_t i = 0; i < function->instruction_count; i++) {
-      const IRInstruction *insn = &function->instructions[i];
-      if (insn->op == IR_OP_BINARY && insn->text &&
-          strcmp(insn->text, "+") == 0 && !insn->is_float &&
-          insn->dest.kind == IR_OPERAND_TEMP && insn->dest.name &&
-          insn->lhs.kind == IR_OPERAND_TEMP && insn->lhs.name &&
-          insn->rhs.kind == IR_OPERAND_INT) {
-        const IRSroaHashEnt *base =
-            ir_sroa_hash_get(&addr_hash, insn->lhs.name);
-        if (base) {
-          ir_sroa_rec_add_addr(recs, base->member, &addr_hash,
-                               insn->dest.name,
-                               base->offset + insn->rhs.int_value);
-        }
-      }
-    }
-
-    for (size_t i = 0; i < function->instruction_count; i++) {
-      const IRInstruction *insn = &function->instructions[i];
-      if ((insn->op == IR_OP_ADDRESS_OF || insn->op == IR_OP_BINARY) &&
-          insn->dest.kind == IR_OPERAND_TEMP &&
-          ir_sroa_hash_get(&addr_hash, insn->dest.name)) {
-        continue;
-      }
-      if (insn->op == IR_OP_LOAD) {
-        const IRSroaHashEnt *ae = ir_sroa_hash_get(&addr_hash, insn->lhs.name);
-        if (ae) {
-          IRSroaRec *rec = &recs[ae->member];
-          if (ir_operand_is_temp_named(&insn->dest, insn->lhs.name) ||
-              ir_operand_is_temp_named(&insn->rhs, insn->lhs.name)) {
-            rec->eligible = 0;
-            continue;
-          }
-          if (insn->dest.kind == IR_OPERAND_TEMP && insn->dest.name) {
-            const IRSroaHashEnt *o =
-                ir_sroa_hash_get(&addr_hash, insn->dest.name);
-            if (o) {
-              recs[o->member].eligible = 0;
-            }
-          }
-          if (insn->rhs.kind == IR_OPERAND_TEMP && insn->rhs.name) {
-            const IRSroaHashEnt *o =
-                ir_sroa_hash_get(&addr_hash, insn->rhs.name);
-            if (o) {
-              recs[o->member].eligible = 0;
-            }
-          }
-          int size = (insn->rhs.kind == IR_OPERAND_INT)
-                         ? (int)insn->rhs.int_value
-                         : 8;
-          if (!ir_sroa_scalar_access_width(size)) {
-            rec->eligible = 0;
-            continue;
-          }
-          if (!ir_sroa_note_slot(rec->slots, &rec->slot_count, ae->offset,
-                                 size, insn->is_float, insn->float_bits,
-                                 insn->is_unsigned, insn->alias_class)) {
-            rec->eligible = 0;
-          }
-          continue;
-        }
-      }
-      if (insn->op == IR_OP_STORE) {
-        const IRSroaHashEnt *ae =
-            ir_sroa_hash_get(&addr_hash, insn->dest.name);
-        if (ae) {
-          IRSroaRec *rec = &recs[ae->member];
-          if (ir_operand_is_temp_named(&insn->lhs, insn->dest.name)) {
-            rec->eligible = 0;
-            continue;
-          }
-          if (insn->lhs.kind == IR_OPERAND_TEMP && insn->lhs.name) {
-            const IRSroaHashEnt *o =
-                ir_sroa_hash_get(&addr_hash, insn->lhs.name);
-            if (o) {
-              recs[o->member].eligible = 0;
-            }
-          }
-          if (insn->rhs.kind == IR_OPERAND_TEMP && insn->rhs.name) {
-            const IRSroaHashEnt *o =
-                ir_sroa_hash_get(&addr_hash, insn->rhs.name);
-            if (o) {
-              recs[o->member].eligible = 0;
-            }
-          }
-          int size = (insn->rhs.kind == IR_OPERAND_INT)
-                         ? (int)insn->rhs.int_value
-                         : 8;
-          if (!ir_sroa_scalar_access_width(size)) {
-            rec->eligible = 0;
-            continue;
-          }
-          if (!ir_sroa_note_slot(rec->slots, &rec->slot_count, ae->offset,
-                                 size, insn->is_float, insn->float_bits,
-                                 insn->is_unsigned, insn->alias_class)) {
-            rec->eligible = 0;
-          }
-          continue;
-        }
-      }
-      if (insn->dest.kind == IR_OPERAND_TEMP && insn->dest.name) {
-        const IRSroaHashEnt *ae =
-            ir_sroa_hash_get(&addr_hash, insn->dest.name);
-        if (ae) {
-          recs[ae->member].eligible = 0;
-        }
-      }
-      if (insn->lhs.kind == IR_OPERAND_TEMP && insn->lhs.name) {
-        const IRSroaHashEnt *ae = ir_sroa_hash_get(&addr_hash, insn->lhs.name);
-        if (ae) {
-          recs[ae->member].eligible = 0;
-        }
-      }
-      if (insn->rhs.kind == IR_OPERAND_TEMP && insn->rhs.name) {
-        const IRSroaHashEnt *ae = ir_sroa_hash_get(&addr_hash, insn->rhs.name);
-        if (ae) {
-          recs[ae->member].eligible = 0;
-        }
-      }
-      for (size_t a = 0; a < insn->argument_count; a++) {
-        const IROperand *arg = &insn->arguments[a];
-        if (arg->kind == IR_OPERAND_TEMP && arg->name) {
-          const IRSroaHashEnt *ae = ir_sroa_hash_get(&addr_hash, arg->name);
-          if (ae) {
-            recs[ae->member].eligible = 0;
-          }
-        }
-      }
-    }
-
-    for (size_t r = 0; r < rec_count; r++) {
-      if (recs[r].addr_count == 0 || recs[r].slot_count == 0) {
-        recs[r].eligible = 0;
-      }
-      ir_sroa_sort_slots(recs[r].slots, recs[r].slot_count);
-    }
-    static int sroa_debug = -1;
-    if (sroa_debug < 0) {
-      sroa_debug = getenv("METTLE_SROA_DEBUG") ? 1 : 0;
-    }
-    if (sroa_debug) {
-      for (size_t r = 0; r < rec_count; r++) {
-        fprintf(stderr,
-                "SROA rec %zu name=%s decl=%zu elig=%d comp_fail=%d "
-                "partners=%zu addrs=%zu slots=%zu\n",
-                r, recs[r].name, recs[r].decl_index, recs[r].eligible,
-                recs[r].comp_fail, recs[r].partner_count, recs[r].addr_count,
-                recs[r].slot_count);
-      }
-    }
-    free(addr_hash.ents);
-    addr_hash.ents = NULL;
-    addr_hash.bucket_count = 0;
-
-    IRSroaFlatMember *members = NULL;
-    IRSroaLayout *layouts = NULL;
-    size_t member_count = 0, member_cap = 0;
-    size_t layout_count = 0, layout_cap = 0;
-    size_t comp[IR_SROA_MAX_GROUP];
-    size_t stack[IR_SROA_MAX_GROUP];
-    int oom = 0;
-
-    for (size_t r = 0; r < rec_count && !oom; r++) {
-      if (recs[r].visited) {
-        continue;
-      }
-      size_t comp_count = 0, stack_count = 0;
-      int comp_ok = 1;
-      recs[r].visited = 1;
-      stack[stack_count++] = r;
-      while (stack_count > 0) {
-        size_t cur = stack[--stack_count];
-        if (comp_count >= IR_SROA_MAX_GROUP) {
-          comp_ok = 0;
-          break;
-        }
-        comp[comp_count++] = cur;
-        for (size_t p = 0; p < recs[cur].partner_count; p++) {
-          size_t nxt = recs[cur].partners[p];
-          if (!recs[nxt].visited) {
-            recs[nxt].visited = 1;
-            if (stack_count >= IR_SROA_MAX_GROUP) {
-              comp_ok = 0;
-              break;
-            }
-            stack[stack_count++] = nxt;
-          }
-        }
-        if (!comp_ok) {
-          break;
-        }
-      }
-      if (comp_ok) {
-        const IRSroaRec *seed = &recs[comp[0]];
-        for (size_t c = 0; c < comp_count && comp_ok; c++) {
-          const IRSroaRec *m = &recs[comp[c]];
-          if (!m->eligible || m->comp_fail ||
-              !ir_sroa_slots_match(seed->slots, seed->slot_count, m->slots,
-                                   m->slot_count)) {
-            comp_ok = 0;
-          }
-        }
-      }
-      if (!comp_ok) {
-        continue;
-      }
-
-      if (layout_count >= layout_cap) {
-        size_t nc = layout_cap ? layout_cap * 2 : 8;
-        IRSroaLayout *grown =
-            (IRSroaLayout *)realloc(layouts, nc * sizeof(IRSroaLayout));
-        if (!grown) {
-          oom = 1;
-          break;
-        }
-        layouts = grown;
-        layout_cap = nc;
-      }
-      memcpy(layouts[layout_count].slots, recs[comp[0]].slots,
-             sizeof(layouts[layout_count].slots));
-      layouts[layout_count].slot_count = recs[comp[0]].slot_count;
-
-      if (member_count + comp_count > member_cap) {
-        size_t nc = member_cap ? member_cap * 2 : 16;
-        while (nc < member_count + comp_count) {
-          nc *= 2;
-        }
-        IRSroaFlatMember *grown = (IRSroaFlatMember *)realloc(
-            members, nc * sizeof(IRSroaFlatMember));
-        if (!grown) {
-          oom = 1;
-          break;
-        }
-        members = grown;
-        member_cap = nc;
-      }
-      for (size_t c = 0; c < comp_count; c++) {
-        IRSroaFlatMember *fm = &members[member_count++];
-        fm->name = recs[comp[c]].name;
-        fm->decl_index = recs[comp[c]].decl_index;
-        fm->layout = layout_count;
-        fm->addr_count = 0;
-      }
-      layout_count++;
-    }
-
-    free(rec_hash.ents);
-    free(recs);
-    if (oom) {
-      free(members);
-      free(layouts);
-      return 0;
-    }
-    if (sroa_debug) {
-      fprintf(stderr, "SROA fn=%s iter=%d members=%zu layouts=%zu\n",
-              function->name ? function->name : "?", iter, member_count,
-              layout_count);
-    }
-    if (member_count == 0) {
-      free(members);
-      free(layouts);
-      break;
-    }
-
-    IRSroaHash member_hash = {0};
-    IRSroaHash xform_addr_hash = {0};
-    int rc = ir_sroa_hash_init(&member_hash, member_count) &&
-             ir_sroa_hash_init(&xform_addr_hash,
-                               member_count * IR_SROA_MAX_SLOTS * 2);
-    if (rc) {
-      for (size_t m = 0; m < member_count; m++) {
-        ir_sroa_hash_put(&member_hash, members[m].name, m, 0);
-      }
-      ir_sroa_collect_all_addrs(function, members, &member_hash,
-                                &xform_addr_hash);
-      rc = ir_sroa_transform_all(function, members, member_count, layouts,
-                                 &member_hash, &xform_addr_hash);
-    }
-    free(member_hash.ents);
-    free(xform_addr_hash.ents);
-    free(members);
-    free(layouts);
-    if (!rc) {
-      return 0;
-    }
-    if (changed) {
-      *changed = 1;
     }
   }
   return 1;
