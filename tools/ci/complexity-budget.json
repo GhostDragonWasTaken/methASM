@@ -94,7 +94,6 @@
     "src/ir/ir_verify.c::irv_check_function_ex": 51,
     "src/ir/ml_gnn.c::gnn_forward": 42,
     "src/ir/ml_gnn.c::load_weights_into": 67,
-    "src/ir/ml_gnn.c::process_function": 197,
     "src/ir/ml_obs.c::ml_obs_selftest": 94,
     "src/ir/optimizer/ir_optimize_core.c::ir_collect_instruction_temp_uses": 56,
     "src/ir/optimizer/ir_optimize_egraph.c::eg_saturate_round": 51,

@@ -1300,400 +1300,581 @@ static void dag_infix(char **texts, int n, const char *name, char *out, size_t c
   snprintf(out, cap, "%s", name[0] == '@' ? name + 1 : name);
 }
 
-static void process_function(const char *fname, char **texts, int *gidx, int n,
-                             Buf *out, Buf *explain) {
-  if (n <= 0 || n > 6000) return;
+typedef struct {
+  const char *fname;
+  char **texts;
+  int *gidx;
+  int n;
+  int nf;
+  int *kind;
+  int *op;
+  float *feat;
+  char **defn;
+  VecS *uses;
+  VecI *succ;
+  VecI *preds;
+  char *dom;
+  Intern gk;
+  int *gkey;
+  VecI du_s, du_d, c_s, c_d, se_s, se_d, dse_s, dse_d;
+  VecI sv_s, sv_d, dsv_s, dsv_d;
+  MlObsFp *ofps;
+  int *esrc[NEDGE_MAX];
+  int *edst[NEDGE_MAX];
+  int ecnt[NEDGE_MAX];
+  int *action;
+  float *hstate;
+  float *risk_p;
+  double risk_thresh;
+  int want_ptr;
+  int want_risk;
+  int *collapse_flag;
+  char **gvn_src;
+  unsigned char *gvn_model_src;
+  VecS params;
+  int *aff_kind;
+  char **aff_arg;
+} GnnJob;
 
-  int *kind = calloc(n, sizeof(int)), *op = calloc(n, sizeof(int));
-  const int NF = G.nfeat > 0 ? G.nfeat : NFEAT;
-  float *feat = calloc((size_t)n * NF, sizeof(float));
-  char **defn = calloc(n, sizeof(char *));
-  VecS *uses = calloc(n, sizeof(VecS));
+static char *gnn_dominators(GnnJob *job) {
+  if (!job->dom) job->dom = dominators(job->preds, job->n);
+  return job->dom;
+}
+
+static void gnn_build_features(GnnJob *job) {
+  const int n = job->n, NF = job->nf;
+  job->kind = calloc(n, sizeof(int));
+  job->op = calloc(n, sizeof(int));
+  job->feat = calloc((size_t)n * NF, sizeof(float));
+  job->defn = calloc(n, sizeof(char *));
+  job->uses = calloc(n, sizeof(VecS));
   for (int i = 0; i < n; i++) {
-    classify(texts[i], &kind[i], &op[i]);
-    defn[i] = parse_instr(texts[i], &uses[i]);
-    feat[(size_t)i * NF + 0] = (defn[i] && defn[i][0] == '%') ? 1.f : 0.f;
-    feat[(size_t)i * NF + 1] = (defn[i] && defn[i][0] == '@') ? 1.f : 0.f;
-    int nc = count_consts(texts[i]); feat[(size_t)i * NF + 2] = nc < 3 ? nc : 3;
-    int nu = uses[i].n; feat[(size_t)i * NF + 3] = nu < 4 ? nu : 4;
-    float of[5]; operand_feats(texts[i], of);
-    for (int j = 0; j < 5; j++) feat[(size_t)i * NF + 4 + j] = of[j];
+    classify(job->texts[i], &job->kind[i], &job->op[i]);
+    job->defn[i] = parse_instr(job->texts[i], &job->uses[i]);
+    job->feat[(size_t)i * NF + 0] = (job->defn[i] && job->defn[i][0] == '%') ? 1.f : 0.f;
+    job->feat[(size_t)i * NF + 1] = (job->defn[i] && job->defn[i][0] == '@') ? 1.f : 0.f;
+    int nc = count_consts(job->texts[i]); job->feat[(size_t)i * NF + 2] = nc < 3 ? nc : 3;
+    int nu = job->uses[i].n; job->feat[(size_t)i * NF + 3] = nu < 4 ? nu : 4;
+    float of[5]; operand_feats(job->texts[i], of);
+    for (int j = 0; j < 5; j++) job->feat[(size_t)i * NF + 4 + j] = of[j];
   }
+}
 
-  VecI du_s = {0}, du_d = {0};
-  { VecS ld_name = {0}; VecI ld_idx = {0};
-    for (int i = 0; i < n; i++) {
-      for (int u = 0; u < uses[i].n; u++) {
-        for (int k = ld_name.n - 1; k >= 0; k--)
-          if (strcmp(ld_name.a[k], uses[i].a[u]) == 0) { vi_push(&du_s, ld_idx.a[k]); vi_push(&du_d, i); break; }
-      }
-      if (defn[i]) { int found = -1;
-        for (int k = 0; k < ld_name.n; k++) if (strcmp(ld_name.a[k], defn[i]) == 0) { found = k; break; }
-        if (found >= 0) ld_idx.a[found] = i; else { vs_push(&ld_name, strdup(defn[i])); vi_push(&ld_idx, i); }
-      }
+static void gnn_build_def_use(GnnJob *job) {
+  const int n = job->n;
+  VecS ld_name = {0}; VecI ld_idx = {0};
+  for (int i = 0; i < n; i++) {
+    for (int u = 0; u < job->uses[i].n; u++) {
+      for (int k = ld_name.n - 1; k >= 0; k--)
+        if (strcmp(ld_name.a[k], job->uses[i].a[u]) == 0) { vi_push(&job->du_s, ld_idx.a[k]); vi_push(&job->du_d, i); break; }
     }
-    vs_free(&ld_name); vi_free(&ld_idx);
+    if (job->defn[i]) { int found = -1;
+      for (int k = 0; k < ld_name.n; k++) if (strcmp(ld_name.a[k], job->defn[i]) == 0) { found = k; break; }
+      if (found >= 0) ld_idx.a[found] = i; else { vs_push(&ld_name, strdup(job->defn[i])); vi_push(&ld_idx, i); }
+    }
   }
+  vs_free(&ld_name); vi_free(&ld_idx);
+}
 
-  VecI *succ = calloc(n, sizeof(VecI)), *preds = calloc(n, sizeof(VecI));
-  { VecS lbl_name = {0}; VecI lbl_idx = {0};
-    for (int i = 0; i < n; i++) if (starts(texts[i], "label ")) {
-      char t[256]; nth_token(texts[i], 1, t, sizeof t); vs_push(&lbl_name, strdup(t)); vi_push(&lbl_idx, i);
-    }
-    for (int i = 0; i < n; i++) {
-      const char *s = texts[i];
-      if (starts(s, "jump ")) {
-        char t[256]; nth_token(s, 1, t, sizeof t);
-        for (int k = 0; k < lbl_name.n; k++) if (strcmp(lbl_name.a[k], t) == 0) { vi_push(&succ[i], lbl_idx.a[k]); break; }
-      } else if (starts(s, "branch_zero ") || starts(s, "branch_eq ")) {
-        const char *ar = strstr(s, "-> ");
-        if (ar) { char t[256]; nth_token(ar + 3, 0, t, sizeof t);
-          for (int k = 0; k < lbl_name.n; k++) if (strcmp(lbl_name.a[k], t) == 0) { vi_push(&succ[i], lbl_idx.a[k]); break; } }
-        if (i + 1 < n) vi_push(&succ[i], i + 1);
-      } else if (starts(s, "return ")) {
-      } else if (i + 1 < n) vi_push(&succ[i], i + 1);
-    }
-    vs_free(&lbl_name); vi_free(&lbl_idx);
+static void gnn_build_successors(GnnJob *job, const VecS *lbl_name,
+                                 const VecI *lbl_idx) {
+  const int n = job->n;
+  for (int i = 0; i < n; i++) {
+    const char *s = job->texts[i];
+    if (starts(s, "jump ")) {
+      char t[256]; nth_token(s, 1, t, sizeof t);
+      for (int k = 0; k < lbl_name->n; k++) if (strcmp(lbl_name->a[k], t) == 0) { vi_push(&job->succ[i], lbl_idx->a[k]); break; }
+    } else if (starts(s, "branch_zero ") || starts(s, "branch_eq ")) {
+      const char *ar = strstr(s, "-> ");
+      if (ar) { char t[256]; nth_token(ar + 3, 0, t, sizeof t);
+        for (int k = 0; k < lbl_name->n; k++) if (strcmp(lbl_name->a[k], t) == 0) { vi_push(&job->succ[i], lbl_idx->a[k]); break; } }
+      if (i + 1 < n) vi_push(&job->succ[i], i + 1);
+    } else if (starts(s, "return ")) {
+    } else if (i + 1 < n) vi_push(&job->succ[i], i + 1);
   }
-  for (int i = 0; i < n; i++) for (int k = 0; k < succ[i].n; k++) vi_push(&preds[succ[i].a[k]], i);
+}
 
-  VecI c_s = {0}, c_d = {0};
-  for (int i = 0; i < n; i++) for (int k = 0; k < succ[i].n; k++) { vi_push(&c_s, i); vi_push(&c_d, succ[i].a[k]); }
+static void gnn_build_cfg(GnnJob *job) {
+  const int n = job->n;
+  VecS lbl_name = {0}; VecI lbl_idx = {0};
+  job->succ = calloc(n, sizeof(VecI));
+  job->preds = calloc(n, sizeof(VecI));
+  for (int i = 0; i < n; i++) if (starts(job->texts[i], "label ")) {
+    char t[256]; nth_token(job->texts[i], 1, t, sizeof t); vs_push(&lbl_name, strdup(t)); vi_push(&lbl_idx, i);
+  }
+  gnn_build_successors(job, &lbl_name, &lbl_idx);
+  vs_free(&lbl_name); vi_free(&lbl_idx);
+  for (int i = 0; i < n; i++) for (int k = 0; k < job->succ[i].n; k++) vi_push(&job->preds[job->succ[i].a[k]], i);
+  for (int i = 0; i < n; i++) for (int k = 0; k < job->succ[i].n; k++) { vi_push(&job->c_s, i); vi_push(&job->c_d, job->succ[i].a[k]); }
+}
 
-  Intern gk = {0}; int *gkey = malloc(n * sizeof(int));
-  for (int i = 0; i < n; i++) { gkey[i] = -1;
+static void gnn_build_expr_keys(GnnJob *job) {
+  const int n = job->n;
+  job->gkey = malloc(n * sizeof(int));
+  for (int i = 0; i < n; i++) { job->gkey[i] = -1;
     char dest[256], rhs[512];
-    if (split_def(texts[i], dest, sizeof dest, rhs, sizeof rhs)) {
-      char *k = expr_key(rhs); if (k) { gkey[i] = intern(&gk, k); free(k); }
+    if (split_def(job->texts[i], dest, sizeof dest, rhs, sizeof rhs)) {
+      char *k = expr_key(rhs); if (k) { job->gkey[i] = intern(&job->gk, k); free(k); }
     }
   }
-  VecI se_s = {0}, se_d = {0};
-  { int *last = malloc(gk.keys.n ? gk.keys.n * sizeof(int) : sizeof(int));
-    for (int i = 0; i < gk.keys.n; i++) last[i] = -1;
-    for (int i = 0; i < n; i++) if (gkey[i] >= 0) {
-      if (last[gkey[i]] >= 0) { vi_push(&se_s, last[gkey[i]]); vi_push(&se_d, i); }
-      last[gkey[i]] = i;
+  { int *last = malloc(job->gk.keys.n ? job->gk.keys.n * sizeof(int) : sizeof(int));
+    for (int i = 0; i < job->gk.keys.n; i++) last[i] = -1;
+    for (int i = 0; i < n; i++) if (job->gkey[i] >= 0) {
+      if (last[job->gkey[i]] >= 0) { vi_push(&job->se_s, last[job->gkey[i]]); vi_push(&job->se_d, i); }
+      last[job->gkey[i]] = i;
     }
     free(last);
   }
+}
 
-  VecI dse_s = {0}, dse_d = {0};
-  char *dom = NULL;
-  { int multi = 0; if (gk.keys.n) { int *cnt = calloc(gk.keys.n, sizeof(int));
-      for (int i = 0; i < n; i++) if (gkey[i] >= 0) cnt[gkey[i]]++;
-      for (int k = 0; k < gk.keys.n; k++) if (cnt[k] > 1) multi = 1;
-      free(cnt); }
-    if (multi) {
-      dom = dominators(preds, n);
-      for (int k = 0; k < gk.keys.n; k++) {
-        VecI idxs = {0};
-        for (int i = 0; i < n; i++) if (gkey[i] == k) vi_push(&idxs, i);
-        if (idxs.n >= 2) for (int ai = 0; ai < idxs.n; ai++) {
-          int i = idxs.a[ai];
-          for (int bi = ai - 1; bi >= 0; bi--) { int j = idxs.a[bi];
-            if (dom[(size_t)i * n + j]) { vi_push(&dse_s, j); vi_push(&dse_d, i); break; } }
-        }
-        vi_free(&idxs);
+static int gnn_expr_key_repeats(const GnnJob *job) {
+  const int n = job->n;
+  int multi = 0;
+  int *cnt = NULL;
+  if (!job->gk.keys.n) return 0;
+  cnt = calloc(job->gk.keys.n, sizeof(int));
+  for (int i = 0; i < n; i++) if (job->gkey[i] >= 0) cnt[job->gkey[i]]++;
+  for (int k = 0; k < job->gk.keys.n; k++) if (cnt[k] > 1) multi = 1;
+  free(cnt);
+  return multi;
+}
+
+static void gnn_build_dom_expr_edges(GnnJob *job) {
+  const int n = job->n;
+  if (!gnn_expr_key_repeats(job)) return;
+  gnn_dominators(job);
+  for (int k = 0; k < job->gk.keys.n; k++) {
+    VecI idxs = {0};
+    for (int i = 0; i < n; i++) if (job->gkey[i] == k) vi_push(&idxs, i);
+    if (idxs.n >= 2) for (int ai = 0; ai < idxs.n; ai++) {
+      int i = idxs.a[ai];
+      for (int bi = ai - 1; bi >= 0; bi--) { int j = idxs.a[bi];
+        if (job->dom[(size_t)i * n + j]) { vi_push(&job->dse_s, j); vi_push(&job->dse_d, i); break; } }
+    }
+    vi_free(&idxs);
+  }
+}
+
+static void gnn_edge_pair(GnnJob *job, int slot, VecI *s, VecI *d) {
+  job->esrc[slot] = s->a; job->edst[slot] = d->a; job->ecnt[slot] = s->n;
+  job->esrc[slot + 1] = d->a; job->edst[slot + 1] = s->a; job->ecnt[slot + 1] = s->n;
+}
+
+static void gnn_wire_edges(GnnJob *job) {
+  for (int t = 0; t < NEDGE_MAX; t++) { job->esrc[t] = NULL; job->edst[t] = NULL; job->ecnt[t] = 0; }
+  gnn_edge_pair(job, 0, &job->du_s, &job->du_d);
+  gnn_edge_pair(job, 2, &job->c_s, &job->c_d);
+  gnn_edge_pair(job, 4, &job->se_s, &job->se_d);
+  gnn_edge_pair(job, 6, &job->dse_s, &job->dse_d);
+}
+
+static void gnn_obs_apply_features(GnnJob *job) {
+  const int n = job->n, NF = job->nf;
+  float *ob = calloc((size_t)n * ML_OBS_NOBS, sizeof(float));
+  if (!ob) return;
+  ml_obs_features(job->texts, n, ob);
+  for (int i = 0; i < n; i++)
+    for (int j = 0; j < ML_OBS_NOBS; j++)
+      job->feat[(size_t)i * NF + NFEAT + j] = ob[(size_t)i * ML_OBS_NOBS + j];
+  free(ob);
+}
+
+static void gnn_obs_value_edges(GnnJob *job) {
+  const int n = job->n;
+  for (int i = 0; i < n; i++) {
+    if (!ml_obs_edge_eligible(&job->ofps[i])) continue;
+    for (int p = i - 1; p >= 0; p--) {
+      if (!ml_obs_edge_eligible(&job->ofps[p])) continue;
+      if (memcmp(job->ofps[i].v, job->ofps[p].v, sizeof job->ofps[i].v) == 0) {
+        vi_push(&job->sv_s, p); vi_push(&job->sv_d, i);
+        break;
       }
     }
   }
+}
 
-  int *esrc[NEDGE_MAX], *edst[NEDGE_MAX], ecnt[NEDGE_MAX];
-  for (int t = 0; t < NEDGE_MAX; t++) { esrc[t] = NULL; edst[t] = NULL; ecnt[t] = 0; }
-  esrc[0] = du_s.a; edst[0] = du_d.a; ecnt[0] = du_s.n;
-  esrc[1] = du_d.a; edst[1] = du_s.a; ecnt[1] = du_s.n;
-  esrc[2] = c_s.a; edst[2] = c_d.a; ecnt[2] = c_s.n;
-  esrc[3] = c_d.a; edst[3] = c_s.a; ecnt[3] = c_s.n;
-  esrc[4] = se_s.a; edst[4] = se_d.a; ecnt[4] = se_s.n;
-  esrc[5] = se_d.a; edst[5] = se_s.a; ecnt[5] = se_s.n;
-  esrc[6] = dse_s.a; edst[6] = dse_d.a; ecnt[6] = dse_s.n;
-  esrc[7] = dse_d.a; edst[7] = dse_s.a; ecnt[7] = dse_s.n;
-
-  VecI sv_s = {0}, sv_d = {0}, dsv_s = {0}, dsv_d = {0};
-  MlObsFp *ofps = NULL;
-  if (G.nfeat >= NFEAT_OBS && G.nedge >= NEDGE_OBS) {
-    float *ob = calloc((size_t)n * ML_OBS_NOBS, sizeof(float));
-    if (ob) {
-      ml_obs_features(texts, n, ob);
-      for (int i = 0; i < n; i++)
-        for (int j = 0; j < ML_OBS_NOBS; j++)
-          feat[(size_t)i * NF + NFEAT + j] = ob[(size_t)i * ML_OBS_NOBS + j];
-      free(ob);
-    }
-    ofps = calloc((size_t)n, sizeof(MlObsFp));
-    if (ofps) {
-      ml_obs_fingerprints(texts, n, ofps, NULL, NULL);
-      for (int i = 0; i < n; i++) {
-        if (!ml_obs_edge_eligible(&ofps[i])) continue;
-        for (int p = i - 1; p >= 0; p--) {
-          if (!ml_obs_edge_eligible(&ofps[p])) continue;
-          if (memcmp(ofps[i].v, ofps[p].v, sizeof ofps[i].v) == 0) {
-            vi_push(&sv_s, p); vi_push(&sv_d, i);
-            break;
-          }
-        }
-      }
-      if (sv_s.n > 0) {
-        if (!dom) dom = dominators(preds, n);
-        if (dom) {
-          for (int i = 0; i < n; i++) {
-            if (!ml_obs_edge_eligible(&ofps[i])) continue;
-            for (int p = i - 1; p >= 0; p--) {
-              if (!ml_obs_edge_eligible(&ofps[p])) continue;
-              if (memcmp(ofps[i].v, ofps[p].v, sizeof ofps[i].v) != 0) continue;
-              if (dom[(size_t)i * n + p]) {
-                vi_push(&dsv_s, p); vi_push(&dsv_d, i);
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-    esrc[8] = sv_s.a; edst[8] = sv_d.a; ecnt[8] = sv_s.n;
-    esrc[9] = sv_d.a; edst[9] = sv_s.a; ecnt[9] = sv_s.n;
-    esrc[10] = dsv_s.a; edst[10] = dsv_d.a; ecnt[10] = dsv_s.n;
-    esrc[11] = dsv_d.a; edst[11] = dsv_s.a; ecnt[11] = dsv_s.n;
-  }
-
-  int *action = malloc(n * sizeof(int));
-  float *hstate = NULL;
-  int want_ptr = (G.flags & MLW_FLAG_PTR) && getenv("METTLE_ML_PTR") &&
-                 getenv("METTLE_ML_PTR")[0] != '0';
-  double risk_thresh = -1.0;
-  {
-    const char *rt = getenv("METTLE_ML_RISK");
-    if (rt && rt[0] && (G.flags & MLW_FLAG_AUX)) risk_thresh = atof(rt);
-  }
-  int want_risk = risk_thresh >= 0.0;
-  gnn_forward(&G, n, kind, op, feat, esrc, edst, ecnt, action,
-              (want_ptr || want_risk) ? &hstate : NULL);
-
-  float *risk_p = NULL;
-  if (want_risk && hstate) {
-    risk_p = malloc((size_t)n * sizeof(float));
-    for (int i = 0; i < n; i++) {
-      float lg2[2];
-      linear(lg2, hstate + (size_t)i * G.d, G.risk_w, G.risk_b, 2, G.d);
-      float m0 = lg2[0] > lg2[1] ? lg2[0] : lg2[1];
-      float e0 = expf(lg2[0] - m0), e1 = expf(lg2[1] - m0);
-      risk_p[i] = e1 / (e0 + e1);
-    }
-  }
-
-  {
-    const char *ap = getenv("METTLE_ML_ACTIONS");
-    if (ap && ap[0]) {
-      FILE *af = fopen(ap, "a");
-      if (af) {
-        for (int j = 0; j < n; j++)
-          fprintf(af, "%s\t%d\t%d\n", fname, gidx[j], action[j]);
-        fclose(af);
+static void gnn_obs_dom_edges(GnnJob *job) {
+  const int n = job->n;
+  if (job->sv_s.n <= 0 || !gnn_dominators(job)) return;
+  for (int i = 0; i < n; i++) {
+    if (!ml_obs_edge_eligible(&job->ofps[i])) continue;
+    for (int p = i - 1; p >= 0; p--) {
+      if (!ml_obs_edge_eligible(&job->ofps[p])) continue;
+      if (memcmp(job->ofps[i].v, job->ofps[p].v, sizeof job->ofps[i].v) != 0) continue;
+      if (job->dom[(size_t)i * n + p]) {
+        vi_push(&job->dsv_s, p); vi_push(&job->dsv_d, i);
+        break;
       }
     }
   }
-  int *collapse_flag = calloc(n, sizeof(int));
+}
+
+static void gnn_build_obs_edges(GnnJob *job) {
+  if (G.nfeat < NFEAT_OBS || G.nedge < NEDGE_OBS) return;
+  gnn_obs_apply_features(job);
+  job->ofps = calloc((size_t)job->n, sizeof(MlObsFp));
+  if (job->ofps) {
+    ml_obs_fingerprints(job->texts, job->n, job->ofps, NULL, NULL);
+    gnn_obs_value_edges(job);
+    gnn_obs_dom_edges(job);
+  }
+  gnn_edge_pair(job, 8, &job->sv_s, &job->sv_d);
+  gnn_edge_pair(job, 10, &job->dsv_s, &job->dsv_d);
+}
+
+static void gnn_score_risk(GnnJob *job) {
+  const int n = job->n;
+  if (!job->want_risk || !job->hstate) return;
+  job->risk_p = malloc((size_t)n * sizeof(float));
+  for (int i = 0; i < n; i++) {
+    float lg2[2];
+    linear(lg2, job->hstate + (size_t)i * G.d, G.risk_w, G.risk_b, 2, G.d);
+    float m0 = lg2[0] > lg2[1] ? lg2[0] : lg2[1];
+    float e0 = expf(lg2[0] - m0), e1 = expf(lg2[1] - m0);
+    job->risk_p[i] = e1 / (e0 + e1);
+  }
+}
+
+static void gnn_dump_actions(const GnnJob *job) {
+  const char *ap = getenv("METTLE_ML_ACTIONS");
+  FILE *af = NULL;
+  if (!ap || !ap[0]) return;
+  af = fopen(ap, "a");
+  if (!af) return;
+  for (int j = 0; j < job->n; j++)
+    fprintf(af, "%s\t%d\t%d\n", job->fname, job->gidx[j], job->action[j]);
+  fclose(af);
+}
+
+static void gnn_run_model(GnnJob *job) {
+  const int n = job->n;
+  const char *rt = getenv("METTLE_ML_RISK");
+  job->action = malloc(n * sizeof(int));
+  job->want_ptr = (G.flags & MLW_FLAG_PTR) && getenv("METTLE_ML_PTR") &&
+                  getenv("METTLE_ML_PTR")[0] != '0';
+  job->risk_thresh = -1.0;
+  if (rt && rt[0] && (G.flags & MLW_FLAG_AUX)) job->risk_thresh = atof(rt);
+  job->want_risk = job->risk_thresh >= 0.0;
+  gnn_forward(&G, n, job->kind, job->op, job->feat, job->esrc, job->edst,
+              job->ecnt, job->action,
+              (job->want_ptr || job->want_risk) ? &job->hstate : NULL);
+  gnn_score_risk(job);
+  gnn_dump_actions(job);
+  job->collapse_flag = calloc(n, sizeof(int));
   if (getenv("METTLE_ML_COLLAPSE_ALL")) {
-    for (int i = 0; i < n; i++) collapse_flag[i] = 1;
+    for (int i = 0; i < n; i++) job->collapse_flag[i] = 1;
   } else {
-    for (int i = 0; i < n; i++) collapse_flag[i] = (action[i] == COLLAPSE_CLASS);
+    for (int i = 0; i < n; i++) job->collapse_flag[i] = (job->action[i] == COLLAPSE_CLASS);
   }
+}
 
-  char **gvn_src = calloc(n, sizeof(char *));
-  unsigned char *gvn_model_src = calloc(n, 1);
-  {
-    Intern vk = {0}; VecS vk_a = {0}, vk_b = {0};
-    int *keyid = malloc(n * sizeof(int));
-    char **vdefn = calloc(n, sizeof(char *));
-    for (int i = 0; i < n; i++) { keyid[i] = -1;
-      char dest[256], rhs[512];
-      if (split_def(texts[i], dest, sizeof dest, rhs, sizeof rhs)) {
-        vdefn[i] = strdup(dest);
-        if (dest[0] == '%') {
-          char a[256], o[16], b[256];
-          if (three_token(rhs, a, sizeof a, o, sizeof o, b, sizeof b)) {
-            if (op_is_comm(o) && strcmp(a, b) > 0) { char tmp[256]; strcpy(tmp, a); strcpy(a, b); strcpy(b, tmp); }
-            char key[600]; sprintf(key, "%s|%s|%s", o, a, b);
-            int before = vk.keys.n; int id = intern(&vk, key);
-            if (id == before) { vs_push(&vk_a, strdup(a)); vs_push(&vk_b, strdup(b)); }
-            keyid[i] = id;
-          }
-        }
-      }
-    }
-    int K = vk.keys.n;
-    if (K > 0) {
-      char *gen = calloc((size_t)n * K, 1), *kill = calloc((size_t)n * K, 1);
-      for (int i = 0; i < n; i++) {
-        if (vdefn[i]) for (int k = 0; k < K; k++)
-          if (strcmp(vdefn[i], vk_a.a[k]) == 0 || strcmp(vdefn[i], vk_b.a[k]) == 0) kill[(size_t)i * K + k] = 1;
-        if (texts[i][0] == '*' || has_call(texts[i])) {
-          for (int k = 0; k < K; k++)
-            if (vk_a.a[k][0] == '@' || vk_b.a[k][0] == '@') kill[(size_t)i * K + k] = 1;
-        }
-        if (keyid[i] >= 0 && !kill[(size_t)i * K + keyid[i]]) gen[(size_t)i * K + keyid[i]] = 1;
-      }
-      char *ain = calloc((size_t)n * K, 1), *aout = malloc((size_t)n * K);
-      memset(aout, 1, (size_t)n * K);
-      int changed = 1;
-      char *tmp = malloc(K);
-      while (changed) { changed = 0;
-        for (int i = 0; i < n; i++) {
-          if (i == 0 || preds[i].n == 0) memset(tmp, 0, K);
-          else { memset(tmp, 1, K);
-            for (int pi = 0; pi < preds[i].n; pi++) { char *ao = aout + (size_t)preds[i].a[pi] * K;
-              for (int k = 0; k < K; k++) tmp[k] &= ao[k]; } }
-          if (i == 0) memset(tmp, 0, K);
-          char *ai = ain + (size_t)i * K;
-          int diff = memcmp(ai, tmp, K) != 0;
-          if (diff) memcpy(ai, tmp, K);
-          char *ao = aout + (size_t)i * K, *ki = kill + (size_t)i * K, *gi = gen + (size_t)i * K;
-          for (int k = 0; k < K; k++) { char v = (ai[k] & !ki[k]) | gi[k];
-            if (v != ao[k]) { ao[k] = v; changed = 1; } }
-          if (diff) changed = 1;
-        }
-      }
-      if (!dom) dom = dominators(preds, n);
-      for (int i = 0; i < n; i++) {
-        int e = keyid[i];
-        if (e < 0 || !ain[(size_t)i * K + e]) continue;
-        for (int j = 0; j < n; j++) if (j != i && keyid[j] == e && dom[(size_t)i * n + j]) {
-          gvn_src[i] = strdup(vdefn[j]); break;
-        }
-      }
-      free(gen); free(kill); free(ain); free(aout); free(tmp);
-    }
-    if (want_ptr && hstate) {
-      int d = G.d;
-      float *q = malloc((size_t)d * sizeof(float));
-      float *k = malloc((size_t)d * sizeof(float));
-      for (int i = 0; i < n; i++) {
-        int cs[ML_PTR_MAX_CAND], nc = 0;
-        for (int e = 0; e < ecnt[6] && nc < ML_PTR_MAX_CAND; e++)
-          if (edst[6][e] == i) cs[nc++] = esrc[6][e];
-        for (int e = 0; e < ecnt[10] && nc < ML_PTR_MAX_CAND; e++) {
-          if (edst[10][e] != i) continue;
-          int dup = 0;
-          for (int c = 0; c < nc; c++) if (cs[c] == esrc[10][e]) dup = 1;
-          if (!dup) cs[nc++] = esrc[10][e];
-        }
-        if (nc == 0) continue;
-        linear(q, hstate + (size_t)i * d, G.ptr_q_w, G.ptr_q_b, d, d);
-        float best = G.ptr_none[0];
-        int bestc = -1;
-        for (int c = 0; c < nc; c++) {
-          linear(k, hstate + (size_t)cs[c] * d, G.ptr_k_w, G.ptr_k_b, d, d);
-          float s = 0.f;
-          for (int t = 0; t < d; t++) s += q[t] * k[t];
-          s /= sqrtf((float)d);
-          if (s > best) { best = s; bestc = cs[c]; }
-        }
-        if (bestc < 0 || !vdefn[bestc] || vdefn[bestc][0] != '%') continue;
-        if (gvn_src[i] && strcmp(gvn_src[i], vdefn[bestc]) == 0) continue;
-        free(gvn_src[i]);
-        gvn_src[i] = strdup(vdefn[bestc]);
-        gvn_model_src[i] = 1;
-        if (action[i] != GVN_CLASS) action[i] = GVN_CLASS;
-      }
-      free(q); free(k);
-    }
-    for (int i = 0; i < n; i++) free(vdefn[i]);
-    free(vdefn); free(keyid); vs_free(&vk.keys); vs_free(&vk_a); vs_free(&vk_b);
-  }
+typedef struct {
+  Intern vk;
+  VecS vk_a, vk_b;
+  int *keyid;
+  char **vdefn;
+} GnnValueKeys;
 
-  VecS params = {0};
-  int *aff_kind = calloc(n, sizeof(int)); char **aff_arg = calloc(n, sizeof(char *));
-  if (getenv("METTLE_ML_AFFINE")) {
-    infer_params(texts, n, &params);
-    affine_run(texts, n, &params, aff_kind, aff_arg);
+static void gnn_value_key_scan(GnnJob *job, GnnValueKeys *vs) {
+  const int n = job->n;
+  vs->keyid = malloc(n * sizeof(int));
+  vs->vdefn = calloc(n, sizeof(char *));
+  for (int i = 0; i < n; i++) { vs->keyid[i] = -1;
+    char dest[256], rhs[512];
+    if (!split_def(job->texts[i], dest, sizeof dest, rhs, sizeof rhs)) continue;
+    vs->vdefn[i] = strdup(dest);
+    if (dest[0] != '%') continue;
+    { char a[256], o[16], b[256];
+      if (three_token(rhs, a, sizeof a, o, sizeof o, b, sizeof b)) {
+        if (op_is_comm(o) && strcmp(a, b) > 0) { char tmp[256]; strcpy(tmp, a); strcpy(a, b); strcpy(b, tmp); }
+        char key[600]; sprintf(key, "%s|%s|%s", o, a, b);
+        int before = vs->vk.keys.n; int id = intern(&vs->vk, key);
+        if (id == before) { vs_push(&vs->vk_a, strdup(a)); vs_push(&vs->vk_b, strdup(b)); }
+        vs->keyid[i] = id;
+      }
+    }
   }
+}
+
+static void gnn_value_gen_kill(GnnJob *job, GnnValueKeys *vs, int K,
+                               char *gen, char *kill) {
+  const int n = job->n;
+  for (int i = 0; i < n; i++) {
+    if (vs->vdefn[i]) for (int k = 0; k < K; k++)
+      if (strcmp(vs->vdefn[i], vs->vk_a.a[k]) == 0 || strcmp(vs->vdefn[i], vs->vk_b.a[k]) == 0) kill[(size_t)i * K + k] = 1;
+    if (job->texts[i][0] == '*' || has_call(job->texts[i])) {
+      for (int k = 0; k < K; k++)
+        if (vs->vk_a.a[k][0] == '@' || vs->vk_b.a[k][0] == '@') kill[(size_t)i * K + k] = 1;
+    }
+    if (vs->keyid[i] >= 0 && !kill[(size_t)i * K + vs->keyid[i]]) gen[(size_t)i * K + vs->keyid[i]] = 1;
+  }
+}
+
+static void gnn_value_available(GnnJob *job, int K, const char *gen,
+                                const char *kill, char *ain, char *aout) {
+  const int n = job->n;
+  char *tmp = malloc(K);
+  int changed = 1;
+  memset(aout, 1, (size_t)n * K);
+  while (changed) { changed = 0;
+    for (int i = 0; i < n; i++) {
+      if (i == 0 || job->preds[i].n == 0) memset(tmp, 0, K);
+      else { memset(tmp, 1, K);
+        for (int pi = 0; pi < job->preds[i].n; pi++) { const char *ao = aout + (size_t)job->preds[i].a[pi] * K;
+          for (int k = 0; k < K; k++) tmp[k] &= ao[k]; } }
+      if (i == 0) memset(tmp, 0, K);
+      char *ai = ain + (size_t)i * K;
+      int diff = memcmp(ai, tmp, K) != 0;
+      if (diff) memcpy(ai, tmp, K);
+      char *ao = aout + (size_t)i * K;
+      const char *ki = kill + (size_t)i * K, *gi = gen + (size_t)i * K;
+      for (int k = 0; k < K; k++) { char v = (ai[k] & !ki[k]) | gi[k];
+        if (v != ao[k]) { ao[k] = v; changed = 1; } }
+      if (diff) changed = 1;
+    }
+  }
+  free(tmp);
+}
+
+static void gnn_value_pick_sources(GnnJob *job, GnnValueKeys *vs, int K,
+                                   const char *ain) {
+  const int n = job->n;
+  gnn_dominators(job);
+  for (int i = 0; i < n; i++) {
+    int e = vs->keyid[i];
+    if (e < 0 || !ain[(size_t)i * K + e]) continue;
+    for (int j = 0; j < n; j++) if (j != i && vs->keyid[j] == e && job->dom[(size_t)i * n + j]) {
+      job->gvn_src[i] = strdup(vs->vdefn[j]); break;
+    }
+  }
+}
+
+static void gnn_value_numbering(GnnJob *job, GnnValueKeys *vs) {
+  const int n = job->n;
+  const int K = vs->vk.keys.n;
+  char *gen = NULL, *kill = NULL, *ain = NULL, *aout = NULL;
+  if (K <= 0) return;
+  gen = calloc((size_t)n * K, 1);
+  kill = calloc((size_t)n * K, 1);
+  gnn_value_gen_kill(job, vs, K, gen, kill);
+  ain = calloc((size_t)n * K, 1);
+  aout = malloc((size_t)n * K);
+  gnn_value_available(job, K, gen, kill, ain, aout);
+  gnn_value_pick_sources(job, vs, K, ain);
+  free(gen); free(kill); free(ain); free(aout);
+}
+
+static int gnn_ptr_candidates(const GnnJob *job, int i, int *cs) {
+  int nc = 0;
+  for (int e = 0; e < job->ecnt[6] && nc < ML_PTR_MAX_CAND; e++)
+    if (job->edst[6][e] == i) cs[nc++] = job->esrc[6][e];
+  for (int e = 0; e < job->ecnt[10] && nc < ML_PTR_MAX_CAND; e++) {
+    if (job->edst[10][e] != i) continue;
+    int dup = 0;
+    for (int c = 0; c < nc; c++) if (cs[c] == job->esrc[10][e]) dup = 1;
+    if (!dup) cs[nc++] = job->esrc[10][e];
+  }
+  return nc;
+}
+
+static int gnn_ptr_best(const GnnJob *job, int i, const int *cs, int nc,
+                        float *q, float *k) {
+  const int d = G.d;
+  float best = G.ptr_none[0];
+  int bestc = -1;
+  linear(q, job->hstate + (size_t)i * d, G.ptr_q_w, G.ptr_q_b, d, d);
+  for (int c = 0; c < nc; c++) {
+    linear(k, job->hstate + (size_t)cs[c] * d, G.ptr_k_w, G.ptr_k_b, d, d);
+    float s = 0.f;
+    for (int t = 0; t < d; t++) s += q[t] * k[t];
+    s /= sqrtf((float)d);
+    if (s > best) { best = s; bestc = cs[c]; }
+  }
+  return bestc;
+}
+
+static void gnn_ptr_attention(GnnJob *job, GnnValueKeys *vs) {
+  const int n = job->n, d = G.d;
+  float *q = NULL, *k = NULL;
+  if (!job->want_ptr || !job->hstate) return;
+  q = malloc((size_t)d * sizeof(float));
+  k = malloc((size_t)d * sizeof(float));
+  for (int i = 0; i < n; i++) {
+    int cs[ML_PTR_MAX_CAND];
+    int nc = gnn_ptr_candidates(job, i, cs);
+    int bestc = nc ? gnn_ptr_best(job, i, cs, nc, q, k) : -1;
+    if (bestc < 0 || !vs->vdefn[bestc] || vs->vdefn[bestc][0] != '%') continue;
+    if (job->gvn_src[i] && strcmp(job->gvn_src[i], vs->vdefn[bestc]) == 0) continue;
+    free(job->gvn_src[i]);
+    job->gvn_src[i] = strdup(vs->vdefn[bestc]);
+    job->gvn_model_src[i] = 1;
+    if (job->action[i] != GVN_CLASS) job->action[i] = GVN_CLASS;
+  }
+  free(q); free(k);
+}
+
+static void gnn_build_gvn(GnnJob *job) {
+  const int n = job->n;
+  GnnValueKeys vs = {0};
+  job->gvn_src = calloc(n, sizeof(char *));
+  job->gvn_model_src = calloc(n, 1);
+  gnn_value_key_scan(job, &vs);
+  gnn_value_numbering(job, &vs);
+  gnn_ptr_attention(job, &vs);
+  for (int i = 0; i < n; i++) free(vs.vdefn[i]);
+  free(vs.vdefn); free(vs.keyid);
+  vs_free(&vs.vk.keys); vs_free(&vs.vk_a); vs_free(&vs.vk_b);
+}
+
+static void gnn_build_affine(GnnJob *job) {
+  job->aff_kind = calloc(job->n, sizeof(int));
+  job->aff_arg = calloc(job->n, sizeof(char *));
+  if (!getenv("METTLE_ML_AFFINE")) return;
+  infer_params(job->texts, job->n, &job->params);
+  affine_run(job->texts, job->n, &job->params, job->aff_kind, job->aff_arg);
+}
+
+static int gnn_emit_superopt(GnnJob *job, int j, const char *bexpr, Buf *out,
+                             Buf *explain) {
+  char rw[600], after[600], line[700], ex[1200];
+  int saved = 0;
+  int bw = superopt_check(job->texts, job->n, j, rw, sizeof rw, &saved);
+  int gf = bw ? 0 : gf2_check(job->texts, job->n, j, rw, sizeof rw, &saved);
+  if (!bw && !gf) return 0;
+  snprintf(line, sizeof line, "%s %d %s\n", job->fname, job->gidx[j], rw);
+  buf_add(out, line);
+  if (strncmp(rw, "REWRITE ", 8) == 0) infix_from_postfix(rw + 8, after, sizeof after);
+  else snprintf(after, sizeof after, "%s", strchr(rw, ' ') ? strchr(rw, ' ') + 1 : rw);
+  snprintf(ex, sizeof ex, "%s\t%d\t%s superoptimize\t%s\t%s\t%d\n",
+           job->fname, job->gidx[j], bw ? "bitwise" : "xor-shift", bexpr, after, saved);
+  buf_add(explain, ex);
+  return 1;
+}
+
+static int gnn_emit_collapse(GnnJob *job, int j, const char *bexpr, Buf *out,
+                             Buf *explain) {
+  char arg[256], line[700], ex[1200];
+  int ck = 0, saved = 0;
+  if (!collapse_check(job->texts, job->n, j, arg, sizeof arg, &ck, &saved)) return 0;
+  snprintf(line, sizeof line, "%s %d %s %s\n", job->fname, job->gidx[j],
+           ck == 1 ? "CONST" : "COPY", arg);
+  buf_add(out, line);
+  snprintf(ex, sizeof ex, "%s\t%d\tcollapse\t%s\t%s\t%d\n",
+           job->fname, job->gidx[j], bexpr, arg, saved);
+  buf_add(explain, ex);
+  return 1;
+}
+
+static int gnn_speculative_enabled(void) {
+  static int speculative = -1;
+  if (speculative < 0) {
+    const char *e = getenv("METTLE_ML_SPECULATIVE");
+    speculative = (e && e[0] && strcmp(e, "0") != 0) ? 1 : 0;
+  }
+  return speculative;
+}
+
+static int gnn_emit_delete(GnnJob *job, int j, const char *bexpr, Buf *out,
+                           Buf *explain) {
+  char line[700], ex[1200];
+  int k = job->kind[j];
+  if (!gnn_speculative_enabled() || job->action[j] != DELETE_CLASS ||
+      !(k == 5 || k == 6 || k == 7 || k == 8)) {
+    return 0;
+  }
+  if (job->risk_p && job->risk_p[j] >= (float)job->risk_thresh) {
+    ml_risk_declined++;
+    return 1;
+  }
+  snprintf(line, sizeof line, "%s %d NOP\n", job->fname, job->gidx[j]);
+  buf_add(out, line);
+  snprintf(ex, sizeof ex, "%s\t%d\tmodel delete\t%s\t(deleted)\t1\n", job->fname,
+           job->gidx[j], bexpr[0] ? bexpr : job->texts[j]);
+  buf_add(explain, ex);
+  return 1;
+}
+
+static int gnn_emit_affine(GnnJob *job, int j, const char *bexpr, Buf *out,
+                           Buf *explain) {
+  char line[700], ex[1200];
+  if (job->action[j] != AFFINE_CLASS || !job->aff_kind[j]) return 0;
+  snprintf(line, sizeof line, "%s %d %s %s\n", job->fname, job->gidx[j],
+           job->aff_kind[j] == 1 ? "CONST" : "COPY", job->aff_arg[j]);
+  buf_add(out, line);
+  snprintf(ex, sizeof ex, "%s\t%d\taffine\t%s\t%s\t1\n", job->fname, job->gidx[j], bexpr, job->aff_arg[j]);
+  buf_add(explain, ex);
+  return 1;
+}
+
+static void gnn_emit_gvn(GnnJob *job, int j, const char *bexpr,
+                         const char *drhs, Buf *out, Buf *explain) {
+  char a[256], o[16], b[256], line[700], ex[1200];
+  if (!job->gvn_src[j] || job->action[j] != GVN_CLASS) return;
+  if (drhs[0] == 0 || three_token(drhs, a, sizeof a, o, sizeof o, b, sizeof b) == 0) return;
+  snprintf(line, sizeof line, "%s %d COPY%s %s\n", job->fname, job->gidx[j],
+           job->gvn_model_src[j] ? "?" : "", job->gvn_src[j]);
+  buf_add(out, line);
+  snprintf(ex, sizeof ex, "%s\t%d\tGVN reuse%s\t%s\t%s\t1\n", job->fname, job->gidx[j],
+           job->gvn_model_src[j] ? " (model-chosen)" : "", bexpr, job->gvn_src[j]);
+  buf_add(explain, ex);
+}
+
+static void gnn_emit_one(GnnJob *job, int j, Buf *out, Buf *explain) {
+  char drhs[512] = "", ddst[256] = "", bexpr[512];
+  split_def(job->texts[j], ddst, sizeof ddst, drhs, sizeof drhs);
+  if (ddst[0]) dag_infix(job->texts, job->n, ddst, bexpr, sizeof bexpr, 0);
+  else snprintf(bexpr, sizeof bexpr, "%s", drhs);
+  if (job->collapse_flag[j] &&
+      (gnn_emit_superopt(job, j, bexpr, out, explain) ||
+       gnn_emit_collapse(job, j, bexpr, out, explain))) {
+    return;
+  }
+  if (gnn_emit_delete(job, j, bexpr, out, explain)) return;
+  if (gnn_emit_affine(job, j, bexpr, out, explain)) return;
+  gnn_emit_gvn(job, j, bexpr, drhs, out, explain);
+}
+
+static void gnn_job_free(GnnJob *job) {
+  const int n = job->n;
+  for (int i = 0; i < n; i++) free(job->aff_arg[i]);
+  free(job->aff_kind); free(job->aff_arg); vs_free(&job->params); free(job->collapse_flag);
+  for (int i = 0; i < n; i++) { free(job->defn[i]); free(job->gvn_src[i]); vs_free(&job->uses[i]); }
+  free(job->defn); free(job->gvn_src); free(job->gvn_model_src); free(job->hstate); free(job->risk_p);
+  free(job->uses); free(job->kind); free(job->op); free(job->feat);
+  free(job->action); free(job->gkey); vs_free(&job->gk.keys);
+  vi_free(&job->du_s); vi_free(&job->du_d); vi_free(&job->c_s); vi_free(&job->c_d);
+  vi_free(&job->se_s); vi_free(&job->se_d); vi_free(&job->dse_s); vi_free(&job->dse_d);
+  vi_free(&job->sv_s); vi_free(&job->sv_d); vi_free(&job->dsv_s); vi_free(&job->dsv_d);
+  free(job->ofps);
+  for (int i = 0; i < n; i++) { vi_free(&job->succ[i]); vi_free(&job->preds[i]); }
+  free(job->succ); free(job->preds); free(job->dom);
+}
+
+static void process_function(const char *fname, char **texts, int *gidx, int n,
+                             Buf *out, Buf *explain) {
+  GnnJob job = {0};
+  if (n <= 0 || n > 6000) return;
+  job.fname = fname;
+  job.texts = texts;
+  job.gidx = gidx;
+  job.n = n;
+  job.nf = G.nfeat > 0 ? G.nfeat : NFEAT;
+
+  gnn_build_features(&job);
+  gnn_build_def_use(&job);
+  gnn_build_cfg(&job);
+  gnn_build_expr_keys(&job);
+  gnn_build_dom_expr_edges(&job);
+  gnn_wire_edges(&job);
+  gnn_build_obs_edges(&job);
+  gnn_run_model(&job);
+  gnn_build_gvn(&job);
+  gnn_build_affine(&job);
 
   for (int j = 0; j < n; j++) {
-    char drhs[512] = "", ddst[256] = "";
-    split_def(texts[j], ddst, sizeof ddst, drhs, sizeof drhs);
-    char ex[1200], after[600], bexpr[512]; int saved = 0;
-    if (ddst[0]) dag_infix(texts, n, ddst, bexpr, sizeof bexpr, 0);
-    else snprintf(bexpr, sizeof bexpr, "%s", drhs);
-    if (collapse_flag[j]) {
-      char rw[600];
-      int bw = superopt_check(texts, n, j, rw, sizeof rw, &saved);
-      int gf = bw ? 0 : gf2_check(texts, n, j, rw, sizeof rw, &saved);
-      if (bw || gf) {
-        char line[700];
-        snprintf(line, sizeof line, "%s %d %s\n", fname, gidx[j], rw);
-        buf_add(out, line);
-        if (strncmp(rw, "REWRITE ", 8) == 0) infix_from_postfix(rw + 8, after, sizeof after);
-        else snprintf(after, sizeof after, "%s", strchr(rw, ' ') ? strchr(rw, ' ') + 1 : rw);
-        snprintf(ex, sizeof ex, "%s\t%d\t%s superoptimize\t%s\t%s\t%d\n",
-                 fname, gidx[j], bw ? "bitwise" : "xor-shift", bexpr, after, saved);
-        buf_add(explain, ex);
-        continue;
-      }
-      char arg[256]; int ck;
-      if (collapse_check(texts, n, j, arg, sizeof arg, &ck, &saved)) {
-        char line[700];
-        snprintf(line, sizeof line, "%s %d %s %s\n", fname, gidx[j],
-                 ck == 1 ? "CONST" : "COPY", arg);
-        buf_add(out, line);
-        snprintf(ex, sizeof ex, "%s\t%d\tcollapse\t%s\t%s\t%d\n",
-                 fname, gidx[j], bexpr, arg, saved);
-        buf_add(explain, ex);
-        continue;
-      }
-    }
-    static int speculative = -1;
-    if (speculative < 0) {
-      const char *e = getenv("METTLE_ML_SPECULATIVE");
-      speculative = (e && e[0] && strcmp(e, "0") != 0) ? 1 : 0;
-    }
-    if (speculative && action[j] == DELETE_CLASS &&
-        (kind[j] == 5 || kind[j] == 6 || kind[j] == 7 || kind[j] == 8)) {
-      if (risk_p && risk_p[j] >= (float)risk_thresh) {
-        ml_risk_declined++;
-        continue;
-      }
-      char line[700];
-      snprintf(line, sizeof line, "%s %d NOP\n", fname, gidx[j]);
-      buf_add(out, line);
-      snprintf(ex, sizeof ex, "%s\t%d\tmodel delete\t%s\t(deleted)\t1\n", fname,
-               gidx[j], bexpr[0] ? bexpr : texts[j]);
-      buf_add(explain, ex);
-      continue;
-    }
-    if (action[j] == AFFINE_CLASS && aff_kind[j]) {
-      char line[700];
-      snprintf(line, sizeof line, "%s %d %s %s\n", fname, gidx[j],
-               aff_kind[j] == 1 ? "CONST" : "COPY", aff_arg[j]);
-      buf_add(out, line);
-      snprintf(ex, sizeof ex, "%s\t%d\taffine\t%s\t%s\t1\n", fname, gidx[j], bexpr, aff_arg[j]);
-      buf_add(explain, ex);
-      continue;
-    }
-    if (gvn_src[j] && action[j] == GVN_CLASS) {
-      char a[256], o[16], b[256];
-      if (drhs[0] == 0 || three_token(drhs, a, sizeof a, o, sizeof o, b, sizeof b) == 0) continue;
-      char line[700];
-      snprintf(line, sizeof line, "%s %d COPY%s %s\n", fname, gidx[j],
-               gvn_model_src[j] ? "?" : "", gvn_src[j]);
-      buf_add(out, line);
-      snprintf(ex, sizeof ex, "%s\t%d\tGVN reuse%s\t%s\t%s\t1\n", fname, gidx[j],
-               gvn_model_src[j] ? " (model-chosen)" : "", bexpr, gvn_src[j]);
-      buf_add(explain, ex);
-    }
+    gnn_emit_one(&job, j, out, explain);
   }
-
-  for (int i = 0; i < n; i++) free(aff_arg[i]);
-  free(aff_kind); free(aff_arg); vs_free(&params); free(collapse_flag);
-  for (int i = 0; i < n; i++) { free(defn[i]); free(gvn_src[i]); vs_free(&uses[i]); }
-  free(defn); free(gvn_src); free(gvn_model_src); free(hstate); free(risk_p);
-  free(uses); free(kind); free(op); free(feat);
-  free(action); free(gkey); vs_free(&gk.keys);
-  vi_free(&du_s); vi_free(&du_d); vi_free(&c_s); vi_free(&c_d);
-  vi_free(&se_s); vi_free(&se_d); vi_free(&dse_s); vi_free(&dse_d);
-  vi_free(&sv_s); vi_free(&sv_d); vi_free(&dsv_s); vi_free(&dsv_d);
-  free(ofps);
-  for (int i = 0; i < n; i++) { vi_free(&succ[i]); vi_free(&preds[i]); }
-  free(succ); free(preds); free(dom);
+  gnn_job_free(&job);
 }
 
 static char *slurp(const char *path, long *len) {
