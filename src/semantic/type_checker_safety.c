@@ -102,423 +102,495 @@ static void type_checker_wrap_constant_to_expression_type(
 
 static int type_checker_eval_numeric_constant(TypeChecker *checker,
                                               ASTNode *expression,
+                                              TypeCheckerConstant *out_value);
+
+typedef enum {
+  TC_CMP_NONE,
+  TC_CMP_EQ,
+  TC_CMP_NE,
+  TC_CMP_LT,
+  TC_CMP_LE,
+  TC_CMP_GT,
+  TC_CMP_GE,
+  TC_CMP_AND,
+  TC_CMP_OR
+} TypeCheckerCompare;
+
+static TypeCheckerCompare type_checker_compare_kind(const char *op) {
+  static const struct {
+    const char *text;
+    TypeCheckerCompare kind;
+  } table[] = {
+      {"==", TC_CMP_EQ}, {"!=", TC_CMP_NE}, {"<", TC_CMP_LT},
+      {"<=", TC_CMP_LE}, {">", TC_CMP_GT},  {">=", TC_CMP_GE},
+      {"&&", TC_CMP_AND}, {"||", TC_CMP_OR},
+  };
+  for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+    if (strcmp(op, table[i].text) == 0) {
+      return table[i].kind;
+    }
+  }
+  return TC_CMP_NONE;
+}
+
+static int type_checker_compare_floats(TypeCheckerCompare kind, double a,
+                                       double b) {
+  switch (kind) {
+  case TC_CMP_EQ: return a == b;
+  case TC_CMP_NE: return a != b;
+  case TC_CMP_LT: return a < b;
+  case TC_CMP_LE: return a <= b;
+  case TC_CMP_GT: return a > b;
+  case TC_CMP_GE: return a >= b;
+  case TC_CMP_AND: return (a != 0.0) && (b != 0.0);
+  default: return (a != 0.0) || (b != 0.0);
+  }
+}
+
+static int type_checker_compare_ints(TypeCheckerCompare kind, long long a,
+                                     long long b) {
+  switch (kind) {
+  case TC_CMP_EQ: return a == b;
+  case TC_CMP_NE: return a != b;
+  case TC_CMP_LT: return a < b;
+  case TC_CMP_LE: return a <= b;
+  case TC_CMP_GT: return a > b;
+  case TC_CMP_GE: return a >= b;
+  case TC_CMP_AND: return (a != 0) && (b != 0);
+  default: return (a != 0) || (b != 0);
+  }
+}
+
+static int type_checker_fold_float_binary(const char *op, double left,
+                                          double right,
+                                          TypeCheckerConstant *out_value) {
+  TypeCheckerCompare compare = TC_CMP_NONE;
+  if (strcmp(op, "+") == 0) {
+    type_checker_constant_from_float(out_value, left + right);
+    return 1;
+  }
+  if (strcmp(op, "-") == 0) {
+    type_checker_constant_from_float(out_value, left - right);
+    return 1;
+  }
+  if (strcmp(op, "*") == 0) {
+    type_checker_constant_from_float(out_value, left * right);
+    return 1;
+  }
+  if (strcmp(op, "/") == 0) {
+    if (right == 0.0) {
+      return 0;
+    }
+    type_checker_constant_from_float(out_value, left / right);
+    return 1;
+  }
+  compare = type_checker_compare_kind(op);
+  if (compare == TC_CMP_NONE) {
+    return 0;
+  }
+  type_checker_constant_from_int(
+      out_value, type_checker_compare_floats(compare, left, right));
+  return 1;
+}
+
+typedef struct {
+  long long left;
+  long long right;
+  int bits;
+  int is_signed;
+  int shaped;
+} TypeCheckerIntFold;
+
+static void type_checker_store_shaped(const TypeCheckerIntFold *f,
+                                      long long value,
+                                      TypeCheckerConstant *out_value) {
+  type_checker_constant_from_int(out_value, value);
+  if (f->shaped) {
+    type_checker_constant_from_int(
+        out_value, type_checker_wrap_integer(value, f->bits, f->is_signed));
+  }
+}
+
+static int type_checker_fold_int_arith(const char *op,
+                                       const TypeCheckerIntFold *f,
+                                       TypeCheckerConstant *out_value) {
+  unsigned long long l = (unsigned long long)f->left;
+  unsigned long long r = (unsigned long long)f->right;
+  unsigned long long folded = op[0] == '+'   ? l + r
+                              : op[0] == '-' ? l - r
+                                             : l * r;
+  type_checker_store_shaped(f, (long long)folded, out_value);
+  return 1;
+}
+
+static int type_checker_fold_int_divide(const char *op,
+                                        const TypeCheckerIntFold *f,
+                                        TypeCheckerConstant *out_value) {
+  long long quotient = 0;
+  if (f->right == 0) {
+    return 0;
+  }
+  if (f->shaped && !f->is_signed) {
+    unsigned long long l =
+        (unsigned long long)type_checker_wrap_integer(f->left, f->bits, 0);
+    unsigned long long r =
+        (unsigned long long)type_checker_wrap_integer(f->right, f->bits, 0);
+    if (r == 0) {
+      return 0;
+    }
+    quotient = (long long)(op[0] == '/' ? l / r : l % r);
+  } else {
+    if (f->left == LLONG_MIN && f->right == -1) {
+      return 0;
+    }
+    quotient = op[0] == '/' ? f->left / f->right : f->left % f->right;
+  }
+  type_checker_store_shaped(f, quotient, out_value);
+  return 1;
+}
+
+static int type_checker_fold_int_bitwise(const char *op,
+                                         const TypeCheckerIntFold *f,
+                                         TypeCheckerConstant *out_value) {
+  unsigned long long l = (unsigned long long)f->left;
+  unsigned long long r = (unsigned long long)f->right;
+  unsigned long long folded = op[0] == '&'   ? l & r
+                              : op[0] == '|' ? l | r
+                                             : l ^ r;
+  type_checker_store_shaped(f, (long long)folded, out_value);
+  return 1;
+}
+
+static int type_checker_fold_shaped_shift(const TypeCheckerIntFold *f,
+                                          int shift_left,
+                                          TypeCheckerConstant *out_value) {
+  unsigned long long count =
+      (unsigned long long)type_checker_wrap_integer(f->right, f->bits, 0) %
+      (unsigned long long)f->bits;
+  long long value = type_checker_wrap_integer(f->left, f->bits, f->is_signed);
+  long long folded;
+  if (shift_left) {
+    folded = (long long)((unsigned long long)value << count);
+  } else if (f->is_signed) {
+    folded = value >> count;
+  } else {
+    folded = (long long)(
+        (unsigned long long)type_checker_wrap_integer(value, f->bits, 0) >>
+        count);
+  }
+  type_checker_constant_from_int(
+      out_value, type_checker_wrap_integer(folded, f->bits, f->is_signed));
+  return 1;
+}
+
+static int type_checker_fold_int_shift(const char *op,
+                                       const TypeCheckerIntFold *f,
+                                       TypeCheckerConstant *out_value) {
+  int shift_left = op[0] == '<';
+  if (f->shaped) {
+    return type_checker_fold_shaped_shift(f, shift_left, out_value);
+  }
+  if (f->right < 0 || f->right > (shift_left ? 62 : 63)) {
+    return 0;
+  }
+  if (shift_left) {
+    if (f->left < 0 || f->left > (LLONG_MAX >> f->right)) {
+      return 0;
+    }
+    type_checker_constant_from_int(out_value, f->left << f->right);
+    return 1;
+  }
+  type_checker_constant_from_int(out_value, f->left >> f->right);
+  return 1;
+}
+
+static int type_checker_fold_int_binary(const char *op,
+                                        const TypeCheckerIntFold *f,
+                                        TypeCheckerConstant *out_value) {
+  TypeCheckerCompare compare = TC_CMP_NONE;
+  if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0 || strcmp(op, "*") == 0) {
+    return type_checker_fold_int_arith(op, f, out_value);
+  }
+  if (strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
+    return type_checker_fold_int_divide(op, f, out_value);
+  }
+  if (strcmp(op, "&") == 0 || strcmp(op, "|") == 0 || strcmp(op, "^") == 0) {
+    return type_checker_fold_int_bitwise(op, f, out_value);
+  }
+  if (strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
+    return type_checker_fold_int_shift(op, f, out_value);
+  }
+  compare = type_checker_compare_kind(op);
+  if (compare == TC_CMP_NONE) {
+    return 0;
+  }
+  type_checker_constant_from_int(
+      out_value, type_checker_compare_ints(compare, f->left, f->right));
+  return 1;
+}
+
+static int type_checker_eval_string_equality(TypeChecker *checker,
+                                             BinaryExpression *binary_expr,
+                                             TypeCheckerConstant *out_value) {
+  ComptimeValue left;
+  ComptimeValue right;
+  int equal = 0;
+  if (!checker || (strcmp(binary_expr->operator, "==") != 0 &&
+                   strcmp(binary_expr->operator, "!=") != 0)) {
+    return 0;
+  }
+  left = comptime_none();
+  right = comptime_none();
+  if (!type_checker_eval_comptime(checker, binary_expr->left, &left) ||
+      left.kind != COMPTIME_STRING || !left.as.string.value ||
+      !type_checker_eval_comptime(checker, binary_expr->right, &right) ||
+      right.kind != COMPTIME_STRING || !right.as.string.value) {
+    return 0;
+  }
+  equal = strcmp(left.as.string.value, right.as.string.value) == 0;
+  type_checker_constant_from_int(
+      out_value, binary_expr->operator[0] == '!' ? !equal : equal);
+  return 1;
+}
+
+static int type_checker_eval_binary(TypeChecker *checker, ASTNode *expression,
+                                    TypeCheckerConstant *out_value) {
+  BinaryExpression *binary_expr = (BinaryExpression *)expression->data;
+  TypeCheckerConstant left = {0};
+  TypeCheckerConstant right = {0};
+  TypeCheckerIntFold fold = {0};
+  Type *result_type = NULL;
+  if (!binary_expr || !binary_expr->operator || !binary_expr->left ||
+      !binary_expr->right) {
+    return 0;
+  }
+  if (type_checker_eval_string_equality(checker, binary_expr, out_value)) {
+    return 1;
+  }
+  if (!type_checker_eval_numeric_constant(checker, binary_expr->left, &left) ||
+      !type_checker_eval_numeric_constant(checker, binary_expr->right,
+                                          &right)) {
+    return 0;
+  }
+  if (left.is_float || right.is_float) {
+    return type_checker_fold_float_binary(
+        binary_expr->operator,
+        left.is_float ? left.float_value : (double)left.int_value,
+        right.is_float ? right.float_value : (double)right.int_value,
+        out_value);
+  }
+  fold.left = left.int_value;
+  fold.right = right.int_value;
+  result_type = checker ? type_checker_infer_type(checker, expression) : NULL;
+  fold.shaped = type_checker_integer_type_shape(result_type, &fold.bits,
+                                                &fold.is_signed);
+  return type_checker_fold_int_binary(binary_expr->operator, &fold, out_value);
+}
+
+static int type_checker_eval_cast(TypeChecker *checker, ASTNode *expression,
+                                  TypeCheckerConstant *out_value) {
+  CastExpression *cast = (CastExpression *)expression->data;
+  TypeCheckerConstant operand = {0};
+  Type *target = NULL;
+  int bits = 0;
+  int is_signed = 0;
+
+  if (!cast || !cast->type_name || !cast->operand || !checker ||
+      !type_checker_eval_numeric_constant(checker, cast->operand, &operand)) {
+    return 0;
+  }
+  target = type_checker_get_type_by_name(checker, cast->type_name);
+  if (!target) {
+    return 0;
+  }
+  if (type_checker_is_floating_type(target)) {
+    double value =
+        operand.is_float ? operand.float_value : (double)operand.int_value;
+    if (target->kind == TYPE_FLOAT32) {
+      value = (double)(float)value;
+    }
+    type_checker_constant_from_float(out_value, value);
+    return 1;
+  }
+  if (!type_checker_integer_type_shape(target, &bits, &is_signed)) {
+    return 0;
+  }
+  type_checker_constant_from_int(
+      out_value,
+      type_checker_wrap_integer(operand.is_float
+                                    ? (long long)operand.float_value
+                                    : operand.int_value,
+                                bits, is_signed));
+  return 1;
+}
+
+static int type_checker_eval_number(ASTNode *expression,
+                                    TypeCheckerConstant *out_value) {
+  NumberLiteral *literal = (NumberLiteral *)expression->data;
+  if (!literal) {
+    return 0;
+  }
+  if (literal->is_float) {
+    type_checker_constant_from_float(out_value, literal->float_value);
+  } else {
+    type_checker_constant_from_int(out_value, literal->int_value);
+  }
+  return 1;
+}
+
+static int type_checker_eval_identifier_constant(
+    TypeChecker *checker, ASTNode *expression,
+    TypeCheckerConstant *out_value) {
+  Identifier *identifier = (Identifier *)expression->data;
+  Symbol *symbol = NULL;
+  if (!identifier || !identifier->name) {
+    return 0;
+  }
+  symbol = checker ? type_checker_resolve_identifier(checker, identifier)
+                   : NULL;
+  if (!symbol ||
+      (symbol->kind != SYMBOL_CONSTANT && !symbol->has_constant_value)) {
+    return 0;
+  }
+  if (symbol->has_constant_value && symbol->constant_is_float) {
+    type_checker_constant_from_float(out_value, symbol->constant_float_value);
+    return 1;
+  }
+  type_checker_constant_from_int(out_value,
+                                 symbol->has_constant_value
+                                     ? symbol->constant_integer_value
+                                     : symbol->data.constant.value);
+  return 1;
+}
+
+static int type_checker_eval_sizeof(TypeChecker *checker, CallExpression *call,
+                                    TypeCheckerConstant *out_value) {
+  Identifier *type_id = NULL;
+  Type *type = NULL;
+  if (strcmp(call->function_name, "sizeof") != 0 ||
+      call->argument_count != 1 || !call->arguments[0] ||
+      call->arguments[0]->type != AST_IDENTIFIER) {
+    return 0;
+  }
+  type_id = (Identifier *)call->arguments[0]->data;
+  type = (checker && type_id)
+             ? type_checker_get_type_by_name(checker, type_id->name)
+             : NULL;
+  if (!type || type->size > (size_t)LLONG_MAX) {
+    return 0;
+  }
+  type_checker_constant_from_int(out_value, (long long)type->size);
+  return 1;
+}
+
+static int type_checker_eval_call_constant(TypeChecker *checker,
+                                           ASTNode *expression,
+                                           TypeCheckerConstant *out_value) {
+  CallExpression *call = (CallExpression *)expression->data;
+  long long folded = 0;
+  if (!call || !call->function_name) {
+    return 0;
+  }
+  if (strcmp(call->function_name, "offsetof") == 0) {
+    if (!type_checker_eval_offsetof(checker, call, expression->location,
+                                    &folded)) {
+      return 0;
+    }
+    type_checker_constant_from_int(out_value, folded);
+    return 1;
+  }
+  if (strcmp(call->function_name, "layoutof") == 0) {
+    if (!type_checker_eval_layoutof(checker, call, expression->location,
+                                    &folded)) {
+      return 0;
+    }
+    type_checker_constant_from_int(out_value, folded);
+    return 1;
+  }
+  return type_checker_eval_sizeof(checker, call, out_value);
+}
+
+static int type_checker_eval_member_constant(TypeChecker *checker,
+                                             ASTNode *expression,
+                                             TypeCheckerConstant *out_value) {
+  ComptimeValue folded = comptime_none();
+  if (!checker || !type_checker_eval_comptime(checker, expression, &folded)) {
+    return 0;
+  }
+  if (folded.kind == COMPTIME_INT) {
+    type_checker_constant_from_int(out_value, folded.as.int_value);
+    return 1;
+  }
+  if (folded.kind == COMPTIME_FLOAT) {
+    type_checker_constant_from_float(out_value, folded.as.float_value);
+    return 1;
+  }
+  return 0;
+}
+
+static int type_checker_eval_unary(TypeChecker *checker, ASTNode *expression,
+                                   TypeCheckerConstant *out_value) {
+  UnaryExpression *unary_expr = (UnaryExpression *)expression->data;
+  TypeCheckerConstant operand = {0};
+  const char *op = NULL;
+  if (!unary_expr || !unary_expr->operator || !unary_expr->operand ||
+      !type_checker_eval_numeric_constant(checker, unary_expr->operand,
+                                          &operand)) {
+    return 0;
+  }
+  op = unary_expr->operator;
+  if (strcmp(op, "+") == 0) {
+    *out_value = operand;
+    return 1;
+  }
+  if (strcmp(op, "-") == 0) {
+    if (operand.is_float) {
+      type_checker_constant_from_float(out_value, -operand.float_value);
+    } else {
+      type_checker_constant_from_int(out_value, -operand.int_value);
+      type_checker_wrap_constant_to_expression_type(checker, expression,
+                                                    out_value);
+    }
+    return 1;
+  }
+  if (strcmp(op, "!") == 0) {
+    type_checker_constant_from_int(out_value,
+                                   operand.is_float
+                                       ? operand.float_value == 0.0
+                                       : operand.int_value == 0);
+    return 1;
+  }
+  if (strcmp(op, "~") == 0 && !operand.is_float) {
+    type_checker_constant_from_int(out_value, ~operand.int_value);
+    type_checker_wrap_constant_to_expression_type(checker, expression,
+                                                  out_value);
+    return 1;
+  }
+  return 0;
+}
+
+static int type_checker_eval_numeric_constant(TypeChecker *checker,
+                                              ASTNode *expression,
                                               TypeCheckerConstant *out_value) {
   if (!expression || !out_value) {
     return 0;
   }
-
   switch (expression->type) {
-  case AST_CAST_EXPRESSION: {
-    CastExpression *cast = (CastExpression *)expression->data;
-    TypeCheckerConstant operand = {0};
-    Type *target = NULL;
-    int bits = 0;
-    int is_signed = 0;
-
-    if (!cast || !cast->type_name || !cast->operand || !checker ||
-        !type_checker_eval_numeric_constant(checker, cast->operand,
-                                            &operand)) {
-      return 0;
-    }
-    target = type_checker_get_type_by_name(checker, cast->type_name);
-    if (!target) {
-      return 0;
-    }
-    if (type_checker_is_floating_type(target)) {
-      double value = operand.is_float ? operand.float_value
-                                      : (double)operand.int_value;
-      if (target->kind == TYPE_FLOAT32) {
-        value = (double)(float)value;
-      }
-      type_checker_constant_from_float(out_value, value);
-      return 1;
-    }
-    if (!type_checker_integer_type_shape(target, &bits, &is_signed)) {
-      return 0;
-    }
-    {
-      long long value = operand.is_float ? (long long)operand.float_value
-                                         : operand.int_value;
-      type_checker_constant_from_int(
-          out_value, type_checker_wrap_integer(value, bits, is_signed));
-    }
-    return 1;
-  }
-
-  case AST_NUMBER_LITERAL: {
-    NumberLiteral *literal = (NumberLiteral *)expression->data;
-    if (!literal || literal->is_float) {
-      if (!literal) {
-        return 0;
-      }
-      type_checker_constant_from_float(out_value, literal->float_value);
-      return 1;
-    }
-    type_checker_constant_from_int(out_value, literal->int_value);
-    return 1;
-  }
-
-  case AST_IDENTIFIER: {
-    Identifier *identifier = (Identifier *)expression->data;
-    if (!identifier || !identifier->name) {
-      return 0;
-    }
-
-    Symbol *symbol = checker
-                         ? type_checker_resolve_identifier(checker, identifier)
-                         : NULL;
-    if (!symbol || (symbol->kind != SYMBOL_CONSTANT &&
-                    !symbol->has_constant_value)) {
-      return 0;
-    }
-
-    if (symbol->has_constant_value && symbol->constant_is_float) {
-      type_checker_constant_from_float(out_value,
-                                       symbol->constant_float_value);
-    } else {
-      long long value = symbol->has_constant_value
-                            ? symbol->constant_integer_value
-                            : symbol->data.constant.value;
-      type_checker_constant_from_int(out_value, value);
-    }
-    return 1;
-  }
-
-  case AST_FUNCTION_CALL: {
-    CallExpression *call = (CallExpression *)expression->data;
-    if (!call || !call->function_name) {
-      return 0;
-    }
-    if (strcmp(call->function_name, "offsetof") == 0) {
-      long long offset = 0;
-      if (!type_checker_eval_offsetof(checker, call, expression->location,
-                                      &offset)) {
-        return 0;
-      }
-      type_checker_constant_from_int(out_value, offset);
-      return 1;
-    }
-    if (strcmp(call->function_name, "layoutof") == 0) {
-      long long digest = 0;
-      if (!type_checker_eval_layoutof(checker, call, expression->location,
-                                      &digest)) {
-        return 0;
-      }
-      type_checker_constant_from_int(out_value, digest);
-      return 1;
-    }
-    if (strcmp(call->function_name, "sizeof") != 0 ||
-        call->argument_count != 1 || !call->arguments[0] ||
-        call->arguments[0]->type != AST_IDENTIFIER) {
-      return 0;
-    }
-
-    Identifier *type_id = (Identifier *)call->arguments[0]->data;
-    Type *type = (checker && type_id)
-                     ? type_checker_get_type_by_name(checker, type_id->name)
-                     : NULL;
-    if (!type || type->size > (size_t)LLONG_MAX) {
-      return 0;
-    }
-
-    type_checker_constant_from_int(out_value, (long long)type->size);
-    return 1;
-  }
-
-  case AST_MEMBER_ACCESS: {
-    ComptimeValue folded = comptime_none();
-    if (!checker ||
-        !type_checker_eval_comptime(checker, expression, &folded)) {
-      return 0;
-    }
-    if (folded.kind == COMPTIME_INT) {
-      type_checker_constant_from_int(out_value, folded.as.int_value);
-      return 1;
-    }
-    if (folded.kind == COMPTIME_FLOAT) {
-      type_checker_constant_from_float(out_value, folded.as.float_value);
-      return 1;
-    }
-    return 0;
-  }
-
-  case AST_UNARY_EXPRESSION: {
-    UnaryExpression *unary_expr = (UnaryExpression *)expression->data;
-    TypeCheckerConstant operand = {0};
-    if (!unary_expr || !unary_expr->operator || !unary_expr->operand ||
-        !type_checker_eval_numeric_constant(
-            checker, unary_expr->operand, &operand)) {
-      return 0;
-    }
-
-    if (strcmp(unary_expr->operator, "+") == 0) {
-      *out_value = operand;
-      return 1;
-    }
-    if (strcmp(unary_expr->operator, "-") == 0) {
-      if (operand.is_float) {
-        type_checker_constant_from_float(out_value, -operand.float_value);
-      } else {
-        type_checker_constant_from_int(out_value, -operand.int_value);
-        type_checker_wrap_constant_to_expression_type(checker, expression,
-                                                      out_value);
-      }
-      return 1;
-    }
-    if (strcmp(unary_expr->operator, "!") == 0) {
-      int is_zero = operand.is_float ? operand.float_value == 0.0
-                                     : operand.int_value == 0;
-      type_checker_constant_from_int(out_value, is_zero);
-      return 1;
-    }
-    if (strcmp(unary_expr->operator, "~") == 0 && !operand.is_float) {
-      type_checker_constant_from_int(out_value, ~operand.int_value);
-      type_checker_wrap_constant_to_expression_type(checker, expression,
-                                                    out_value);
-      return 1;
-    }
-    return 0;
-  }
-
-  case AST_BINARY_EXPRESSION: {
-    BinaryExpression *binary_expr = (BinaryExpression *)expression->data;
-    TypeCheckerConstant left = {0};
-    TypeCheckerConstant right = {0};
-    if (!binary_expr || !binary_expr->operator || !binary_expr->left ||
-        !binary_expr->right) {
-      return 0;
-    }
-
-    if (checker && (strcmp(binary_expr->operator, "==") == 0 ||
-                    strcmp(binary_expr->operator, "!=") == 0)) {
-      ComptimeValue left_string = comptime_none();
-      ComptimeValue right_string = comptime_none();
-      if (type_checker_eval_comptime(checker, binary_expr->left,
-                                     &left_string) &&
-          left_string.kind == COMPTIME_STRING && left_string.as.string.value &&
-          type_checker_eval_comptime(checker, binary_expr->right,
-                                     &right_string) &&
-          right_string.kind == COMPTIME_STRING &&
-          right_string.as.string.value) {
-        int equal = strcmp(left_string.as.string.value,
-                           right_string.as.string.value) == 0;
-        type_checker_constant_from_int(
-            out_value, binary_expr->operator[0] == '!' ? !equal : equal);
-        return 1;
-      }
-    }
-
-    if (!type_checker_eval_numeric_constant(
-            checker, binary_expr->left, &left) ||
-        !type_checker_eval_numeric_constant(
-            checker, binary_expr->right, &right)) {
-      return 0;
-    }
-
-    if (left.is_float || right.is_float) {
-      double left_value = left.is_float ? left.float_value
-                                        : (double)left.int_value;
-      double right_value = right.is_float ? right.float_value
-                                          : (double)right.int_value;
-      const char *operator = binary_expr->operator;
-      if (strcmp(operator, "+") == 0) {
-        type_checker_constant_from_float(out_value,
-                                         left_value + right_value);
-        return 1;
-      }
-      if (strcmp(operator, "-") == 0) {
-        type_checker_constant_from_float(out_value,
-                                         left_value - right_value);
-        return 1;
-      }
-      if (strcmp(operator, "*") == 0) {
-        type_checker_constant_from_float(out_value,
-                                         left_value * right_value);
-        return 1;
-      }
-      if (strcmp(operator, "/") == 0) {
-        if (right_value == 0.0) {
-          return 0;
-        }
-        type_checker_constant_from_float(out_value,
-                                         left_value / right_value);
-        return 1;
-      }
-      if (strcmp(operator, "==") == 0) {
-        type_checker_constant_from_int(out_value, left_value == right_value);
-        return 1;
-      }
-      if (strcmp(operator, "!=") == 0) {
-        type_checker_constant_from_int(out_value, left_value != right_value);
-        return 1;
-      }
-      if (strcmp(operator, "<") == 0) {
-        type_checker_constant_from_int(out_value, left_value < right_value);
-        return 1;
-      }
-      if (strcmp(operator, "<=") == 0) {
-        type_checker_constant_from_int(out_value, left_value <= right_value);
-        return 1;
-      }
-      if (strcmp(operator, ">") == 0) {
-        type_checker_constant_from_int(out_value, left_value > right_value);
-        return 1;
-      }
-      if (strcmp(operator, ">=") == 0) {
-        type_checker_constant_from_int(out_value, left_value >= right_value);
-        return 1;
-      }
-      if (strcmp(operator, "&&") == 0) {
-        type_checker_constant_from_int(
-            out_value, (left_value != 0.0) && (right_value != 0.0));
-        return 1;
-      }
-      if (strcmp(operator, "||") == 0) {
-        type_checker_constant_from_int(
-            out_value, (left_value != 0.0) || (right_value != 0.0));
-        return 1;
-      }
-      return 0;
-    }
-
-    long long left_value = left.int_value;
-    long long right_value = right.int_value;
-    unsigned long long left_bits = (unsigned long long)left_value;
-    unsigned long long right_bits = (unsigned long long)right_value;
-    const char *operator = binary_expr->operator;
-    int bits = 0;
-    int is_signed = 0;
-    Type *result_type = checker ? type_checker_infer_type(checker, expression)
-                                : NULL;
-    int shaped =
-        type_checker_integer_type_shape(result_type, &bits, &is_signed);
-
-    if (strcmp(operator, "+") == 0 || strcmp(operator, "-") == 0 ||
-        strcmp(operator, "*") == 0) {
-      unsigned long long folded = operator[0] == '+' ? left_bits + right_bits
-                                 : operator[0] == '-' ? left_bits - right_bits
-                                                      : left_bits * right_bits;
-      type_checker_constant_from_int(out_value, (long long)folded);
-      if (shaped) {
-        type_checker_constant_from_int(
-            out_value, type_checker_wrap_integer((long long)folded, bits,
-                                                 is_signed));
-      }
-      return 1;
-    }
-    if (strcmp(operator, "/") == 0 || strcmp(operator, "%") == 0) {
-      long long quotient = 0;
-      if (right_value == 0) {
-        return 0;
-      }
-      if (shaped && !is_signed) {
-        unsigned long long l = (unsigned long long)type_checker_wrap_integer(
-            left_value, bits, 0);
-        unsigned long long r = (unsigned long long)type_checker_wrap_integer(
-            right_value, bits, 0);
-        if (r == 0) {
-          return 0;
-        }
-        quotient = (long long)(operator[0] == '/' ? l / r : l % r);
-      } else {
-        if (left_value == LLONG_MIN && right_value == -1) {
-          return 0;
-        }
-        quotient = operator[0] == '/' ? left_value / right_value
-                                      : left_value % right_value;
-      }
-      type_checker_constant_from_int(out_value, quotient);
-      if (shaped) {
-        type_checker_constant_from_int(
-            out_value, type_checker_wrap_integer(quotient, bits, is_signed));
-      }
-      return 1;
-    }
-    if (strcmp(operator, "&") == 0 || strcmp(operator, "|") == 0 ||
-        strcmp(operator, "^") == 0) {
-      unsigned long long folded = operator[0] == '&' ? left_bits & right_bits
-                                 : operator[0] == '|' ? left_bits | right_bits
-                                                      : left_bits ^ right_bits;
-      type_checker_constant_from_int(out_value, (long long)folded);
-      if (shaped) {
-        type_checker_constant_from_int(
-            out_value, type_checker_wrap_integer((long long)folded, bits,
-                                                 is_signed));
-      }
-      return 1;
-    }
-    if (strcmp(operator, "<<") == 0 || strcmp(operator, ">>") == 0) {
-      int shift_left = operator[0] == '<';
-      if (shaped) {
-        unsigned long long count =
-            (unsigned long long)type_checker_wrap_integer(right_value, bits, 0)
-            % (unsigned long long)bits;
-        long long value =
-            type_checker_wrap_integer(left_value, bits, is_signed);
-        long long folded;
-        if (shift_left) {
-          folded = (long long)((unsigned long long)value << count);
-        } else if (is_signed) {
-          folded = value >> count;
-        } else {
-          folded = (long long)((unsigned long long)type_checker_wrap_integer(
-                                   value, bits, 0) >>
-                               count);
-        }
-        type_checker_constant_from_int(
-            out_value, type_checker_wrap_integer(folded, bits, is_signed));
-        return 1;
-      }
-      if (right_value < 0 || right_value > (shift_left ? 62 : 63)) {
-        return 0;
-      }
-      if (shift_left) {
-        if (left_value < 0 || left_value > (LLONG_MAX >> right_value)) {
-          return 0;
-        }
-        type_checker_constant_from_int(out_value, left_value << right_value);
-        return 1;
-      }
-      type_checker_constant_from_int(out_value, left_value >> right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "==") == 0) {
-      type_checker_constant_from_int(out_value, left_value == right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "!=") == 0) {
-      type_checker_constant_from_int(out_value, left_value != right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "<") == 0) {
-      type_checker_constant_from_int(out_value, left_value < right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "<=") == 0) {
-      type_checker_constant_from_int(out_value, left_value <= right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, ">") == 0) {
-      type_checker_constant_from_int(out_value, left_value > right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, ">=") == 0) {
-      type_checker_constant_from_int(out_value, left_value >= right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "&&") == 0) {
-      type_checker_constant_from_int(out_value,
-                                     (left_value != 0) && (right_value != 0));
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "||") == 0) {
-      type_checker_constant_from_int(out_value,
-                                     (left_value != 0) || (right_value != 0));
-      return 1;
-    }
-    return 0;
-  }
-
+  case AST_CAST_EXPRESSION:
+    return type_checker_eval_cast(checker, expression, out_value);
+  case AST_NUMBER_LITERAL:
+    return type_checker_eval_number(expression, out_value);
+  case AST_IDENTIFIER:
+    return type_checker_eval_identifier_constant(checker, expression,
+                                                 out_value);
+  case AST_FUNCTION_CALL:
+    return type_checker_eval_call_constant(checker, expression, out_value);
+  case AST_MEMBER_ACCESS:
+    return type_checker_eval_member_constant(checker, expression, out_value);
+  case AST_UNARY_EXPRESSION:
+    return type_checker_eval_unary(checker, expression, out_value);
+  case AST_BINARY_EXPRESSION:
+    return type_checker_eval_binary(checker, expression, out_value);
   default:
     return 0;
   }
