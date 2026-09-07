@@ -469,6 +469,7 @@ int ir_run_fixpoint_pass(IRFunction *function, IROptPassId pass_id,
   IRVerifySnapshot *verify_snapshot = ir_verify_snapshot_take(function);
 
   int pass_changed = 0;
+  ir_facts_invalidate();
   mettle_compiler_ctx_set_pass_name(pass_name);
   ir_explain_pass_begin(function);
   double t0 = ir_pass_time_begin();
@@ -492,6 +493,7 @@ int ir_run_fixpoint_pass(IRFunction *function, IROptPassId pass_id,
     ir_verify_snapshot_free(verify_snapshot);
   }
 
+  ir_facts_invalidate();
   if (pass_changed) {
     *changed = 1;
     (*version)++;

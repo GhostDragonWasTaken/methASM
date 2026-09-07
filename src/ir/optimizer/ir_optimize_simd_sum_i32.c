@@ -46,22 +46,12 @@ int ir_function_symbol_is_inlined_param(const IRFunction *function,
 
 static int ir_symbol_assigned_once(const IRFunction *function,
                                    const char *symbol_name) {
-  int writes = 0;
+  const IRFacts *facts;
   if (!function || !symbol_name) {
     return 0;
   }
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    const IRInstruction *ins = &function->instructions[i];
-    if (ins->op == IR_OP_DECLARE_LOCAL) {
-      continue;
-    }
-    if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
-        strcmp(ins->dest.name, symbol_name) == 0 && ++writes > 1) {
-      return 0;
-    }
-  }
-  return writes == 1;
+  facts = ir_facts_of(function);
+  return facts && ir_facts_symbol_def_count(facts, symbol_name) == 1;
 }
 
 int ir_symbol_is_settled_local(const IRFunction *function,

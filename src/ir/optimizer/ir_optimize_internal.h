@@ -439,6 +439,28 @@ typedef struct {
   size_t capacity;
 } IRNameIndex;
 
+typedef struct {
+  IRNameIndex symbol_defs;
+  IRNameIndex symbol_first_def;
+  IRNameIndex temp_defs;
+  IRNameIndex temp_first_def;
+  size_t instruction_count;
+  int valid;
+} IRFacts;
+
+int ir_facts_build(IRFacts *facts, const IRFunction *function);
+void ir_facts_destroy(IRFacts *facts);
+size_t ir_facts_symbol_def_count(const IRFacts *facts, const char *name);
+size_t ir_facts_temp_def_count(const IRFacts *facts, const char *name);
+int ir_facts_symbol_single_def(const IRFacts *facts, const char *name,
+                               size_t *at);
+int ir_facts_temp_single_def(const IRFacts *facts, const char *name,
+                             size_t *at);
+int ir_facts_matches(const IRFacts *facts, const IRFunction *function);
+const IRFacts *ir_facts_of(const IRFunction *function);
+void ir_facts_invalidate(void);
+void ir_facts_release(void);
+
 int ir_name_index_init(IRNameIndex *index, size_t expected);
 void ir_name_index_insert(IRNameIndex *index, const char *name, size_t value);
 int ir_name_index_find(const IRNameIndex *index, const char *name,
