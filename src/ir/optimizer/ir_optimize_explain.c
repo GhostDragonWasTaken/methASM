@@ -3939,87 +3939,44 @@ IRFunction *ir_explain_clone_function(const IRFunction *src) {
   return clone;
 }
 
+static const char *const IR_KERNEL_DESC[IR_OP_KIND_COUNT] = {
+    [IR_OP_COUNT_WORD_STARTS] = "SSE2 word-start scan, 16 bytes/iteration",
+    [IR_OP_MEMCPY_INLINE] = "inline memcpy (constant size)",
+    [IR_OP_SIMD_SUM_I32] = "vpaddd, 8-wide int32 sum (AVX2)",
+    [IR_OP_SIMD_SUM_U8] = "vpsadbw, 32-wide byte sum (AVX2)",
+    [IR_OP_SIMD_BYTE_MAP] = "32-wide byte map (AVX2)",
+    [IR_OP_SIMD_FILL] = "16-byte splat stores (vectorized fill/memset)",
+    [IR_OP_SIMD_DOT_I32] = "vpmulld + vpaddd, 8-wide int32 dot product (AVX2)",
+    [IR_OP_SIMD_DOT_I8] = "vpmaddwd, 16-wide int8 dot product (AVX2)",
+    [IR_OP_SIMD_SLP_MAC_I8] = "SLP int8 multiply-accumulate tile (AVX2)",
+    [IR_OP_SIMD_SCALE_I32] = "8-wide int32 scale map (AVX2)",
+    [IR_OP_SIMD_CLAMP_I32] = "vpminsd/vpmaxsd, 8-wide int32 clamp (AVX2)",
+    [IR_OP_SIMD_REVERSE_COPY_I32] = "8-wide int32 reverse copy (AVX2)",
+    [IR_OP_LOWER_BOUND_I32] = "branchless lower-bound search",
+    [IR_OP_PREFIX_SUM_I32] = "vectorized int32 prefix sum",
+    [IR_OP_SIMD_MINMAX_I32] = "vpminsd/vpmaxsd, 8-wide int32 min/max scan (AVX2)",
+    [IR_OP_SIMD_SUM_F64] = "vaddpd, 4-wide float64 sum, 2 accumulators (AVX)",
+    [IR_OP_SIMD_SUM_F32] = "vaddps, 8-wide float32 sum, 2 accumulators (AVX)",
+    [IR_OP_SIMD_DOT_F64] = "vfmadd231pd, 4-wide float64 FMA dot product",
+    [IR_OP_SIMD_DOT_F32] = "vfmadd231ps, 8-wide float32 FMA dot product",
+    [IR_OP_SIMD_AFFINE_MAP_F64] = "vfmadd231pd, 4-wide float64 affine map",
+    [IR_OP_SIMD_AFFINE_MAP_F32] = "vfmadd231ps, 8-wide float32 affine map",
+    [IR_OP_SIMD_EXP_F32] = "8-wide float32 exp (Cephes polynomial, AVX2)",
+    [IR_OP_SIMD_SILU_F32] = "8-wide float32 SiLU/SwiGLU gate (AVX2 exp poly)",
+    [IR_OP_SIMD_I2F_REDUCE_F64] = "4-wide float64 counter reduction (AVX2)",
+    [IR_OP_SIMD_MATMUL_N32] = "32x32 int32 matrix-multiply kernel",
+    [IR_OP_SIMD_INSERTION_SORT_I32] = "accelerated int32 insertion sort",
+};
+
 void ir_explain_kernel_desc(const IRInstruction *ins, char *buf, size_t cap) {
   if (!ins) {
     snprintf(buf, cap, "a SIMD kernel");
     return;
   }
   switch (ins->op) {
-  case IR_OP_COUNT_WORD_STARTS:
-    snprintf(buf, cap, "SSE2 word-start scan, 16 bytes/iteration");
-    return;
-  case IR_OP_MEMCPY_INLINE:
-    snprintf(buf, cap, "inline memcpy (constant size)");
-    return;
-  case IR_OP_SIMD_SUM_I32:
-    snprintf(buf, cap, "vpaddd, 8-wide int32 sum (AVX2)");
-    return;
-  case IR_OP_SIMD_SUM_U8:
-    snprintf(buf, cap, "vpsadbw, 32-wide byte sum (AVX2)");
-    return;
-  case IR_OP_SIMD_BYTE_MAP:
-    snprintf(buf, cap, "32-wide byte map (AVX2)");
-    return;
-  case IR_OP_SIMD_FILL:
-    snprintf(buf, cap, "16-byte splat stores (vectorized fill/memset)");
-    return;
-  case IR_OP_SIMD_DOT_I32:
-    snprintf(buf, cap, "vpmulld + vpaddd, 8-wide int32 dot product (AVX2)");
-    return;
-  case IR_OP_SIMD_DOT_I8:
-    snprintf(buf, cap, "vpmaddwd, 16-wide int8 dot product (AVX2)");
-    return;
   case IR_OP_SIMD_SLP_MAC_I32:
     snprintf(buf, cap, "SLP multiply-accumulate, %lld int32 lanes (AVX2)",
              ins->argument_count > 0 ? ins->arguments[0].int_value : 4LL);
-    return;
-  case IR_OP_SIMD_SLP_MAC_I8:
-    snprintf(buf, cap, "SLP int8 multiply-accumulate tile (AVX2)");
-    return;
-  case IR_OP_SIMD_SCALE_I32:
-    snprintf(buf, cap, "8-wide int32 scale map (AVX2)");
-    return;
-  case IR_OP_SIMD_CLAMP_I32:
-    snprintf(buf, cap, "vpminsd/vpmaxsd, 8-wide int32 clamp (AVX2)");
-    return;
-  case IR_OP_SIMD_REVERSE_COPY_I32:
-    snprintf(buf, cap, "8-wide int32 reverse copy (AVX2)");
-    return;
-  case IR_OP_LOWER_BOUND_I32:
-    snprintf(buf, cap, "branchless lower-bound search");
-    return;
-  case IR_OP_PREFIX_SUM_I32:
-    snprintf(buf, cap, "vectorized int32 prefix sum");
-    return;
-  case IR_OP_SIMD_MINMAX_I32:
-    snprintf(buf, cap, "vpminsd/vpmaxsd, 8-wide int32 min/max scan (AVX2)");
-    return;
-  case IR_OP_SIMD_SUM_F64:
-    snprintf(buf, cap, "vaddpd, 4-wide float64 sum, 2 accumulators (AVX)");
-    return;
-  case IR_OP_SIMD_SUM_F32:
-    snprintf(buf, cap, "vaddps, 8-wide float32 sum, 2 accumulators (AVX)");
-    return;
-  case IR_OP_SIMD_DOT_F64:
-    snprintf(buf, cap, "vfmadd231pd, 4-wide float64 FMA dot product");
-    return;
-  case IR_OP_SIMD_DOT_F32:
-    snprintf(buf, cap, "vfmadd231ps, 8-wide float32 FMA dot product");
-    return;
-  case IR_OP_SIMD_AFFINE_MAP_F64:
-    snprintf(buf, cap, "vfmadd231pd, 4-wide float64 affine map");
-    return;
-  case IR_OP_SIMD_AFFINE_MAP_F32:
-    snprintf(buf, cap, "vfmadd231ps, 8-wide float32 affine map");
-    return;
-  case IR_OP_SIMD_EXP_F32:
-    snprintf(buf, cap, "8-wide float32 exp (Cephes polynomial, AVX2)");
-    return;
-  case IR_OP_SIMD_SILU_F32:
-    snprintf(buf, cap, "8-wide float32 SiLU/SwiGLU gate (AVX2 exp poly)");
-    return;
-  case IR_OP_SIMD_I2F_REDUCE_F64:
-    snprintf(buf, cap, "4-wide float64 counter reduction (AVX2)");
     return;
   case IR_OP_SIMD_VLOOP_F64: {
     int f32 = ins->float_bits == 32;
@@ -4063,17 +4020,17 @@ void ir_explain_kernel_desc(const IRInstruction *ins, char *buf, size_t cap) {
     snprintf(buf, cap, "vdivpd, 4 outer iterations in 4-wide float64 lockstep "
                        "(hides the inner recurrence's latency)");
     return;
-  case IR_OP_SIMD_MATMUL_N32:
-    snprintf(buf, cap, "32x32 int32 matrix-multiply kernel");
-    return;
-  case IR_OP_SIMD_INSERTION_SORT_I32:
-    snprintf(buf, cap, "accelerated int32 insertion sort");
-    return;
   default:
-    snprintf(buf, cap, "%s (SIMD kernel)", ir_opcode_name(ins->op));
+    break;
+  }
+  if ((unsigned)ins->op < (unsigned)IR_OP_KIND_COUNT &&
+      IR_KERNEL_DESC[ins->op]) {
+    snprintf(buf, cap, "%s", IR_KERNEL_DESC[ins->op]);
     return;
   }
+  snprintf(buf, cap, "%s (SIMD kernel)", ir_opcode_name(ins->op));
 }
+
 
 static const char *glyph_ellipsis(void) {
   return ir_explain_use_unicode() ? "\xE2\x80\xA6" : "..";

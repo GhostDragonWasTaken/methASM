@@ -2149,217 +2149,231 @@ static size_t ir_simd_loop_end_line(const IRFunction *function,
   return last;
 }
 
+
+static void ir_explain_report_loop(const IRFunction *function,
+                                   const IRSimdLoopRecord *loops,
+                                   size_t loop_count, size_t k) {
+const IRSimdLoopRecord *L = &loops[k];
+if (!ir_explain_location_enabled(&L->location)) {
+  
+}
+const IRInstruction *own =
+    ir_region_vectorized_ins(function, L->begin, L->end, 0);
+if (!own) {
+  own = ir_region_skipahead_ins(function, L->begin, L->end);
+}
+const IRInstruction *any =
+    own ? own : ir_region_vectorized_ins(function, L->begin, L->end, 1);
+
+size_t nest_depth = 1;
+for (size_t m = 0; m < loop_count; m++) {
+  if (m != k && loops[m].begin < L->begin && loops[m].end > L->end) {
+    nest_depth++;
+  }
+}
+
+int has_inner = 0;
+size_t inner_line = 0;
+for (size_t m = 0; m < loop_count; m++) {
+  if (m == k || loops[m].begin <= L->begin || loops[m].end >= L->end) {
+    continue;
+  }
+  has_inner = 1;
+  if (inner_line == 0) {
+    inner_line = loops[m].location.line;
+  }
+  if (!own && any &&
+      ir_region_vectorized_ins(function, loops[m].begin, loops[m].end, 1)) {
+    inner_line = loops[m].location.line;
+  }
+}
+size_t inlined_loop_from_line = 0;
+char inlined_loop_callee[128];
+inlined_loop_callee[0] = '\0';
+if (!has_inner) {
+  size_t structural = ir_region_inner_loop_line(function, L->begin, L->end);
+  if (structural) {
+    has_inner = 1;
+    inner_line = structural;
+    size_t last = ir_simd_loop_end_line(function, L);
+    if (ir_explain_inlined_calls_in_range(
+            function->name, L->location.line, last ? last : L->location.line,
+            &inlined_loop_from_line, inlined_loop_callee,
+            sizeof(inlined_loop_callee)) != 1) {
+      inlined_loop_from_line = 0;
+      inlined_loop_callee[0] = '\0';
+    }
+  }
+}
+
+char headline[192], reason[320], fix[320];
+  if (own) {
+  char desc[128];
+  ir_explain_kernel_desc(own, desc, sizeof(desc));
+  snprintf(headline, sizeof(headline), "vectorized \xE2\x86\x92 %s", desc);
+  ir_explain_remark(function->name, "loop", L->location, 1, headline, NULL,
+                    NULL, NULL);
+  ir_explain_remark_code("vectorized");
+  ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
+  } else if (any) {
+  snprintf(reason, sizeof(reason),
+           "only the innermost loop of a nest is vectorized; this loop "
+           "drives the vectorized inner loop (line %zu)",
+           inner_line);
+  ir_explain_remark(function->name, "loop", L->location, 1,
+                    "vectorized inner, scalar outer", reason, NULL, NULL);
+  ir_explain_remark_code("vectorized-inner");
+  ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
+  } else if (has_inner) {
+  if (inlined_loop_callee[0]) {
+    snprintf(reason, sizeof(reason),
+             "the call to `%s` on line %zu was inlined, so that callee's "
+             "loop (line %zu) now sits in this body; only innermost loops "
+             "are vectorized",
+             inlined_loop_callee, inlined_loop_from_line, inner_line);
+    snprintf(fix, sizeof(fix),
+             "nothing to change on this line: this loop drives the work, "
+             "and the vectorizable part is `%s`'s loop. See the remark "
+             "on line %zu",
+             inlined_loop_callee, inner_line);
+  } else {
+    snprintf(reason, sizeof(reason),
+             "the body contains a nested loop (line %zu), and only "
+             "innermost loops are vectorized; the inner loop did not "
+             "vectorize either. See its remark",
+             inner_line);
+    snprintf(fix, sizeof(fix),
+             "nothing to change on this line: this loop drives the nest, "
+             "so the fix belongs on the inner loop at line %zu",
+             inner_line);
+  }
+  ir_explain_remark(function->name, "loop", L->location, 0,
+                    "NOT vectorized", reason, fix, NULL);
+  ir_explain_remark_code("outer-of-nest");
+  ir_explain_remark_advisory();
+  ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
+  } else if (!ir_region_has_loop_label(function, L->begin, L->end)) {
+  if (!ir_explain_has_remark_at(L->location.line, "loop")) {
+    ir_explain_remark(function->name, "loop", L->location, 1,
+                      "eliminated: no loop remains after "
+                      "optimization (fully unrolled or folded away)",
+                      NULL, NULL, NULL);
+    ir_explain_remark_code("eliminated");
+    ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
+  }
+  } else {
+  int diagnosis = IR_SIMD_BAIL_NONE;
+  int advisory = 0;
+  ir_simd_explain_bail(function, L->begin, L->end, reason, sizeof(reason),
+                       fix, sizeof(fix), &diagnosis, &advisory);
+  char verified[512], partial[512];
+  verified[0] = partial[0] = '\0';
+  char kernel_desc[128];
+  if (diagnosis == IR_SIMD_BAIL_CALL_IN_BODY) {
+    char callee[128];
+    int was_noinline = 0;
+    const char *decline_reason = NULL;
+    int nest_after = 0;
+    int sim = ir_explain_simulate_inline_fix(
+        function, L->begin, L->end, callee, sizeof(callee), kernel_desc,
+        sizeof(kernel_desc), &was_noinline, &decline_reason, &nest_after);
+    if (sim == -1) {
+      if (decline_reason) {
+        snprintf(reason, sizeof(reason),
+                 "each iteration calls `%s`, and `@inline` cannot help: "
+                 "%s",
+                 callee, decline_reason);
+      } else if (nest_after) {
+        snprintf(reason, sizeof(reason),
+                 "each iteration calls `%s`; even with it inlined, its "
+                 "loops would land in this body, making this the outer "
+                 "loop of a nest, and only innermost loops vectorize",
+                 callee);
+      } else {
+        snprintf(reason, sizeof(reason),
+                 "each iteration calls `%s`; the compiler simulated "
+                 "inlining it, and this loop still does not vectorize, "
+                 "so inlining is not the blocker",
+                 callee);
+      }
+      snprintf(fix, sizeof(fix),
+               "nothing to change on this line: this loop is a driver "
+               "and scalar is the right code for it. The vectorizable "
+               "work is inside `%s`, so check the remarks on its loops",
+               callee);
+      advisory = 1;
+    } else if (sim == 1) {
+      if (was_noinline) {
+        snprintf(fix, sizeof(fix),
+                 "remove `@noinline` from `%s` (it blocks this loop's "
+                 "vectorization), or hoist the call out of the loop",
+                 callee);
+        snprintf(verified, sizeof(verified),
+                 "simulated removing `@noinline` from `%s` and re-ran "
+                 "the inliner and the optimizer: this loop then "
+                 "vectorizes \xE2\x86\x92 %s",
+                 callee, kernel_desc);
+      } else {
+        snprintf(verified, sizeof(verified),
+                 "simulated marking `%s` @inline and re-ran the inliner "
+                 "and the optimizer: this loop then vectorizes "
+                 "\xE2\x86\x92 %s",
+                 callee, kernel_desc);
+      }
+    }
+  } else {
+    const char *inapplicable_fix = NULL;
+    char next_reason[320];
+    next_reason[0] = '\0';
+    int sim = ir_explain_try_fix_for_diagnosis(
+        function, L->begin, L->end, diagnosis, kernel_desc,
+        sizeof(kernel_desc), &inapplicable_fix, next_reason,
+        sizeof(next_reason));
+    if (sim == 1) {
+      snprintf(verified, sizeof(verified),
+               "simulated that fix and re-ran the optimizer: this loop "
+               "then vectorizes \xE2\x86\x92 %s",
+               kernel_desc);
+    } else if (sim == IR_SIMD_FIX_INAPPLICABLE && inapplicable_fix) {
+      snprintf(fix, sizeof(fix), "%s", inapplicable_fix);
+      advisory = 1;
+    } else if (sim == IR_SIMD_FIX_PARTIAL && next_reason[0]) {
+      size_t used = strlen(fix);
+      snprintf(fix + used, sizeof(fix) - used, " (first step only)");
+      snprintf(partial, sizeof(partial),
+               "re-checked with that change applied: the loop still does "
+               "not vectorize, because %s",
+               next_reason);
+    }
+  }
+  ir_explain_remark(function->name, "loop", L->location, 0,
+                    "NOT vectorized", reason, fix[0] ? fix : NULL,
+                    verified[0] ? verified : NULL);
+  if (partial[0]) {
+    ir_explain_remark_partial(partial);
+  }
+  if (advisory) {
+    ir_explain_remark_advisory();
+  }
+  ir_explain_remark_code(ir_simd_bail_id_name(diagnosis));
+  ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
+  }
+ir_explain_remark_loop_depth(L->location.line, nest_depth);
+
+}
+
+static void ir_explain_report_each_loop(const IRFunction *function,
+                                        size_t loop_count,
+                                        const IRSimdLoopRecord *loops) {
+  for (size_t k = 0; k < loop_count; k++) {
+    ir_explain_report_loop(function, loops, loop_count, k);
+  }
+}
+
 static void ir_explain_report_loops(const IRFunction *function,
                                     const IRSimdLoopRecord *loops,
                                     size_t loop_count) {
-  for (size_t k = 0; k < loop_count; k++) {
-    const IRSimdLoopRecord *L = &loops[k];
-    if (!ir_explain_location_enabled(&L->location)) {
-      continue;
-    }
-    const IRInstruction *own =
-        ir_region_vectorized_ins(function, L->begin, L->end, 0);
-    if (!own) {
-      own = ir_region_skipahead_ins(function, L->begin, L->end);
-    }
-    const IRInstruction *any =
-        own ? own : ir_region_vectorized_ins(function, L->begin, L->end, 1);
-
-    size_t nest_depth = 1;
-    for (size_t m = 0; m < loop_count; m++) {
-      if (m != k && loops[m].begin < L->begin && loops[m].end > L->end) {
-        nest_depth++;
-      }
-    }
-
-    int has_inner = 0;
-    size_t inner_line = 0;
-    for (size_t m = 0; m < loop_count; m++) {
-      if (m == k || loops[m].begin <= L->begin || loops[m].end >= L->end) {
-        continue;
-      }
-      has_inner = 1;
-      if (inner_line == 0) {
-        inner_line = loops[m].location.line;
-      }
-      if (!own && any &&
-          ir_region_vectorized_ins(function, loops[m].begin, loops[m].end, 1)) {
-        inner_line = loops[m].location.line;
-      }
-    }
-    size_t inlined_loop_from_line = 0;
-    char inlined_loop_callee[128];
-    inlined_loop_callee[0] = '\0';
-    if (!has_inner) {
-      size_t structural = ir_region_inner_loop_line(function, L->begin, L->end);
-      if (structural) {
-        has_inner = 1;
-        inner_line = structural;
-        size_t last = ir_simd_loop_end_line(function, L);
-        if (ir_explain_inlined_calls_in_range(
-                function->name, L->location.line, last ? last : L->location.line,
-                &inlined_loop_from_line, inlined_loop_callee,
-                sizeof(inlined_loop_callee)) != 1) {
-          inlined_loop_from_line = 0;
-          inlined_loop_callee[0] = '\0';
-        }
-      }
-    }
-
-    char headline[192], reason[320], fix[320];
-    if (own) {
-      char desc[128];
-      ir_explain_kernel_desc(own, desc, sizeof(desc));
-      snprintf(headline, sizeof(headline), "vectorized \xE2\x86\x92 %s", desc);
-      ir_explain_remark(function->name, "loop", L->location, 1, headline, NULL,
-                        NULL, NULL);
-      ir_explain_remark_code("vectorized");
-      ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
-    } else if (any) {
-      snprintf(reason, sizeof(reason),
-               "only the innermost loop of a nest is vectorized; this loop "
-               "drives the vectorized inner loop (line %zu)",
-               inner_line);
-      ir_explain_remark(function->name, "loop", L->location, 1,
-                        "vectorized inner, scalar outer", reason, NULL, NULL);
-      ir_explain_remark_code("vectorized-inner");
-      ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
-    } else if (has_inner) {
-      if (inlined_loop_callee[0]) {
-        snprintf(reason, sizeof(reason),
-                 "the call to `%s` on line %zu was inlined, so that callee's "
-                 "loop (line %zu) now sits in this body; only innermost loops "
-                 "are vectorized",
-                 inlined_loop_callee, inlined_loop_from_line, inner_line);
-        snprintf(fix, sizeof(fix),
-                 "nothing to change on this line: this loop drives the work, "
-                 "and the vectorizable part is `%s`'s loop. See the remark "
-                 "on line %zu",
-                 inlined_loop_callee, inner_line);
-      } else {
-        snprintf(reason, sizeof(reason),
-                 "the body contains a nested loop (line %zu), and only "
-                 "innermost loops are vectorized; the inner loop did not "
-                 "vectorize either. See its remark",
-                 inner_line);
-        snprintf(fix, sizeof(fix),
-                 "nothing to change on this line: this loop drives the nest, "
-                 "so the fix belongs on the inner loop at line %zu",
-                 inner_line);
-      }
-      ir_explain_remark(function->name, "loop", L->location, 0,
-                        "NOT vectorized", reason, fix, NULL);
-      ir_explain_remark_code("outer-of-nest");
-      ir_explain_remark_advisory();
-      ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
-    } else if (!ir_region_has_loop_label(function, L->begin, L->end)) {
-      if (!ir_explain_has_remark_at(L->location.line, "loop")) {
-        ir_explain_remark(function->name, "loop", L->location, 1,
-                          "eliminated: no loop remains after "
-                          "optimization (fully unrolled or folded away)",
-                          NULL, NULL, NULL);
-        ir_explain_remark_code("eliminated");
-        ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
-      }
-    } else {
-      int diagnosis = IR_SIMD_BAIL_NONE;
-      int advisory = 0;
-      ir_simd_explain_bail(function, L->begin, L->end, reason, sizeof(reason),
-                           fix, sizeof(fix), &diagnosis, &advisory);
-      char verified[512], partial[512];
-      verified[0] = partial[0] = '\0';
-      char kernel_desc[128];
-      if (diagnosis == IR_SIMD_BAIL_CALL_IN_BODY) {
-        char callee[128];
-        int was_noinline = 0;
-        const char *decline_reason = NULL;
-        int nest_after = 0;
-        int sim = ir_explain_simulate_inline_fix(
-            function, L->begin, L->end, callee, sizeof(callee), kernel_desc,
-            sizeof(kernel_desc), &was_noinline, &decline_reason, &nest_after);
-        if (sim == -1) {
-          if (decline_reason) {
-            snprintf(reason, sizeof(reason),
-                     "each iteration calls `%s`, and `@inline` cannot help: "
-                     "%s",
-                     callee, decline_reason);
-          } else if (nest_after) {
-            snprintf(reason, sizeof(reason),
-                     "each iteration calls `%s`; even with it inlined, its "
-                     "loops would land in this body, making this the outer "
-                     "loop of a nest, and only innermost loops vectorize",
-                     callee);
-          } else {
-            snprintf(reason, sizeof(reason),
-                     "each iteration calls `%s`; the compiler simulated "
-                     "inlining it, and this loop still does not vectorize, "
-                     "so inlining is not the blocker",
-                     callee);
-          }
-          snprintf(fix, sizeof(fix),
-                   "nothing to change on this line: this loop is a driver "
-                   "and scalar is the right code for it. The vectorizable "
-                   "work is inside `%s`, so check the remarks on its loops",
-                   callee);
-          advisory = 1;
-        } else if (sim == 1) {
-          if (was_noinline) {
-            snprintf(fix, sizeof(fix),
-                     "remove `@noinline` from `%s` (it blocks this loop's "
-                     "vectorization), or hoist the call out of the loop",
-                     callee);
-            snprintf(verified, sizeof(verified),
-                     "simulated removing `@noinline` from `%s` and re-ran "
-                     "the inliner and the optimizer: this loop then "
-                     "vectorizes \xE2\x86\x92 %s",
-                     callee, kernel_desc);
-          } else {
-            snprintf(verified, sizeof(verified),
-                     "simulated marking `%s` @inline and re-ran the inliner "
-                     "and the optimizer: this loop then vectorizes "
-                     "\xE2\x86\x92 %s",
-                     callee, kernel_desc);
-          }
-        }
-      } else {
-        const char *inapplicable_fix = NULL;
-        char next_reason[320];
-        next_reason[0] = '\0';
-        int sim = ir_explain_try_fix_for_diagnosis(
-            function, L->begin, L->end, diagnosis, kernel_desc,
-            sizeof(kernel_desc), &inapplicable_fix, next_reason,
-            sizeof(next_reason));
-        if (sim == 1) {
-          snprintf(verified, sizeof(verified),
-                   "simulated that fix and re-ran the optimizer: this loop "
-                   "then vectorizes \xE2\x86\x92 %s",
-                   kernel_desc);
-        } else if (sim == IR_SIMD_FIX_INAPPLICABLE && inapplicable_fix) {
-          snprintf(fix, sizeof(fix), "%s", inapplicable_fix);
-          advisory = 1;
-        } else if (sim == IR_SIMD_FIX_PARTIAL && next_reason[0]) {
-          size_t used = strlen(fix);
-          snprintf(fix + used, sizeof(fix) - used, " (first step only)");
-          snprintf(partial, sizeof(partial),
-                   "re-checked with that change applied: the loop still does "
-                   "not vectorize, because %s",
-                   next_reason);
-        }
-      }
-      ir_explain_remark(function->name, "loop", L->location, 0,
-                        "NOT vectorized", reason, fix[0] ? fix : NULL,
-                        verified[0] ? verified : NULL);
-      if (partial[0]) {
-        ir_explain_remark_partial(partial);
-      }
-      if (advisory) {
-        ir_explain_remark_advisory();
-      }
-      ir_explain_remark_code(ir_simd_bail_id_name(diagnosis));
-      ir_explain_remark_extent(ir_simd_loop_end_line(function, L));
-    }
-    ir_explain_remark_loop_depth(L->location.line, nest_depth);
-  }
+  ir_explain_report_each_loop(function, loop_count, loops);
 }
 
 int ir_verify_simd_contracts(IRFunction *function) {

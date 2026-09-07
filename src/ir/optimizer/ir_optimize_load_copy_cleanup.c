@@ -1573,116 +1573,120 @@ static int ir_scan_assigns_element(const IRFunction *function, size_t at,
   }
 }
 
+static void ir_normalize_scan_at(int *changed, IRFunction *function) {
+for (size_t header = 0; header < function->instruction_count; header++) {
+  const IRInstruction *label = &function->instructions[header];
+  size_t latch = 0;
+  size_t init_index = 0;
+  const char *iv = NULL;
+  const char *acc = NULL;
+  const char *base = NULL;
+  long long width = 0;
+  int found_init = 0;
+  int ok = 1;
+
+  if (label->op != IR_OP_LABEL ||
+      !ir_cleanup_label_is_loop_header(label->text)) {
+    continue;
+  }
+  latch = ir_cleanup_loop_latch(function, header, label->text);
+  if (!latch) {
+    continue;
+  }
+  {
+    size_t compare_index = 0;
+    const IRInstruction *cmp = NULL;
+    if (!ir_find_next_non_nop(function, header + 1, &compare_index) ||
+        compare_index >= latch) {
+      continue;
+    }
+    cmp = &function->instructions[compare_index];
+    if (cmp->op != IR_OP_BINARY || cmp->is_float || !cmp->text ||
+        strcmp(cmp->text, "<") != 0 || cmp->lhs.kind != IR_OPERAND_SYMBOL ||
+        !cmp->lhs.name) {
+      continue;
+    }
+    iv = cmp->lhs.name;
+  }
+  for (size_t k = 0; k < header; k++) {
+    const IRInstruction *ins = &function->instructions[k];
+    if (ir_instruction_writes_destination(ins) &&
+        ir_operand_is_symbol_named(&ins->dest, iv)) {
+      init_index = k;
+      found_init = (ins->op == IR_OP_ASSIGN &&
+                    ins->lhs.kind == IR_OPERAND_INT && ins->lhs.int_value == 1);
+    }
+  }
+  if (!found_init) {
+    continue;
+  }
+  for (size_t k = header + 1; k < latch && ok; k++) {
+    const IRInstruction *ins = &function->instructions[k];
+    const char *b = NULL;
+    long long w = 0;
+    if (ins->op == IR_OP_STORE || ins->op == IR_OP_CALL ||
+        ins->op == IR_OP_CALL_INDIRECT || ins->op == IR_OP_INLINE_ASM ||
+        ins->op == IR_OP_ADDRESS_OF || ins->op == IR_OP_NEW) {
+      ok = 0;
+      break;
+    }
+    if (!ir_instruction_writes_destination(ins) ||
+        ins->dest.kind != IR_OPERAND_SYMBOL || !ins->dest.name ||
+        strcmp(ins->dest.name, iv) == 0) {
+      continue;
+    }
+    if (acc && strcmp(acc, ins->dest.name) != 0) {
+      ok = 0;
+      break;
+    }
+    if (!ir_scan_assigns_element(function, k, ins->dest.name, iv, &b, &w) ||
+        (base && strcmp(base, b) != 0) || (width && w != width)) {
+      ok = 0;
+      break;
+    }
+    acc = ins->dest.name;
+    base = b;
+    width = w;
+  }
+  if (!ok || !acc || !base) {
+    continue;
+  }
+  {
+    const IRInstruction *seed = NULL;
+    for (size_t k = 0; k < header; k++) {
+      const IRInstruction *ins = &function->instructions[k];
+      if (ir_instruction_writes_destination(ins) &&
+          ir_operand_is_symbol_named(&ins->dest, acc)) {
+        seed = ins;
+      }
+      if (seed && ir_instruction_writes_destination(ins) &&
+          ir_operand_is_symbol_named(&ins->dest, base)) {
+        seed = NULL;
+        break;
+      }
+    }
+    if (!seed || seed->op != IR_OP_LOAD ||
+        !ir_operand_is_symbol_named(&seed->lhs, base) ||
+        seed->rhs.kind != IR_OPERAND_INT || seed->rhs.int_value != width) {
+      continue;
+    }
+  }
+  {
+    IRInstruction *init = &function->instructions[init_index];
+    ir_operand_destroy(&init->lhs);
+    init->lhs = ir_operand_int(0);
+    if (changed) {
+      *changed = 1;
+    }
+  }
+}
+}
+
 int ir_normalize_scan_from_first_pass(IRFunction *function, int *changed) {
   if (!function) {
     return 0;
   }
-  for (size_t header = 0; header < function->instruction_count; header++) {
-    const IRInstruction *label = &function->instructions[header];
-    size_t latch = 0;
-    size_t init_index = 0;
-    const char *iv = NULL;
-    const char *acc = NULL;
-    const char *base = NULL;
-    long long width = 0;
-    int found_init = 0;
-    int ok = 1;
-
-    if (label->op != IR_OP_LABEL ||
-        !ir_cleanup_label_is_loop_header(label->text)) {
-      continue;
-    }
-    latch = ir_cleanup_loop_latch(function, header, label->text);
-    if (!latch) {
-      continue;
-    }
-    {
-      size_t compare_index = 0;
-      const IRInstruction *cmp = NULL;
-      if (!ir_find_next_non_nop(function, header + 1, &compare_index) ||
-          compare_index >= latch) {
-        continue;
-      }
-      cmp = &function->instructions[compare_index];
-      if (cmp->op != IR_OP_BINARY || cmp->is_float || !cmp->text ||
-          strcmp(cmp->text, "<") != 0 || cmp->lhs.kind != IR_OPERAND_SYMBOL ||
-          !cmp->lhs.name) {
-        continue;
-      }
-      iv = cmp->lhs.name;
-    }
-    for (size_t k = 0; k < header; k++) {
-      const IRInstruction *ins = &function->instructions[k];
-      if (ir_instruction_writes_destination(ins) &&
-          ir_operand_is_symbol_named(&ins->dest, iv)) {
-        init_index = k;
-        found_init = (ins->op == IR_OP_ASSIGN &&
-                      ins->lhs.kind == IR_OPERAND_INT && ins->lhs.int_value == 1);
-      }
-    }
-    if (!found_init) {
-      continue;
-    }
-    for (size_t k = header + 1; k < latch && ok; k++) {
-      const IRInstruction *ins = &function->instructions[k];
-      const char *b = NULL;
-      long long w = 0;
-      if (ins->op == IR_OP_STORE || ins->op == IR_OP_CALL ||
-          ins->op == IR_OP_CALL_INDIRECT || ins->op == IR_OP_INLINE_ASM ||
-          ins->op == IR_OP_ADDRESS_OF || ins->op == IR_OP_NEW) {
-        ok = 0;
-        break;
-      }
-      if (!ir_instruction_writes_destination(ins) ||
-          ins->dest.kind != IR_OPERAND_SYMBOL || !ins->dest.name ||
-          strcmp(ins->dest.name, iv) == 0) {
-        continue;
-      }
-      if (acc && strcmp(acc, ins->dest.name) != 0) {
-        ok = 0;
-        break;
-      }
-      if (!ir_scan_assigns_element(function, k, ins->dest.name, iv, &b, &w) ||
-          (base && strcmp(base, b) != 0) || (width && w != width)) {
-        ok = 0;
-        break;
-      }
-      acc = ins->dest.name;
-      base = b;
-      width = w;
-    }
-    if (!ok || !acc || !base) {
-      continue;
-    }
-    {
-      const IRInstruction *seed = NULL;
-      for (size_t k = 0; k < header; k++) {
-        const IRInstruction *ins = &function->instructions[k];
-        if (ir_instruction_writes_destination(ins) &&
-            ir_operand_is_symbol_named(&ins->dest, acc)) {
-          seed = ins;
-        }
-        if (seed && ir_instruction_writes_destination(ins) &&
-            ir_operand_is_symbol_named(&ins->dest, base)) {
-          seed = NULL;
-          break;
-        }
-      }
-      if (!seed || seed->op != IR_OP_LOAD ||
-          !ir_operand_is_symbol_named(&seed->lhs, base) ||
-          seed->rhs.kind != IR_OPERAND_INT || seed->rhs.int_value != width) {
-        continue;
-      }
-    }
-    {
-      IRInstruction *init = &function->instructions[init_index];
-      ir_operand_destroy(&init->lhs);
-      init->lhs = ir_operand_int(0);
-      if (changed) {
-        *changed = 1;
-      }
-    }
-  }
+  ir_normalize_scan_at(changed, function);
   return 1;
 }
 

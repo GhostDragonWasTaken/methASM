@@ -7367,164 +7367,168 @@ static int mir_addr_fold_through_inner_add(const IRFunction *f,
   return 0;
 }
 
-static void mir_compute_address_folds(const IRFunction *f,
-                                      const MirTempUseIndex *uses, char *skip,
-                                      MirAddrFold *folds) {
-  for (size_t i = 0; i < f->instruction_count; i++) {
-    const IRInstruction *in = &f->instructions[i];
-    const IROperand *addr;
-    if (in->op == IR_OP_LOAD) {
-      addr = &in->lhs;
-    } else if (in->op == IR_OP_STORE) {
-      addr = &in->dest;
-    } else {
+static void mir_compute_address_fold_at(const IRFunction *f, MirAddrFold *folds, char *skip, const MirTempUseIndex *uses) {
+for (size_t i = 0; i < f->instruction_count; i++) {
+  const IRInstruction *in = &f->instructions[i];
+  const IROperand *addr;
+  if (in->op == IR_OP_LOAD) {
+    addr = &in->lhs;
+  } else if (in->op == IR_OP_STORE) {
+    addr = &in->dest;
+  } else {
+    continue;
+  }
+  if (in->is_float || addr->kind != IR_OPERAND_TEMP || !addr->name) {
+    continue;
+  }
+  int addr_reads = 0;
+  if (!mir_temp_reads_are_all_addresses(uses, addr->name, &addr_reads)) {
+    continue;
+  }
+  long ai = mir_temp_def_index(uses, addr->name);
+  if (ai < 0) {
+    continue;
+  }
+  const IRInstruction *padd = &f->instructions[ai];
+  if (padd->op != IR_OP_BINARY || padd->is_float || !padd->text ||
+      strcmp(padd->text, "+") != 0) {
+    continue;
+  }
+  const IROperand *order[2][2] = {{&padd->lhs, &padd->rhs},
+                                  {&padd->rhs, &padd->lhs}};
+  for (int t = 0; t < 2; t++) {
+    const IROperand *base = order[t][0];
+    const IROperand *scaled = order[t][1];
+    if (scaled->kind != IR_OPERAND_TEMP || !scaled->name) {
       continue;
     }
-    if (in->is_float || addr->kind != IR_OPERAND_TEMP || !addr->name) {
+    int scaled_reads = mir_temp_read_count(uses, scaled->name);
+    if (scaled_reads < 1) {
       continue;
     }
-    int addr_reads = 0;
-    if (!mir_temp_reads_are_all_addresses(uses, addr->name, &addr_reads)) {
+    long si = mir_temp_def_index(uses, scaled->name);
+    if (si < 0) {
       continue;
     }
-    long ai = mir_temp_def_index(uses, addr->name);
-    if (ai < 0) {
+    IROperand index;
+    int scale;
+    if (!mir_decode_scale(&f->instructions[si], &index, &scale)) {
       continue;
     }
-    const IRInstruction *padd = &f->instructions[ai];
-    if (padd->op != IR_OP_BINARY || padd->is_float || !padd->text ||
-        strcmp(padd->text, "+") != 0) {
+    long long disp = 0;
+    long offset_producer =
+        mir_fold_index_constant_offset(f, uses, &index, scale, &disp);
+    if (addr_reads > 1 &&
+        !mir_addr_fold_multiuse_safe(f, (size_t)ai, addr->name, base, &index,
+                                     addr_reads)) {
       continue;
     }
-    const IROperand *order[2][2] = {{&padd->lhs, &padd->rhs},
-                                    {&padd->rhs, &padd->lhs}};
-    for (int t = 0; t < 2; t++) {
-      const IROperand *base = order[t][0];
-      const IROperand *scaled = order[t][1];
-      if (scaled->kind != IR_OPERAND_TEMP || !scaled->name) {
-        continue;
+    folds[i].valid = 1;
+    folds[i].base = *base;
+    folds[i].index = index;
+    folds[i].scale = scale;
+    folds[i].disp = disp;
+    skip[ai] = 1;
+    if (scaled_reads == 1) {
+      skip[si] = 1;
+      if (offset_producer >= 0) {
+        skip[offset_producer] = 1;
       }
-      int scaled_reads = mir_temp_read_count(uses, scaled->name);
-      if (scaled_reads < 1) {
-        continue;
-      }
-      long si = mir_temp_def_index(uses, scaled->name);
-      if (si < 0) {
-        continue;
-      }
-      IROperand index;
-      int scale;
-      if (!mir_decode_scale(&f->instructions[si], &index, &scale)) {
-        continue;
-      }
+    }
+    break;
+  }
+
+  if (!folds[i].valid) {
+    const IROperand *o0 = &padd->lhs;
+    const IROperand *o1 = &padd->rhs;
+    int o0_reg = (o0->kind == IR_OPERAND_TEMP || o0->kind == IR_OPERAND_SYMBOL);
+    int o1_reg = (o1->kind == IR_OPERAND_TEMP || o1->kind == IR_OPERAND_SYMBOL);
+    if (o0_reg && o1_reg &&
+        (addr_reads == 1 ||
+         mir_addr_fold_multiuse_safe(f, (size_t)ai, addr->name, o0, o1,
+                                     addr_reads))) {
+      IROperand index = *o1;
+      IROperand base = *o0;
       long long disp = 0;
       long offset_producer =
-          mir_fold_index_constant_offset(f, uses, &index, scale, &disp);
-      if (addr_reads > 1 &&
-          !mir_addr_fold_multiuse_safe(f, (size_t)ai, addr->name, base, &index,
-                                       addr_reads)) {
-        continue;
-      }
-      folds[i].valid = 1;
-      folds[i].base = *base;
-      folds[i].index = index;
-      folds[i].scale = scale;
-      folds[i].disp = disp;
-      skip[ai] = 1;
-      if (scaled_reads == 1) {
-        skip[si] = 1;
-        if (offset_producer >= 0) {
-          skip[offset_producer] = 1;
-        }
-      }
-      break;
-    }
-
-    if (!folds[i].valid) {
-      const IROperand *o0 = &padd->lhs;
-      const IROperand *o1 = &padd->rhs;
-      int o0_reg = (o0->kind == IR_OPERAND_TEMP || o0->kind == IR_OPERAND_SYMBOL);
-      int o1_reg = (o1->kind == IR_OPERAND_TEMP || o1->kind == IR_OPERAND_SYMBOL);
-      if (o0_reg && o1_reg &&
-          (addr_reads == 1 ||
-           mir_addr_fold_multiuse_safe(f, (size_t)ai, addr->name, o0, o1,
-                                       addr_reads))) {
-        IROperand index = *o1;
-        IROperand base = *o0;
-        long long disp = 0;
-        long offset_producer =
+          mir_fold_index_constant_offset(f, uses, &index, 1, &disp);
+      if (offset_producer < 0) {
+        index = *o0;
+        base = *o1;
+        offset_producer =
             mir_fold_index_constant_offset(f, uses, &index, 1, &disp);
         if (offset_producer < 0) {
-          index = *o0;
-          base = *o1;
-          offset_producer =
-              mir_fold_index_constant_offset(f, uses, &index, 1, &disp);
-          if (offset_producer < 0) {
-            index = *o1;
-            base = *o0;
-          }
-        }
-        folds[i].valid = 1;
-        folds[i].base = base;
-        folds[i].index = index;
-        folds[i].scale = 1;
-        folds[i].disp = disp;
-        skip[ai] = 1;
-        if (offset_producer >= 0) {
-          skip[offset_producer] = 1;
+          index = *o1;
+          base = *o0;
         }
       }
-    }
-
-    if (!folds[i].valid) {
-      const IROperand *o0 = &padd->lhs;
-      const IROperand *o1 = &padd->rhs;
-      const IROperand *base = NULL;
-      const IROperand *cst = NULL;
-      int base_is_symbol = 0;
-      if (mir_addr_base_operand_kind(o0) && o1->kind == IR_OPERAND_INT) {
-        base = o0;
-        cst = o1;
-      } else if (mir_addr_base_operand_kind(o1) &&
-                 o0->kind == IR_OPERAND_INT) {
-        base = o1;
-        cst = o0;
-      }
-      base_is_symbol = base && base->kind == IR_OPERAND_SYMBOL;
-      if (base && cst->int_value >= -2147483648LL &&
-          cst->int_value <= 2147483647LL &&
-          ((addr_reads == 1 && !base_is_symbol) ||
-           mir_addr_fold_multiuse_safe(f, (size_t)ai, addr->name, base, cst,
-                                       addr_reads))) {
-        IROperand deep_base;
-        IROperand deep_index;
-        int deep_scale = 1;
-        long inner = -1;
-        long index_def = -1;
-        if (addr_reads == 1 &&
-            mir_addr_fold_through_inner_add(f, uses, base, addr->name,
-                                            &deep_base, &deep_index,
-                                            &deep_scale, &inner, &index_def)) {
-          folds[i].valid = 1;
-          folds[i].base = deep_base;
-          folds[i].index = deep_index;
-          folds[i].scale = deep_scale;
-          folds[i].disp = cst->int_value;
-          skip[ai] = 1;
-          skip[inner] = 1;
-          if (index_def >= 0) {
-            skip[index_def] = 1;
-          }
-        } else {
-          folds[i].valid = 1;
-          folds[i].base = *base;
-          folds[i].index = *cst;
-          folds[i].scale = 1;
-          skip[ai] = 1;
-        }
+      folds[i].valid = 1;
+      folds[i].base = base;
+      folds[i].index = index;
+      folds[i].scale = 1;
+      folds[i].disp = disp;
+      skip[ai] = 1;
+      if (offset_producer >= 0) {
+        skip[offset_producer] = 1;
       }
     }
   }
+
+  if (!folds[i].valid) {
+    const IROperand *o0 = &padd->lhs;
+    const IROperand *o1 = &padd->rhs;
+    const IROperand *base = NULL;
+    const IROperand *cst = NULL;
+    int base_is_symbol = 0;
+    if (mir_addr_base_operand_kind(o0) && o1->kind == IR_OPERAND_INT) {
+      base = o0;
+      cst = o1;
+    } else if (mir_addr_base_operand_kind(o1) &&
+               o0->kind == IR_OPERAND_INT) {
+      base = o1;
+      cst = o0;
+    }
+    base_is_symbol = base && base->kind == IR_OPERAND_SYMBOL;
+    if (base && cst->int_value >= -2147483648LL &&
+        cst->int_value <= 2147483647LL &&
+        ((addr_reads == 1 && !base_is_symbol) ||
+         mir_addr_fold_multiuse_safe(f, (size_t)ai, addr->name, base, cst,
+                                     addr_reads))) {
+      IROperand deep_base;
+      IROperand deep_index;
+      int deep_scale = 1;
+      long inner = -1;
+      long index_def = -1;
+      if (addr_reads == 1 &&
+          mir_addr_fold_through_inner_add(f, uses, base, addr->name,
+                                          &deep_base, &deep_index,
+                                          &deep_scale, &inner, &index_def)) {
+        folds[i].valid = 1;
+        folds[i].base = deep_base;
+        folds[i].index = deep_index;
+        folds[i].scale = deep_scale;
+        folds[i].disp = cst->int_value;
+        skip[ai] = 1;
+        skip[inner] = 1;
+        if (index_def >= 0) {
+          skip[index_def] = 1;
+        }
+      } else {
+        folds[i].valid = 1;
+        folds[i].base = *base;
+        folds[i].index = *cst;
+        folds[i].scale = 1;
+        skip[ai] = 1;
+      }
+    }
+  }
+}
+}
+
+static void mir_compute_address_folds(const IRFunction *f,
+                                      const MirTempUseIndex *uses, char *skip,
+                                      MirAddrFold *folds) {
+  mir_compute_address_fold_at(f, folds, skip, uses);
 }
 
 static int mir_lower_folded_access(MirFunction *fn, CodeGenerator *g,

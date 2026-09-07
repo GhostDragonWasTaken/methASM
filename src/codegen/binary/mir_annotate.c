@@ -1979,112 +1979,125 @@ static void query_remark_for_line(const char *fnname, size_t line) {
   }
 }
 
+static void write_line_query_registers(AnnotFunc *f, int min_idx,
+                                       int max_idx) {
+const char *names[32];
+int cc[32], lc[32], rcls[32], nd = 0;
+for (size_t ri = 0; ri < f->reg_count; ri++) {
+  RegInterval *iv = &f->regs[ri];
+  if (iv->start > max_idx || iv->end < min_idx) continue;
+  const char *nm = iv->rclass == MIR_RC_GP ? gp_name(iv->phys, 8)
+                                           : vec_name(iv->phys, iv->rclass);
+  int found = -1;
+  for (int k = 0; k < nd; k++)
+    if (icase_eq(names[k], nm)) { found = k; break; }
+  if (found < 0 && nd < 32) {
+    found = nd++;
+    names[found] = nm; cc[found] = 0; lc[found] = 0;
+    rcls[found] = iv->rclass;
+  }
+  if (found >= 0) {
+    if (iv->crosses_call) cc[found] = 1;
+    if (iv->loop_carried) lc[found] = 1;
+  }
+}
+int gp = 0, vec = 0;
+printf("  registers live across MIR [%d..%d]:", min_idx, max_idx);
+for (int k = 0; k < nd; k++) {
+  printf(" %s%s%s", names[k], cc[k] ? "(C)" : "", lc[k] ? "(*)" : "");
+  if (rcls[k] == MIR_RC_GP) gp++; else vec++;
+}
+printf("  [%d GP, %d vec", gp, vec);
+if (f->spill_count) printf(", %d spilled", f->spill_count);
+printf("; (C)=crosses call, (*)=loop-carried]\n");
+}
+
+static void write_line_query_row(AnnotFunc *f, int hi, int lo, int *any_fn) {
+  if (!query_in_focus(f)) return;
+int n_in = 0, min_idx = -1, max_idx = -1, rt = 0, kern = 0;
+size_t bytes = 0;
+for (size_t ii = 0; ii < f->insn_count; ii++) {
+  AnnotInsn *r = &f->insns[ii];
+  if (r->line < (size_t)lo || r->line > (size_t)hi) continue;
+  n_in++;
+  bytes += r->len;
+  rt += r->rthru;
+  if (r->is_kernel) kern++;
+  if (r->mir_index >= 0) {
+    if (min_idx < 0 || r->mir_index < min_idx) min_idx = r->mir_index;
+    if (r->mir_index > max_idx) max_idx = r->mir_index;
+  }
+}
+if (!n_in && !g.q_fn) return;
+(*any_fn) = 1;
+char c[16];
+cycles_str(rt, c, sizeof(c));
+printf("\n=== %s  (%s:%zu, %s) ===\n", f->name, f->file ? f->file : "?",
+       f->line, f->backend ? f->backend : "?");
+if (!n_in) {
+  printf("  (no emitted code on those lines)\n");
+  
+}
+printf("  %d op%s, %zu bytes, ~%s cyc static throughput", n_in,
+       n_in == 1 ? "" : "s", bytes, c);
+if (kern)
+  printf(" (+%d SIMD kernel%s, run at vector speed, excluded from the static"
+         " estimate)",
+         kern, kern == 1 ? "" : "s");
+printf("\n");
+size_t cur_line = 0;
+for (size_t ii = 0; ii < f->insn_count; ii++) {
+  AnnotInsn *r = &f->insns[ii];
+  if (r->line < (size_t)lo || r->line > (size_t)hi) continue;
+  if (r->line != cur_line) {
+    cur_line = r->line;
+    printf("  line %zu:\n", cur_line);
+    query_remark_for_line(f->name, cur_line);
+  }
+  char cost[16] = "";
+  if (r->rthru > 0 || r->lat > 1) {
+    char rtb[12];
+    cycles_str(r->rthru, rtb, sizeof(rtb));
+    snprintf(cost, sizeof(cost), "%dc/%s", r->lat, rtb);
+  }
+  printf("    %04zx  %-30s %-9s", r->off, r->intel ? r->intel : "", cost);
+  if (r->tag) {
+    printf("  [%s%s%s]", r->tag, r->note ? ": " : "", r->note ? r->note : "");
+  }
+  printf("\n");
+}
+for (size_t li = 0; li < f->loop_count; li++) {
+  Loop *l = &f->loops[li];
+  size_t lt = l->tail_line ? l->tail_line : l->head_line;
+  if ((int)l->head_line > hi || (int)lt < lo) continue;
+  char cy[16];
+  cycles_str(l->cycles_per_iter, cy, sizeof(cy));
+  printf("  loop @ line %zu (depth %d): ~%s cyc/iter, bound on %s%s%s\n",
+         l->head_line, l->depth, cy, res_name[l->bottleneck],
+         l->has_kernel ? " (+SIMD kernel)" : "",
+         l->has_estimated ? " (partly estimated)" : "");
+}
+  if (f->reg_count && min_idx >= 0) {
+    write_line_query_registers(f, min_idx, max_idx);
+  }
+
+}
+
+static void write_line_query_rows(int hi, int lo, int *any_fn) {
+if (g.q_lo) printf(" lines %d-%d", lo, hi);
+if (g.q_fn) printf(" fn=%s", g.q_fn);
+printf("\n");
+  for (size_t fi = 0; fi < g.func_count; fi++) {
+    write_line_query_row(&g.funcs[fi], hi, lo, any_fn);
+  }
+}
+
 static void write_line_query(void) {
   int lo = g.q_lo ? g.q_lo : 1;
   int hi = g.q_hi ? g.q_hi : 1000000000;
-  printf("# codegen query: %s", g.source_file ? g.source_file : "?");
-  if (g.q_lo) printf(" lines %d-%d", lo, hi);
-  if (g.q_fn) printf(" fn=%s", g.q_fn);
-  printf("\n");
   int any_fn = 0;
-  for (size_t fi = 0; fi < g.func_count; fi++) {
-    AnnotFunc *f = &g.funcs[fi];
-    if (!query_in_focus(f)) continue;
-    int n_in = 0, min_idx = -1, max_idx = -1, rt = 0, kern = 0;
-    size_t bytes = 0;
-    for (size_t ii = 0; ii < f->insn_count; ii++) {
-      AnnotInsn *r = &f->insns[ii];
-      if (r->line < (size_t)lo || r->line > (size_t)hi) continue;
-      n_in++;
-      bytes += r->len;
-      rt += r->rthru;
-      if (r->is_kernel) kern++;
-      if (r->mir_index >= 0) {
-        if (min_idx < 0 || r->mir_index < min_idx) min_idx = r->mir_index;
-        if (r->mir_index > max_idx) max_idx = r->mir_index;
-      }
-    }
-    if (!n_in && !g.q_fn) continue;
-    any_fn = 1;
-    char c[16];
-    cycles_str(rt, c, sizeof(c));
-    printf("\n=== %s  (%s:%zu, %s) ===\n", f->name, f->file ? f->file : "?",
-           f->line, f->backend ? f->backend : "?");
-    if (!n_in) {
-      printf("  (no emitted code on those lines)\n");
-      continue;
-    }
-    printf("  %d op%s, %zu bytes, ~%s cyc static throughput", n_in,
-           n_in == 1 ? "" : "s", bytes, c);
-    if (kern)
-      printf(" (+%d SIMD kernel%s, run at vector speed, excluded from the static"
-             " estimate)",
-             kern, kern == 1 ? "" : "s");
-    printf("\n");
-    size_t cur_line = 0;
-    for (size_t ii = 0; ii < f->insn_count; ii++) {
-      AnnotInsn *r = &f->insns[ii];
-      if (r->line < (size_t)lo || r->line > (size_t)hi) continue;
-      if (r->line != cur_line) {
-        cur_line = r->line;
-        printf("  line %zu:\n", cur_line);
-        query_remark_for_line(f->name, cur_line);
-      }
-      char cost[16] = "";
-      if (r->rthru > 0 || r->lat > 1) {
-        char rtb[12];
-        cycles_str(r->rthru, rtb, sizeof(rtb));
-        snprintf(cost, sizeof(cost), "%dc/%s", r->lat, rtb);
-      }
-      printf("    %04zx  %-30s %-9s", r->off, r->intel ? r->intel : "", cost);
-      if (r->tag) {
-        printf("  [%s%s%s]", r->tag, r->note ? ": " : "", r->note ? r->note : "");
-      }
-      printf("\n");
-    }
-    for (size_t li = 0; li < f->loop_count; li++) {
-      Loop *l = &f->loops[li];
-      size_t lt = l->tail_line ? l->tail_line : l->head_line;
-      if ((int)l->head_line > hi || (int)lt < lo) continue;
-      char cy[16];
-      cycles_str(l->cycles_per_iter, cy, sizeof(cy));
-      printf("  loop @ line %zu (depth %d): ~%s cyc/iter, bound on %s%s%s\n",
-             l->head_line, l->depth, cy, res_name[l->bottleneck],
-             l->has_kernel ? " (+SIMD kernel)" : "",
-             l->has_estimated ? " (partly estimated)" : "");
-    }
-    if (f->reg_count && min_idx >= 0) {
-      const char *names[32];
-      int cc[32], lc[32], rcls[32], nd = 0;
-      for (size_t ri = 0; ri < f->reg_count; ri++) {
-        RegInterval *iv = &f->regs[ri];
-        if (iv->start > max_idx || iv->end < min_idx) continue;
-        const char *nm = iv->rclass == MIR_RC_GP ? gp_name(iv->phys, 8)
-                                                 : vec_name(iv->phys, iv->rclass);
-        int found = -1;
-        for (int k = 0; k < nd; k++)
-          if (icase_eq(names[k], nm)) { found = k; break; }
-        if (found < 0 && nd < 32) {
-          found = nd++;
-          names[found] = nm; cc[found] = 0; lc[found] = 0;
-          rcls[found] = iv->rclass;
-        }
-        if (found >= 0) {
-          if (iv->crosses_call) cc[found] = 1;
-          if (iv->loop_carried) lc[found] = 1;
-        }
-      }
-      int gp = 0, vec = 0;
-      printf("  registers live across MIR [%d..%d]:", min_idx, max_idx);
-      for (int k = 0; k < nd; k++) {
-        printf(" %s%s%s", names[k], cc[k] ? "(C)" : "", lc[k] ? "(*)" : "");
-        if (rcls[k] == MIR_RC_GP) gp++; else vec++;
-      }
-      printf("  [%d GP, %d vec", gp, vec);
-      if (f->spill_count) printf(", %d spilled", f->spill_count);
-      printf("; (C)=crosses call, (*)=loop-carried]\n");
-    }
-  }
+  printf("# codegen query: %s", g.source_file ? g.source_file : "?");
+  write_line_query_rows(hi, lo, &any_fn);
   if (!any_fn)
     printf("\n(no register-allocated or emitted code matched the query)\n");
 }
