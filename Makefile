@@ -85,7 +85,7 @@ ERROR_SOURCES = $(SRCDIR)/error/error_explain.c
 DEBUG_SOURCES = $(SRCDIR)/debug/debug_info.c
 COMPILER_SOURCES = $(SRCDIR)/compiler/compiler_context.c $(SRCDIR)/compiler/compiler_crash.c $(SRCDIR)/compiler/compiler_self_profile.c
 COMMON_SOURCES = $(SRCDIR)/common.c
-MAIN_SOURCES = $(SRCDIR)/main.c $(SRCDIR)/tracy_build.c
+MAIN_SOURCES = $(SRCDIR)/main.c
 
 # libmtlc: the standalone, frontend-agnostic backend (IR core, optimizer + GNN,
 # code generators, native linker, public API).

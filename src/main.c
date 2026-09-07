@@ -23,7 +23,6 @@
 #include "compiler/compiler_self_profile.h"
 #include "runtime/owned.h"
 #include "runtime/verify_owned.h"
-#include "tracy_build.h"
 #include "ir/ir.h"
 #include "ir/ir_lowering.h"
 #include "ir/ir_optimize.h"
@@ -1861,29 +1860,6 @@ static int append_quoted_argument(char *buffer, size_t buffer_size,
   return append_argument_text(buffer, buffer_size, offset, "\"");
 }
 
-static int append_gcc_link_arguments(char *buffer, size_t buffer_size,
-                                     size_t *offset,
-                                     const CompilerOptions *options) {
-  if (!options) {
-    return 1;
-  }
-
-  for (size_t i = 0; i < options->link_argument_count; i++) {
-    const char *arg = options->link_arguments[i];
-    if (!arg || arg[0] == '\0') {
-      continue;
-    }
-    if (!append_argument_text(buffer, buffer_size, offset, " ")) {
-      return 0;
-    }
-    if (!append_argument_text(buffer, buffer_size, offset, arg)) {
-      return 0;
-    }
-  }
-
-  return 1;
-}
-
 static int append_msvc_link_argument(char *buffer, size_t buffer_size,
                                      size_t *offset, const char *argument) {
   if (!argument || argument[0] == '\0') {
@@ -2044,79 +2020,6 @@ cleanup:
   return result;
 }
 
-static int mettle_link_objects_with_gxx(const char **object_paths,
-                                        size_t object_count,
-                                        const char *executable_filename,
-                                        const CompilerOptions *options) {
-  size_t cmd_len = strlen(executable_filename) + 512u;
-  size_t i = 0u;
-  size_t offset = 0u;
-  char *command = NULL;
-  int result = 1;
-
-  if (!object_paths || object_count == 0u || !executable_filename) {
-    fprintf(stderr, "Error: Missing inputs for g++ Tracy link\n");
-    return 1;
-  }
-
-  for (i = 0u; i < object_count; i++) {
-    if (object_paths[i] && object_paths[i][0] != '\0') {
-      cmd_len += strlen(object_paths[i]) + 4u;
-    }
-  }
-  if (options) {
-    for (i = 0u; i < options->link_argument_count; i++) {
-      if (options->link_arguments[i]) {
-        cmd_len += strlen(options->link_arguments[i]) + 2u;
-      }
-    }
-  }
-
-  command = malloc(cmd_len);
-  if (!command) {
-    fprintf(stderr, "Error: Failed to allocate g++ Tracy link command\n");
-    return 1;
-  }
-
-  if (!append_argument_text(command, cmd_len, &offset, "g++ -o ") ||
-      !append_quoted_argument(command, cmd_len, &offset, executable_filename)) {
-    free(command);
-    fprintf(stderr, "Error: Failed to build g++ Tracy link command\n");
-    return 1;
-  }
-
-  for (i = 0u; i < object_count; i++) {
-    if (!object_paths[i] || object_paths[i][0] == '\0') {
-      continue;
-    }
-    if (!append_argument_text(command, cmd_len, &offset, " ") ||
-        !append_quoted_argument(command, cmd_len, &offset, object_paths[i])) {
-      free(command);
-      fprintf(stderr, "Error: Failed to build g++ Tracy link command\n");
-      return 1;
-    }
-  }
-
-  if (!append_argument_text(command, cmd_len, &offset,
-                            " -lkernel32 -luser32 -lgdi32 -ladvapi32 -lws2_32 "
-                            "-lsecur32 -ldbghelp") ||
-      !append_gcc_link_arguments(command, cmd_len, &offset, options)) {
-    free(command);
-    fprintf(stderr, "Error: Failed to build g++ Tracy link command\n");
-    return 1;
-  }
-
-  if (run_system_command(command) != 0) {
-    fprintf(stderr, "Warning: g++ Tracy link step failed\n");
-    result = 1;
-  } else {
-    result = 0;
-  }
-
-  free(command);
-  return result;
-}
-
 static int mettle_link_object_with_gcc(const char *object_filename,
                                         const char *executable_filename,
                                         const char *const *runtime_objects,
@@ -2243,739 +2146,451 @@ static int mettle_link_object_with_link(const char *object_filename,
   return 0;
 }
 
-static int mettle_link_object_file(const char *object_filename,
-                                     const char *executable_filename,
-                                     const char *runtime_directory,
-                                     const CompilerOptions *options) {
-  LinkerMode linker_mode =
-      options ? options->linker_mode : LINKER_MODE_AUTO;
-  int has_gcc = 0;
-  int has_link = 0;
-  char *external_startup_object = NULL;
-  int want_shared = options && options->shared_output ? 1 : 0;
+typedef enum {
+  RUNTIME_OBJECT_FREESTANDING,
+  RUNTIME_OBJECT_CRASH,
+  RUNTIME_OBJECT_ATOMICS,
+  RUNTIME_OBJECT_PROFILE,
+  RUNTIME_OBJECT_DEBUG,
+  RUNTIME_OBJECT_SAFETY,
+  RUNTIME_OBJECT_TRACE,
+  RUNTIME_OBJECT_SWAP,
+  RUNTIME_OBJECT_STRING,
+  RUNTIME_OBJECT_TRACY_HELPERS,
+  RUNTIME_OBJECT_COUNT
+} RuntimeObjectKind;
 
-  if (!object_filename || !executable_filename || !runtime_directory) {
-    fprintf(stderr, "Error: Missing build inputs for executable generation\n");
-    return 1;
+typedef struct {
+  const char *stem;
+  const char *label;
+  int (*needed)(const char *);
+} RuntimeObjectSpec;
+
+static const RuntimeObjectSpec RUNTIME_OBJECT_SPECS[RUNTIME_OBJECT_COUNT] = {
+    [RUNTIME_OBJECT_FREESTANDING] = {"freestanding", "freestanding", NULL},
+    [RUNTIME_OBJECT_CRASH] = {"crash_handler", "crash-handler",
+                              object_needs_crash_handler},
+    [RUNTIME_OBJECT_ATOMICS] = {"atomics", "atomics", object_needs_atomics},
+    [RUNTIME_OBJECT_PROFILE] = {"profile", "profile",
+                                object_needs_profile_runtime},
+    [RUNTIME_OBJECT_DEBUG] = {"debug", "debug", object_needs_debug_runtime},
+    [RUNTIME_OBJECT_SAFETY] = {"safety", "safety", object_needs_safety_runtime},
+    [RUNTIME_OBJECT_TRACE] = {"trace", "trace", object_needs_trace_runtime},
+    [RUNTIME_OBJECT_SWAP] = {"swap", "swap", object_needs_swap_runtime},
+    [RUNTIME_OBJECT_STRING] = {"string", "string", object_needs_string_runtime},
+    [RUNTIME_OBJECT_TRACY_HELPERS] = {"tracy_helpers", "Tracy helpers",
+                                      object_needs_tracy_helpers},
+};
+
+typedef struct {
+  const char *object_filename;
+  const char *executable_filename;
+  const char *runtime_directory;
+  const CompilerOptions *options;
+  LinkerMode linker_mode;
+  int has_gcc;
+  int has_link;
+  int want_shared;
+  int profile_runtime;
+  int needed[RUNTIME_OBJECT_COUNT];
+  char *gcc_path[RUNTIME_OBJECT_COUNT];
+  char *msvc_path[RUNTIME_OBJECT_COUNT];
+  const char *freestanding_object;
+} LinkPlan;
+
+typedef enum {
+  LINK_OBJECT_ANY,
+  LINK_OBJECT_SKIP_MISSING,
+  LINK_OBJECT_REQUIRED
+} LinkObjectPolicy;
+
+typedef struct {
+  RuntimeObjectKind kind;
+  int gcc_only;
+  LinkObjectPolicy policy;
+} LinkObjectRequest;
+
+typedef struct {
+  const char **paths;
+  unsigned char *is_default;
+  size_t count;
+} LinkObjectList;
+
+static const LinkObjectRequest LINK_INTERNAL_REQUESTS[] = {
+    {RUNTIME_OBJECT_CRASH, 0, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_ATOMICS, 0, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_PROFILE, 0, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_DEBUG, 0, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_SAFETY, 0, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_TRACE, 0, LINK_OBJECT_SKIP_MISSING},
+    {RUNTIME_OBJECT_SWAP, 0, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_STRING, 0, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_TRACY_HELPERS, 0, LINK_OBJECT_ANY},
+};
+
+static const LinkObjectRequest LINK_GCC_REQUESTS[] = {
+    {RUNTIME_OBJECT_FREESTANDING, 1, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_CRASH, 1, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_ATOMICS, 1, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_PROFILE, 1, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_STRING, 0, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_SWAP, 0, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_SAFETY, 1, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_DEBUG, 1, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_TRACY_HELPERS, 0, LINK_OBJECT_ANY},
+};
+
+static const LinkObjectRequest LINK_MSVC_REQUESTS[] = {
+    {RUNTIME_OBJECT_FREESTANDING, 0, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_CRASH, 0, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_ATOMICS, 0, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_PROFILE, 0, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_STRING, 0, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_SWAP, 0, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_TRACE, 0, LINK_OBJECT_SKIP_MISSING},
+    {RUNTIME_OBJECT_SAFETY, 0, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_DEBUG, 0, LINK_OBJECT_REQUIRED},
+    {RUNTIME_OBJECT_TRACY_HELPERS, 0, LINK_OBJECT_ANY},
+};
+
+static const char *link_plan_pick(const LinkPlan *plan,
+                                  RuntimeObjectKind kind) {
+  return (_access(plan->msvc_path[kind], 0) == 0) ? plan->msvc_path[kind]
+                                                  : plan->gcc_path[kind];
+}
+
+static void link_plan_release(LinkPlan *plan) {
+  for (int i = 0; i < RUNTIME_OBJECT_COUNT; i++) {
+    free(plan->gcc_path[i]);
+    free(plan->msvc_path[i]);
   }
-  if (want_shared && linker_mode != LINKER_MODE_INTERNAL &&
-      linker_mode != LINKER_MODE_AUTO) {
+}
+
+static int link_plan_build_paths(LinkPlan *plan) {
+  for (int i = 0; i < RUNTIME_OBJECT_COUNT; i++) {
+    char filename[128];
+    snprintf(filename, sizeof(filename), "%s.o", RUNTIME_OBJECT_SPECS[i].stem);
+    plan->gcc_path[i] = join_paths(plan->runtime_directory, filename);
+    snprintf(filename, sizeof(filename), "%s.obj",
+             RUNTIME_OBJECT_SPECS[i].stem);
+    plan->msvc_path[i] = join_paths(plan->runtime_directory, filename);
+    if (!plan->gcc_path[i] || !plan->msvc_path[i]) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void link_plan_survey(LinkPlan *plan) {
+  for (int i = 0; i < RUNTIME_OBJECT_COUNT; i++) {
+    plan->needed[i] = RUNTIME_OBJECT_SPECS[i].needed
+                          ? RUNTIME_OBJECT_SPECS[i].needed(
+                                plan->object_filename)
+                          : 1;
+  }
+  if (plan->profile_runtime) {
+    plan->needed[RUNTIME_OBJECT_PROFILE] = 1;
+  }
+  if (plan->options && plan->options->debug_hooks) {
+    plan->needed[RUNTIME_OBJECT_DEBUG] = 1;
+  }
+  if (plan->needed[RUNTIME_OBJECT_PROFILE] ||
+      plan->needed[RUNTIME_OBJECT_SAFETY]) {
+    plan->needed[RUNTIME_OBJECT_CRASH] = 1;
+  }
+}
+
+static int link_plan_validate(LinkPlan *plan) {
+  if (!plan->object_filename || !plan->executable_filename ||
+      !plan->runtime_directory) {
+    fprintf(stderr, "Error: Missing build inputs for executable generation\n");
+    return 0;
+  }
+  if (plan->want_shared && plan->linker_mode != LINKER_MODE_INTERNAL &&
+      plan->linker_mode != LINKER_MODE_AUTO) {
     fprintf(stderr,
             "Error: DLL emission requires --linker internal; external linkers "
             "cannot emit a Mettle DLL\n");
-    return 1;
+    return 0;
   }
-
-  has_gcc = (linker_mode == LINKER_MODE_AUTO || linker_mode == LINKER_MODE_GCC)
-                ? windows_tool_exists("gcc")
-                : 0;
-  has_link =
-      (linker_mode == LINKER_MODE_AUTO || linker_mode == LINKER_MODE_MSVC)
-          ? windows_tool_exists("link.exe")
-          : 0;
-  if (linker_mode == LINKER_MODE_GCC && !has_gcc) {
-    fprintf(stderr, "Error: gcc was requested with --linker gcc but was not found.\n");
-    return 1;
+  plan->has_gcc = (plan->linker_mode == LINKER_MODE_AUTO ||
+                   plan->linker_mode == LINKER_MODE_GCC)
+                      ? windows_tool_exists("gcc")
+                      : 0;
+  plan->has_link = (plan->linker_mode == LINKER_MODE_AUTO ||
+                    plan->linker_mode == LINKER_MODE_MSVC)
+                       ? windows_tool_exists("link.exe")
+                       : 0;
+  if (plan->linker_mode == LINKER_MODE_GCC && !plan->has_gcc) {
+    fprintf(stderr,
+            "Error: gcc was requested with --linker gcc but was not found.\n");
+    return 0;
   }
-  if (linker_mode == LINKER_MODE_MSVC && !has_link) {
+  if (plan->linker_mode == LINKER_MODE_MSVC && !plan->has_link) {
     fprintf(stderr,
             "Error: link.exe was requested with --linker msvc but was not found.\n");
-    return 1;
+    return 0;
   }
-  char *crash_gcc_object = join_paths(runtime_directory, "crash_handler.o");
-  char *crash_msvc_object = join_paths(runtime_directory, "crash_handler.obj");
-  char *atomics_gcc_object = join_paths(runtime_directory, "atomics.o");
-  char *atomics_msvc_object = join_paths(runtime_directory, "atomics.obj");
-  char *profile_gcc_object = join_paths(runtime_directory, "profile.o");
-  char *profile_msvc_object = join_paths(runtime_directory, "profile.obj");
-  if (!crash_gcc_object || !crash_msvc_object || !atomics_gcc_object ||
-      !atomics_msvc_object || !profile_gcc_object || !profile_msvc_object) {
+  return 1;
+}
+
+static int link_plan_prepare(LinkPlan *plan) {
+  if (!link_plan_build_paths(plan)) {
     fprintf(stderr, "Error: Failed to allocate build paths\n");
-    free(crash_gcc_object);
-    free(crash_msvc_object);
-    free(atomics_gcc_object);
-    free(atomics_msvc_object);
-    free(profile_gcc_object);
-    free(profile_msvc_object);
-    return 1;
+    return 0;
   }
-
-  int needs_crash = object_needs_crash_handler(object_filename);
-  int needs_atomics = object_needs_atomics(object_filename);
-  int needs_profile = object_needs_profile_runtime(object_filename);
-  int profile_runtime =
-      options && compiler_options_use_profile_runtime(options) ? 1 : 0;
-  if (profile_runtime) {
-    needs_profile = 1;
-  }
-  if (needs_profile) {
-    needs_crash = 1;
-  }
-
-  char debug_gcc_object[1024];
-  char debug_msvc_object[1024];
-  char freestanding_gcc_object[1024];
-  char freestanding_msvc_object[1024];
-  int needs_debug = object_needs_debug_runtime(object_filename) ||
-                    (options && options->debug_hooks);
-  snprintf(debug_gcc_object, sizeof(debug_gcc_object), "%s/debug.o",
-           runtime_directory);
-  snprintf(debug_msvc_object, sizeof(debug_msvc_object), "%s/debug.obj",
-           runtime_directory);
-
-  char safety_gcc_object[1024];
-  char safety_msvc_object[1024];
-  int needs_safety = object_needs_safety_runtime(object_filename);
-  char trace_gcc_object[1024];
-  char trace_msvc_object[1024];
-  int needs_trace = object_needs_trace_runtime(object_filename);
-  char swap_gcc_object[1024];
-  char swap_msvc_object[1024];
-  int needs_swap = object_needs_swap_runtime(object_filename);
-  char string_gcc_object[1024];
-  char string_msvc_object[1024];
-  int needs_string = object_needs_string_runtime(object_filename);
-  snprintf(string_gcc_object, sizeof(string_gcc_object), "%s/string.o",
-           runtime_directory);
-  snprintf(string_msvc_object, sizeof(string_msvc_object), "%s/string.obj",
-           runtime_directory);
-  snprintf(swap_gcc_object, sizeof(swap_gcc_object), "%s/swap.o",
-           runtime_directory);
-  snprintf(swap_msvc_object, sizeof(swap_msvc_object), "%s/swap.obj",
-           runtime_directory);
-  snprintf(safety_gcc_object, sizeof(safety_gcc_object), "%s/safety.o",
-           runtime_directory);
-  snprintf(safety_msvc_object, sizeof(safety_msvc_object), "%s/safety.obj",
-           runtime_directory);
-  snprintf(trace_gcc_object, sizeof(trace_gcc_object), "%s/trace.o",
-           runtime_directory);
-  snprintf(trace_msvc_object, sizeof(trace_msvc_object), "%s/trace.obj",
-           runtime_directory);
-  if (needs_safety) {
-    needs_crash = 1;
-  }
-  snprintf(freestanding_gcc_object, sizeof(freestanding_gcc_object),
-           "%s/freestanding.o", runtime_directory);
-  snprintf(freestanding_msvc_object, sizeof(freestanding_msvc_object),
-           "%s/freestanding.obj", runtime_directory);
-
-  const char *freestanding_object =
-      (_access(freestanding_msvc_object, 0) == 0) ? freestanding_msvc_object
-                                                  : freestanding_gcc_object;
-
-  int use_tracy = compiler_options_use_tracy(options);
-  int needs_tracy_helpers =
-      use_tracy || object_needs_tracy_helpers(object_filename);
-  TracyBuildArtifacts tracy_artifacts = {0};
-  char *tracy_directory = NULL;
-  char *tracy_error = NULL;
-  const char *tracy_helpers_object = NULL;
-  char *tracy_helpers_gcc_object =
-      join_paths(runtime_directory, "tracy_helpers.o");
-  char *tracy_helpers_msvc_object =
-      join_paths(runtime_directory, "tracy_helpers.obj");
-  if (!tracy_helpers_gcc_object || !tracy_helpers_msvc_object) {
-    fprintf(stderr, "Error: Failed to allocate Tracy build paths\n");
-    free(tracy_helpers_gcc_object);
-    free(tracy_helpers_msvc_object);
-    free(crash_gcc_object);
-    free(crash_msvc_object);
-    free(atomics_gcc_object);
-    free(atomics_msvc_object);
-    free(profile_gcc_object);
-    free(profile_msvc_object);
-    return 1;
-  }
-  if (use_tracy) {
+  link_plan_survey(plan);
+  if (compiler_options_use_tracy(plan->options)) {
     fprintf(stderr,
             "Error: --tracy cannot use the external TracyClient in owned "
             "runtime mode because it requires a C++ runtime. Use "
             "--profile-runtime instead.\n");
-    free(tracy_helpers_gcc_object);
-    free(tracy_helpers_msvc_object);
-    free(crash_gcc_object);
-    free(crash_msvc_object);
-    free(atomics_gcc_object);
-    free(atomics_msvc_object);
-    free(profile_gcc_object);
-    free(profile_msvc_object);
-    return 1;
+    return 0;
   }
-  if (_access(freestanding_object, 0) != 0) {
+  plan->freestanding_object = link_plan_pick(plan, RUNTIME_OBJECT_FREESTANDING);
+  if (_access(plan->freestanding_object, 0) != 0) {
     fprintf(stderr,
             "Error: Required freestanding runtime object not found in '%s'\n",
-            runtime_directory);
-    free(tracy_helpers_gcc_object);
-    free(tracy_helpers_msvc_object);
-    free(crash_gcc_object);
-    free(crash_msvc_object);
-    free(atomics_gcc_object);
-    free(atomics_msvc_object);
-    free(profile_gcc_object);
-    free(profile_msvc_object);
+            plan->runtime_directory);
+    return 0;
+  }
+  if (plan->needed[RUNTIME_OBJECT_TRACY_HELPERS] &&
+      _access(link_plan_pick(plan, RUNTIME_OBJECT_TRACY_HELPERS), 0) != 0) {
+    fprintf(stderr,
+            "Error: Program references Tracy helpers but bundled stub "
+            "object not found in '%s'\n",
+            plan->runtime_directory);
+    return 0;
+  }
+  return 1;
+}
+
+static int link_collect_objects(const LinkPlan *plan,
+                                const LinkObjectRequest *requests,
+                                size_t request_count, LinkObjectList *list) {
+  for (size_t i = 0u; i < request_count; i++) {
+    const LinkObjectRequest *request = &requests[i];
+    const char *path = NULL;
+    if (!plan->needed[request->kind]) {
+      continue;
+    }
+    path = request->gcc_only ? plan->gcc_path[request->kind]
+                             : link_plan_pick(plan, request->kind);
+    if (request->policy != LINK_OBJECT_ANY && _access(path, 0) != 0) {
+      if (request->policy == LINK_OBJECT_SKIP_MISSING) {
+        continue;
+      }
+      fprintf(stderr, "Error: Bundled %s runtime object not found in '%s'\n",
+              RUNTIME_OBJECT_SPECS[request->kind].label,
+              plan->runtime_directory);
+      return 0;
+    }
+    if (list->is_default) {
+      list->is_default[list->count] = 1u;
+    }
+    list->paths[list->count++] = path;
+  }
+  return 1;
+}
+
+static int link_internal_prepare_startup(const LinkPlan *plan,
+                                         char **startup_object) {
+  int fatal = plan->linker_mode == LINKER_MODE_INTERNAL ||
+              (!plan->has_gcc && !plan->has_link);
+  if (plan->want_shared) {
     return 1;
   }
-
-  if (use_tracy) {
-    TracyBuildRequest tracy_request = {
-        .tracy_directory = options ? options->tracy_directory : NULL,
-        .stdlib_directory = options ? options->stdlib_directory : NULL,
-        .executable_filename = executable_filename,
-    };
-    tracy_directory = tracy_resolve_directory(&tracy_request, &tracy_error);
-    if (!tracy_directory) {
-      fprintf(stderr, "Error: %s\n",
-              tracy_error ? tracy_error : "Failed to resolve Tracy directory");
-      free(tracy_error);
-      free(tracy_helpers_gcc_object);
-      free(tracy_helpers_msvc_object);
-      free(crash_gcc_object);
-      free(crash_msvc_object);
-      free(atomics_gcc_object);
-      free(atomics_msvc_object);
-      free(profile_gcc_object);
-      free(profile_msvc_object);
-      return 1;
-    }
-    if (!tracy_build_support_objects(&tracy_request, tracy_directory,
-                                     &tracy_artifacts, &tracy_error)) {
-      fprintf(stderr, "Error: %s\n",
-              tracy_error ? tracy_error
-                          : "Failed to build Tracy support objects");
-      free(tracy_error);
-      free(tracy_directory);
-      tracy_free_artifacts(&tracy_artifacts);
-      free(tracy_helpers_gcc_object);
-      free(tracy_helpers_msvc_object);
-      free(crash_gcc_object);
-      free(crash_msvc_object);
-      free(atomics_gcc_object);
-      free(atomics_msvc_object);
-      free(profile_gcc_object);
-      free(profile_msvc_object);
-      return 1;
-    }
-    free(tracy_error);
-    tracy_error = NULL;
-    tracy_helpers_object = tracy_artifacts.helpers_object;
-  } else if (needs_tracy_helpers) {
-    tracy_helpers_object =
-        (_access(tracy_helpers_msvc_object, 0) == 0) ? tracy_helpers_msvc_object
-                                                     : tracy_helpers_gcc_object;
-    if (_access(tracy_helpers_object, 0) != 0) {
-      fprintf(stderr,
-              "Error: Program references Tracy helpers but bundled stub "
-              "object not found in '%s'\n",
-              runtime_directory);
-      free(tracy_helpers_gcc_object);
-      free(tracy_helpers_msvc_object);
-      free(crash_gcc_object);
-      free(crash_msvc_object);
-      free(atomics_gcc_object);
-      free(atomics_msvc_object);
-      free(profile_gcc_object);
-      free(profile_msvc_object);
-      return 1;
-    }
+  *startup_object =
+      replace_extension(plan->executable_filename, ".startup.obj");
+  if (!*startup_object) {
+    fputs(fatal ? "Error: Failed to allocate internal-linker startup object "
+                  "path\n"
+                : "Warning: Failed to allocate internal-linker startup object "
+                  "path, falling back to external linkers\n",
+          stderr);
+    return fatal ? -1 : 0;
   }
+  if (write_internal_startup_object(
+          *startup_object, plan->profile_runtime,
+          compiler_options_install_crash_handler(plan->options),
+          plan->options && plan->options->main_wants_argc_argv ? 1 : 0) != 0) {
+    fputs(fatal ? "Error: Failed to generate internal-linker startup object\n"
+                : "Warning: Failed to generate internal-linker startup object, "
+                  "falling back to external linkers\n",
+          stderr);
+    return fatal ? -1 : 0;
+  }
+  return 1;
+}
 
+static void link_internal_report(const LinkPlan *plan, int linked) {
+  if (linked || plan->linker_mode == LINKER_MODE_INTERNAL) {
+    return;
+  }
+  if (!plan->has_gcc && !plan->has_link) {
+    fprintf(stderr,
+            "Error: Internal linker failed and no external fallback linker is "
+            "available.\n");
+    return;
+  }
+  fprintf(stderr,
+          "Warning: Internal linker failed in auto mode, falling back to "
+          "external linkers\n");
+}
+
+static int link_internal_assemble(const LinkPlan *plan, LinkObjectList *list,
+                                  size_t capacity, char *startup_object) {
+  if (!plan->want_shared) {
+    list->paths[list->count++] = startup_object;
+  }
+  list->is_default[list->count] = 1u;
+  list->paths[list->count++] = plan->freestanding_object;
+  list->paths[list->count++] = plan->object_filename;
+  if (!link_collect_objects(plan, LINK_INTERNAL_REQUESTS,
+                            sizeof(LINK_INTERNAL_REQUESTS) /
+                                sizeof(LINK_INTERNAL_REQUESTS[0]),
+                            list)) {
+    return 0;
+  }
+  if (!append_internal_link_object_args(plan->options, list->paths, capacity,
+                                        &list->count)) {
+    fprintf(stderr, "Error: Too many internal-linker object arguments\n");
+    return 0;
+  }
+  return 1;
+}
+
+static int link_build_internal(const LinkPlan *plan, int *build_result) {
+  size_t capacity = RUNTIME_OBJECT_COUNT + 2u +
+                    (plan->options ? plan->options->link_argument_count : 0u);
+  const char **paths = calloc(capacity, sizeof(const char *));
+  unsigned char *is_default = calloc(capacity, 1u);
+  char *startup_object = NULL;
+  LinkObjectList list = {NULL, NULL, 0u};
+  int ready = 0;
+  int stop = 1;
+
+  if (!paths || !is_default) {
+    fprintf(stderr, "Error: Failed to allocate internal-linker object list\n");
+    goto done;
+  }
+  ready = link_internal_prepare_startup(plan, &startup_object);
+  if (ready < 0) {
+    goto done;
+  }
+  list.paths = paths;
+  list.is_default = is_default;
+  if (ready > 0) {
+    int linked = 0;
+    if (!link_internal_assemble(plan, &list, capacity, startup_object)) {
+      goto done;
+    }
+    linked = mettle_link_internal(paths, is_default, list.count,
+                                  plan->executable_filename, 0,
+                                  plan->options) == 0;
+    if (linked) {
+      *build_result = 0;
+      g_link_output_ownership_verified = 1;
+    }
+    link_internal_report(plan, linked);
+  }
+  stop = plan->want_shared || *build_result == 0 ||
+         plan->linker_mode == LINKER_MODE_INTERNAL ||
+         (!plan->has_gcc && !plan->has_link);
+
+done:
+  if (startup_object) {
+    if (ready > 0) {
+      _unlink(startup_object);
+    }
+    free(startup_object);
+  }
+  free(paths);
+  free(is_default);
+  return stop;
+}
+
+typedef int (*ExternalLinkFn)(const char *, const char *, const char *const *,
+                              size_t, const CompilerOptions *);
+
+static int link_build_external(const LinkPlan *plan,
+                               const LinkObjectRequest *requests,
+                               size_t request_count,
+                               const char *startup_object,
+                               ExternalLinkFn link_fn) {
+  const char *objects[RUNTIME_OBJECT_COUNT + 1u] = {0};
+  LinkObjectList list = {objects, NULL, 0u};
+  list.paths[list.count++] = startup_object;
+  if (!link_collect_objects(plan, requests, request_count, &list)) {
+    return -1;
+  }
+  return link_fn(plan->object_filename, plan->executable_filename, objects,
+                 list.count, plan->options) == 0;
+}
+
+static int mettle_link_object_file(const char *object_filename,
+                                   const char *executable_filename,
+                                   const char *runtime_directory,
+                                   const CompilerOptions *options) {
+  LinkPlan plan = {0};
+  char *external_startup_object = NULL;
   int build_result = 1;
 
-  if (use_tracy && tracy_artifacts.use_gxx_link) {
-    size_t gxx_capacity =
-        4u + (needs_crash ? 1u : 0u) + (needs_atomics ? 1u : 0u) +
-        (needs_profile ? 1u : 0u);
-    const char **gxx_objects = calloc(gxx_capacity, sizeof(const char *));
-    size_t gxx_count = 0u;
+  plan.object_filename = object_filename;
+  plan.executable_filename = executable_filename;
+  plan.runtime_directory = runtime_directory;
+  plan.options = options;
+  plan.linker_mode = options ? options->linker_mode : LINKER_MODE_AUTO;
+  plan.want_shared = options && options->shared_output ? 1 : 0;
+  plan.profile_runtime =
+      options && compiler_options_use_profile_runtime(options) ? 1 : 0;
 
-    if (!gxx_objects) {
-      fprintf(stderr, "Error: Failed to allocate g++ Tracy link object list\n");
-      goto cleanup;
-    }
-
-    gxx_objects[gxx_count++] = object_filename;
-    if (needs_crash) {
-      if (_access(crash_gcc_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled crash-handler runtime object not found in '%s'\n",
-                runtime_directory);
-        free(gxx_objects);
-        goto cleanup;
-      }
-      gxx_objects[gxx_count++] = crash_gcc_object;
-    }
-    if (needs_atomics) {
-      if (_access(atomics_gcc_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled atomics runtime object not found in '%s'\n",
-                runtime_directory);
-        free(gxx_objects);
-        goto cleanup;
-      }
-      gxx_objects[gxx_count++] = atomics_gcc_object;
-    }
-    if (needs_profile) {
-      if (_access(profile_gcc_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled profile runtime object not found in '%s'\n",
-                runtime_directory);
-        free(gxx_objects);
-        goto cleanup;
-      }
-      gxx_objects[gxx_count++] = profile_gcc_object;
-    }
-    gxx_objects[gxx_count++] = tracy_artifacts.helpers_object;
-    gxx_objects[gxx_count++] = tracy_artifacts.client_object;
-
-    if (mettle_link_objects_with_gxx(gxx_objects, gxx_count, executable_filename,
-                                     options) == 0) {
-      build_result = 0;
-    } else {
-      fprintf(stderr, "Error: g++ Tracy link failed\n");
-    }
-    free(gxx_objects);
+  if (!link_plan_validate(&plan) || !link_plan_prepare(&plan)) {
     goto cleanup;
   }
-
-  if (linker_mode == LINKER_MODE_INTERNAL || linker_mode == LINKER_MODE_AUTO) {
-    size_t object_capacity =
-        12u + (use_tracy ? 2u : (needs_tracy_helpers ? 1u : 0u)) +
-        (options ? options->link_argument_count : 0u);
-    const char **object_paths = calloc(object_capacity, sizeof(const char *));
-    unsigned char *object_is_default = calloc(object_capacity, 1u);
-    const char *crash_object = NULL;
-    const char *atomics_object = NULL;
-    const char *profile_object = NULL;
-    const char *debug_object = NULL;
-    const char *safety_object = NULL;
-    const char *trace_object = NULL;
-    const char *swap_object_internal = NULL;
-    const char *string_object_internal = NULL;
-    char *startup_object = want_shared
-                                     ? NULL
-                                     : replace_extension(executable_filename,
-                                                         ".startup.obj");
-    size_t object_count = 0u;
-    int startup_ready = want_shared ? 1 : 0;
-
-    if (!object_paths || !object_is_default) {
-      fprintf(stderr, "Error: Failed to allocate internal-linker object list\n");
-      free(object_paths);
-      free(object_is_default);
-      goto cleanup;
-    }
-
-    if (want_shared) {
-    } else if (!startup_object) {
-      if (linker_mode == LINKER_MODE_INTERNAL || (!has_gcc && !has_link)) {
-        fprintf(stderr,
-                "Error: Failed to allocate internal-linker startup object path\n");
-        free(object_paths);
-        free(object_is_default);
-        goto cleanup;
-      }
-      fprintf(stderr,
-              "Warning: Failed to allocate internal-linker startup object path, "
-              "falling back to external linkers\n");
-    } else if (write_internal_startup_object(
-                   startup_object, profile_runtime,
-                   compiler_options_install_crash_handler(options),
-                   options && options->main_wants_argc_argv ? 1 : 0) != 0) {
-      if (linker_mode == LINKER_MODE_INTERNAL || (!has_gcc && !has_link)) {
-        fprintf(stderr,
-                "Error: Failed to generate internal-linker startup object\n");
-        free(startup_object);
-        free(object_paths);
-        free(object_is_default);
-        goto cleanup;
-      }
-      fprintf(stderr,
-              "Warning: Failed to generate internal-linker startup object, "
-              "falling back to external linkers\n");
-    } else {
-      startup_ready = 1;
-    }
-
-    if (startup_ready) {
-      if (needs_crash) {
-        crash_object = (_access(crash_msvc_object, 0) == 0) ? crash_msvc_object
-                                                            : crash_gcc_object;
-      }
-      if (needs_atomics) {
-        atomics_object = (_access(atomics_msvc_object, 0) == 0)
-                             ? atomics_msvc_object
-                             : atomics_gcc_object;
-      }
-      if (needs_profile) {
-        profile_object = (_access(profile_msvc_object, 0) == 0)
-                             ? profile_msvc_object
-                             : profile_gcc_object;
-        if (_access(profile_object, 0) != 0) {
-          fprintf(stderr,
-                  "Error: Bundled profile runtime object not found in '%s'\n",
-                  runtime_directory);
-          free(object_paths);
-          free(object_is_default);
-          if (startup_object) {
-            if (startup_ready) {
-              _unlink(startup_object);
-            }
-            free(startup_object);
-          }
-          goto cleanup;
-        }
-      }
-      if (needs_debug) {
-        debug_object = (_access(debug_msvc_object, 0) == 0) ? debug_msvc_object
-                                                            : debug_gcc_object;
-        if (_access(debug_object, 0) != 0) {
-          fprintf(stderr,
-                  "Error: Bundled debug runtime object not found in '%s'\n",
-                  runtime_directory);
-          free(object_paths);
-          free(object_is_default);
-          if (startup_object) {
-            if (startup_ready) {
-              _unlink(startup_object);
-            }
-            free(startup_object);
-          }
-          goto cleanup;
-        }
-      }
-      if (needs_string) {
-        string_object_internal = (_access(string_msvc_object, 0) == 0)
-                                     ? string_msvc_object
-                                     : string_gcc_object;
-      }
-      if (needs_swap) {
-        swap_object_internal = (_access(swap_msvc_object, 0) == 0)
-                                   ? swap_msvc_object
-                                   : swap_gcc_object;
-      }
-      if (needs_trace) {
-        trace_object = (_access(trace_msvc_object, 0) == 0)
-                           ? trace_msvc_object
-                           : trace_gcc_object;
-        if (_access(trace_object, 0) != 0) {
-          trace_object = NULL;
-        }
-      }
-      if (needs_safety) {
-        safety_object = (_access(safety_msvc_object, 0) == 0)
-                            ? safety_msvc_object
-                            : safety_gcc_object;
-        if (_access(safety_object, 0) != 0) {
-          fprintf(stderr,
-                  "Error: Bundled safety runtime object not found in '%s'\n",
-                  runtime_directory);
-          free(object_paths);
-          free(object_is_default);
-          if (startup_object) {
-            if (startup_ready) {
-              _unlink(startup_object);
-            }
-            free(startup_object);
-          }
-          goto cleanup;
-        }
-      }
-
-      if (!want_shared) {
-        object_paths[object_count++] = startup_object;
-        object_is_default[object_count] = 1u;
-      } else {
-        object_is_default[object_count] = 1u;
-      }
-      object_paths[object_count++] = freestanding_object;
-      object_paths[object_count++] = object_filename;
-      if (crash_object) {
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = crash_object;
-      }
-      if (atomics_object) {
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = atomics_object;
-      }
-      if (profile_object) {
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = profile_object;
-      }
-      if (debug_object) {
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = debug_object;
-      }
-      if (safety_object) {
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = safety_object;
-      }
-      if (trace_object) {
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = trace_object;
-      }
-      if (swap_object_internal) {
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = swap_object_internal;
-      }
-      if (string_object_internal) {
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = string_object_internal;
-      }
-      if (use_tracy) {
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = tracy_artifacts.helpers_object;
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = tracy_artifacts.client_object;
-      } else if (needs_tracy_helpers && tracy_helpers_object) {
-        object_is_default[object_count] = 1u;
-        object_paths[object_count++] = tracy_helpers_object;
-      }
-      if (!append_internal_link_object_args(options, object_paths,
-                                            object_capacity, &object_count)) {
-        fprintf(stderr, "Error: Too many internal-linker object arguments\n");
-        free(object_paths);
-        free(object_is_default);
-        if (startup_object) {
-          if (startup_ready) {
-            _unlink(startup_object);
-          }
-          free(startup_object);
-        }
-        goto cleanup;
-      }
-
-      if (mettle_link_internal(object_paths, object_is_default, object_count,
-                                 executable_filename, 0, options) == 0) {
-        build_result = 0;
-        g_link_output_ownership_verified = 1;
-      } else if (linker_mode == LINKER_MODE_INTERNAL) {
-        (void)0;
-      } else if (!has_gcc && !has_link) {
-        fprintf(stderr,
-                "Error: Internal linker failed and no external fallback linker is "
-                "available.\n");
-      } else {
-        fprintf(stderr,
-                "Warning: Internal linker failed in auto mode, falling back to "
-                "external linkers\n");
-      }
-    }
-
-    if (startup_object) {
-      if (startup_ready) {
-        _unlink(startup_object);
-      }
-      free(startup_object);
-    }
-    free(object_paths);
-    free(object_is_default);
-
-    if (want_shared || build_result == 0 ||
-        linker_mode == LINKER_MODE_INTERNAL || (!has_gcc && !has_link)) {
-      goto cleanup;
-    }
+  if ((plan.linker_mode == LINKER_MODE_INTERNAL ||
+       plan.linker_mode == LINKER_MODE_AUTO) &&
+      link_build_internal(&plan, &build_result)) {
+    goto cleanup;
   }
-
-  if ((has_gcc && linker_mode != LINKER_MODE_MSVC) ||
-      (has_link && linker_mode != LINKER_MODE_GCC)) {
+  if ((plan.has_gcc && plan.linker_mode != LINKER_MODE_MSVC) ||
+      (plan.has_link && plan.linker_mode != LINKER_MODE_GCC)) {
     external_startup_object =
         replace_extension(executable_filename, ".external-startup.obj");
     if (!external_startup_object ||
         write_internal_startup_object(
-            external_startup_object, profile_runtime,
+            external_startup_object, plan.profile_runtime,
             compiler_options_install_crash_handler(options),
             options && options->main_wants_argc_argv ? 1 : 0) != 0) {
-      fprintf(stderr, "Error: Failed to generate external-linker startup object\n");
+      fprintf(stderr,
+              "Error: Failed to generate external-linker startup object\n");
       goto cleanup;
     }
   }
-
-  if (has_gcc && linker_mode != LINKER_MODE_MSVC) {
-    const char *runtime_objects[9] = {NULL, NULL, NULL, NULL, NULL,
-                                      NULL, NULL, NULL, NULL};
-    size_t runtime_object_count = 0u;
-    runtime_objects[runtime_object_count++] = external_startup_object;
-    runtime_objects[runtime_object_count++] = freestanding_gcc_object;
-    if (needs_crash) {
-      if (_access(crash_gcc_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled crash-handler runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = crash_gcc_object;
-    }
-    if (needs_atomics) {
-      if (_access(atomics_gcc_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled atomics runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = atomics_gcc_object;
-    }
-    if (needs_profile) {
-      if (_access(profile_gcc_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled profile runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = profile_gcc_object;
-    }
-    if (needs_string) {
-      const char *string_object = (_access(string_msvc_object, 0) == 0)
-                                      ? string_msvc_object
-                                      : string_gcc_object;
-      runtime_objects[runtime_object_count++] = string_object;
-    }
-    if (needs_swap) {
-      const char *swap_object = (_access(swap_msvc_object, 0) == 0)
-                                    ? swap_msvc_object
-                                    : swap_gcc_object;
-      if (_access(swap_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled swap runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = swap_object;
-    }
-    if (needs_safety) {
-      if (_access(safety_gcc_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled safety runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = safety_gcc_object;
-    }
-    if (needs_debug) {
-      if (_access(debug_gcc_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled debug runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = debug_gcc_object;
-    }
-    if (!use_tracy && needs_tracy_helpers && tracy_helpers_object) {
-      runtime_objects[runtime_object_count++] = tracy_helpers_object;
-    }
-    if (mettle_link_object_with_gcc(object_filename, executable_filename,
-                                      runtime_objects, runtime_object_count,
-                                      options) == 0) {
+  if (plan.has_gcc && plan.linker_mode != LINKER_MODE_MSVC) {
+    int linked = link_build_external(
+        &plan, LINK_GCC_REQUESTS,
+        sizeof(LINK_GCC_REQUESTS) / sizeof(LINK_GCC_REQUESTS[0]),
+        external_startup_object, mettle_link_object_with_gcc);
+    if (linked > 0) {
       build_result = 0;
+    }
+    if (linked != 0) {
       goto cleanup;
     }
   }
-
-  if (has_link && linker_mode != LINKER_MODE_GCC) {
-    const char *runtime_objects[9] = {NULL, NULL, NULL, NULL, NULL,
-                                      NULL, NULL, NULL, NULL};
-    size_t runtime_object_count = 0u;
-    runtime_objects[runtime_object_count++] = external_startup_object;
-    runtime_objects[runtime_object_count++] = freestanding_object;
-    if (needs_crash) {
-      const char *crash_object = (_access(crash_msvc_object, 0) == 0)
-                                     ? crash_msvc_object
-                                     : crash_gcc_object;
-      if (_access(crash_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled crash-handler runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = crash_object;
-    }
-    if (needs_atomics) {
-      const char *atomics_object = (_access(atomics_msvc_object, 0) == 0)
-                                       ? atomics_msvc_object
-                                       : atomics_gcc_object;
-      if (_access(atomics_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled atomics runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = atomics_object;
-    }
-    if (needs_profile) {
-      const char *profile_object = (_access(profile_msvc_object, 0) == 0)
-                                       ? profile_msvc_object
-                                       : profile_gcc_object;
-      if (_access(profile_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled profile runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = profile_object;
-    }
-    if (needs_string) {
-      const char *msvc_string_object = (_access(string_msvc_object, 0) == 0)
-                                           ? string_msvc_object
-                                           : string_gcc_object;
-      runtime_objects[runtime_object_count++] = msvc_string_object;
-    }
-    if (needs_swap) {
-      const char *msvc_swap_object = (_access(swap_msvc_object, 0) == 0)
-                                         ? swap_msvc_object
-                                         : swap_gcc_object;
-      if (_access(msvc_swap_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled swap runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = msvc_swap_object;
-    }
-    if (needs_trace) {
-      const char *msvc_trace_object = (_access(trace_msvc_object, 0) == 0)
-                                          ? trace_msvc_object
-                                          : trace_gcc_object;
-      if (_access(msvc_trace_object, 0) == 0) {
-        runtime_objects[runtime_object_count++] = msvc_trace_object;
-      }
-    }
-    if (needs_safety) {
-      const char *msvc_safety_object = (_access(safety_msvc_object, 0) == 0)
-                                           ? safety_msvc_object
-                                           : safety_gcc_object;
-      if (_access(msvc_safety_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled safety runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = msvc_safety_object;
-    }
-    if (needs_debug) {
-      const char *msvc_debug_object = (_access(debug_msvc_object, 0) == 0)
-                                          ? debug_msvc_object
-                                          : debug_gcc_object;
-      if (_access(msvc_debug_object, 0) != 0) {
-        fprintf(stderr,
-                "Error: Bundled debug runtime object not found in '%s'\n",
-                runtime_directory);
-        goto cleanup;
-      }
-      runtime_objects[runtime_object_count++] = msvc_debug_object;
-    }
-    if (!use_tracy && needs_tracy_helpers && tracy_helpers_object) {
-      const char *stub_object =
-          (_access(tracy_helpers_msvc_object, 0) == 0) ? tracy_helpers_msvc_object
-                                                       : tracy_helpers_gcc_object;
-      runtime_objects[runtime_object_count++] = stub_object;
-    }
-    if (mettle_link_object_with_link(object_filename, executable_filename,
-                                       runtime_objects, runtime_object_count,
-                                       options) == 0) {
+  if (plan.has_link && plan.linker_mode != LINKER_MODE_GCC) {
+    int linked = link_build_external(
+        &plan, LINK_MSVC_REQUESTS,
+        sizeof(LINK_MSVC_REQUESTS) / sizeof(LINK_MSVC_REQUESTS[0]),
+        external_startup_object, mettle_link_object_with_link);
+    if (linked > 0) {
       build_result = 0;
+    }
+    if (linked != 0) {
       goto cleanup;
     }
   }
-
   fprintf(stderr,
           "Error: Failed to link executable with the available linker backends\n");
 
@@ -2984,17 +2599,7 @@ cleanup:
     _unlink(external_startup_object);
   }
   free(external_startup_object);
-  tracy_free_artifacts(&tracy_artifacts);
-  free(tracy_directory);
-  free(tracy_error);
-  free(tracy_helpers_gcc_object);
-  free(tracy_helpers_msvc_object);
-  free(crash_gcc_object);
-  free(crash_msvc_object);
-  free(atomics_gcc_object);
-  free(atomics_msvc_object);
-  free(profile_gcc_object);
-  free(profile_msvc_object);
+  link_plan_release(&plan);
   return build_result;
 }
 #endif
