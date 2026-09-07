@@ -2921,6 +2921,55 @@ int ir_strength_reduce_rotate_loops_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
+static const int IR_HAS_SIDE_EFFECT[IR_OP_KIND_COUNT] = {
+    [IR_OP_BARRIER] = 1,
+    [IR_OP_ASYNC_COPY] = 1,
+    [IR_OP_ASYNC_COMMIT] = 1,
+    [IR_OP_ASYNC_WAIT] = 1,
+    [IR_OP_TENSOR_TRANSFER] = 1,
+    [IR_OP_GPU_LAUNCH] = 1,
+    [IR_OP_TENSOR_MMA] = 1,
+    [IR_OP_TENSOR_MATMUL] = 1,
+    [IR_OP_TENSOR_EPILOGUE] = 1,
+    [IR_OP_TENSOR_COMMIT] = 1,
+    [IR_OP_STORE] = 1,
+    [IR_OP_CALL] = 1,
+    [IR_OP_CALL_INDIRECT] = 1,
+    [IR_OP_MEMCPY_INLINE] = 1,
+    [IR_OP_COUNT_WORD_STARTS] = 1,
+    [IR_OP_SIMD_SUM_I32] = 1,
+    [IR_OP_SIMD_SUM_U8] = 1,
+    [IR_OP_SIMD_BYTE_MAP] = 1,
+    [IR_OP_SIMD_FILL] = 1,
+    [IR_OP_SIMD_MATMUL_N32] = 1,
+    [IR_OP_SIMD_INSERTION_SORT_I32] = 1,
+    [IR_OP_SIMD_DOT_I32] = 1,
+    [IR_OP_SIMD_DOT_I8] = 1,
+    [IR_OP_SIMD_SLP_MAC_I32] = 1,
+    [IR_OP_SIMD_SLP_MAC_I8] = 1,
+    [IR_OP_SIMD_SCALE_I32] = 1,
+    [IR_OP_SIMD_CLAMP_I32] = 1,
+    [IR_OP_SIMD_REVERSE_COPY_I32] = 1,
+    [IR_OP_LOWER_BOUND_I32] = 1,
+    [IR_OP_PREFIX_SUM_I32] = 1,
+    [IR_OP_SIMD_MINMAX_I32] = 1,
+    [IR_OP_SIMD_SUM_F64] = 1,
+    [IR_OP_SIMD_SUM_F32] = 1,
+    [IR_OP_SIMD_DOT_F64] = 1,
+    [IR_OP_SIMD_DOT_F32] = 1,
+    [IR_OP_SIMD_AFFINE_MAP_F64] = 1,
+    [IR_OP_SIMD_AFFINE_MAP_F32] = 1,
+    [IR_OP_SIMD_EXP_F32] = 1,
+    [IR_OP_SIMD_SILU_F32] = 1,
+    [IR_OP_SIMD_I2F_REDUCE_F64] = 1,
+    [IR_OP_SIMD_VLOOP_F64] = 1,
+    [IR_OP_SIMD_VLOOP_I32] = 1,
+    [IR_OP_SIMD_FIND] = 1,
+    [IR_OP_SIMD_OUTER_LANE_F64] = 1,
+    [IR_OP_RETURN] = 1,
+    [IR_OP_INLINE_ASM] = 1,
+};
+
 int ir_instruction_has_side_effect(const IRInstruction *instruction) {
   if (!instruction) {
     return 0;
@@ -2930,58 +2979,11 @@ int ir_instruction_has_side_effect(const IRInstruction *instruction) {
     return 1;
   }
 
-  switch (instruction->op) {
-  case IR_OP_BARRIER:
-  case IR_OP_ASYNC_COPY:
-  case IR_OP_ASYNC_COMMIT:
-  case IR_OP_ASYNC_WAIT:
-  case IR_OP_TENSOR_TRANSFER:
-  case IR_OP_GPU_LAUNCH:
-  case IR_OP_TENSOR_MMA:
-  case IR_OP_TENSOR_MATMUL:
-  case IR_OP_TENSOR_EPILOGUE:
-  case IR_OP_TENSOR_COMMIT:
-  case IR_OP_STORE:
-  case IR_OP_CALL:
-  case IR_OP_CALL_INDIRECT:
-  case IR_OP_MEMCPY_INLINE:
-  case IR_OP_COUNT_WORD_STARTS:
-  case IR_OP_SIMD_SUM_I32:
-  case IR_OP_SIMD_SUM_U8:
-  case IR_OP_SIMD_BYTE_MAP:
-  case IR_OP_SIMD_FILL:
-  case IR_OP_SIMD_MATMUL_N32:
-  case IR_OP_SIMD_INSERTION_SORT_I32:
-  case IR_OP_SIMD_DOT_I32:
-  case IR_OP_SIMD_DOT_I8:
-  case IR_OP_SIMD_SLP_MAC_I32:
-  case IR_OP_SIMD_SLP_MAC_I8:
-  case IR_OP_SIMD_SCALE_I32:
-  case IR_OP_SIMD_CLAMP_I32:
-  case IR_OP_SIMD_REVERSE_COPY_I32:
-  case IR_OP_LOWER_BOUND_I32:
-  case IR_OP_PREFIX_SUM_I32:
-  case IR_OP_SIMD_MINMAX_I32:
-  case IR_OP_SIMD_SUM_F64:
-  case IR_OP_SIMD_SUM_F32:
-  case IR_OP_SIMD_DOT_F64:
-  case IR_OP_SIMD_DOT_F32:
-  case IR_OP_SIMD_AFFINE_MAP_F64:
-  case IR_OP_SIMD_AFFINE_MAP_F32:
-  case IR_OP_SIMD_EXP_F32:
-  case IR_OP_SIMD_SILU_F32:
-  case IR_OP_SIMD_I2F_REDUCE_F64:
-  case IR_OP_SIMD_VLOOP_F64:
-  case IR_OP_SIMD_VLOOP_I32:
-  case IR_OP_SIMD_FIND:
-  case IR_OP_SIMD_OUTER_LANE_F64:
-  case IR_OP_RETURN:
-  case IR_OP_INLINE_ASM:
-    return 1;
-  default:
-    return 0;
-  }
+  return (unsigned)instruction->op < (unsigned)IR_OP_KIND_COUNT
+             ? IR_HAS_SIDE_EFFECT[instruction->op]
+             : 1;
 }
+
 
 int ir_operand_is_temp_named(const IROperand *operand,
                                     const char *name) {

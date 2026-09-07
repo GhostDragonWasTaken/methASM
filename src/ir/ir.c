@@ -2280,108 +2280,78 @@ int ir_program_add_function(IRProgram *program, IRFunction *function) {
   return 1;
 }
 
+static const char *const IR_OPCODE_NAMES[IR_OP_KIND_COUNT] = {
+    [IR_OP_NOP] = "nop",
+    [IR_OP_LABEL] = "label",
+    [IR_OP_JUMP] = "jump",
+    [IR_OP_BRANCH_ZERO] = "branch_zero",
+    [IR_OP_BRANCH_EQ] = "branch_eq",
+    [IR_OP_DECLARE_LOCAL] = "local",
+    [IR_OP_ADDRESS_SPACE_ALLOC] = "address_space_alloc",
+    [IR_OP_BARRIER] = "barrier",
+    [IR_OP_ASYNC_COPY] = "async_copy",
+    [IR_OP_ASYNC_COMMIT] = "async_commit",
+    [IR_OP_ASYNC_WAIT] = "async_wait",
+    [IR_OP_TENSOR_TRANSFER] = "tensor_transfer",
+    [IR_OP_TENSOR_MMA] = "tensor_mma",
+    [IR_OP_TENSOR_MATMUL] = "tensor_matmul",
+    [IR_OP_TENSOR_EPILOGUE] = "tensor_epilogue",
+    [IR_OP_TENSOR_COMMIT] = "tensor_commit",
+    [IR_OP_ASSIGN] = "assign",
+    [IR_OP_ADDRESS_OF] = "addr_of",
+    [IR_OP_LOAD] = "load",
+    [IR_OP_STORE] = "store",
+    [IR_OP_PREFETCH] = "prefetch",
+    [IR_OP_SELECT] = "select",
+    [IR_OP_SAFETY_CHECK] = "safety_check",
+    [IR_OP_BINARY] = "binary",
+    [IR_OP_ROTATE_ADD] = "rotate_add",
+    [IR_OP_UNARY] = "unary",
+    [IR_OP_CALL] = "call",
+    [IR_OP_CALL_INDIRECT] = "call_indirect",
+    [IR_OP_GPU_LAUNCH] = "gpu_launch",
+    [IR_OP_NEW] = "new",
+    [IR_OP_RETURN] = "return",
+    [IR_OP_INLINE_ASM] = "inline_asm",
+    [IR_OP_CAST] = "cast",
+    [IR_OP_COUNT_WORD_STARTS] = "count_word_starts",
+    [IR_OP_MEMCPY_INLINE] = "memcpy_inline",
+    [IR_OP_SIMD_SUM_I32] = "simd_sum_i32",
+    [IR_OP_SIMD_SUM_U8] = "simd_sum_u8",
+    [IR_OP_SIMD_BYTE_MAP] = "simd_byte_map",
+    [IR_OP_SIMD_FILL] = "simd_fill",
+    [IR_OP_SIMD_MATMUL_N32] = "simd_matmul_n32",
+    [IR_OP_SIMD_INSERTION_SORT_I32] = "simd_insertion_sort_i32",
+    [IR_OP_SIMD_DOT_I32] = "simd_dot_i32",
+    [IR_OP_SIMD_DOT_I8] = "simd_dot_i8",
+    [IR_OP_SIMD_SLP_MAC_I32] = "simd_slp_mac_i32",
+    [IR_OP_SIMD_SLP_MAC_I8] = "simd_slp_mac_i8",
+    [IR_OP_SIMD_SCALE_I32] = "simd_scale_i32",
+    [IR_OP_SIMD_CLAMP_I32] = "simd_clamp_i32",
+    [IR_OP_SIMD_REVERSE_COPY_I32] = "simd_reverse_copy_i32",
+    [IR_OP_LOWER_BOUND_I32] = "lower_bound_i32",
+    [IR_OP_PREFIX_SUM_I32] = "prefix_sum_i32",
+    [IR_OP_SIMD_MINMAX_I32] = "simd_minmax_i32",
+    [IR_OP_SIMD_SUM_F64] = "simd_sum_f64",
+    [IR_OP_SIMD_SUM_F32] = "simd_sum_f32",
+    [IR_OP_SIMD_DOT_F64] = "simd_dot_f64",
+    [IR_OP_SIMD_DOT_F32] = "simd_dot_f32",
+    [IR_OP_SIMD_AFFINE_MAP_F64] = "simd_affine_map_f64",
+    [IR_OP_SIMD_AFFINE_MAP_F32] = "simd_affine_map_f32",
+    [IR_OP_SIMD_EXP_F32] = "simd_exp_f32",
+    [IR_OP_SIMD_I2F_REDUCE_F64] = "simd_i2f_reduce_f64",
+    [IR_OP_SIMD_VLOOP_F64] = "simd_vloop_f64",
+    [IR_OP_SIMD_VLOOP_I32] = "simd_vloop_i32",
+    [IR_OP_SIMD_FIND] = "simd_find",
+    [IR_OP_SIMD_OUTER_LANE_F64] = "simd_outer_lane_f64",
+};
+
 const char *ir_opcode_name(IROpcode op) {
-  switch (op) {
-  case IR_OP_NOP:
-    return "nop";
-  case IR_OP_LABEL:
-    return "label";
-  case IR_OP_JUMP:
-    return "jump";
-  case IR_OP_BRANCH_ZERO:
-    return "branch_zero";
-  case IR_OP_BRANCH_EQ:
-    return "branch_eq";
-  case IR_OP_DECLARE_LOCAL:
-    return "local";
-  case IR_OP_ADDRESS_SPACE_ALLOC:
-    return "address_space_alloc";
-  case IR_OP_BARRIER:
-    return "barrier";
-  case IR_OP_ASYNC_COPY:
-    return "async_copy";
-  case IR_OP_ASYNC_COMMIT:
-    return "async_commit";
-  case IR_OP_ASYNC_WAIT:
-    return "async_wait";
-  case IR_OP_TENSOR_TRANSFER:
-    return "tensor_transfer";
-  case IR_OP_TENSOR_MMA:
-    return "tensor_mma";
-  case IR_OP_TENSOR_MATMUL:
-    return "tensor_matmul";
-  case IR_OP_TENSOR_EPILOGUE:
-    return "tensor_epilogue";
-  case IR_OP_TENSOR_COMMIT:
-    return "tensor_commit";
-  case IR_OP_ASSIGN:
-    return "assign";
-  case IR_OP_ADDRESS_OF:
-    return "addr_of";
-  case IR_OP_LOAD:
-    return "load";
-  case IR_OP_STORE:
-    return "store";
-  case IR_OP_PREFETCH:
-    return "prefetch";
-  case IR_OP_SELECT:
-    return "select";
-  case IR_OP_SAFETY_CHECK:
-    return "safety_check";
-  case IR_OP_BINARY:
-    return "binary";
-  case IR_OP_ROTATE_ADD:
-    return "rotate_add";
-  case IR_OP_UNARY:
-    return "unary";
-  case IR_OP_CALL:
-    return "call";
-  case IR_OP_CALL_INDIRECT:
-    return "call_indirect";
-  case IR_OP_GPU_LAUNCH:
-    return "gpu_launch";
-  case IR_OP_NEW:
-    return "new";
-  case IR_OP_RETURN:
-    return "return";
-  case IR_OP_INLINE_ASM:
-    return "inline_asm";
-  case IR_OP_CAST:
-    return "cast";
-  case IR_OP_COUNT_WORD_STARTS: return "count_word_starts";
-  case IR_OP_MEMCPY_INLINE: return "memcpy_inline";
-  case IR_OP_SIMD_SUM_I32: return "simd_sum_i32";
-  case IR_OP_SIMD_SUM_U8: return "simd_sum_u8";
-  case IR_OP_SIMD_BYTE_MAP: return "simd_byte_map";
-  case IR_OP_SIMD_FILL: return "simd_fill";
-  case IR_OP_SIMD_MATMUL_N32: return "simd_matmul_n32";
-  case IR_OP_SIMD_INSERTION_SORT_I32: return "simd_insertion_sort_i32";
-  case IR_OP_SIMD_DOT_I32: return "simd_dot_i32";
-  case IR_OP_SIMD_DOT_I8: return "simd_dot_i8";
-  case IR_OP_SIMD_SLP_MAC_I32: return "simd_slp_mac_i32";
-  case IR_OP_SIMD_SLP_MAC_I8: return "simd_slp_mac_i8";
-  case IR_OP_SIMD_SCALE_I32: return "simd_scale_i32";
-  case IR_OP_SIMD_CLAMP_I32: return "simd_clamp_i32";
-  case IR_OP_SIMD_REVERSE_COPY_I32: return "simd_reverse_copy_i32";
-  case IR_OP_LOWER_BOUND_I32: return "lower_bound_i32";
-  case IR_OP_PREFIX_SUM_I32: return "prefix_sum_i32";
-  case IR_OP_SIMD_MINMAX_I32: return "simd_minmax_i32";
-  case IR_OP_SIMD_SUM_F64: return "simd_sum_f64";
-  case IR_OP_SIMD_SUM_F32: return "simd_sum_f32";
-  case IR_OP_SIMD_DOT_F64: return "simd_dot_f64";
-  case IR_OP_SIMD_DOT_F32: return "simd_dot_f32";
-  case IR_OP_SIMD_AFFINE_MAP_F64: return "simd_affine_map_f64";
-  case IR_OP_SIMD_AFFINE_MAP_F32: return "simd_affine_map_f32";
-  case IR_OP_SIMD_EXP_F32: return "simd_exp_f32";
-  case IR_OP_SIMD_I2F_REDUCE_F64: return "simd_i2f_reduce_f64";
-  case IR_OP_SIMD_VLOOP_F64: return "simd_vloop_f64";
-  case IR_OP_SIMD_VLOOP_I32: return "simd_vloop_i32";
-  case IR_OP_SIMD_FIND: return "simd_find";
-  case IR_OP_SIMD_OUTER_LANE_F64: return "simd_outer_lane_f64";
-  default:
-    return "unknown";
-  }
+  return (unsigned)op < (unsigned)IR_OP_KIND_COUNT
+             ? IR_OPCODE_NAMES[op]
+             : "unknown";
 }
+
 
 static void ir_format_operand(const IROperand *operand, char *buffer,
                               size_t buffer_size) {
@@ -4792,44 +4762,53 @@ static unsigned char ir_gpu_uniform_arguments(const IRGpuUniformMap *map,
   return rank;
 }
 
+static const unsigned char IR_GPU_INTRINSIC_UNIFORMITY[MTLC_INTRINSIC_KIND_COUNT] = {
+    [MTLC_INTRINSIC_GPU_LOCAL_ID_X] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_LOCAL_ID_Y] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_LOCAL_ID_Z] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_LOCAL_ID] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_LOCAL_SIZE_X] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_LOCAL_SIZE_Y] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_LOCAL_SIZE_Z] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_GROUP_ID_X] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_GROUP_ID_Y] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_GROUP_ID_Z] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_NUM_GROUPS_X] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_NUM_GROUPS_Y] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_NUM_GROUPS_Z] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_SIZE] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_U32] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_F32] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_U32] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_U32] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_U32] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_ANY] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_ALL] = IR_GPU_UNIFORM_SUBGROUP,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_U32] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_SHUFFLE_U32] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_SHUFFLE_F32] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_SUBGROUP_BALLOT_WORD] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_LOAD4_F32] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_LOAD4_U32] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_STORE4_F32] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_STORE4_U32] = IR_GPU_UNIFORM_VARYING,
+    [MTLC_INTRINSIC_GPU_PRINT] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_PRINT_I32] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_PRINT_F32] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_PRINT_2I32] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_ASSERT] = IR_GPU_UNIFORM_WORKGROUP,
+    [MTLC_INTRINSIC_GPU_WORKGROUP_BARRIER] = IR_GPU_UNIFORM_WORKGROUP,
+};
+
 static unsigned char ir_gpu_intrinsic_result_uniformity(
     const IRGpuUniformMap *map, const IRInstruction *instruction) {
   switch (instruction->intrinsic) {
-  case MTLC_INTRINSIC_GPU_LOCAL_ID_X:
-  case MTLC_INTRINSIC_GPU_LOCAL_ID_Y:
-  case MTLC_INTRINSIC_GPU_LOCAL_ID_Z:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_LOCAL_ID:
-    return IR_GPU_UNIFORM_VARYING;
-  case MTLC_INTRINSIC_GPU_LOCAL_SIZE_X:
-  case MTLC_INTRINSIC_GPU_LOCAL_SIZE_Y:
-  case MTLC_INTRINSIC_GPU_LOCAL_SIZE_Z:
-  case MTLC_INTRINSIC_GPU_GROUP_ID_X:
-  case MTLC_INTRINSIC_GPU_GROUP_ID_Y:
-  case MTLC_INTRINSIC_GPU_GROUP_ID_Z:
-  case MTLC_INTRINSIC_GPU_NUM_GROUPS_X:
-  case MTLC_INTRINSIC_GPU_NUM_GROUPS_Y:
-  case MTLC_INTRINSIC_GPU_NUM_GROUPS_Z:
-    return IR_GPU_UNIFORM_WORKGROUP;
-  case MTLC_INTRINSIC_GPU_SUBGROUP_SIZE:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_U32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_F32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_U32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_U32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_U32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_ANY:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_ALL:
-    return IR_GPU_UNIFORM_SUBGROUP;
-  case MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_U32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_SHUFFLE_U32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_SHUFFLE_F32:
-  case MTLC_INTRINSIC_GPU_SUBGROUP_BALLOT_WORD:
-    return IR_GPU_UNIFORM_VARYING;
   case MTLC_INTRINSIC_GPU_SQRT_F32:
   case MTLC_INTRINSIC_GPU_RSQRT_F32:
   case MTLC_INTRINSIC_GPU_ABS_F32:
@@ -4857,26 +4836,14 @@ static unsigned char ir_gpu_intrinsic_result_uniformity(
   case MTLC_INTRINSIC_GPU_BF2F:
   case MTLC_INTRINSIC_GPU_F2BF:
     return ir_gpu_uniform_arguments(map, instruction);
-  case MTLC_INTRINSIC_GPU_LOAD4_F32:
-  case MTLC_INTRINSIC_GPU_LOAD4_U32:
-  case MTLC_INTRINSIC_GPU_STORE4_F32:
-  case MTLC_INTRINSIC_GPU_STORE4_U32:
-    return IR_GPU_UNIFORM_VARYING;
-  case MTLC_INTRINSIC_GPU_PRINT:
-  case MTLC_INTRINSIC_GPU_PRINT_I32:
-  case MTLC_INTRINSIC_GPU_PRINT_F32:
-  case MTLC_INTRINSIC_GPU_PRINT_2I32:
-  case MTLC_INTRINSIC_GPU_ASSERT:
-    return IR_GPU_UNIFORM_WORKGROUP;
-  case MTLC_INTRINSIC_GPU_WORKGROUP_BARRIER:
-    return IR_GPU_UNIFORM_WORKGROUP;
-  case MTLC_INTRINSIC_NONE:
   default:
-    if (ir_intrinsic_is_atomic(instruction->intrinsic))
-      return IR_GPU_UNIFORM_VARYING;
-    return IR_GPU_UNIFORM_VARYING;
+    break;
   }
+  return (unsigned)instruction->intrinsic < (unsigned)MTLC_INTRINSIC_KIND_COUNT
+             ? IR_GPU_INTRINSIC_UNIFORMITY[instruction->intrinsic]
+             : IR_GPU_UNIFORM_VARYING;
 }
+
 
 static unsigned char ir_gpu_instruction_result_uniformity(
     const IRGpuUniformMap *map, const IRInstruction *instruction) {

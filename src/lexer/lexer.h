@@ -156,7 +156,8 @@ typedef enum {
   TOKEN_R14,
   TOKEN_R15,
 
-  TOKEN_ERROR
+  TOKEN_ERROR,
+  TOKEN_KIND_COUNT
 } TokenType;
 
 typedef struct {

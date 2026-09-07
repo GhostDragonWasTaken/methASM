@@ -169,131 +169,75 @@ int parser_match(Parser *parser, TokenType type) {
   return parser->current_token.type == type;
 }
 
+static const char *const TOKEN_TYPE_NAMES[TOKEN_KIND_COUNT] = {
+    [TOKEN_EOF] = "end of file",
+    [TOKEN_IDENTIFIER] = "identifier",
+    [TOKEN_NUMBER] = "number",
+    [TOKEN_STRING] = "string",
+    [TOKEN_IMPORT] = "'import'",
+    [TOKEN_IMPORT_STR] = "'import_str'",
+    [TOKEN_EXTERN] = "'extern'",
+    [TOKEN_EXPORT] = "'export'",
+    [TOKEN_VAR] = "'var'",
+    [TOKEN_WORKGROUP] = "'workgroup'",
+    [TOKEN_PRIVATE] = "'private'",
+    [TOKEN_BARRIER] = "'barrier'",
+    [TOKEN_FUNCTION] = "'fn'",
+    [TOKEN_FN] = "'fn'",
+    [TOKEN_STRUCT] = "'struct'",
+    [TOKEN_METHOD] = "'method'",
+    [TOKEN_RETURN] = "'return'",
+    [TOKEN_IF] = "'if'",
+    [TOKEN_ELSE] = "'else'",
+    [TOKEN_WHILE] = "'while'",
+    [TOKEN_FOR] = "'for'",
+    [TOKEN_SWITCH] = "'switch'",
+    [TOKEN_CASE] = "'case'",
+    [TOKEN_DEFAULT] = "'default'",
+    [TOKEN_BREAK] = "'break'",
+    [TOKEN_CONTINUE] = "'continue'",
+    [TOKEN_DEFER] = "'defer'",
+    [TOKEN_ERRDEFER] = "'errdefer'",
+    [TOKEN_ASM] = "'asm'",
+    [TOKEN_THIS] = "'this'",
+    [TOKEN_NEW] = "'new'",
+    [TOKEN_COLON] = "':'",
+    [TOKEN_SEMICOLON] = "';'",
+    [TOKEN_COMMA] = "','",
+    [TOKEN_EQUALS] = "'='",
+    [TOKEN_ARROW] = "'->'",
+    [TOKEN_LPAREN] = "'('",
+    [TOKEN_RPAREN] = "')'",
+    [TOKEN_LBRACE] = "'{'",
+    [TOKEN_RBRACE] = "'}'",
+    [TOKEN_LBRACKET] = "'['",
+    [TOKEN_RBRACKET] = "']'",
+    [TOKEN_PLUS] = "'+'",
+    [TOKEN_MINUS] = "'-'",
+    [TOKEN_PLUS_PLUS] = "'++'",
+    [TOKEN_MINUS_MINUS] = "'--'",
+    [TOKEN_MULTIPLY] = "'*'",
+    [TOKEN_AMPERSAND] = "'&'",
+    [TOKEN_PIPE] = "'|'",
+    [TOKEN_CARET] = "'^'",
+    [TOKEN_LSHIFT] = "'<<'",
+    [TOKEN_RSHIFT] = "'>>'",
+    [TOKEN_TILDE] = "'~'",
+    [TOKEN_AND_AND] = "'&&'",
+    [TOKEN_OR_OR] = "'||'",
+    [TOKEN_DIVIDE] = "'/'",
+    [TOKEN_PERCENT] = "'%'",
+    [TOKEN_DOT] = "'.'",
+    [TOKEN_NEWLINE] = "newline",
+    [TOKEN_ERROR] = "lexical error",
+};
+
 static const char *token_type_to_string(TokenType type) {
-  switch (type) {
-  case TOKEN_EOF:
-    return "end of file";
-  case TOKEN_IDENTIFIER:
-    return "identifier";
-  case TOKEN_NUMBER:
-    return "number";
-  case TOKEN_STRING:
-    return "string";
-  case TOKEN_IMPORT:
-    return "'import'";
-  case TOKEN_IMPORT_STR:
-    return "'import_str'";
-  case TOKEN_EXTERN:
-    return "'extern'";
-  case TOKEN_EXPORT:
-    return "'export'";
-  case TOKEN_VAR:
-    return "'var'";
-  case TOKEN_WORKGROUP:
-    return "'workgroup'";
-  case TOKEN_PRIVATE:
-    return "'private'";
-  case TOKEN_BARRIER:
-    return "'barrier'";
-  case TOKEN_FUNCTION:
-  case TOKEN_FN:
-    return "'fn'";
-  case TOKEN_STRUCT:
-    return "'struct'";
-  case TOKEN_METHOD:
-    return "'method'";
-  case TOKEN_RETURN:
-    return "'return'";
-  case TOKEN_IF:
-    return "'if'";
-  case TOKEN_ELSE:
-    return "'else'";
-  case TOKEN_WHILE:
-    return "'while'";
-  case TOKEN_FOR:
-    return "'for'";
-  case TOKEN_SWITCH:
-    return "'switch'";
-  case TOKEN_CASE:
-    return "'case'";
-  case TOKEN_DEFAULT:
-    return "'default'";
-  case TOKEN_BREAK:
-    return "'break'";
-  case TOKEN_CONTINUE:
-    return "'continue'";
-  case TOKEN_DEFER:
-    return "'defer'";
-  case TOKEN_ERRDEFER:
-    return "'errdefer'";
-  case TOKEN_ASM:
-    return "'asm'";
-  case TOKEN_THIS:
-    return "'this'";
-  case TOKEN_NEW:
-    return "'new'";
-  case TOKEN_COLON:
-    return "':'";
-  case TOKEN_SEMICOLON:
-    return "';'";
-  case TOKEN_COMMA:
-    return "','";
-  case TOKEN_EQUALS:
-    return "'='";
-  case TOKEN_ARROW:
-    return "'->'";
-  case TOKEN_LPAREN:
-    return "'('";
-  case TOKEN_RPAREN:
-    return "')'";
-  case TOKEN_LBRACE:
-    return "'{'";
-  case TOKEN_RBRACE:
-    return "'}'";
-  case TOKEN_LBRACKET:
-    return "'['";
-  case TOKEN_RBRACKET:
-    return "']'";
-  case TOKEN_PLUS:
-    return "'+'";
-  case TOKEN_MINUS:
-    return "'-'";
-  case TOKEN_PLUS_PLUS:
-    return "'++'";
-  case TOKEN_MINUS_MINUS:
-    return "'--'";
-  case TOKEN_MULTIPLY:
-    return "'*'";
-  case TOKEN_AMPERSAND:
-    return "'&'";
-  case TOKEN_PIPE:
-    return "'|'";
-  case TOKEN_CARET:
-    return "'^'";
-  case TOKEN_LSHIFT:
-    return "'<<'";
-  case TOKEN_RSHIFT:
-    return "'>>'";
-  case TOKEN_TILDE:
-    return "'~'";
-  case TOKEN_AND_AND:
-    return "'&&'";
-  case TOKEN_OR_OR:
-    return "'||'";
-  case TOKEN_DIVIDE:
-    return "'/'";
-  case TOKEN_PERCENT:
-    return "'%'";
-  case TOKEN_DOT:
-    return "'.'";
-  case TOKEN_NEWLINE:
-    return "newline";
-  case TOKEN_ERROR:
-    return "lexical error";
-  default:
-    return "unknown token";
-  }
+  return (unsigned)type < (unsigned)TOKEN_KIND_COUNT
+             ? TOKEN_TYPE_NAMES[type]
+             : "unknown";
 }
+
 
 int parser_expect_statement_end(Parser *parser) {
   if (parser_match(parser, TOKEN_SEMICOLON) ||
