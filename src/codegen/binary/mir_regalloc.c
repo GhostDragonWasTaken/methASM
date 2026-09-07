@@ -1,4 +1,5 @@
 #include "codegen/binary/mir.h"
+#include "codegen/binary/mir_machine.h"
 #include "../../common.h"
 #include "internal.h"
 
@@ -27,9 +28,7 @@ static const BinaryGpRegister MIR_GP_EXTRA[] = {
 #define MIR_GP_LEAF_POOL_MAX (MIR_GP_POOL_COUNT + MIR_GP_EXTRA_COUNT)
 
 static int mir_op_is_call_barrier(MirOpcode op) {
-  return op == MIR_CALL || op == MIR_CALL_INDIRECT || op == MIR_HEAP_NEW ||
-         op == MIR_REP_MOVSB || op == MIR_REP_STOSB || op == MIR_SYSCALL ||
-         op == MIR_INLINE_ASM || mir_op_is_inline_kernel(op);
+  return mir_op_has(op, MIR_OPF_CALL_BARRIER);
 }
 
 static int mir_fn_has_calls(const MirFunction *fn) {
@@ -124,11 +123,7 @@ static int mir_fn_has_preserving_call(const MirFunction *fn, int xmm) {
 
 static int mir_fn_has_real_calls(const MirFunction *fn) {
   for (size_t i = 0; i < fn->insn_count; i++) {
-    if (fn->insns[i].op == MIR_CALL || fn->insns[i].op == MIR_CALL_INDIRECT ||
-        fn->insns[i].op == MIR_HEAP_NEW ||
-        fn->insns[i].op == MIR_REP_MOVSB ||
-        fn->insns[i].op == MIR_REP_STOSB ||
-        fn->insns[i].op == MIR_SYSCALL) {
+    if (mir_op_has(fn->insns[i].op, MIR_OPF_REAL_CALL)) {
       return 1;
     }
   }
@@ -962,31 +957,10 @@ static void mir_compute_coalesce_hints(MirFunction *fn) {
   for (size_t i = 0; i < fn->insn_count; i++) {
     const MirInst *in = &fn->insns[i];
     int commutative;
-    switch (in->op) {
-    case MIR_ADD:
-    case MIR_AND:
-    case MIR_OR:
-    case MIR_XOR:
-    case MIR_IMUL:
-    case MIR_FADD:
-    case MIR_FMUL:
-    case MIR_FXOR:
-      commutative = 1;
-      break;
-    case MIR_SUB:
-    case MIR_FSUB:
-    case MIR_FDIV:
-    case MIR_NEG:
-    case MIR_NOT:
-    case MIR_SHL:
-    case MIR_SHR:
-    case MIR_SAR:
-    case MIR_MOV:
-      commutative = 0;
-      break;
-    default:
+    if (!mir_op_has(in->op, MIR_OPF_COALESCE_CANDIDATE)) {
       continue;
     }
+    commutative = mir_op_has(in->op, MIR_OPF_COMMUTATIVE);
     if (in->dst.kind != MIR_OPK_VREG) {
       continue;
     }
@@ -1104,33 +1078,17 @@ static int mir_clobber_index_ensure(const MirFunction *fn) {
       }
     }
     if (ok) {
-      switch (in->op) {
-      case MIR_IDIV:
-      case MIR_DIV:
-      case MIR_MULHI:
-        ok = mir_clobber_list_push(&ix->rax_implicit, (int)k) &&
-             mir_clobber_list_push(&ix->rdx_implicit, (int)k);
-        break;
-      case MIR_CQO:
-      case MIR_XOR_RDX:
-        ok = mir_clobber_list_push(&ix->rdx_implicit, (int)k);
-        break;
-      case MIR_SETCC:
-      case MIR_FSETCC:
+      unsigned implicit = mir_inst_fixed_gp(in);
+      if (implicit & (1u << (unsigned)BINARY_GP_RAX)) {
         ok = mir_clobber_list_push(&ix->rax_implicit, (int)k);
-        if (ok && in->op == MIR_FSETCC &&
-            mir_fsetcc_unordered_cc(in->cc) >= 0) {
-          ok = mir_clobber_list_push(&ix->rcx_implicit, (int)k);
-        }
-        break;
-      case MIR_SHL:
-      case MIR_SHR:
-      case MIR_SAR:
-        if (in->b.kind != MIR_OPK_IMM) {
-          ok = mir_clobber_list_push(&ix->rcx_implicit, (int)k);
-        }
-        break;
-      case MIR_IR_KERNEL: {
+      }
+      if (ok && (implicit & (1u << (unsigned)BINARY_GP_RDX))) {
+        ok = mir_clobber_list_push(&ix->rdx_implicit, (int)k);
+      }
+      if (ok && (implicit & (1u << (unsigned)BINARY_GP_RCX))) {
+        ok = mir_clobber_list_push(&ix->rcx_implicit, (int)k);
+      }
+      if (ok && mir_op_has(in->op, MIR_OPF_CLOBBERS_LISTED_BY_KERNEL)) {
         const MirKernelAux *ka = (const MirKernelAux *)in->aux;
         const MirIrKernel *kern = ka ? mir_ir_kernel_at(ka->kernel_index) : NULL;
         unsigned clobbers = kern ? kern->gp_clobbers : 0u;
@@ -1139,15 +1097,11 @@ static int mir_clobber_index_ensure(const MirFunction *fn) {
             ok = mir_clobber_list_push(&ix->explicit_fixed[r], (int)k);
           }
         }
-        break;
       }
-      case MIR_INLINE_ASM:
-        for (int r = 0; ok && r < 16; r++) {
+      if (ok && mir_op_has(in->op, MIR_OPF_CLOBBERS_EVERY_GP)) {
+        for (int r = 0; ok && r < mir_machine()->gp_register_count; r++) {
           ok = mir_clobber_list_push(&ix->explicit_fixed[r], (int)k);
         }
-        break;
-      default:
-        break;
       }
     }
     if (!ok) {
@@ -1164,7 +1118,7 @@ static int mir_clobber_index_ensure(const MirFunction *fn) {
 }
 
 static int mir_reg_is_pinned(BinaryGpRegister reg) {
-  return reg == BINARY_GP_RAX || reg == BINARY_GP_RCX || reg == BINARY_GP_RDX;
+  return mir_machine_gp_is_pinned((int)reg);
 }
 
 static int mir_reg_clobbered_by_index(const MirFunction *fn,
@@ -1193,26 +1147,7 @@ static int mir_reg_clobbered_by_index(const MirFunction *fn,
 }
 
 static int mir_inst_pins_reg(const MirInst *in, BinaryGpRegister reg) {
-  switch (in->op) {
-  case MIR_IDIV:
-  case MIR_DIV:
-  case MIR_MULHI:
-    return reg == BINARY_GP_RAX || reg == BINARY_GP_RDX;
-  case MIR_CQO:
-  case MIR_XOR_RDX:
-    return reg == BINARY_GP_RDX;
-  case MIR_SETCC:
-    return reg == BINARY_GP_RAX;
-  case MIR_FSETCC:
-    return reg == BINARY_GP_RAX ||
-           (reg == BINARY_GP_RCX && mir_fsetcc_unordered_cc(in->cc) >= 0);
-  case MIR_SHL:
-  case MIR_SHR:
-  case MIR_SAR:
-    return reg == BINARY_GP_RCX && in->b.kind != MIR_OPK_IMM;
-  default:
-    return 0;
-  }
+  return mir_inst_pins_gp(in, (int)reg);
 }
 
 static int mir_inst_clobbers_reg(const MirInst *in, BinaryGpRegister reg) {
@@ -2000,48 +1935,7 @@ static int mir_regalloc_color(MirFunction *fn) {
 }
 
 static int mir_op_pure_def(MirOpcode op) {
-  switch (op) {
-  case MIR_MOV:
-  case MIR_MOVZX:
-  case MIR_MOVSX:
-  case MIR_LEA:
-  case MIR_LEA_LOCAL:
-  case MIR_LEA_GLOBAL:
-  case MIR_LEA_FUNC:
-  case MIR_LEA_CSTR:
-  case MIR_LEA_STRLIT:
-  case MIR_ADD:
-  case MIR_SUB:
-  case MIR_AND:
-  case MIR_OR:
-  case MIR_XOR:
-  case MIR_IMUL:
-  case MIR_NEG:
-  case MIR_NOT:
-  case MIR_POPCNT:
-  case MIR_SHL:
-  case MIR_SHR:
-  case MIR_SAR:
-  case MIR_SETCC:
-  case MIR_CMOVCC:
-  case MIR_FADD:
-  case MIR_FSUB:
-  case MIR_FMUL:
-  case MIR_FDIV:
-  case MIR_FXOR:
-  case MIR_FDUP:
-  case MIR_FEXTHI:
-  case MIR_CVTSI2F:
-  case MIR_CVTF2SI:
-  case MIR_CVTF2F:
-  case MIR_MOVD_TO_XMM:
-  case MIR_MOVD_TO_GP:
-  case MIR_CVTPH2PS:
-  case MIR_CVTPS2PH:
-    return 1;
-  default:
-    return 0;
-  }
+  return mir_op_has(op, MIR_OPF_PURE_DEF);
 }
 
 static void mir_dce_add_read(MirVregId v, int *reads, size_t n) {
