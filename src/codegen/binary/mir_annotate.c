@@ -809,104 +809,145 @@ static int modrm_len(const unsigned char *p, size_t avail, int *is_mem,
   return len;
 }
 
-static int decode_one(const unsigned char *p, size_t len, Insn *o) {
-  memset(o, 0, sizeof *o);
-  o->pc = PC_ALU;
-  size_t i = 0;
-  int opsize16 = 0, mand = 0;
-  for (;;) {
-    if (i >= len) return 0;
-    unsigned char b = p[i];
-    if (b == 0x66) { opsize16 = 1; mand = 0x66; i++; continue; }
-    if (b == 0xF2 || b == 0xF3) { mand = b; i++; continue; }
-    if (b == 0x67 || b == 0xF0 || b == 0x2E || b == 0x36 || b == 0x3E ||
-        b == 0x26 || b == 0x64 || b == 0x65) { i++; continue; }
-    break;
-  }
-  if (i >= len) return 0;
-  if ((p[i] & 0xF0) == 0x40) { o->wide = (p[i] & 8) != 0; i++; if (i >= len) return 0; }
-  unsigned char op = p[i++];
-
+static int decode_alu(const unsigned char *p, size_t len, Insn *o, size_t i,
+                      unsigned char op, int opsize16) {
   int is_mem = 0, reg = 0, has_index = 0, imm = 0;
-  int two = 0;
-  if (op == 0xC4 || op == 0xC5) return 0;
-
-  if (op == 0x0F) {
-    two = 1;
-    if (i >= len) return 0;
-    unsigned char o2 = p[i++];
-    if (o2 == 0x38 || o2 == 0x3A) return 0;
-    if (o2 >= 0x80 && o2 <= 0x8F) {
-      o->pc = PC_BRANCH; o->is_cond_branch = 1;
-      imm = opsize16 ? 2 : 4;
-      o->ilen = (int)i + imm;
-      return o->ilen <= (int)len;
-    }
+  int blk = op >> 3;
+  int form = op & 7;
+  int is_cmp = (blk == 7);
+  int is_fusible = (blk == 0 || blk == 4 || blk == 5 || blk == 7);
+  if (form <= 3) {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
     i += ml;
     o->ilen = (int)i;
     if (o->ilen > (int)len) return 0;
-    if (o2 >= 0x90 && o2 <= 0x9F) { o->pc = PC_SETCC; if (is_mem) o->mem_store = 1; return 1; }
-    if (o2 >= 0x40 && o2 <= 0x4F) { o->pc = PC_CMOV; if (is_mem) o->mem_load = 1; return 1; }
-    if (o2 == 0xAF) { o->pc = PC_MUL; if (is_mem) o->mem_load = 1; return 1; }
-    if (o2 == 0xB6 || o2 == 0xB7 || o2 == 0xBE || o2 == 0xBF) {
-      o->pc = PC_ALU; if (is_mem) o->mem_load = 1; return 1; }
-    if (o2 == 0x1F) { o->pc = PC_NONE; return 1; }
-    switch (o2) {
-    case 0x58: case 0x59: case 0x5C: case 0x5D: case 0x5F:
-      o->pc = PC_FPADDMUL; if (is_mem) o->mem_load = 1; return 1;
-    case 0x5E: o->pc = PC_FPDIV; if (is_mem) o->mem_load = 1; return 1;
-    case 0x51: o->pc = PC_FPDIV; if (is_mem) o->mem_load = 1; return 1;
-    case 0x54: case 0x55: case 0x56: case 0x57:
-      o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
-    case 0x2E: case 0x2F:
-      o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
-    case 0x2A: case 0x2C: case 0x2D: case 0x5A: case 0x5B:
-      o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
-    case 0x10: case 0x28:
-      o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
-    case 0x11: case 0x29:
-      o->pc = PC_FPMISC; if (is_mem) o->mem_store = 1; return 1;
-    case 0x6E:
-      o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
-    case 0x7E:
-      o->pc = PC_FPMISC;
-      if (is_mem) { if (mand == 0xF3) o->mem_load = 1; else o->mem_store = 1; }
-      return 1;
-    case 0xD6:
-      o->pc = PC_FPMISC; if (is_mem) o->mem_store = 1; return 1;
-    case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x17:
-      o->pc = PC_FPMISC; if (is_mem) { if (o2 & 1) o->mem_store = 1; else o->mem_load = 1; } return 1;
-    default:
-      return 0;
+    o->pc = PC_ALU;
+    o->is_cmp_fusible = is_fusible;
+    if (is_mem) {
+      if (form <= 1) { o->mem_load = 1; if (!is_cmp) o->mem_store = 1; }
+      else o->mem_load = 1;
     }
+    return 1;
   }
+  imm = (form == 4) ? 1 : (opsize16 ? 2 : 4);
+  o->ilen = (int)i + imm;
+  o->pc = PC_ALU; o->is_cmp_fusible = is_fusible;
+  return o->ilen <= (int)len;
+}
 
-  if (op <= 0x3D && (op & 7) <= 5 && op != 0x0F) {
-    int blk = op >> 3;
-    int form = op & 7;
-    int is_cmp = (blk == 7);
-    int is_fusible = (blk == 0 || blk == 4 || blk == 5 || blk == 7);
-    if (form <= 3) {
-      int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
-      if (ml < 0) return 0;
-      i += ml;
-      o->ilen = (int)i;
-      if (o->ilen > (int)len) return 0;
-      o->pc = PC_ALU;
-      o->is_cmp_fusible = is_fusible;
-      if (is_mem) {
-        if (form <= 1) { o->mem_load = 1; if (!is_cmp) o->mem_store = 1; }
-        else o->mem_load = 1;
-      }
-      return 1;
-    }
-    imm = (form == 4) ? 1 : (opsize16 ? 2 : 4);
+static int decode_two_byte_move(const unsigned char *p, size_t len,
+                              Insn *o, size_t i, int mand,
+                              unsigned char o2, int is_mem) {
+  (void)p;
+  (void)len;
+  (void)i;
+
+  switch (o2) {
+  case 0x10: case 0x28:
+    o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
+  case 0x11: case 0x29:
+    o->pc = PC_FPMISC; if (is_mem) o->mem_store = 1; return 1;
+  case 0x6E:
+    o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
+  case 0x7E:
+    o->pc = PC_FPMISC;
+    if (is_mem) { if (mand == 0xF3) o->mem_load = 1; else o->mem_store = 1; }
+    return 1;
+  case 0xD6:
+    o->pc = PC_FPMISC; if (is_mem) o->mem_store = 1; return 1;
+  case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x17:
+    o->pc = PC_FPMISC; if (is_mem) { if (o2 & 1) o->mem_store = 1; else o->mem_load = 1; } return 1;
+  default:
+    return 0;
+  }
+}
+
+static int decode_two_byte_float(const unsigned char *p, size_t len,
+                              Insn *o, size_t i, int mand,
+                              unsigned char o2, int is_mem) {
+
+  switch (o2) {
+  case 0x58: case 0x59: case 0x5C: case 0x5D: case 0x5F:
+    o->pc = PC_FPADDMUL; if (is_mem) o->mem_load = 1; return 1;
+  case 0x5E: o->pc = PC_FPDIV; if (is_mem) o->mem_load = 1; return 1;
+  case 0x51: o->pc = PC_FPDIV; if (is_mem) o->mem_load = 1; return 1;
+  case 0x54: case 0x55: case 0x56: case 0x57:
+    o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
+  case 0x2E: case 0x2F:
+    o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
+  case 0x2A: case 0x2C: case 0x2D: case 0x5A: case 0x5B:
+    o->pc = PC_FPMISC; if (is_mem) o->mem_load = 1; return 1;
+  default:
+    break;
+  }
+  return decode_two_byte_move(p, len, o, i, mand, o2, is_mem);
+}
+
+static int decode_two_byte(const unsigned char *p, size_t len, Insn *o,
+                           size_t i, int mand, int opsize16) {
+  int is_mem = 0, reg = 0, has_index = 0, imm = 0;
+  if (i >= len) return 0;
+  unsigned char o2 = p[i++];
+  if (o2 == 0x38 || o2 == 0x3A) return 0;
+  if (o2 >= 0x80 && o2 <= 0x8F) {
+    o->pc = PC_BRANCH; o->is_cond_branch = 1;
+    imm = opsize16 ? 2 : 4;
     o->ilen = (int)i + imm;
-    o->pc = PC_ALU; o->is_cmp_fusible = is_fusible;
     return o->ilen <= (int)len;
   }
+  int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
+  if (ml < 0) return 0;
+  i += ml;
+  o->ilen = (int)i;
+  if (o->ilen > (int)len) return 0;
+  if (o2 >= 0x90 && o2 <= 0x9F) { o->pc = PC_SETCC; if (is_mem) o->mem_store = 1; return 1; }
+  if (o2 >= 0x40 && o2 <= 0x4F) { o->pc = PC_CMOV; if (is_mem) o->mem_load = 1; return 1; }
+  if (o2 == 0xAF) { o->pc = PC_MUL; if (is_mem) o->mem_load = 1; return 1; }
+  if (o2 == 0xB6 || o2 == 0xB7 || o2 == 0xBE || o2 == 0xBF) {
+    o->pc = PC_ALU; if (is_mem) o->mem_load = 1; return 1; }
+  if (o2 == 0x1F) { o->pc = PC_NONE; return 1; }
+  return decode_two_byte_float(p, len, o, i, mand, o2, is_mem);
+}
+
+static int decode_opcode_move(const unsigned char *p, size_t len, Insn *o,
+                            size_t i, unsigned char op, int opsize16) {
+  int is_mem = 0, reg = 0, has_index = 0, imm = 0;
+
+  switch (op) {
+  case 0x88: case 0x89: case 0x8A: case 0x8B: {
+    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
+    if (ml < 0) return 0;
+    i += ml; o->ilen = (int)i; if (o->ilen > (int)len) return 0;
+    if (is_mem) { o->pc = PC_NONE; if (op == 0x88 || op == 0x89) o->mem_store = 1; else o->mem_load = 1; }
+    else { o->pc = PC_NONE; o->is_mov_rr = 1; }
+    return 1; }
+  case 0x8D: {
+    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
+    if (ml < 0) return 0;
+    i += ml; o->pc = has_index ? PC_LEA3 : PC_LEA;
+    o->ilen = (int)i; return o->ilen <= (int)len; }
+  case 0x80: case 0x81: case 0x83: {
+    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
+    if (ml < 0) return 0;
+    i += ml; imm = (op == 0x81) ? (opsize16 ? 2 : 4) : 1;
+    o->pc = PC_ALU; o->is_cmp_fusible = (reg == 0 || reg == 4 || reg == 5 || reg == 7);
+    if (is_mem) { o->mem_load = 1; if (reg != 7) o->mem_store = 1; }
+    o->ilen = (int)i + imm; return o->ilen <= (int)len; }
+  case 0x90: o->pc = PC_NONE; o->ilen = (int)i; return 1;
+  case 0x98: case 0x99: o->pc = PC_ALU; o->ilen = (int)i; return 1;
+  case 0xA8: o->pc = PC_ALU; o->is_cmp_fusible = 1; o->ilen = (int)i + 1; return o->ilen <= (int)len;
+  case 0xA9: imm = opsize16 ? 2 : 4; o->pc = PC_ALU; o->is_cmp_fusible = 1;
+    o->ilen = (int)i + imm; return o->ilen <= (int)len;
+  default:
+    break;
+  }
+  return -1;
+}
+
+static int decode_opcode_low(const unsigned char *p, size_t len, Insn *o,
+                            size_t i, unsigned char op, int opsize16) {
+  int is_mem = 0, reg = 0, has_index = 0, imm = 0;
 
   switch (op) {
   case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56:
@@ -935,66 +976,18 @@ static int decode_one(const unsigned char *p, size_t len, Insn *o) {
     if (ml < 0) return 0;
     i += ml; o->pc = PC_ALU; o->is_cmp_fusible = 1; if (is_mem) o->mem_load = 1;
     o->ilen = (int)i; return o->ilen <= (int)len; }
-  case 0x88: case 0x89: case 0x8A: case 0x8B: {
-    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
-    if (ml < 0) return 0;
-    i += ml; o->ilen = (int)i; if (o->ilen > (int)len) return 0;
-    if (is_mem) { o->pc = PC_NONE; if (op == 0x88 || op == 0x89) o->mem_store = 1; else o->mem_load = 1; }
-    else { o->pc = PC_NONE; o->is_mov_rr = 1; }
-    return 1; }
-  case 0x8D: {
-    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
-    if (ml < 0) return 0;
-    i += ml; o->pc = has_index ? PC_LEA3 : PC_LEA;
-    o->ilen = (int)i; return o->ilen <= (int)len; }
-  case 0x80: case 0x81: case 0x83: {
-    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
-    if (ml < 0) return 0;
-    i += ml; imm = (op == 0x81) ? (opsize16 ? 2 : 4) : 1;
-    o->pc = PC_ALU; o->is_cmp_fusible = (reg == 0 || reg == 4 || reg == 5 || reg == 7);
-    if (is_mem) { o->mem_load = 1; if (reg != 7) o->mem_store = 1; }
-    o->ilen = (int)i + imm; return o->ilen <= (int)len; }
-  case 0x90: o->pc = PC_NONE; o->ilen = (int)i; return 1;
-  case 0x98: case 0x99: o->pc = PC_ALU; o->ilen = (int)i; return 1;
-  case 0xA8: o->pc = PC_ALU; o->is_cmp_fusible = 1; o->ilen = (int)i + 1; return o->ilen <= (int)len;
-  case 0xA9: imm = opsize16 ? 2 : 4; o->pc = PC_ALU; o->is_cmp_fusible = 1;
-    o->ilen = (int)i + imm; return o->ilen <= (int)len;
-  case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6:
-  case 0xB7: o->pc = PC_NONE; o->ilen = (int)i + 1; return o->ilen <= (int)len;
-  case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE:
-  case 0xBF: imm = o->wide ? 8 : (opsize16 ? 2 : 4); o->pc = PC_NONE;
-    o->ilen = (int)i + imm; return o->ilen <= (int)len;
-  case 0xC0: case 0xC1: {
-    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
-    if (ml < 0) return 0;
-    i += ml; o->pc = PC_SHIFT; if (is_mem) { o->mem_load = 1; o->mem_store = 1; }
-    o->ilen = (int)i + 1; return o->ilen <= (int)len; }
-  case 0xD0: case 0xD1: case 0xD2: case 0xD3: {
-    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
-    if (ml < 0) return 0;
-    i += ml; o->pc = PC_SHIFT; if (is_mem) { o->mem_load = 1; o->mem_store = 1; }
-    o->ilen = (int)i; return o->ilen <= (int)len; }
-  case 0xC2: o->pc = PC_RET; o->ilen = (int)i + 2; return o->ilen <= (int)len;
-  case 0xC3: o->pc = PC_RET; o->ilen = (int)i; return 1;
-  case 0xC6: {
-    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
-    if (ml < 0) return 0;
-    i += ml; o->pc = PC_NONE; if (is_mem) o->mem_store = 1;
-    o->ilen = (int)i + 1; return o->ilen <= (int)len; }
-  case 0xC7: {
-    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
-    if (ml < 0) return 0;
-    i += ml; imm = opsize16 ? 2 : 4; o->pc = PC_NONE; if (is_mem) o->mem_store = 1;
-    o->ilen = (int)i + imm; return o->ilen <= (int)len; }
-  case 0xCC: o->pc = PC_NONE; o->ilen = (int)i; return 1;
-  case 0xE8: o->pc = PC_CALL; o->ilen = (int)i + 4; return o->ilen <= (int)len;
-  case 0xE9: o->pc = PC_BRANCH; o->ilen = (int)i + 4; return o->ilen <= (int)len;
-  case 0xEB: o->pc = PC_BRANCH; o->ilen = (int)i + 1; return o->ilen <= (int)len;
-  case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76:
-  case 0x77: case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D:
-  case 0x7E: case 0x7F:
-    o->pc = PC_BRANCH; o->is_cond_branch = 1; o->ilen = (int)i + 1;
-    return o->ilen <= (int)len;
+  default:
+    break;
+  }
+  return decode_opcode_move(p, len, o, i, op, opsize16);
+}
+
+
+static int decode_opcode_group(const unsigned char *p, size_t len, Insn *o,
+                            size_t i, unsigned char op, int opsize16) {
+  int is_mem = 0, reg = 0, has_index = 0, imm = 0;
+
+  switch (op) {
   case 0xF6: case 0xF7: {
     int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
     if (ml < 0) return 0;
@@ -1025,8 +1018,104 @@ static int decode_one(const unsigned char *p, size_t len, Insn *o) {
     else return 0;
     return 1; }
   default:
-    (void)two;
     return 0;
+  }
+  return -1;
+}
+
+static int decode_opcode_misc(const unsigned char *p, size_t len, Insn *o,
+                            size_t i, unsigned char op, int opsize16) {
+
+  switch (op) {
+  case 0xCC: o->pc = PC_NONE; o->ilen = (int)i; return 1;
+  case 0xE8: o->pc = PC_CALL; o->ilen = (int)i + 4; return o->ilen <= (int)len;
+  case 0xE9: o->pc = PC_BRANCH; o->ilen = (int)i + 4; return o->ilen <= (int)len;
+  case 0xEB: o->pc = PC_BRANCH; o->ilen = (int)i + 1; return o->ilen <= (int)len;
+  case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76:
+  case 0x77: case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D:
+  case 0x7E: case 0x7F:
+    o->pc = PC_BRANCH; o->is_cond_branch = 1; o->ilen = (int)i + 1;
+    return o->ilen <= (int)len;
+  default:
+    break;
+  }
+  return decode_opcode_group(p, len, o, i, op, opsize16);
+}
+
+static int decode_opcode_high(const unsigned char *p, size_t len, Insn *o,
+                            size_t i, unsigned char op, int opsize16) {
+  int is_mem = 0, reg = 0, has_index = 0, imm = 0;
+
+  switch (op) {
+  case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6:
+  case 0xB7: o->pc = PC_NONE; o->ilen = (int)i + 1; return o->ilen <= (int)len;
+  case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE:
+  case 0xBF: imm = o->wide ? 8 : (opsize16 ? 2 : 4); o->pc = PC_NONE;
+    o->ilen = (int)i + imm; return o->ilen <= (int)len;
+  case 0xC0: case 0xC1: {
+    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
+    if (ml < 0) return 0;
+    i += ml; o->pc = PC_SHIFT; if (is_mem) { o->mem_load = 1; o->mem_store = 1; }
+    o->ilen = (int)i + 1; return o->ilen <= (int)len; }
+  case 0xD0: case 0xD1: case 0xD2: case 0xD3: {
+    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
+    if (ml < 0) return 0;
+    i += ml; o->pc = PC_SHIFT; if (is_mem) { o->mem_load = 1; o->mem_store = 1; }
+    o->ilen = (int)i; return o->ilen <= (int)len; }
+  case 0xC2: o->pc = PC_RET; o->ilen = (int)i + 2; return o->ilen <= (int)len;
+  case 0xC3: o->pc = PC_RET; o->ilen = (int)i; return 1;
+  case 0xC6: {
+    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
+    if (ml < 0) return 0;
+    i += ml; o->pc = PC_NONE; if (is_mem) o->mem_store = 1;
+    o->ilen = (int)i + 1; return o->ilen <= (int)len; }
+  case 0xC7: {
+    int ml = modrm_len(p + i, len - i, &is_mem, &reg, &has_index);
+    if (ml < 0) return 0;
+    i += ml; imm = opsize16 ? 2 : 4; o->pc = PC_NONE; if (is_mem) o->mem_store = 1;
+    o->ilen = (int)i + imm; return o->ilen <= (int)len; }
+  default:
+    break;
+  }
+  return decode_opcode_misc(p, len, o, i, op, opsize16);
+}
+
+
+
+static int decode_one(const unsigned char *p, size_t len, Insn *o) {
+  memset(o, 0, sizeof *o);
+  o->pc = PC_ALU;
+  size_t i = 0;
+  int opsize16 = 0, mand = 0;
+  for (;;) {
+    if (i >= len) return 0;
+    unsigned char b = p[i];
+    if (b == 0x66) { opsize16 = 1; mand = 0x66; i++; continue; }
+    if (b == 0xF2 || b == 0xF3) { mand = b; i++; continue; }
+    if (b == 0x67 || b == 0xF0 || b == 0x2E || b == 0x36 || b == 0x3E ||
+        b == 0x26 || b == 0x64 || b == 0x65) { i++; continue; }
+    break;
+  }
+  if (i >= len) return 0;
+  if ((p[i] & 0xF0) == 0x40) { o->wide = (p[i] & 8) != 0; i++; if (i >= len) return 0; }
+  unsigned char op = p[i++];
+
+  if (op == 0xC4 || op == 0xC5) return 0;
+
+  if (op == 0x0F) {
+    return decode_two_byte(p, len, o, i, mand, opsize16);
+  }
+
+  if (op <= 0x3D && (op & 7) <= 5 && op != 0x0F) {
+    return decode_alu(p, len, o, i, op, opsize16);
+  }
+
+  {
+    int decoded = decode_opcode_low(p, len, o, i, op, opsize16);
+    if (decoded < 0) {
+      decoded = decode_opcode_high(p, len, o, i, op, opsize16);
+    }
+    return decoded < 0 ? 0 : decoded;
   }
 }
 

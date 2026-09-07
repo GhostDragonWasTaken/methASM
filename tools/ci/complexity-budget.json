@@ -92,7 +92,7 @@
     "src/ir/ir_lower_address.c::ir_try_lower_pointer_arithmetic": 42,
     "src/ir/ir_lower_expr.c::ir_lower_call_expression": 230,
     "src/ir/ir_lower_stmt.c::ir_lower_gpu_launch": 45,
-    "src/ir/ir_lower_stmt.c::ir_lower_statement_with_defers": 263,
+    "src/ir/ir_lower_stmt.c::ir_lower_statement_with_defers": 42,
     "src/ir/ir_lower_switch_match.c::ir_lower_match_expression": 72,
     "src/ir/ir_lower_switch_match.c::ir_lower_match_statement": 64,
     "src/ir/ir_lower_switch_match.c::ir_lower_switch_statement": 45,
