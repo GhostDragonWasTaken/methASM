@@ -66,7 +66,10 @@ function Build-Arm {
 
     if (Test-Path $OutExe) { Remove-Item -Force $OutExe }
     $args = @($mettleFlags) + @($Source, "-o", $OutExe)
+    $keep = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $out = & $Compiler @args 2>&1
+    $ErrorActionPreference = $keep
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutExe)) {
         return @{ ok = $false; log = ($out -join "`n") }
     }

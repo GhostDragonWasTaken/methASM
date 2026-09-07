@@ -474,16 +474,16 @@ static int re_kills_append(REKillLog *log, const char *base, long long off,
 static int re_kill_hits(const IRFunction *function, const REMemRegion *kill,
                         const char *mem_base, long long mem_off,
                         long long mem_size, unsigned mem_class) {
+  if (kill->base && mem_base && strcmp(kill->base, mem_base) == 0) {
+    return kill->off < mem_off + mem_size && mem_off < kill->off + kill->size;
+  }
+  if (ir_alias_classes_distinct(kill->alias_class, mem_class)) {
+    return 0;
+  }
   if (!kill->base || !mem_base) {
     return 1;
   }
-  if (strcmp(kill->base, mem_base) == 0) {
-    return kill->off < mem_off + mem_size && mem_off < kill->off + kill->size;
-  }
   if (kill->base[0] == '&' && mem_base[0] == '&') {
-    return 0;
-  }
-  if (ir_alias_classes_distinct(kill->alias_class, mem_class)) {
     return 0;
   }
   if (ir_alias_bases_distinct(function, kill->base, mem_base)) {
@@ -1799,7 +1799,7 @@ static int re_collect_loop_writes(const IRFunction *function,
                                      sizeof(wbase), &woff, &wsize, &wtype)) {
       continue;
     }
-    if (!wbase[0] || !re_kills_append(log, wbase, woff, wtype, wsize)) {
+    if (!re_kills_append(log, wbase[0] ? wbase : NULL, woff, wtype, wsize)) {
       return 0;
     }
   }
@@ -2275,8 +2275,21 @@ static int re_promote_classify_access(const IRFunction *function,
   {
     REMemRegion probe = {resolvable ? abase : NULL, a.offset, asize,
                          ins->alias_class};
-    if (!re_kill_hits(function, &probe, region_base, region->offset, size,
-                      seed_class)) {
+    int hits = re_kill_hits(function, &probe, region_base, region->offset,
+                            size, seed_class);
+    if (getenv("METTLE_PROM_TRACE")) {
+      fprintf(stderr,
+              "[probe] %s @%zu %s cls=%u seed=%u distinct=%d base=%s "
+              "region=%s hits=%d line=%zu:%zu\n",
+              function->name ? function->name : "?",
+              (size_t)(ins - function->instructions),
+              ins->op == IR_OP_LOAD ? "load" : "store",
+              (unsigned)ins->alias_class, seed_class,
+              ir_alias_classes_distinct(ins->alias_class, seed_class),
+              resolvable ? abase : "-", region_base, hits,
+              ins->location.line, ins->location.column);
+    }
+    if (!hits) {
       return RE_ACCESS_ELSEWHERE;
     }
   }
@@ -2678,6 +2691,7 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
         st.lhs = ir_operand_symbol(local_name);
         st.rhs = ir_operand_int(size);
         st.location = function->instructions[exits[k].at].location;
+        st.alias_class = promoted_class;
 
         if (exits[k].is_return) {
           if (!ir_function_insert_instruction(function, exits[k].at, &st)) {
@@ -2746,6 +2760,20 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
 int ir_promote_loop_memory_pass(IRFunction *function, int *changed) {
   if (!function || function->instruction_count == 0) {
     return 1;
+  }
+  if (getenv("METTLE_PROM_TRACE")) {
+    for (size_t i = 0; i < function->instruction_count; i++) {
+      const IRInstruction *ins = &function->instructions[i];
+      if (ins->op != IR_OP_LOAD && ins->op != IR_OP_STORE) {
+        continue;
+      }
+      fprintf(stderr, "[census] %s @%zu %s cls=%u size=%lld line=%zu:%zu\n",
+              function->name ? function->name : "?", i,
+              ins->op == IR_OP_LOAD ? "load" : "store",
+              (unsigned)ins->alias_class,
+              ins->rhs.kind == IR_OPERAND_INT ? ins->rhs.int_value : -1LL,
+              ins->location.line, ins->location.column);
+    }
   }
   for (;;) {
     REDefs defs = {0};
