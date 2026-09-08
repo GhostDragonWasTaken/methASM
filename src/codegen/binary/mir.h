@@ -108,6 +108,7 @@ typedef enum {
 
   MIR_CMP,
   MIR_TEST,
+  MIR_BT,
   MIR_SETCC,
   MIR_CMOVCC,
 

@@ -1113,6 +1113,22 @@ int binary_emit_imul_reg_reg(BinaryCodeBuffer *buffer,
   return 1;
 }
 
+int binary_emit_bt_reg_reg(BinaryCodeBuffer *buffer,
+                                  BinaryGpRegister base,
+                                  BinaryGpRegister offset) {
+  if (!buffer) {
+    return 0;
+  }
+  if (!binary_emit_rex(buffer, 1, offset >> 3, 0, base >> 3) ||
+      !binary_code_buffer_append_u8(buffer, 0x0F) ||
+      !binary_code_buffer_append_u8(buffer, 0xA3) ||
+      !binary_code_buffer_append_u8(
+          buffer, (unsigned char)(0xC0 | ((offset & 7) << 3) | (base & 7)))) {
+    return 0;
+  }
+  return 1;
+}
+
 int binary_immediate_positive_power_of_two_i32(int32_t value,
                                                       unsigned char *shift_out) {
   if (!shift_out || value <= 0 || (value & (value - 1)) != 0) {

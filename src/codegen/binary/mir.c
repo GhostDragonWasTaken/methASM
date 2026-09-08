@@ -259,6 +259,7 @@ static const char *const MIR_OPCODE_NAMES[MIR_OPCODE_COUNT] = {
     [MIR_MULHI] = "mulhi",
     [MIR_CMP] = "cmp",
     [MIR_TEST] = "test",
+    [MIR_BT] = "bt",
     [MIR_SETCC] = "setcc",
     [MIR_CMOVCC] = "cmovcc",
     [MIR_JMP] = "jmp",

@@ -40,6 +40,7 @@ static void home_fwd_clear(void) { g_home_fwd.valid = 0; }
 
 static void home_fwd_note_boundary(MirOpcode op) {
   if (op == MIR_LABEL || op == MIR_JMP || op == MIR_JCC || op == MIR_CMPBR ||
+      op == MIR_BT ||
       op == MIR_FCMPBR || op == MIR_CALL || op == MIR_RET ||
       op == MIR_INLINE_ASM) {
     g_home_fwd.valid = 0;
@@ -1890,7 +1891,7 @@ static int mir_label_is_branch_target(const MirFunction *fn,
       continue;
     }
     if (b->op != MIR_JMP && b->op != MIR_JCC && b->op != MIR_CMPBR &&
-        b->op != MIR_FCMPBR) {
+        b->op != MIR_BT && b->op != MIR_FCMPBR) {
       continue;
     }
     if (b->dst.kind == MIR_OPK_LABEL && b->dst.sym &&
@@ -3552,6 +3553,15 @@ static int mir_encode_compare_branch(MirEncodeState *st, const MirInst *in) {
   int rok = 1;
   int ok;
 
+  if (in->op == MIR_BT) {
+    BinaryGpRegister base = (BinaryGpRegister)fn->vregs[in->a.vreg].phys;
+    BinaryGpRegister offset = (BinaryGpRegister)fn->vregs[in->b.vreg].phys;
+    if (!binary_emit_bt_reg_reg(&fn->context->code, base, offset)) {
+      return enc_err(fn, "out of memory in bit test");
+    }
+    st->prev_cmpbr = (size_t)-1;
+    return mir_cmpbr_emit_branch(st, in);
+  }
   if (in->op != MIR_CMPBR) {
     return enc_err(fn, "unsupported MIR opcode in encoder");
   }
@@ -3696,6 +3706,7 @@ static const MirEncodeHandler MIR_ENCODERS[MIR_OPCODE_COUNT] = {
     [MIR_LEA_STRLIT] = mir_encode_literal_address,
     [MIR_TRAP] = mir_encode_trap,
     [MIR_CMPBR] = mir_encode_compare_branch,
+    [MIR_BT] = mir_encode_compare_branch,
     [MIR_JMP_TABLE] = mir_encode_jump_table,
     [MIR_RET] = mir_encode_jump_table,
     [MIR_INLINE_ASM] = mir_encode_jump_table,
@@ -3712,7 +3723,7 @@ static char *mir_scan_loop_alignment(const MirFunction *fn) {
     int header;
 
     if (in->op != MIR_JMP && in->op != MIR_JCC && in->op != MIR_CMPBR &&
-        in->op != MIR_FCMPBR) {
+        in->op != MIR_BT && in->op != MIR_FCMPBR) {
       continue;
     }
     if (in->dst.kind != MIR_OPK_LABEL || !in->dst.sym) {

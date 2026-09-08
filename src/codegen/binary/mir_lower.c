@@ -7918,7 +7918,7 @@ static int mir_sext_label_covered(const MirFunction *fn, size_t l, size_t g,
   for (size_t j = 0; j < fn->insn_count; j++) {
     const MirInst *jj = &fn->insns[j];
     if (jj->op != MIR_JMP && jj->op != MIR_JCC && jj->op != MIR_CMPBR &&
-        jj->op != MIR_FCMPBR) {
+        jj->op != MIR_BT && jj->op != MIR_FCMPBR) {
       continue;
     }
     if (jj->dst.kind != MIR_OPK_LABEL || !jj->dst.sym ||
@@ -8290,6 +8290,117 @@ static void mir_fuse_extend_then_mov(MirFunction *fn) {
   free(defs);
 }
 
+static size_t mir_next_real_insn(const MirFunction *fn, size_t i) {
+  for (i++; i < fn->insn_count; i++) {
+    if (fn->insns[i].op != MIR_NOP) {
+      return i;
+    }
+  }
+  return fn->insn_count;
+}
+
+/* `(1 << c) & mask` tested against zero is a bit test. x86 has one: BT reads
+   the bit the second operand names out of the first, so the shift, the mask
+   and the compare collapse into one instruction plus a branch on carry. The
+   mask becomes a vreg of its own so the constant pool can hoist it out of the
+   loop; left as an immediate it is a ten-byte movabs per iteration, which is
+   what a character-class test in a scanner pays today. SHL already takes its
+   count modulo 64 and so does BT, so the two agree on an out-of-range c. */
+static void mir_fuse_bit_test_branch(MirFunction *fn) {
+  int *uses = NULL;
+  int *defs = NULL;
+
+  if (!fn || fn->insn_count < 3 || fn->vreg_count == 0) {
+    return;
+  }
+  if (!mir_count_vreg_uses_defs(fn, &uses, &defs)) {
+    return;
+  }
+
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    MirInst *shl = &fn->insns[i];
+    size_t ai;
+    size_t bi;
+
+    if (shl->op != MIR_SHL || shl->is_float || shl->width != 8 ||
+        shl->dst.kind != MIR_OPK_VREG || shl->a.kind != MIR_OPK_IMM ||
+        shl->a.imm != 1 || shl->b.kind != MIR_OPK_VREG) {
+      continue;
+    }
+    ai = mir_next_real_insn(fn, i);
+    if (ai >= fn->insn_count) {
+      continue;
+    }
+    {
+      MirInst *and_op = &fn->insns[ai];
+      MirInst *br;
+      MirVregId shifted = shl->dst.vreg;
+      MirVregId masked;
+      MirVregId mask_vreg;
+      unsigned char cc;
+
+      if (and_op->op != MIR_AND || and_op->is_float || and_op->width != 8 ||
+          and_op->dst.kind != MIR_OPK_VREG || and_op->a.kind != MIR_OPK_VREG ||
+          and_op->a.vreg != shifted || and_op->b.kind != MIR_OPK_IMM) {
+        continue;
+      }
+      bi = mir_next_real_insn(fn, ai);
+      if (bi >= fn->insn_count) {
+        continue;
+      }
+      br = &fn->insns[bi];
+      masked = and_op->dst.vreg;
+      if (br->is_float || br->dst.kind != MIR_OPK_LABEL ||
+          br->a.kind != MIR_OPK_VREG || br->a.vreg != masked) {
+        continue;
+      }
+      if (br->op == MIR_CMPBR) {
+        if (br->b.kind != MIR_OPK_IMM || br->b.imm != 0) {
+          continue;
+        }
+      } else if (br->op != MIR_JCC) {
+        continue;
+      }
+      if (br->cc == 0x84) {
+        cc = 0x83;
+      } else if (br->cc == 0x85) {
+        cc = 0x82;
+      } else {
+        continue;
+      }
+      if (uses[shifted] != 1 || defs[shifted] != 1 || uses[masked] != 1 ||
+          defs[masked] != 1 || fn->vregs[shifted].address_taken ||
+          fn->vregs[masked].address_taken ||
+          fn->vregs[shl->b.vreg].rclass != MIR_RC_GP) {
+        continue;
+      }
+
+      MirVregId count_vreg = shl->b.vreg;
+      mask_vreg = mir_new_vreg(fn, MIR_RC_GP, 8);
+      if (mask_vreg == MIR_VREG_NONE) {
+        break;
+      }
+      shl->op = MIR_MOV;
+      shl->dst = mir_op_vreg(mask_vreg);
+      shl->a = mir_op_imm(and_op->b.imm);
+      shl->b = mir_op_none();
+      shl->width = 8;
+      shl->is_unsigned = 0;
+
+      and_op->op = MIR_NOP;
+
+      br->op = MIR_BT;
+      br->a = mir_op_vreg(mask_vreg);
+      br->b = mir_op_vreg(count_vreg);
+      br->cc = cc;
+      br->width = 8;
+    }
+  }
+
+  free(uses);
+  free(defs);
+}
+
 static void mir_fold_address_offsets(MirFunction *fn) {
   if (!fn || fn->insn_count < 2 || fn->vreg_count == 0) {
     return;
@@ -8473,7 +8584,7 @@ static void mir_cse_loads(MirFunction *fn) {
   for (size_t b = 0; b < fn->insn_count; b++) {
     const MirInst *in = &fn->insns[b];
     if (in->op != MIR_JMP && in->op != MIR_JCC && in->op != MIR_CMPBR &&
-        in->op != MIR_FCMPBR) {
+        in->op != MIR_BT && in->op != MIR_FCMPBR) {
       continue;
     }
     if (in->dst.kind != MIR_OPK_LABEL || !in->dst.sym) {
@@ -9625,7 +9736,7 @@ static size_t mir_collect_back_edges(const MirFunction *fn,
     size_t seen = 0;
     for (size_t k = 0; k < fn->insn_count; k++) {
       const MirInst *in = &fn->insns[k];
-      if ((in->op != MIR_JMP && in->op != MIR_CMPBR) ||
+      if ((in->op != MIR_JMP && in->op != MIR_CMPBR && in->op != MIR_BT) ||
           in->dst.kind != MIR_OPK_LABEL || !in->dst.sym) {
         continue;
       }
@@ -9771,7 +9882,7 @@ static size_t mir_const_insert_index(const MirFunction *fn, size_t first_use,
   for (size_t b = 0; b < fn->insn_count; b++) {
     const MirInst *br = &fn->insns[b];
     if ((br->op != MIR_JMP && br->op != MIR_JCC && br->op != MIR_CMPBR &&
-         br->op != MIR_FCMPBR) ||
+         br->op != MIR_BT && br->op != MIR_FCMPBR) ||
         br->dst.kind != MIR_OPK_LABEL || !br->dst.sym) {
       continue;
     }
@@ -10633,6 +10744,7 @@ int code_generator_binary_emit_function_via_mir(
   mir_build_jump_tables(&fn);
   mir_rotate_loops(&fn);
   mir_thread_branch_over_jump(&fn);
+  mir_fuse_bit_test_branch(&fn);
   mir_place_const_pool(&fn);
   mir_sink_cold_exits(&fn);
 

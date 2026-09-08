@@ -17049,8 +17049,12 @@ $runFixtures = @(
   @{ Name = "or_chain_bitset"; Path = "tests/codegen/or_chain_bitset.mettle"
      What = "an or-chain of equality tests answered differently as a bit test"
      AsmMustMatch = @(
-       @{ Fn = "classify"; Pattern = "shl" },
-       @{ Fn = "wide"; Pattern = "shl" },
+       # The fold's proof is the bit test itself: the set membership lowers to
+       # one `bt` against a mask, where it used to need a shift, an and and a
+       # compare. Matching `bt` asserts both that the or-chain folded and that
+       # it reached the single-instruction form.
+       @{ Fn = "classify"; Pattern = "\bbt\s" },
+       @{ Fn = "wide"; Pattern = "\bbt\s" },
        @{ Fn = "ascii_name_start"; Pattern = "(?m)^\s+[0-9a-f]+\s+or\s+[a-z0-9]+,\s+[a-z0-9]+,\s+32\b" },
        @{ Fn = "ascii_name_start_reverse"; Pattern = "(?m)^\s+[0-9a-f]+\s+or\s+[a-z0-9]+,\s+[a-z0-9]+,\s+32\b" }) },
   @{ Name = "switch_dense"; Path = "tests/codegen/switch_dense.mettle"

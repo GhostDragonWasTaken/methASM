@@ -399,6 +399,7 @@ int binary_emit_div_reg(BinaryCodeBuffer *buffer, BinaryGpRegister divisor);
 int binary_emit_mul_reg(BinaryCodeBuffer *buffer, BinaryGpRegister src);
 int binary_emit_imul_reg(BinaryCodeBuffer *buffer, BinaryGpRegister src);
 int binary_emit_imul_reg_reg(BinaryCodeBuffer *buffer, BinaryGpRegister destination, BinaryGpRegister source);
+int binary_emit_bt_reg_reg(BinaryCodeBuffer *buffer, BinaryGpRegister base, BinaryGpRegister offset);
 int binary_emit_imul_reg_reg_imm32(BinaryCodeBuffer *buffer, BinaryGpRegister destination, BinaryGpRegister source, uint32_t immediate);
 int binary_emit_imul_reg_reg32(BinaryCodeBuffer *buffer, BinaryGpRegister destination, BinaryGpRegister source);
 int binary_emit_imul_reg_reg_imm32_scratch(BinaryCodeBuffer *buffer, BinaryGpRegister destination, BinaryGpRegister source, uint32_t immediate, int have_scratch, BinaryGpRegister scratch);
