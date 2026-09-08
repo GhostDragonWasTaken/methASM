@@ -49,7 +49,10 @@ function Build-Mettle {
     param([string]$Source, [string]$OutExe)
     if (Test-Path $OutExe) { Remove-Item -Force $OutExe }
     $a = @($mettleFlags) + @($Source, "-o", $OutExe)
+    $keep = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $out = & $CompilerPath @a 2>&1
+    $ErrorActionPreference = $keep
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutExe)) { return @{ ok = $false; log = ($out -join "`n") } }
     return @{ ok = $true; log = "" }
 }
@@ -58,7 +61,10 @@ function Build-C {
     param([string]$Source, [string]$OutExe)
     if (Test-Path $OutExe) { Remove-Item -Force $OutExe }
     $a = @($cFlags) + @("-o", $OutExe, $Source)
+    $keep = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $out = & $ccPath @a 2>&1
+    $ErrorActionPreference = $keep
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutExe)) { return @{ ok = $false; log = ($out -join "`n") } }
     return @{ ok = $true; log = "" }
 }

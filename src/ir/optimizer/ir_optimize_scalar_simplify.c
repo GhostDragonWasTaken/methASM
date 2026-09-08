@@ -751,16 +751,19 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
   }
 
   IRTempValueMap addr_taken, temp_last_use, sym_last_use, storage_syms;
+  IRTempValueMap label_index;
   if (!ir_temp_value_map_init(&addr_taken) ||
       !ir_temp_value_map_init(&temp_last_use) ||
       !ir_temp_value_map_init(&sym_last_use) ||
       !ir_temp_value_map_init(&storage_syms) ||
+      !ir_temp_value_map_init(&label_index) ||
       !ir_addr_taken_set_build(function, &addr_taken) ||
       !ir_storage_symbol_set_build(function, &storage_syms)) {
     ir_label_value_map_destroy(&label_in);
     ir_temp_value_map_destroy(&map);
     ir_temp_value_map_destroy(&symbol_map);
     ir_temp_value_map_destroy(&addr_taken);
+    ir_temp_value_map_destroy(&label_index);
     ir_temp_value_map_destroy(&temp_last_use);
     ir_temp_value_map_destroy(&sym_last_use);
     ir_temp_value_map_destroy(&storage_syms);
@@ -768,14 +771,65 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
   }
 
   int any_changed = 0;
+  int round_changed = 0;
+  for (int round = 0; round < 4; round++) {
   int flow_settled = 0;
-  for (int iteration = 0; iteration < 17; iteration++) {
+  round_changed = 0;
+  ir_label_value_map_destroy(&label_in);
+  if (!ir_label_value_map_init(&label_in)) {
+    ir_temp_value_map_destroy(&map);
+    ir_temp_value_map_destroy(&symbol_map);
+    ir_temp_value_map_destroy(&addr_taken);
+    ir_temp_value_map_destroy(&label_index);
+    ir_temp_value_map_destroy(&temp_last_use);
+    ir_temp_value_map_destroy(&sym_last_use);
+    ir_temp_value_map_destroy(&storage_syms);
+    return 0;
+  }
+  for (int iteration = 0; iteration < 12; iteration++) {
     int flow_changed = 0;
     const int rewrite = flow_settled;
     ir_temp_value_map_clear(&map);
     ir_temp_value_map_clear(&symbol_map);
     ir_temp_value_map_clear(&temp_last_use);
     ir_temp_value_map_clear(&sym_last_use);
+    ir_temp_value_map_clear(&label_index);
+    for (size_t i = 0; i < function->instruction_count; i++) {
+      const IRInstruction *lab = &function->instructions[i];
+      if (lab->op == IR_OP_LABEL && lab->text) {
+        IROperand at = ir_operand_int((long long)i);
+        if (!ir_temp_value_map_set(&label_index, lab->text, &at)) {
+          ir_label_value_map_destroy(&label_in);
+          ir_temp_value_map_destroy(&map);
+          ir_temp_value_map_destroy(&symbol_map);
+          ir_temp_value_map_destroy(&addr_taken);
+          ir_temp_value_map_destroy(&label_index);
+          ir_temp_value_map_destroy(&temp_last_use);
+          ir_temp_value_map_destroy(&sym_last_use);
+          ir_temp_value_map_destroy(&storage_syms);
+          return 0;
+        }
+      }
+    }
+    /* Pruning an entry once its last use is behind reads instruction order as
+       time. That holds only while every edge runs forward: a backward edge
+       reaches uses whose recorded last use already sits behind the branch, and
+       pruning there drops exactly the values a loop carries. */
+    int forward_only = 1;
+    for (size_t i = 0; i < function->instruction_count && forward_only; i++) {
+      const IRInstruction *br = &function->instructions[i];
+      const IROperand *target_at;
+      if ((br->op != IR_OP_JUMP && br->op != IR_OP_BRANCH_ZERO &&
+           br->op != IR_OP_BRANCH_EQ) ||
+          !br->text) {
+        continue;
+      }
+      target_at = ir_temp_value_map_lookup(&label_index, br->text);
+      if (!target_at || target_at->kind != IR_OPERAND_INT ||
+          target_at->int_value <= (long long)i) {
+        forward_only = 0;
+      }
+    }
     for (size_t i = 0; i < function->instruction_count; i++) {
       if (!ir_cp_note_operand_uses(&function->instructions[i], i,
                                    &temp_last_use, &sym_last_use)) {
@@ -783,6 +837,7 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
         ir_temp_value_map_destroy(&map);
         ir_temp_value_map_destroy(&symbol_map);
         ir_temp_value_map_destroy(&addr_taken);
+    ir_temp_value_map_destroy(&label_index);
         ir_temp_value_map_destroy(&temp_last_use);
         ir_temp_value_map_destroy(&sym_last_use);
         return 0;
@@ -793,8 +848,10 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
       IRInstruction *instruction = &function->instructions[i];
 
       if (instruction->op == IR_OP_LABEL && instruction->text) {
-        ir_cp_prune_dead_entries(&map, &temp_last_use, i);
-        ir_cp_prune_dead_entries(&symbol_map, &sym_last_use, i);
+        if (forward_only) {
+          ir_cp_prune_dead_entries(&map, &temp_last_use, i);
+          ir_cp_prune_dead_entries(&symbol_map, &sym_last_use, i);
+        }
 
         int fall_through = 1;
         for (size_t pi = i; pi > 0;) {
@@ -819,6 +876,7 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
             ir_temp_value_map_destroy(&map);
             ir_temp_value_map_destroy(&symbol_map);
             ir_temp_value_map_destroy(&addr_taken);
+    ir_temp_value_map_destroy(&label_index);
     ir_temp_value_map_destroy(&temp_last_use);
     ir_temp_value_map_destroy(&sym_last_use);
     ir_temp_value_map_destroy(&storage_syms);
@@ -834,6 +892,7 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
             ir_temp_value_map_destroy(&map);
             ir_temp_value_map_destroy(&symbol_map);
             ir_temp_value_map_destroy(&addr_taken);
+    ir_temp_value_map_destroy(&label_index);
     ir_temp_value_map_destroy(&temp_last_use);
     ir_temp_value_map_destroy(&sym_last_use);
     ir_temp_value_map_destroy(&storage_syms);
@@ -847,11 +906,12 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
 
       if (rewrite &&
           !ir_propagate_instruction_operands(&map, &symbol_map, instruction,
-                                             &any_changed)) {
+                                             &round_changed)) {
         ir_label_value_map_destroy(&label_in);
         ir_temp_value_map_destroy(&map);
         ir_temp_value_map_destroy(&symbol_map);
         ir_temp_value_map_destroy(&addr_taken);
+    ir_temp_value_map_destroy(&label_index);
     ir_temp_value_map_destroy(&temp_last_use);
     ir_temp_value_map_destroy(&sym_last_use);
     ir_temp_value_map_destroy(&storage_syms);
@@ -860,8 +920,8 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
 
       if (rewrite) {
         ir_cp_fold_constant_binary(function, &map, &symbol_map, instruction,
-                                   &any_changed);
-        ir_cp_wrap_assign_to_home(function, instruction, &any_changed);
+                                   &round_changed);
+        ir_cp_wrap_assign_to_home(function, instruction, &round_changed);
       }
 
       if (ir_instruction_writes_temp(instruction) && instruction->dest.name) {
@@ -879,6 +939,7 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
             ir_temp_value_map_destroy(&map);
             ir_temp_value_map_destroy(&symbol_map);
             ir_temp_value_map_destroy(&addr_taken);
+    ir_temp_value_map_destroy(&label_index);
     ir_temp_value_map_destroy(&temp_last_use);
     ir_temp_value_map_destroy(&sym_last_use);
     ir_temp_value_map_destroy(&storage_syms);
@@ -907,6 +968,7 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
             ir_temp_value_map_destroy(&map);
             ir_temp_value_map_destroy(&symbol_map);
             ir_temp_value_map_destroy(&addr_taken);
+    ir_temp_value_map_destroy(&label_index);
     ir_temp_value_map_destroy(&temp_last_use);
     ir_temp_value_map_destroy(&sym_last_use);
     ir_temp_value_map_destroy(&storage_syms);
@@ -938,13 +1000,16 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
       if ((instruction->op == IR_OP_JUMP || instruction->op == IR_OP_BRANCH_ZERO ||
            instruction->op == IR_OP_BRANCH_EQ) &&
           instruction->text) {
-        ir_cp_prune_dead_entries(&map, &temp_last_use, i);
+        if (forward_only) {
+          ir_cp_prune_dead_entries(&map, &temp_last_use, i);
+        }
         if (!ir_label_value_map_merge_incoming(&label_in, instruction->text,
                                                &map, &flow_changed)) {
           ir_label_value_map_destroy(&label_in);
           ir_temp_value_map_destroy(&map);
           ir_temp_value_map_destroy(&symbol_map);
           ir_temp_value_map_destroy(&addr_taken);
+    ir_temp_value_map_destroy(&label_index);
     ir_temp_value_map_destroy(&temp_last_use);
     ir_temp_value_map_destroy(&sym_last_use);
     ir_temp_value_map_destroy(&storage_syms);
@@ -965,6 +1030,11 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
       flow_settled = 1;
     }
   }
+    if (!round_changed) {
+      break;
+    }
+    any_changed = 1;
+  }
 
   if (changed && any_changed) {
     *changed = 1;
@@ -975,6 +1045,7 @@ int ir_copy_and_constant_propagation_pass(IRFunction *function,
   ir_temp_value_map_destroy(&symbol_map);
   ir_temp_value_map_destroy(&storage_syms);
   ir_temp_value_map_destroy(&addr_taken);
+    ir_temp_value_map_destroy(&label_index);
   ir_temp_value_map_destroy(&temp_last_use);
   ir_temp_value_map_destroy(&sym_last_use);
   return 1;
