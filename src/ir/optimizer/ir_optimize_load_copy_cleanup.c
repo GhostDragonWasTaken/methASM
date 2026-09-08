@@ -2644,3 +2644,190 @@ int ir_drop_dead_narrowing_pass(IRFunction *function, int *changed) {
   free(retire_use);
   return applied;
 }
+
+static size_t ir_guard_temp_def_index(const IRFunction *function,
+                                      const char *name) {
+  size_t found = (size_t)-1;
+  size_t count = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (ir_instruction_writes_destination(in) &&
+        in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+        strcmp(in->dest.name, name) == 0) {
+      found = i;
+      count++;
+    }
+  }
+  return count == 1 ? found : (size_t)-1;
+}
+
+static int ir_guard_body_is_quiet(const IRFunction *function, size_t lo,
+                                  size_t hi) {
+  for (size_t i = lo; i < hi; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->is_volatile) {
+      return 0;
+    }
+    switch (in->op) {
+    case IR_OP_STORE:
+    case IR_OP_CALL:
+    case IR_OP_CALL_INDIRECT:
+    case IR_OP_INLINE_ASM:
+      return 0;
+    default:
+      break;
+    }
+  }
+  return 1;
+}
+
+static int ir_guard_header_entry_is_sole(const IRFunction *function,
+                                         const char *header_label,
+                                         size_t header, size_t latch) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op == IR_OP_LABEL || !in->text ||
+        strcmp(in->text, header_label) != 0) {
+      continue;
+    }
+    if (i < header || i > latch) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* A load whose address is already loop invariant still costs one access per
+   iteration, and in a byte compare that is a third of the body. Moving it to
+   the preheader would read memory a zero-trip loop never touched, so copy the
+   loop's own entry test in front of it: the read then happens exactly when the
+   first iteration would have made it. */
+int ir_guard_loop_and_hoist_load_pass(IRFunction *function, int *changed) {
+  static int g_guard_counter;
+  if (!function || function->instruction_count == 0) {
+    return 1;
+  }
+  for (size_t header = 0; header + 3 < function->instruction_count; header++) {
+    const IRInstruction *label = &function->instructions[header];
+    const IRInstruction *test;
+    const IRInstruction *branch;
+    const char *header_label;
+    const char *exit_label;
+    size_t latch;
+    size_t body_prefix_end;
+    size_t pick = (size_t)-1;
+    char guard_name[48];
+
+    if (label->op != IR_OP_LABEL || !label->text ||
+        !ir_cleanup_label_is_loop_header(label->text)) {
+      continue;
+    }
+    header_label = label->text;
+    test = &function->instructions[header + 1];
+    branch = &function->instructions[header + 2];
+    if (test->op != IR_OP_BINARY || test->is_float || !test->text ||
+        test->dest.kind != IR_OPERAND_TEMP || !test->dest.name ||
+        !ir_licm_op_is_pure_arith(function, test)) {
+      continue;
+    }
+    if (branch->op != IR_OP_BRANCH_ZERO || !branch->text ||
+        branch->lhs.kind != IR_OPERAND_TEMP || !branch->lhs.name ||
+        strcmp(branch->lhs.name, test->dest.name) != 0) {
+      continue;
+    }
+    exit_label = branch->text;
+    latch = ir_cleanup_loop_latch(function, header, header_label);
+    if (!latch || header == 0 || latch <= header + 3) {
+      continue;
+    }
+    {
+      size_t p = header - 1;
+      while (p > 0 && function->instructions[p].op == IR_OP_NOP) {
+        p--;
+      }
+      IROpcode prev = function->instructions[p].op;
+      if (prev == IR_OP_JUMP || prev == IR_OP_RETURN ||
+          prev == IR_OP_BRANCH_ZERO || prev == IR_OP_BRANCH_EQ ||
+          prev == IR_OP_LABEL) {
+        continue;
+      }
+    }
+    if (!ir_guard_header_entry_is_sole(function, header_label, header, latch) ||
+        !ir_guard_body_is_quiet(function, header + 3, latch)) {
+      continue;
+    }
+    body_prefix_end = header + 3;
+    while (body_prefix_end < latch) {
+      IROpcode op = function->instructions[body_prefix_end].op;
+      if (op == IR_OP_LABEL || op == IR_OP_JUMP || op == IR_OP_RETURN ||
+          op == IR_OP_BRANCH_ZERO || op == IR_OP_BRANCH_EQ) {
+        break;
+      }
+      body_prefix_end++;
+    }
+    for (size_t i = header + 3; i < body_prefix_end; i++) {
+      const IRInstruction *in = &function->instructions[i];
+      size_t addr_def;
+      if (in->op != IR_OP_LOAD || in->is_volatile ||
+          in->rhs.kind != IR_OPERAND_INT ||
+          in->lhs.kind != IR_OPERAND_TEMP || !in->lhs.name ||
+          in->dest.kind != IR_OPERAND_TEMP || !in->dest.name) {
+        continue;
+      }
+      addr_def = ir_guard_temp_def_index(function, in->lhs.name);
+      if (addr_def == (size_t)-1 || addr_def >= header ||
+          ir_guard_temp_def_index(function, in->dest.name) != i ||
+          ir_licm_read_count(function, header + 3, latch, i,
+                             in->dest.name) == 0) {
+        continue;
+      }
+      pick = i;
+      break;
+    }
+    if (pick == (size_t)-1) {
+      continue;
+    }
+
+    snprintf(guard_name, sizeof(guard_name), "__lguard_%d", g_guard_counter++);
+    {
+      IRInstruction guard_test = {0};
+      IRInstruction guard_branch = {0};
+      IRInstruction hoisted = {0};
+      int failed = 0;
+      if (!ir_clone_instruction_plain(&function->instructions[header + 1],
+                                      &guard_test) ||
+          !ir_clone_instruction_plain(&function->instructions[header + 2],
+                                      &guard_branch) ||
+          !ir_clone_instruction_plain(&function->instructions[pick],
+                                      &hoisted)) {
+        ir_instruction_destroy_storage(&guard_test);
+        ir_instruction_destroy_storage(&guard_branch);
+        ir_instruction_destroy_storage(&hoisted);
+        return 0;
+      }
+      ir_operand_destroy(&guard_test.dest);
+      guard_test.dest = ir_operand_temp(guard_name);
+      ir_operand_destroy(&guard_branch.lhs);
+      guard_branch.lhs = ir_operand_temp(guard_name);
+      if (!guard_test.dest.name || !guard_branch.lhs.name ||
+          !ir_function_insert_instruction(function, header, &guard_test) ||
+          !ir_function_insert_instruction(function, header + 1,
+                                          &guard_branch) ||
+          !ir_function_insert_instruction(function, header + 2, &hoisted)) {
+        failed = 1;
+      }
+      ir_instruction_destroy_storage(&guard_test);
+      ir_instruction_destroy_storage(&guard_branch);
+      ir_instruction_destroy_storage(&hoisted);
+      if (failed) {
+        return 0;
+      }
+      ir_instruction_make_nop(&function->instructions[pick + 3]);
+      header += 3;
+      if (changed) {
+        *changed = 1;
+      }
+    }
+  }
+  return 1;
+}

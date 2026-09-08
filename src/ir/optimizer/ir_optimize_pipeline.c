@@ -154,6 +154,10 @@ static const IROptNamedPass g_ir_lowering_cleanup[] = {
      {IR_OPT_FEATURE_TEMP_WRITE, IR_OPT_REQUIRE_NONE}},
     {"cast_coalesce_temp_assign", ir_coalesce_single_use_temp_assign_pass,
      {IR_OPT_FEATURE_ASSIGN, IR_OPT_REQUIRE_NONE}},
+    {"late_invariant_arith", ir_hoist_invariant_arith_pass,
+     {IR_OPT_FEATURE_LABEL, IR_OPT_REQUIRE_NONE}},
+    {"guard_and_hoist_load", ir_guard_loop_and_hoist_load_pass,
+     {IR_OPT_FEATURE_LABEL | IR_OPT_FEATURE_LOAD, IR_OPT_REQUIRE_NONE}},
 };
 
 static const IROptScheduledPass g_ir_fixpoint_passes[] = {
