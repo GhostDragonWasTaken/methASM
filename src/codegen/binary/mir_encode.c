@@ -3747,12 +3747,31 @@ static char *mir_scan_loop_alignment(const MirFunction *fn) {
       align_label[header] = 1;
     }
   }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    size_t prev;
+    if (fn->insns[i].op != MIR_LABEL || align_label[i]) {
+      continue;
+    }
+    prev = i;
+    while (prev > 0 && fn->insns[prev - 1].op == MIR_NOP) {
+      prev--;
+    }
+    if (prev > 0 && (fn->insns[prev - 1].op == MIR_JMP ||
+                     fn->insns[prev - 1].op == MIR_RET ||
+                     fn->insns[prev - 1].op == MIR_JMP_TABLE)) {
+      align_label[i] = 4;
+    }
+  }
   return align_label;
 }
 
 static int mir_encode_loop_alignment(MirFunction *fn, char wanted) {
   BinaryFunctionContext *ctx = fn->context;
 
+  if (wanted == 4) {
+    return binary_emit_align_code(&ctx->code, BINARY_JUMP_TARGET_ALIGN,
+                                  BINARY_JUMP_TARGET_ALIGN - 1);
+  }
   if (wanted != 2 && wanted != 3) {
     return binary_emit_align_code(&ctx->code, BINARY_LOOP_ALIGN,
                                   BINARY_LOOP_ALIGN_MAX_PAD);

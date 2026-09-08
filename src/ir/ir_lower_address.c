@@ -739,6 +739,15 @@ int ir_emit_scaled_index_offset(IRLoweringContext *context,
   return 1;
 }
 
+int ir_lower_index_expression(IRLoweringContext *context, IRFunction *function,
+                              ASTNode *expression, IROperand *out_value) {
+  int ok;
+  context->address_width_depth++;
+  ok = ir_lower_expression(context, function, expression, out_value);
+  context->address_width_depth--;
+  return ok;
+}
+
 int ir_try_lower_pointer_arithmetic(IRLoweringContext *context,
                                            IRFunction *function,
                                            BinaryExpression *binary,
@@ -795,7 +804,7 @@ int ir_try_lower_pointer_arithmetic(IRLoweringContext *context,
     int stride = ir_type_array_element_stride(pointer_type->base_type);
 
     if (!ir_lower_expression(context, function, pointer_expr, &base) ||
-        !ir_lower_expression(context, function, index_expr, &index) ||
+        !ir_lower_index_expression(context, function, index_expr, &index) ||
         !ir_emit_scaled_index_offset(context, function, location, &index,
                                      stride, &offset) ||
         !ir_make_temp_operand(context, &destination)) {
@@ -830,7 +839,7 @@ int ir_try_lower_pointer_arithmetic(IRLoweringContext *context,
     int stride = ir_type_array_element_stride(pointer_type->base_type);
 
     if (!ir_lower_expression(context, function, binary->left, &base) ||
-        !ir_lower_expression(context, function, binary->right, &index) ||
+        !ir_lower_index_expression(context, function, binary->right, &index) ||
         !ir_emit_scaled_index_offset(context, function, location, &index,
                                      stride, &offset) ||
         !ir_make_temp_operand(context, &destination)) {
@@ -1060,8 +1069,8 @@ static int ir_lower_static_view_element(IRLoweringContext *context,
     *out_type = view_type->base_type;
   }
   if (!ir_lower_expression(context, function, inner->array, &base) ||
-      !ir_lower_expression(context, function, inner->index, &row) ||
-      !ir_lower_expression(context, function, outer->index, &column)) {
+      !ir_lower_index_expression(context, function, inner->index, &row) ||
+      !ir_lower_index_expression(context, function, outer->index, &column)) {
     goto done;
   }
   if (!ir_lower_static_view_offset(context, function, view_type, &row, &column,
@@ -1111,8 +1120,8 @@ static int ir_lower_view_row_address(IRLoweringContext *context,
                                &view_address, NULL)) {
     return 0;
   }
-  if (!ir_lower_expression(context, function, index_expression->index,
-                           &index)) {
+  if (!ir_lower_index_expression(context, function, index_expression->index,
+                                 &index)) {
     goto done;
   }
   if (!ir_emit_slice_bounds_check(context, function, expression->location,
@@ -1342,8 +1351,8 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
     }
 
     if (!lowered_base ||
-        !ir_lower_expression(context, function, index_expression->index,
-                             &index)) {
+        !ir_lower_index_expression(context, function, index_expression->index,
+                                   &index)) {
       ir_operand_destroy(&base);
       ir_operand_destroy(&index);
       return 0;

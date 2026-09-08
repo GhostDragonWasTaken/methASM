@@ -53,6 +53,15 @@ Arithmetic compiles to the machine's own instructions, so overflow wraps in
 both directions. Signed overflow wraps two's complement and unsigned wraps
 modulo 2^n. There is no trap and no check.
 
+One place is exempt: an index expression, and an integer added to or
+subtracted from a pointer, is evaluated in address width. Each narrow operand
+contributes its value, sign-extended or zero-extended by its own type, and the
+`+ - * <<` arithmetic between them runs at `int64`, so `a[pos + i]` reaches the
+element the sum names and never a wrapped one. A narrow variable used as an
+index still carries whatever wrapped value it holds, and a call inside an index
+still wraps its own arguments and result at their declared types. Ordinary
+arithmetic outside brackets is unchanged.
+
 An integer literal with no other context is `int32`.
 
 ## Floats

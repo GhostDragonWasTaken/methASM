@@ -61,7 +61,11 @@ typedef struct {
   ASTNode **block_statements;
   size_t block_statement_count;
   size_t block_statement_index;
+  int address_width_depth;
 } IRLoweringContext;
+
+int ir_lower_index_expression(IRLoweringContext *context, IRFunction *function,
+                              ASTNode *expression, IROperand *out_value);
 
 typedef struct {
   struct {

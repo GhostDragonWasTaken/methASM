@@ -2421,6 +2421,10 @@ static int ir_lower_binary_expression(IRLoweringContext *context,
         instruction.is_float ? NULL : ir_infer_expression_type(context,
                                                                expression),
         binary->operator);
+    if (context->address_width_depth > 0) {
+      wants = 0;
+      narrow = NULL;
+    }
     if (narrow) {
       IROperand wrapped = ir_operand_none();
       if (!ir_make_temp_operand(context, &wrapped)) {
@@ -2585,6 +2589,9 @@ static int ir_lower_unary_expression(IRLoweringContext *context,
     if (narrow && instruction.lhs.kind == IR_OPERAND_INT &&
         ir_unary_constant_fits(narrow, unary->operator,
                                instruction.lhs.int_value)) {
+      narrow = NULL;
+    }
+    if (context->address_width_depth > 0) {
       narrow = NULL;
     }
     if (narrow) {
@@ -3216,7 +3223,22 @@ static int ir_lower_expression_inner(IRLoweringContext *context,
 
 int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
                         ASTNode *expression, IROperand *out_value) {
-  if (!ir_lower_expression_inner(context, function, expression, out_value)) {
+  int saved_depth = context ? context->address_width_depth : 0;
+  int lowered;
+  if (context && expression &&
+      (expression->type == AST_FUNCTION_CALL ||
+       expression->type == AST_FUNC_PTR_CALL ||
+       expression->type == AST_LAMBDA_EXPRESSION ||
+       expression->type == AST_CLOSURE_ADAPT_EXPRESSION ||
+       expression->type == AST_NEW_EXPRESSION ||
+       expression->type == AST_MATCH_STATEMENT)) {
+    context->address_width_depth = 0;
+  }
+  lowered = ir_lower_expression_inner(context, function, expression, out_value);
+  if (context) {
+    context->address_width_depth = saved_depth;
+  }
+  if (!lowered) {
     return 0;
   }
   if (context && context->emit_refinement_checks && expression &&

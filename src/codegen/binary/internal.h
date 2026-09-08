@@ -426,6 +426,7 @@ int binary_emit_memory_access_ex_forced(BinaryCodeBuffer *buffer, int operand_si
 #define BINARY_LOOP_ALIGN_BIG 32u
 #define BINARY_LOOP_ALIGN_BIG_MAX_PAD 31u
 #define BINARY_LOOP_BIG_MIR_INSTRUCTIONS 32u
+#define BINARY_JUMP_TARGET_ALIGN 16u
 #define BINARY_LOOP_BIG_IR_INSTRUCTIONS 10u
 
 int binary_emit_align_code(BinaryCodeBuffer *buffer, size_t boundary, size_t max_pad);

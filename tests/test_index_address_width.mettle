@@ -1,0 +1,80 @@
+import "std/io";
+
+extern fn exit2(code: int32) -> int32 = "exit";
+
+@noinline fn id32(x: int32) -> int32 { return x; }
+@noinline fn idu(x: uint32) -> uint32 { return x; }
+
+@noinline fn scan(text: uint8*, pos: int32, n: int32) -> int32 {
+  var i: int32 = 0;
+  var acc: int32 = 0;
+  while (i < n) {
+    acc = acc + (int32)text[pos + i];
+    i += 1;
+  }
+  return acc;
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+  var big: int32[16];
+  var bytes: uint8[16];
+  var k: int32 = 0;
+  while (k < 16) { big[k] = k * 11; bytes[k] = (uint8)(65 + k); k += 1; }
+
+  var x: int32 = id32(2147483647);
+  var three: int32 = id32(3);
+
+  var far: int32* = &big[0] - 2147483647;
+  if (far[x + three] != 33) { fails |= 1; }
+
+  var s: int32 = x + three;
+  if (s != -2147483646) { fails |= 2; }
+
+  var bfar: uint8* = &bytes[0] - 2147483647;
+  if ((int32)bfar[x + id32(5)] != 70) { fails |= 4; }
+
+  var back: int32* = far + x;
+  if (back[three] != 33) { fails |= 8; }
+
+  var m: int32 = id32(65536);
+  var far2: int32* = &big[0] - 4294967296;
+  if (far2[m * m + id32(2)] != 22) { fails |= 16; }
+
+  var idx: int32 = x + three;
+  var q: int32* = &big[4] + 2147483646;
+  if (q[idx] != 44) { fails |= 32; }
+
+  var u: uint32 = idu(4294967295);
+  var ufar: int32* = &big[0] - 4294967295;
+  if (ufar[u] != 0) { fails |= 64; }
+  if (ufar[u + 1] != 11) { fails |= 64; }
+
+  var sh: int32 = id32(1);
+  var sfar: int32* = &big[0] - 2147483648;
+  if (sfar[sh << 31] != 0) { fails |= 128; }
+
+  if (big[id32(x + three) + 2147483646 + 2] != 22) { fails |= 256; }
+
+  var neg: int32 = id32(-5) + 2;
+  var mid: int32* = &big[6];
+  if (mid[neg] != 33) { fails |= 512; }
+
+  if (scan(&bytes[0], id32(2), 3) != 67 + 68 + 69) { fails |= 1024; }
+  var bfar2: uint8* = &bytes[0] - 2147483640;
+  if (scan(bfar2, id32(2147483640), 4) != 65 + 66 + 67 + 68) { fails |= 1024; }
+
+  var pos: int32 = id32(2147483647);
+  var plain: int32 = pos + 1;
+  if (!(plain < 0)) { fails |= 2048; }
+  var nfar: int32* = &big[0] - 2147483647;
+  if (nfar[pos + 1] != 11) { fails |= 2048; }
+
+  if (fails != 0) {
+    println("FAIL mask {fails}");
+    exit2(fails);
+    return fails;
+  }
+  println("PASS");
+  return 0;
+}

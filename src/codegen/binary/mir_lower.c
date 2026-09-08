@@ -7951,6 +7951,189 @@ static int mir_sext_label_covered(const MirFunction *fn, size_t l, size_t g,
   return 1;
 }
 
+static int mir_call_returns_canonical_narrow(const MirFunction *fn,
+                                             const MirInst *call,
+                                             int *is_signed_out) {
+  const IRFunction *callee;
+  MtlcType *rt;
+  if (!fn->generator || call->op != MIR_CALL ||
+      call->dst.kind != MIR_OPK_SYMBOL || !call->dst.sym) {
+    return 0;
+  }
+  callee = code_generator_find_ir_function_binary(fn->generator, call->dst.sym);
+  if (!callee || callee->instruction_count == 0 || !callee->return_type_name) {
+    return 0;
+  }
+  rt = code_generator_binary_get_resolved_type(fn->generator,
+                                               callee->return_type_name, 1);
+  if (!rt || code_generator_type_is_aggregate(rt) ||
+      code_generator_binary_resolved_type_float_bits(rt) != 0 ||
+      code_generator_binary_resolved_type_scalar_size(rt) != 4) {
+    return 0;
+  }
+  *is_signed_out = code_generator_binary_resolved_type_is_signed_integer(rt);
+  return 1;
+}
+
+static void mir_extension_facts(const MirFunction *fn, unsigned char *sx32,
+                                unsigned char *zx32) {
+  unsigned char *defined = (unsigned char *)calloc(fn->vreg_count, 1);
+  int changed = 1;
+  if (!defined) {
+    memset(sx32, 0, fn->vreg_count);
+    memset(zx32, 0, fn->vreg_count);
+    return;
+  }
+  memset(sx32, 1, fn->vreg_count);
+  memset(zx32, 1, fn->vreg_count);
+  for (size_t v = 0; v < fn->vreg_count; v++) {
+    if (fn->vregs[v].address_taken || fn->vregs[v].rclass != MIR_RC_GP) {
+      sx32[v] = 0;
+      zx32[v] = 0;
+    }
+  }
+  for (size_t p = 0; p < fn->param_count; p++) {
+    const MirParam *param = &fn->params[p];
+    if (param->vreg < 0 || (size_t)param->vreg >= fn->vreg_count) {
+      continue;
+    }
+    defined[param->vreg] = 1;
+    if (param->is_float || param->sysv_eightbytes != 0 || param->width != 4) {
+      sx32[param->vreg] = 0;
+      zx32[param->vreg] = 0;
+    } else if (param->is_signed) {
+      zx32[param->vreg] = 0;
+    } else {
+      sx32[param->vreg] = 0;
+    }
+  }
+  while (changed) {
+    changed = 0;
+    for (size_t i = 0; i < fn->insn_count; i++) {
+      const MirInst *in = &fn->insns[i];
+      MirVregId d;
+      int s = 0;
+      int z = 0;
+      if (in->op == MIR_NOP || in->dst.kind != MIR_OPK_VREG) {
+        continue;
+      }
+      d = in->dst.vreg;
+      if (d < 0 || (size_t)d >= fn->vreg_count) {
+        continue;
+      }
+      defined[d] = 1;
+      if (in->is_float) {
+        s = 0;
+      } else if (in->op == MIR_MOVSX && in->width == 4) {
+        s = 1;
+      } else if (in->op == MIR_MOVZX && in->width == 4) {
+        z = 1;
+      } else if (in->op == MIR_MOVZX && in->width < 4) {
+        s = 1;
+        z = 1;
+      } else if (in->op == MIR_MOVSX && in->width < 4) {
+        s = 1;
+      } else if (in->op == MIR_SETCC) {
+        s = 1;
+        z = 1;
+      } else if (in->op == MIR_MOV && in->a.kind == MIR_OPK_VREG) {
+        if (in->a.vreg >= 0 && (size_t)in->a.vreg < fn->vreg_count) {
+          s = sx32[in->a.vreg];
+          z = zx32[in->a.vreg];
+        }
+      } else if (in->op == MIR_MOV && in->a.kind == MIR_OPK_IMM) {
+        s = in->a.imm >= -2147483648LL && in->a.imm <= 2147483647LL;
+        z = in->a.imm >= 0 && in->a.imm <= 4294967295LL;
+      } else if (in->op == MIR_MOV && in->a.kind == MIR_OPK_MEM &&
+                 in->width == 4) {
+        s = !in->is_unsigned;
+        z = in->is_unsigned;
+      } else if (in->op == MIR_MOV && in->a.kind == MIR_OPK_MEM &&
+                 (in->width == 1 || in->width == 2)) {
+        s = 1;
+        z = in->is_unsigned;
+      } else if (in->op == MIR_MOV && in->a.kind == MIR_OPK_PHYS &&
+                 in->a.phys == BINARY_GP_RAX && i > 0) {
+        size_t j = i - 1;
+        int signed_ret = 0;
+        while (j > 0 && fn->insns[j].op == MIR_NOP) {
+          j--;
+        }
+        if (mir_call_returns_canonical_narrow(fn, &fn->insns[j],
+                                              &signed_ret)) {
+          s = signed_ret;
+          z = !signed_ret;
+        }
+      }
+      if (!s && !z) {
+        size_t j = i + 1;
+        while (j < fn->insn_count && fn->insns[j].op == MIR_NOP) {
+          j++;
+        }
+        if (j < fn->insn_count) {
+          const MirInst *nx = &fn->insns[j];
+          if ((nx->op == MIR_MOVSX || nx->op == MIR_MOVZX) && nx->width == 4 &&
+              !nx->is_float && nx->dst.kind == MIR_OPK_VREG &&
+              nx->dst.vreg == d && nx->a.kind == MIR_OPK_VREG &&
+              nx->a.vreg == d) {
+            s = nx->op == MIR_MOVSX;
+            z = nx->op == MIR_MOVZX;
+          }
+        }
+      }
+      if (sx32[d] && !s) {
+        sx32[d] = 0;
+        changed = 1;
+      }
+      if (zx32[d] && !z) {
+        zx32[d] = 0;
+        changed = 1;
+      }
+    }
+  }
+  for (size_t v = 0; v < fn->vreg_count; v++) {
+    if (!defined[v]) {
+      sx32[v] = 0;
+      zx32[v] = 0;
+    }
+  }
+  free(defined);
+}
+
+static void mir_fold_widening_of_canonical(MirFunction *fn) {
+  unsigned char *sx32;
+  unsigned char *zx32;
+  if (fn->vreg_count == 0 || fn->insn_count == 0) {
+    return;
+  }
+  sx32 = (unsigned char *)malloc(fn->vreg_count);
+  zx32 = (unsigned char *)malloc(fn->vreg_count);
+  if (!sx32 || !zx32) {
+    free(sx32);
+    free(zx32);
+    return;
+  }
+  mir_extension_facts(fn, sx32, zx32);
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    MirInst *in = &fn->insns[i];
+    const unsigned char *fact;
+    if ((in->op != MIR_MOVSX && in->op != MIR_MOVZX) || in->is_float ||
+        in->width != 4 || in->dst.kind != MIR_OPK_VREG ||
+        in->a.kind != MIR_OPK_VREG || in->dst.vreg == in->a.vreg ||
+        in->a.vreg < 0 || (size_t)in->a.vreg >= fn->vreg_count) {
+      continue;
+    }
+    fact = in->op == MIR_MOVSX ? sx32 : zx32;
+    if (fact[in->a.vreg]) {
+      in->op = MIR_MOV;
+      in->width = 8;
+      in->is_unsigned = 0;
+    }
+  }
+  free(sx32);
+  free(zx32);
+}
+
 static void mir_elide_guarded_sext(MirFunction *fn) {
   if (!fn || fn->insn_count == 0) {
     return;
@@ -11140,6 +11323,7 @@ int code_generator_binary_emit_function_via_mir(
   mir_canonicalize_commutative(&fn);
   mir_narrow_zero_extended_ops(&fn);
   mir_elide_guarded_sext(&fn);
+  mir_fold_widening_of_canonical(&fn);
   mir_fold_address_offsets(&fn);
   mir_cse_loads(&fn);
   mir_slp_pair_f64(&fn);

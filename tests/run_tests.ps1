@@ -12912,6 +12912,36 @@ foreach ($variant in @("debug", "release")) {
     Write-CaseResult -Name "narrow_int_homes_$variant" -Passed $false -Reason $_.Exception.Message
   }
 }
+# Index expressions and pointer offsets are evaluated in address width
+# (docs/types.md, Integers): the arithmetic inside the brackets runs at int64,
+# a narrow variable used as an index keeps its wrapped value, and a call inside
+# an index still wraps at its declared types. Self-checking: exit code is the
+# failing-check mask.
+foreach ($variant in @("debug", "release")) {
+  $total++
+  try {
+    if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+    $exePath = Join-Path $tmpDir "index_address_width_$variant.exe"
+    $buildArgs = @("--build")
+    if ($variant -like "release*") { $buildArgs += "--release" }
+    $buildArgs += @("tests/test_index_address_width.mettle", "-o", $exePath)
+
+      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
+
+    if ($LASTEXITCODE -ne 0) { throw "$variant build failed: $buildOut" }
+    if (-not (Test-Path $exePath)) { throw "$variant build produced no executable" }
+    & $exePath 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "an index expression left address width in $variant (failure mask $LASTEXITCODE)"
+    }
+    Write-CaseResult -Name "index_address_width_$variant" -Passed $true
+  }
+  catch {
+    $failed++
+    Write-CaseResult -Name "index_address_width_$variant" -Passed $false -Reason $_.Exception.Message
+  }
+}
+
 # Declarative rewrite engine (ir_optimize_rewrite.c): the Tier-1 algebraic
 # identity table and the Tier-2 constant-reassociation pass must preserve the
 # exact integer result of the arithmetic they rewrite. Exercised across
