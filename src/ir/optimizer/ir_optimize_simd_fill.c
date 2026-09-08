@@ -164,6 +164,129 @@ static int ir_fill_install(IRFunction *function, size_t header_index,
   return 1;
 }
 
+#define IR_FILL_MIN_ELEMENTS 64
+
+static int ir_fill_install_versioned(
+    IRFunction *function, size_t header_index, size_t branch_index,
+    long long size, const IROperand *lhs_sym, const IROperand *rhs_op,
+    const IROperand *value, const IROperand *start_op,
+    const IROperand *offset_op, const IRInstruction *offset_producer,
+    const char *final_assign_to, const char *final_assign_from, int *changed) {
+  static int g_fill_counter;
+  const char *exit_label = function->instructions[branch_index].text;
+  char kernel_label[64];
+  char scalar_label[64];
+  char guard_temp[64];
+  IRInstruction steps[8];
+  size_t step_count = 0;
+  size_t at = header_index;
+  int failed = 0;
+
+  if (!exit_label) {
+    return 1;
+  }
+  memset(steps, 0, sizeof(steps));
+  snprintf(kernel_label, sizeof(kernel_label), "ir_fill_k_%d", g_fill_counter);
+  snprintf(scalar_label, sizeof(scalar_label), "ir_fill_s_%d", g_fill_counter);
+  snprintf(guard_temp, sizeof(guard_temp), "__fill_g_%d", g_fill_counter);
+  g_fill_counter++;
+
+  steps[step_count].op = IR_OP_BINARY;
+  steps[step_count].text = mettle_strdup("<");
+  steps[step_count].dest = ir_operand_temp(guard_temp);
+  if (!ir_operand_clone(rhs_op, &steps[step_count].lhs)) {
+    failed = 1;
+  }
+  steps[step_count].rhs = ir_operand_int(IR_FILL_MIN_ELEMENTS);
+  step_count++;
+
+  steps[step_count].op = IR_OP_BRANCH_ZERO;
+  steps[step_count].text = mettle_strdup(kernel_label);
+  steps[step_count].lhs = ir_operand_temp(guard_temp);
+  step_count++;
+
+  steps[step_count].op = IR_OP_JUMP;
+  steps[step_count].text = mettle_strdup(scalar_label);
+  step_count++;
+
+  steps[step_count].op = IR_OP_LABEL;
+  steps[step_count].text = mettle_strdup(kernel_label);
+  step_count++;
+
+  if (offset_producer &&
+      !ir_clone_instruction_plain(offset_producer, &steps[step_count++])) {
+    failed = 1;
+  }
+
+  {
+    IRInstruction *fused = &steps[step_count++];
+    fused->op = IR_OP_SIMD_FILL;
+    if (!ir_operand_clone(lhs_sym, &fused->lhs) ||
+        !ir_operand_clone(rhs_op, &fused->rhs)) {
+      failed = 1;
+    }
+    fused->arguments = calloc(5, sizeof(IROperand));
+    if (!fused->arguments) {
+      failed = 1;
+    } else {
+      fused->argument_count = 5;
+      fused->arguments[0] = ir_operand_int(size);
+      fused->arguments[1] = ir_operand_int(0);
+      if (!ir_operand_clone(value, &fused->arguments[2])) {
+        failed = 1;
+      }
+      if (start_op) {
+        if (!ir_operand_clone(start_op, &fused->arguments[3])) {
+          failed = 1;
+        }
+      } else {
+        fused->arguments[3] = ir_operand_int(0);
+      }
+      if (offset_op) {
+        if (!ir_operand_clone(offset_op, &fused->arguments[4])) {
+          failed = 1;
+        }
+      } else {
+        fused->arguments[4] = ir_operand_int(0);
+      }
+    }
+  }
+
+  if (final_assign_to && final_assign_from) {
+    steps[step_count].op = IR_OP_ASSIGN;
+    steps[step_count].dest = ir_operand_symbol(final_assign_to);
+    steps[step_count].lhs = ir_operand_symbol(final_assign_from);
+    step_count++;
+  }
+
+  steps[step_count].op = IR_OP_JUMP;
+  steps[step_count].text = mettle_strdup(exit_label);
+  step_count++;
+
+  steps[step_count].op = IR_OP_LABEL;
+  steps[step_count].text = mettle_strdup(scalar_label);
+  step_count++;
+
+  for (size_t i = 0; i < step_count && !failed; i++) {
+    steps[i].location = function->instructions[header_index].location;
+    if (!ir_function_insert_instruction(function, at, &steps[i])) {
+      failed = 1;
+    } else {
+      at++;
+    }
+  }
+  for (size_t i = 0; i < step_count; i++) {
+    ir_instruction_destroy_storage(&steps[i]);
+  }
+  if (failed) {
+    return 0;
+  }
+  if (changed) {
+    *changed = 1;
+  }
+  return 1;
+}
+
 static int ir_fill_frame(IRFunction *function, size_t header_index,
                          size_t *compare_out, size_t *branch_out,
                          size_t *jump_out, int *inclusive, int *matched) {
@@ -499,6 +622,16 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
     ir_operand_destroy(&start);
     return 0;
   }
+  if (count_op->kind != IR_OPERAND_INT && !iv_live_after &&
+      index_width != 64 && !offset_producer) {
+    int okv = ir_fill_install_versioned(
+        function, header_index, branch_index, size, &addr->lhs, count_op,
+        &value, start_op, offset_op, NULL, NULL, NULL, changed);
+    ir_operand_destroy(&value);
+    ir_operand_destroy(&start);
+    mettle_free_string(iv_name);
+    return okv;
+  }
   int ok = ir_fill_install(function, header_index, jump_index, 0,
                            size, &addr->lhs, count_op, &value, start_op,
                            offset_op, offset_producer, NULL, NULL, changed);
@@ -639,11 +772,27 @@ static int ir_fill_try_byte_walk(IRFunction *function, size_t header_index,
   return ok;
 }
 
+static int ir_fill_already_versioned(const IRFunction *function,
+                                     size_t header_index) {
+  for (size_t i = header_index; i-- > 0;) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op == IR_OP_NOP) {
+      continue;
+    }
+    return in->op == IR_OP_LABEL && in->text &&
+           strncmp(in->text, "ir_fill_s_", 10) == 0;
+  }
+  return 0;
+}
+
 static int ir_try_vectorize_fill_at(IRFunction *function, size_t header_index,
                                     int *changed) {
   size_t compare_index = 0, branch_index = 0, jump_index = 0;
   int matched = 0;
   int inclusive = 0;
+  if (ir_fill_already_versioned(function, header_index)) {
+    return 1;
+  }
   if (!ir_fill_frame(function, header_index, &compare_index, &branch_index,
                      &jump_index, &inclusive, &matched)) {
     return 0;
