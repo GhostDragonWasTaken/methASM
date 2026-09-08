@@ -487,6 +487,7 @@ int binary_emit_setcc_reg8(BinaryCodeBuffer *buffer, unsigned char condition_opc
 int binary_emit_shift_reg_cl(BinaryCodeBuffer *buffer, unsigned char subopcode, BinaryGpRegister reg);
 int binary_emit_shift_reg_imm8(BinaryCodeBuffer *buffer, unsigned char subopcode, BinaryGpRegister reg, unsigned char immediate);
 int binary_emit_shift_reg_imm8_32(BinaryCodeBuffer *buffer, unsigned char subopcode, BinaryGpRegister reg, unsigned char immediate);
+int binary_emit_shift_reg_cl_32(BinaryCodeBuffer *buffer, unsigned char subopcode, BinaryGpRegister reg);
 int binary_emit_sse_reg_reg(BinaryCodeBuffer *buffer, unsigned char mandatory_prefix, int rex_w, unsigned char opcode1, unsigned char opcode2, BinaryXmmRegister destination, BinaryXmmRegister source);
 int binary_emit_sub_reg_imm32(BinaryCodeBuffer *buffer, BinaryGpRegister reg, uint32_t immediate);
 int binary_emit_sub_rsp_imm32(BinaryCodeBuffer *buffer, uint32_t immediate);

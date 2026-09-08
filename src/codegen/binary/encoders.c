@@ -1468,6 +1468,22 @@ int binary_emit_shift_reg_cl(BinaryCodeBuffer *buffer,
   return 1;
 }
 
+int binary_emit_shift_reg_cl_32(BinaryCodeBuffer *buffer,
+                                unsigned char subopcode,
+                                BinaryGpRegister reg) {
+  if (!buffer) {
+    return 0;
+  }
+  if (!binary_emit_rex(buffer, 0, 0, 0, reg >> 3) ||
+      !binary_code_buffer_append_u8(buffer, 0xD3) ||
+      !binary_code_buffer_append_u8(
+          buffer,
+          (unsigned char)(0xC0 | ((subopcode & 7) << 3) | (reg & 7)))) {
+    return 0;
+  }
+  return 1;
+}
+
 int binary_emit_shift_reg_imm8(BinaryCodeBuffer *buffer,
                                       unsigned char subopcode,
                                       BinaryGpRegister reg,

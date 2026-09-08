@@ -1,0 +1,130 @@
+import "std/io";
+
+extern fn exit2(code: int32) -> int32 = "exit";
+
+@noinline fn id32(x: int32) -> int32 { return x; }
+@noinline fn idu(x: uint32) -> uint32 { return x; }
+@noinline fn take64(x: int32) -> int64 { return (int64)x; }
+@noinline fn wrap_ret(x: int32) -> int32 { return x + 2; }
+
+@noinline fn walk_index(p: uint8*, base: int32, n: int32) -> int32 {
+  var i: int32 = 0;
+  var acc: int32 = 0;
+  while (i < n) {
+    if (base + i >= n || (int32)p[base + i] != (int32)p[i]) {
+      return -1;
+    }
+    acc = acc + (int32)p[base + i];
+    i += 1;
+  }
+  return acc;
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+  var arr: int32[8];
+  var bytes: uint8[16];
+  var i: int32 = 0;
+  while (i < 8) { arr[i] = i * 11; i += 1; }
+  i = 0;
+  while (i < 16) { bytes[i] = (uint8)(65 + i); i += 1; }
+
+  var big: int32 = id32(2147483647);
+  var w: int32 = big + 1;
+  if (!(w < 0)) { fails |= 1; }
+  if (w != -2147483648) { fails |= 1; }
+
+  var k: int32 = id32(2147483647);
+  var m: int32 = k + 2;
+  var idx: int32 = m + 2147483647;
+  if (arr[idx] != 0) { fails |= 2; }
+  if (arr[idx + 3] != 33) { fails |= 2; }
+
+  var q: int32 = m / 3;
+  if (q != -715827882) { fails |= 4; }
+  var r: int32 = m % 1000;
+  if (r != -647) { fails |= 4; }
+
+  var wide: int64 = (int64)m;
+  if (wide != -2147483647) { fails |= 8; }
+  if (take64(m) != -2147483647) { fails |= 8; }
+
+  var ret: int32 = wrap_ret(k);
+  if (ret != -2147483647) { fails |= 16; }
+  if (arr[ret + 2147483647 + 1] != 11) { fails |= 16; }
+
+  var u: uint32 = idu(4294967295);
+  var u2: uint32 = u + 3;
+  if (u2 != 2) { fails |= 32; }
+  if (u2 / 2 != 1) { fails |= 32; }
+  if ((u2 >> 1) != 1) { fails |= 32; }
+  if ((int64)u2 != 2) { fails |= 32; }
+  var u3: uint32 = idu(1) - 2;
+  if (u3 != 4294967295) { fails |= 32; }
+  if ((int64)u3 != 4294967295) { fails |= 32; }
+  if ((u3 >> 1) != 2147483647) { fails |= 32; }
+  if ((u3 >> 31) != 1) { fails |= 32; }
+  var su: int32 = id32(-1);
+  if ((int32)((uint32)su >> 1) != 2147483647) { fails |= 32; }
+  if ((u3 / 2) != 2147483647) { fails |= 32; }
+
+  var one: int32 = id32(1);
+  var s: int32 = one << 31;
+  if (!(s < 0)) { fails |= 64; }
+  if ((s >> 1) != -1073741824) { fails |= 64; }
+  if ((int64)s != -2147483648) { fails |= 64; }
+
+  var h: int32 = id32(65536);
+  var prod: int32 = h * h;
+  if (prod != 0) { fails |= 128; }
+  if ((int64)prod != 0) { fails |= 128; }
+  var prod2: int32 = h * 32769;
+  if (prod2 != -2147418112) { fails |= 128; }
+
+  var mn: int32 = id32(-2147483648);
+  var ng: int32 = -mn;
+  if (!(ng < 0)) { fails |= 256; }
+  if ((int64)ng != -2147483648) { fails |= 256; }
+  var nt: int32 = ~mn;
+  if (nt != 2147483647) { fails |= 256; }
+
+  var lit: int64 = -1000000000;
+  if (!((int64)m < lit)) { fails |= 512; }
+  if (m < 0 && (int64)m > 0) { fails |= 512; }
+
+  var acc: int32 = walk_index(&bytes[0], id32(0), 8);
+  if (acc != 65 + 66 + 67 + 68 + 69 + 70 + 71 + 72) { fails |= 1024; }
+  if (walk_index(&bytes[0], id32(1), 8) != -1) { fails |= 1024; }
+
+  var cnt: int32 = id32(2147483640);
+  var steps: int32 = 0;
+  while (cnt > 0) { cnt = cnt + 4; steps += 1; }
+  if (steps != 2) { fails |= 2048; }
+  if (cnt != -2147483648) { fails |= 2048; }
+
+  var mixed: int32 = id32(7);
+  var picked: int32 = 0;
+  if (m < mixed) { picked = 1; } else { picked = 2; }
+  if (picked != 1) { fails |= 4096; }
+
+  var neg: int32 = id32(-5) + 2;
+  var base: int32* = &arr[6];
+  if (base[neg] != 33) { fails |= 8192; }
+  var bbase: uint8* = &bytes[9];
+  var bneg: int32 = id32(1) - 4;
+  if ((int32)bbase[bneg] != 71) { fails |= 8192; }
+  var off: int32 = id32(2147483647);
+  off = off + id32(2147483647) + id32(2) - 4;
+  if (base[off] != 22) { fails |= 8192; }
+  var wneg: int64 = (int64)(id32(-7) + 4);
+  if (wneg != -3) { fails |= 16384; }
+  if (take64(id32(-7) + 4) != -3) { fails |= 16384; }
+
+  if (fails != 0) {
+    println("FAIL mask {fails}");
+    exit2(fails);
+    return fails;
+  }
+  println("PASS");
+  return 0;
+}

@@ -12884,6 +12884,34 @@ foreach ($variant in @("debug", "release")) {
   }
 }
 
+# Narrow integer homes: an int32 or uint32 value that wraps must read back
+# exactly through every kind of reader, whichever width its arithmetic ran at.
+# Negative indexes, logical shifts of the top bit, widening, divide, params and
+# returns are all covered. Self-checking: exit code is the failing-check mask.
+foreach ($variant in @("debug", "release")) {
+  $total++
+  try {
+    if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+    $exePath = Join-Path $tmpDir "narrow_int_homes_$variant.exe"
+    $buildArgs = @("--build")
+    if ($variant -like "release*") { $buildArgs += "--release" }
+    $buildArgs += @("tests/test_narrow_int_homes.mettle", "-o", $exePath)
+
+      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
+
+    if ($LASTEXITCODE -ne 0) { throw "$variant build failed: $buildOut" }
+    if (-not (Test-Path $exePath)) { throw "$variant build produced no executable" }
+    & $exePath 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "a narrow integer home lost its exact value in $variant (failure mask $LASTEXITCODE)"
+    }
+    Write-CaseResult -Name "narrow_int_homes_$variant" -Passed $true
+  }
+  catch {
+    $failed++
+    Write-CaseResult -Name "narrow_int_homes_$variant" -Passed $false -Reason $_.Exception.Message
+  }
+}
 # Declarative rewrite engine (ir_optimize_rewrite.c): the Tier-1 algebraic
 # identity table and the Tier-2 constant-reassociation pass must preserve the
 # exact integer result of the arithmetic they rewrite. Exercised across

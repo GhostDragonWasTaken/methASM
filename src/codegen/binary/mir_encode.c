@@ -712,18 +712,20 @@ static int encode_mulhi(MirFunction *fn, const MirInst *in) {
 static int encode_shift(MirFunction *fn, const MirInst *in) {
   BinaryCodeBuffer *code = &fn->context->code;
   unsigned char sub = (in->op == MIR_SHL) ? 4 : (in->op == MIR_SHR) ? 5 : 7;
+  int w32 = (in->width == 4);
   BinaryGpRegister D;
   int dst_reg = dst_is_reg(fn, &in->dst, &D);
   BinaryGpRegister work = dst_reg ? D : SCRATCH_A;
 
   if (in->b.kind == MIR_OPK_IMM) {
+    unsigned char count = (unsigned char)(in->b.imm & (w32 ? 31 : 63));
     if ((dst_reg && !operand_in_phys(fn, &in->a, D) &&
          !materialize_into(fn, &in->a, work)) ||
         (!dst_reg && !materialize_into(fn, &in->a, work))) {
       return 0;
     }
-    if (!binary_emit_shift_reg_imm8(code, sub, work,
-                                    (unsigned char)(in->b.imm & 63))) {
+    if (!(w32 ? binary_emit_shift_reg_imm8_32(code, sub, work, count)
+              : binary_emit_shift_reg_imm8(code, sub, work, count))) {
       return enc_err(fn, "out of memory in shift imm");
     }
     return dst_reg ? 1 : store_from(fn, &in->dst, work);
@@ -740,7 +742,8 @@ static int encode_shift(MirFunction *fn, const MirInst *in) {
       !binary_emit_mov_reg_reg(code, BINARY_GP_RCX, cnt)) {
     return enc_err(fn, "out of memory moving shift count");
   }
-  if (!binary_emit_shift_reg_cl(code, sub, SCRATCH_A)) {
+  if (!(w32 ? binary_emit_shift_reg_cl_32(code, sub, SCRATCH_A)
+            : binary_emit_shift_reg_cl(code, sub, SCRATCH_A))) {
     return enc_err(fn, "out of memory in shift");
   }
   return store_from(fn, &in->dst, SCRATCH_A);
