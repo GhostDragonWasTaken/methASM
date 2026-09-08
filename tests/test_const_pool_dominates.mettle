@@ -1,0 +1,121 @@
+import "std/io";
+
+struct P {
+  text: uint8*;
+  len: int32;
+  pos: int32;
+}
+
+@inline fn skip_ws(p: P*) {
+  while (p->pos < p->len) {
+    var c: int32 = (int32)p->text[p->pos];
+    if (c == 32 || c == 9 || c == 10 || c == 13) {
+      p->pos += 1;
+    } else {
+      return;
+    }
+  }
+}
+
+@inline fn scan_num(p: P*) -> float64 {
+  var sign: float64 = 1.0;
+  if (p->pos < p->len && p->text[p->pos] == 45) {
+    sign = -1.0;
+    p->pos += 1;
+  }
+  var value: float64 = 0.0;
+  while (p->pos < p->len) {
+    var c: int32 = (int32)p->text[p->pos];
+    if (c < 48 || c > 57) {
+      break;
+    }
+    value = value * 10.0 + (float64)(c - 48);
+    p->pos += 1;
+  }
+  if (p->pos < p->len && p->text[p->pos] == 46) {
+    p->pos += 1;
+    var scale: float64 = 0.1;
+    while (p->pos < p->len) {
+      var c: int32 = (int32)p->text[p->pos];
+      if (c < 48 || c > 57) {
+        break;
+      }
+      value = value + (float64)(c - 48) * scale;
+      scale = scale * 0.1;
+      p->pos += 1;
+    }
+  }
+  return sign * value;
+}
+
+fn parse_one(p: P*) -> float64 {
+  skip_ws(p);
+  if (p->pos >= p->len) {
+    return 111.0;
+  }
+  var c: int32 = (int32)p->text[p->pos];
+  if (c == 91) {
+    p->pos += 1;
+    return 222.0;
+  }
+  if (c == 123) {
+    p->pos += 1;
+    return 333.0;
+  }
+  if (c == 34) {
+    p->pos += 1;
+    return 444.0;
+  }
+  return scan_num(p);
+}
+
+fn fill(buf: uint8*, s: cstring) -> int32 {
+  var i: int32 = 0;
+  while (s[i] != 0) {
+    buf[i] = (uint8)s[i];
+    i += 1;
+  }
+  return i;
+}
+
+fn main() -> int32 {
+  var buf: uint8[64];
+  var lits: cstring[8];
+  var want: float64[8];
+
+  lits[0] = "   7";        want[0] = 7.0;
+  lits[1] = " -3.5";       want[1] = -3.5;
+  lits[2] = "12";          want[2] = 12.0;
+  lits[3] = "\t0.125";     want[3] = 0.125;
+  lits[4] = "  -0.75";     want[4] = -0.75;
+  lits[5] = "999.0625";    want[5] = 999.0625;
+  lits[6] = "   [";        want[6] = 222.0;
+  lits[7] = " 40";         want[7] = 40.0;
+
+  var bad: int32 = 0;
+  var k: int32 = 0;
+  while (k < 8) {
+    var p: P;
+    p.text = &buf[0];
+    p.pos = 0;
+    p.len = fill(&buf[0], lits[k]);
+    var got: float64 = parse_one(&p);
+    var w: float64 = want[k];
+    var d: float64 = got - w;
+    if (d < 0.0) {
+      d = -d;
+    }
+    if (d > 0.000001) {
+      println("FAIL case {k}: got {got} want {w}");
+      bad += 1;
+    }
+    k += 1;
+  }
+
+  if (bad == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("{bad} case(s) failed");
+  return 1;
+}
