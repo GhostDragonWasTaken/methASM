@@ -256,6 +256,14 @@ static long long *ir_pgo_parse_block_counts(const char *text, size_t *count_out)
   return counts;
 }
 
+static void ir_pgo_note_site_max(const char *function_name,
+                                 SourceLocation location, long long count) {
+  IRPgoSiteEntry *entry = ir_pgo_site_entry(function_name, location, 1);
+  if (entry && count > entry->count) {
+    entry->count = count;
+  }
+}
+
 int ir_pgo_load_profile(const char *path, IRProgram *program) {
   char *text = NULL;
   long long *counts = NULL;
@@ -282,6 +290,7 @@ int ir_pgo_load_profile(const char *path, IRProgram *program) {
     IRPgoEntry *entry = NULL;
     long long body = 0;
     long long entry_count = 0;
+    long long current = 0;
     if (!function || !ir_pgo_block_should_count(function) ||
         function->instruction_count == 0) {
       continue;
@@ -290,29 +299,26 @@ int ir_pgo_load_profile(const char *path, IRProgram *program) {
       break;
     }
     entry_count = counts[next_block];
-    ir_pgo_note_site(function->name, function->instructions[0].location,
-                     entry_count);
+    next_block++;
+    current = entry_count;
+    for (size_t i = 0; i < function->instruction_count; i++) {
+      if (function->instructions[i].op == IR_OP_LABEL) {
+        if (next_block >= count_total) {
+          break;
+        }
+        current = counts[next_block];
+        next_block++;
+        body += current;
+        if (current > g_max_block_count) {
+          g_max_block_count = current;
+        }
+      }
+      ir_pgo_note_site_max(function->name, function->instructions[i].location,
+                           current);
+    }
     body += entry_count;
     if (entry_count > g_max_block_count) {
       g_max_block_count = entry_count;
-    }
-    next_block++;
-    for (size_t i = 0; i < function->instruction_count; i++) {
-      long long block_count;
-      if (function->instructions[i].op != IR_OP_LABEL) {
-        continue;
-      }
-      if (next_block >= count_total) {
-        break;
-      }
-      block_count = counts[next_block];
-      ir_pgo_note_site(function->name, function->instructions[i].location,
-                       block_count);
-      body += block_count;
-      if (block_count > g_max_block_count) {
-        g_max_block_count = block_count;
-      }
-      next_block++;
     }
     entry = ir_pgo_entry(function->name, 1);
     if (entry) {
