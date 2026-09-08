@@ -3710,3 +3710,99 @@ int ir_widen_byte_pack_pass(IRFunction *function, int *changed) {
   }
   return 1;
 }
+
+static int re_store_is_const_word(const IRInstruction *ins) {
+  return ins->op == IR_OP_STORE && !ins->is_volatile && !ins->is_float &&
+         ins->lhs.kind == IR_OPERAND_INT && ins->rhs.kind == IR_OPERAND_INT &&
+         ins->rhs.int_value == 4 &&
+         ins->lhs.int_value >= -2147483648LL &&
+         ins->lhs.int_value <= 4294967295LL;
+}
+
+static int re_op_is_pure_between_stores(IROpcode op) {
+  return op == IR_OP_NOP || op == IR_OP_BINARY || op == IR_OP_ASSIGN ||
+         op == IR_OP_CAST || op == IR_OP_ADDRESS_OF;
+}
+
+static int re_merge_store_pair(IRFunction *function, const REDefs *defs,
+                               size_t first, int *changed) {
+  IRInstruction *lo = &function->instructions[first];
+  BPAddr lo_addr = {0};
+
+  if (!re_store_is_const_word(lo)) {
+    return 0;
+  }
+  lo_addr.ok = 1;
+  bp_collect(function, defs, &lo->dest, &lo_addr, 0);
+  if (!lo_addr.ok || lo_addr.count == 0) {
+    return 0;
+  }
+
+  for (size_t j = first + 1; j < function->instruction_count; j++) {
+    IRInstruction *hi = &function->instructions[j];
+    BPAddr hi_addr = {0};
+    long long merged;
+
+    if (hi->op != IR_OP_STORE) {
+      if (re_op_is_pure_between_stores(hi->op)) {
+        continue;
+      }
+      return 0;
+    }
+    if (!re_store_is_const_word(hi)) {
+      return 0;
+    }
+    hi_addr.ok = 1;
+    bp_collect(function, defs, &hi->dest, &hi_addr, 0);
+    if (!hi_addr.ok || !bp_same_terms(&lo_addr, &hi_addr) ||
+        hi_addr.konst != lo_addr.konst + 4) {
+      return 0;
+    }
+
+    merged = (long long)(((unsigned long long)hi->lhs.int_value << 32) |
+                         ((unsigned long long)lo->lhs.int_value & 0xffffffffULL));
+    /* Widening the pair only removes an instruction while the joined constant
+       still fits an immediate the emitters place directly; anything else
+       trades two stores for a store plus a materialization. */
+    if (merged != (long long)(int)merged) {
+      return 0;
+    }
+
+    lo->lhs = ir_operand_int(merged);
+    lo->rhs = ir_operand_int(8);
+    lo->alias_class = IR_ALIAS_CLASS_NONE;
+    lo->value_type = NULL;
+    lo->is_unsigned = 0;
+    ir_instruction_make_nop(hi);
+    if (changed) {
+      *changed = 1;
+    }
+    return 1;
+  }
+  return 0;
+}
+
+int ir_merge_adjacent_const_stores_pass(IRFunction *function, int *changed) {
+  REDefs defs = {0};
+  IRTempValueMap addr_taken;
+
+  if (!function || function->instruction_count == 0) {
+    return 1;
+  }
+  if (!ir_temp_value_map_init(&addr_taken)) {
+    return 1;
+  }
+  defs.function = function;
+  defs.addr_taken = &addr_taken;
+  if (ir_addr_taken_set_build(function, &addr_taken) &&
+      re_collect_defs(function, &defs)) {
+    for (size_t i = 0; i < function->instruction_count; i++) {
+      while (re_merge_store_pair(function, &defs, i, changed)) {
+      }
+    }
+  }
+  re_map_destroy(&defs.defs);
+  re_map_destroy(&defs.def_at);
+  ir_temp_value_map_destroy(&addr_taken);
+  return 1;
+}

@@ -140,6 +140,7 @@ static const IROptNamedPass g_ir_lowering_cleanup[] = {
     {"redundancy_elim", ir_redundancy_elimination_pass,
      {IR_OPT_FEATURE_LOAD, IR_OPT_REQUIRE_NONE}},
     {"redundancy_copy_prop", ir_copy_and_constant_propagation_pass, {0, 0}},
+    {"merge_const_stores", ir_merge_adjacent_const_stores_pass, {0, 0}},
     {"redundancy_dead_temps", ir_eliminate_dead_temp_writes_pass,
      {IR_OPT_FEATURE_TEMP_WRITE, IR_OPT_REQUIRE_NONE}},
     {"auto_vectorize_class_find", ir_auto_vectorize_find_pass,

@@ -427,6 +427,7 @@ int ir_widen_byte_pack_pass(IRFunction *function, int *changed);
 int ir_widen_subword_load_cast_pass(IRFunction *function, int *changed);
 int ir_hoist_invariant_loads_pass(IRFunction *function, int *changed);
 int ir_promote_loop_memory_pass(IRFunction *function, int *changed);
+int ir_merge_adjacent_const_stores_pass(IRFunction *function, int *changed);
 int ir_unify_param_copy_spelling_pass(IRFunction *function, int *changed);
 int ir_find_label_index(const IRFunction *function, const char *label,
                                size_t *out_index);
@@ -611,6 +612,7 @@ int ir_opt_function_is_hot(const IRFunction *function);
 int ir_opt_function_is_cold(const IRFunction *function);
 int ir_opt_site_is_hot(const IRFunction *function, SourceLocation location);
 int ir_opt_site_is_cold(const IRFunction *function, SourceLocation location);
+size_t ir_opt_inline_scale(void);
 size_t ir_opt_inline_body_budget(const IRFunction *callee);
 size_t ir_opt_inline_nested_call_budget(const IRFunction *callee);
 size_t ir_opt_inline_caller_budget(const IRFunction *caller);
