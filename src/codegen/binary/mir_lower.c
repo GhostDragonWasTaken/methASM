@@ -8196,6 +8196,100 @@ static void mir_operand_reads_pair(const MirOperand *op, MirVregId out[2]) {
   }
 }
 
+static int mir_count_vreg_uses_defs(const MirFunction *fn, int **uses_out,
+                                    int **defs_out) {
+  int *uses = (int *)calloc(fn->vreg_count, sizeof(int));
+  int *defs = (int *)calloc(fn->vreg_count, sizeof(int));
+  if (!uses || !defs) {
+    free(uses);
+    free(defs);
+    return 0;
+  }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    const MirInst *in = &fn->insns[i];
+    if (in->op == MIR_NOP) {
+      continue;
+    }
+    const MirOperand *ops[3] = {&in->a, &in->b, &in->dst};
+    for (int k = 0; k < 3; k++) {
+      MirVregId r[2];
+      if (ops[k] == &in->dst && in->dst.kind == MIR_OPK_VREG) {
+        defs[in->dst.vreg]++;
+        continue;
+      }
+      mir_operand_reads_pair(ops[k], r);
+      for (int e = 0; e < 2; e++) {
+        if (r[e] >= 0 && (size_t)r[e] < fn->vreg_count) {
+          uses[r[e]]++;
+        }
+      }
+    }
+  }
+  *uses_out = uses;
+  *defs_out = defs;
+  return 1;
+}
+
+static size_t mir_prev_real_insn(const MirFunction *fn, size_t i) {
+  while (i > 0) {
+    i--;
+    if (fn->insns[i].op != MIR_NOP) {
+      return i;
+    }
+  }
+  return fn->insn_count;
+}
+
+static void mir_fuse_extend_then_mov(MirFunction *fn) {
+  int *uses = NULL;
+  int *defs = NULL;
+
+  if (!fn || fn->insn_count < 2 || fn->vreg_count == 0) {
+    return;
+  }
+  if (!mir_count_vreg_uses_defs(fn, &uses, &defs)) {
+    return;
+  }
+
+  for (size_t i = 1; i < fn->insn_count; i++) {
+    MirInst *mov = &fn->insns[i];
+    if (mov->op != MIR_MOV || mov->is_float || mov->width != 8 ||
+        mov->dst.kind != MIR_OPK_VREG || mov->a.kind != MIR_OPK_VREG) {
+      continue;
+    }
+    size_t prev = mir_prev_real_insn(fn, i);
+    if (prev >= fn->insn_count) {
+      continue;
+    }
+    MirInst *ext = &fn->insns[prev];
+    if ((ext->op != MIR_MOVSX && ext->op != MIR_MOVZX) || ext->is_float ||
+        ext->dst.kind != MIR_OPK_VREG) {
+      continue;
+    }
+    MirVregId t = ext->dst.vreg;
+    MirVregId d = mov->dst.vreg;
+    if (mov->a.vreg != t || t == d) {
+      continue;
+    }
+    if (uses[t] != 1 || defs[t] != 1) {
+      continue;
+    }
+    if (fn->vregs[t].address_taken || fn->vregs[d].address_taken ||
+        fn->vregs[t].rclass != MIR_RC_GP || fn->vregs[d].rclass != MIR_RC_GP ||
+        fn->vregs[t].width != fn->vregs[d].width) {
+      continue;
+    }
+    ext->dst = mov->dst;
+    mov->op = MIR_NOP;
+    uses[t] = 0;
+    defs[t] = 0;
+    defs[d]++;
+  }
+
+  free(uses);
+  free(defs);
+}
+
 static void mir_fold_address_offsets(MirFunction *fn) {
   if (!fn || fn->insn_count < 2 || fn->vreg_count == 0) {
     return;
@@ -10528,6 +10622,7 @@ int code_generator_binary_emit_function_via_mir(
   free(folds);
 
   mir_fuse_mov_then_extend(&fn);
+  mir_fuse_extend_then_mov(&fn);
   mir_drop_dead_extensions(&fn);
   mir_canonicalize_commutative(&fn);
   mir_narrow_zero_extended_ops(&fn);
