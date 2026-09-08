@@ -278,6 +278,7 @@ typedef struct {
   IRTempValueMap addr_taken;
   IRTempValueMap monotone;
   IRTempValueMap label_guard;
+  IRTempValueMap unique_def;
   int built;
   int ok;
 } IRValueRangeCtx;
@@ -495,6 +496,7 @@ int ir_find_while_loop_bounds(IRFunction *function, size_t header_index,
                                      IRWhileLoopBounds *out);
 int ir_fold_popcount_byte_loop_pass(IRFunction *function, int *changed);
 int ir_fold_kernighan_popcount_pass(IRFunction *function, int *changed);
+int ir_drop_redundant_int_casts_pass(IRFunction *function, int *changed);
 void ir_function_index_reset(void);
 
 const char *ir_function_local_declared_type(const IRFunction *function,

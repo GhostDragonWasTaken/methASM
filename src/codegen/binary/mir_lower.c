@@ -9591,8 +9591,152 @@ static int mir_insert_at(MirFunction *fn, size_t at, const MirInst *inst) {
   return 1;
 }
 
+static size_t mir_label_index(const MirFunction *fn, const char *name);
+
+/* How many places control can go from `at`, and which. Only MIR_RET ends a
+   path; everything else either branches or falls through, and a shape this
+   cannot read (a table with no aux, inline asm that may branch) fails the
+   whole analysis rather than under-reporting an edge. */
+static size_t mir_succ_count(const MirFunction *fn, size_t at) {
+  const MirInst *in = &fn->insns[at];
+  size_t fall = (at + 1 < fn->insn_count) ? 1u : 0u;
+  if (in->op == MIR_RET) {
+    return 0;
+  }
+  if (in->op == MIR_INLINE_ASM) {
+    return (size_t)-1;
+  }
+  if (in->op == MIR_JMP_TABLE) {
+    const MirJumpTable *tbl = (const MirJumpTable *)in->aux;
+    return tbl ? tbl->count : (size_t)-1;
+  }
+  if (in->op == MIR_JMP) {
+    return 1;
+  }
+  if (in->op == MIR_JCC || in->op == MIR_CMPBR) {
+    return 1u + fall;
+  }
+  return fall;
+}
+
+static size_t mir_succ_at(const MirFunction *fn, size_t at, size_t k) {
+  const MirInst *in = &fn->insns[at];
+  const char *label = NULL;
+  if (in->op == MIR_JMP_TABLE) {
+    const MirJumpTable *tbl = (const MirJumpTable *)in->aux;
+    label = (tbl && k < tbl->count) ? tbl->labels[k] : NULL;
+  } else if (in->op == MIR_JMP || in->op == MIR_JCC || in->op == MIR_CMPBR) {
+    if (k == 0) {
+      label = (in->dst.kind == MIR_OPK_LABEL) ? in->dst.sym : NULL;
+    } else {
+      return at + 1;
+    }
+  } else {
+    return at + 1;
+  }
+  if (!label) {
+    return (size_t)-1;
+  }
+  return mir_label_index(fn, label);
+}
+
+/* Everything that can reach one of the back edges without passing through the
+   header, which is the loop's body. A header test whose target lands in there
+   does not leave the loop, and rotating on it would drop the rest of the
+   condition: an or-chain header branches to the body on its first disjunct.
+   Position cannot answer this, because the exit block is free to sit between
+   two back edges, which is exactly where json_parse puts it. */
+typedef struct {
+  size_t *start;
+  size_t *edge;
+  size_t *stack;
+  unsigned char *body;
+  size_t insns;
+} MirRotateCfg;
+
+static void mir_rotate_cfg_destroy(MirRotateCfg *cfg) {
+  free(cfg->start);
+  free(cfg->edge);
+  free(cfg->stack);
+  free(cfg->body);
+  memset(cfg, 0, sizeof(*cfg));
+}
+
+static int mir_rotate_cfg_build(const MirFunction *fn, MirRotateCfg *cfg) {
+  size_t n = fn->insn_count;
+  size_t total = 0;
+  mir_rotate_cfg_destroy(cfg);
+  cfg->start = (size_t *)calloc(n + 2u, sizeof(size_t));
+  cfg->stack = (size_t *)malloc(n * sizeof(size_t));
+  cfg->body = (unsigned char *)malloc(n);
+  if (!cfg->start || !cfg->stack || !cfg->body) {
+    mir_rotate_cfg_destroy(cfg);
+    return 0;
+  }
+  for (size_t i = 0; i < n; i++) {
+    size_t count = mir_succ_count(fn, i);
+    if (count == (size_t)-1) {
+      mir_rotate_cfg_destroy(cfg);
+      return 0;
+    }
+    for (size_t s = 0; s < count; s++) {
+      size_t t = mir_succ_at(fn, i, s);
+      if (t == (size_t)-1 || t >= n) {
+        mir_rotate_cfg_destroy(cfg);
+        return 0;
+      }
+      cfg->start[t + 2u]++;
+    }
+    total += count;
+  }
+  for (size_t i = 0; i < n; i++) {
+    cfg->start[i + 2u] += cfg->start[i + 1u];
+  }
+  cfg->edge = (size_t *)malloc((total ? total : 1u) * sizeof(size_t));
+  if (!cfg->edge) {
+    mir_rotate_cfg_destroy(cfg);
+    return 0;
+  }
+  for (size_t i = 0; i < n; i++) {
+    size_t count = mir_succ_count(fn, i);
+    for (size_t s = 0; s < count; s++) {
+      cfg->edge[cfg->start[mir_succ_at(fn, i, s) + 1u]++] = i;
+    }
+  }
+  cfg->insns = n;
+  return 1;
+}
+
+static int mir_loop_body_marks(const MirRotateCfg *cfg, size_t header,
+                               const size_t *bes, size_t nbe) {
+  size_t top = 0;
+  memset(cfg->body, 0, cfg->insns);
+  for (size_t e = 0; e < nbe; e++) {
+    if (!cfg->body[bes[e]]) {
+      cfg->body[bes[e]] = 1;
+      cfg->stack[top++] = bes[e];
+    }
+  }
+  while (top > 0) {
+    size_t at = cfg->stack[--top];
+    for (size_t p = cfg->start[at]; p < cfg->start[at + 1u]; p++) {
+      size_t pred = cfg->edge[p];
+      if (pred == header || cfg->body[pred]) {
+        continue;
+      }
+      cfg->body[pred] = 1;
+      cfg->stack[top++] = pred;
+    }
+  }
+  return 1;
+}
+
 static void mir_rotate_loops(MirFunction *fn) {
+  MirRotateCfg cfg = {0};
   if (!fn || fn->insn_count < 3) {
+    return;
+  }
+  if (!mir_rotate_cfg_build(fn, &cfg)) {
     return;
   }
   for (size_t j = 0; j + 1 < fn->insn_count; j++) {
@@ -9646,22 +9790,14 @@ static void mir_rotate_loops(MirFunction *fn) {
        alone drops the other disjunct. A test that leaves the loop names a
        label outside the loop's span, so require that. */
     {
-      size_t last_be = bes[0];
-      size_t elabel = (size_t)-1;
-      for (size_t e = 1; e < nbe; e++) {
-        if (bes[e] > last_be) {
-          last_be = bes[e];
-        }
+      size_t elabel = mir_label_index(fn, ename);
+      if (elabel == (size_t)-1 || elabel == j) {
+        continue;
       }
-      for (size_t k = 0; k < fn->insn_count; k++) {
-        if (fn->insns[k].op == MIR_LABEL &&
-            fn->insns[k].dst.kind == MIR_OPK_LABEL && fn->insns[k].dst.sym &&
-            strcmp(fn->insns[k].dst.sym, ename) == 0) {
-          elabel = k;
-          break;
-        }
+      if (cfg.insns != fn->insn_count && !mir_rotate_cfg_build(fn, &cfg)) {
+        return;
       }
-      if (elabel == (size_t)-1 || (elabel > j && elabel <= last_be)) {
+      if (!mir_loop_body_marks(&cfg, j, bes, nbe) || cfg.body[elabel]) {
         continue;
       }
     }
@@ -9703,11 +9839,13 @@ static void mir_rotate_loops(MirFunction *fn) {
         leave.width = 8;
         leave.ir_index = ir_index;
         if (!mir_insert_at(fn, be + 1, &leave)) {
+          mir_rotate_cfg_destroy(&cfg);
           return;
         }
       }
     }
   }
+  mir_rotate_cfg_destroy(&cfg);
 }
 
 static int mir_insn_defines_label(const MirInst *in, const char *name) {

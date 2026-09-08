@@ -533,6 +533,7 @@ $cases = @(
   @{ Name = "kernighan_popcount"; Path = "tests/test_kernighan_popcount.mettle"; ShouldSucceed = $true },
   @{ Name = "signed_mod_pow2"; Path = "tests/test_signed_mod_pow2.mettle"; ShouldSucceed = $true },
   @{ Name = "int32_negative_compare"; Path = "tests/test_int32_negative_compare.mettle"; ShouldSucceed = $true },
+  @{ Name = "int32_wrap_not_provable"; Path = "tests/test_int32_wrap_not_provable.mettle"; ShouldSucceed = $true },
   @{ Name = "control_flow"; Path = "tests/test_control_flow.mettle"; ShouldSucceed = $true },
   @{ Name = "nested_switch_loop"; Path = "tests/test_nested_switch_loop.mettle"; ShouldSucceed = $true },
   @{ Name = "elseif_chaining"; Path = "tests/test_elseif.mettle"; ShouldSucceed = $true },

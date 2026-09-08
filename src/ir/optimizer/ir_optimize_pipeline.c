@@ -146,6 +146,14 @@ static const IROptNamedPass g_ir_lowering_cleanup[] = {
     {"auto_vectorize_class_find", ir_auto_vectorize_find_pass,
      {IR_OPT_FEATURE_LOAD | IR_OPT_FEATURE_LABEL,
       IR_OPT_FEATURE_BRANCH_ZERO}},
+    /* Last, because a cast is a shape the recognizers above match on: dropping
+       one earlier makes a byte kernel widen the wrong way. */
+    {"drop_redundant_int_casts", ir_drop_redundant_int_casts_pass, {0, 0}},
+    {"cast_copy_prop", ir_copy_and_constant_propagation_pass, {0, 0}},
+    {"cast_dead_temps", ir_eliminate_dead_temp_writes_pass,
+     {IR_OPT_FEATURE_TEMP_WRITE, IR_OPT_REQUIRE_NONE}},
+    {"cast_coalesce_temp_assign", ir_coalesce_single_use_temp_assign_pass,
+     {IR_OPT_FEATURE_ASSIGN, IR_OPT_REQUIRE_NONE}},
 };
 
 static const IROptScheduledPass g_ir_fixpoint_passes[] = {

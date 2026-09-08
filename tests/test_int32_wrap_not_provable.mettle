@@ -1,0 +1,101 @@
+import "std/io";
+
+fn step_unguarded(start: int32, n: int32) -> int32 {
+  var i: int32 = start;
+  var k: int32 = 0;
+  while (k < n) {
+    i = i + 1;
+    k = k + 1;
+  }
+  return i;
+}
+
+fn step_guarded(a: uint8*, len: int32) -> int32 {
+  var i: int32 = 0;
+  var hits: int32 = 0;
+  while (i < len) {
+    if (a[i] == 65) {
+      hits = hits + 1;
+    }
+    i = i + 1;
+  }
+  return hits;
+}
+
+fn scan_to_quote(a: uint8*, from: int32, len: int32) -> int32 {
+  var i: int32 = from;
+  while (i < len) {
+    var c: int32 = (int32)a[i];
+    if (c == 92) {
+      i = i + 2;
+    } else if (c == 34) {
+      return i;
+    } else {
+      i = i + 1;
+    }
+  }
+  return -1;
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+
+  var got: int32 = step_unguarded(2147483645, 5);
+  if (got != -2147483646) {
+    println("FAIL step_unguarded(2147483645, 5) = {got} want -2147483646");
+    fails = fails + 1;
+  }
+  got = step_unguarded(2147483647, 1);
+  if (got != -2147483648) {
+    println("FAIL step_unguarded(2147483647, 1) = {got} want -2147483648");
+    fails = fails + 1;
+  }
+  got = step_unguarded(-3, 5);
+  if (got != 2) {
+    println("FAIL step_unguarded(-3, 5) = {got} want 2");
+    fails = fails + 1;
+  }
+
+  var buf: uint8[16];
+  var i: int32 = 0;
+  while (i < 16) {
+    buf[i] = 65;
+    i = i + 1;
+  }
+  buf[3] = 92;
+  buf[4] = 34;
+  buf[9] = 34;
+
+  var hits: int32 = step_guarded(&buf[0], 16);
+  if (hits != 13) {
+    println("FAIL step_guarded = {hits} want 13");
+    fails = fails + 1;
+  }
+  if (step_guarded(&buf[0], 0) != 0) {
+    println("FAIL step_guarded with len 0 counted something");
+    fails = fails + 1;
+  }
+
+  var at: int32 = scan_to_quote(&buf[0], 0, 16);
+  if (at != 9) {
+    println("FAIL scan_to_quote(0) = {at} want 9");
+    fails = fails + 1;
+  }
+  at = scan_to_quote(&buf[0], 4, 16);
+  if (at != 4) {
+    println("FAIL scan_to_quote(4) = {at} want 4");
+    fails = fails + 1;
+  }
+  at = scan_to_quote(&buf[0], 10, 16);
+  if (at != -1) {
+    println("FAIL scan_to_quote(10) = {at} want -1");
+    fails = fails + 1;
+  }
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("{fails} case(s) failed");
+  return 1;
+}

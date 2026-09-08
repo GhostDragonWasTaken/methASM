@@ -114,6 +114,7 @@ void ir_value_range_ctx_destroy(IRValueRangeCtx *ctx) {
   ir_temp_value_map_destroy(&ctx->addr_taken);
   ir_temp_value_map_destroy(&ctx->monotone);
   ir_temp_value_map_destroy(&ctx->label_guard);
+  ir_temp_value_map_destroy(&ctx->unique_def);
   ctx->built = 0;
   ctx->ok = 0;
 }
@@ -149,6 +150,23 @@ static int vr_ctx_populate(IRValueRangeCtx *ctx) {
       return 0;
     }
   }
+  /* A temp written exactly once carries that instruction's value wherever it
+     is read, so a reader in another block can still see it. The loop bound a
+     scanner compares against is loaded in the entry block, and without this
+     nothing downstream knows it is an int32. */
+  for (size_t i = 0; i < fn->instruction_count; i++) {
+    const IRInstruction *in = &fn->instructions[i];
+    if (!ir_instruction_writes_destination(in) ||
+        in->dest.kind != IR_OPERAND_TEMP || !in->dest.name) {
+      continue;
+    }
+    const IROperand *seen =
+        ir_temp_value_map_lookup(&ctx->unique_def, in->dest.name);
+    IROperand value = ir_operand_int(seen ? -1 : (long long)i + 1);
+    if (!ir_temp_value_map_set(&ctx->unique_def, in->dest.name, &value)) {
+      return 0;
+    }
+  }
   return 1;
 }
 
@@ -164,7 +182,8 @@ static int vr_ctx_build(IRValueRangeCtx *ctx) {
   if (!ir_temp_value_map_init(&ctx->decl_types) ||
       !ir_temp_value_map_init(&ctx->addr_taken) ||
       !ir_temp_value_map_init(&ctx->monotone) ||
-      !ir_temp_value_map_init(&ctx->label_guard)) {
+      !ir_temp_value_map_init(&ctx->label_guard) ||
+      !ir_temp_value_map_init(&ctx->unique_def)) {
     ir_value_range_ctx_destroy(ctx);
     ctx->built = 1;
     return 0;
@@ -412,10 +431,12 @@ static void vr_apply_guards(IRValueRangeCtx *ctx, size_t at, const char *symbol,
     scanned++;
     if (in->op == IR_OP_LABEL) {
       size_t entry = vr_label_entry_branch(ctx, i);
-      if (entry != (size_t)-1) {
-        vr_apply_branch_fact(ctx, entry, symbol, 1, depth, r);
+      if (entry == (size_t)-1) {
+        return;
       }
-      return;
+      vr_apply_branch_fact(ctx, entry, symbol, 1, depth, r);
+      i = entry;
+      continue;
     }
     if (ir_instruction_writes_destination(in) &&
         in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name && symbol &&
@@ -712,6 +733,13 @@ static void vr_operand_range(IRValueRangeCtx *ctx, size_t at,
     if (vr_find_block_writer(ctx->function, at, IR_OPERAND_TEMP, operand->name,
                              0, &producer)) {
       vr_instruction_range(ctx, producer, depth, out);
+      return;
+    }
+    const IROperand *only =
+        ir_temp_value_map_lookup(&ctx->unique_def, operand->name);
+    if (only && only->kind == IR_OPERAND_INT && only->int_value > 0 &&
+        (size_t)(only->int_value - 1) < at) {
+      vr_instruction_range(ctx, (size_t)(only->int_value - 1), depth, out);
     }
     return;
   }
@@ -848,6 +876,49 @@ static int vr_try_resolve_branch(IRValueRangeCtx *ctx, size_t at,
   return 1;
 }
 
+static int vr_oracle_bounds_fit(long long lo, long long hi, int bits,
+                                int is_unsigned);
+
+/* A cast that re-canonicalizes a value already inside the target type is the
+   identity, and in a scanner it sits in the loop's recurrence: the address of
+   the next byte waits on it. */
+static int vr_cast_is_identity(IRValueRangeCtx *ctx, size_t at,
+                               const IRInstruction *in) {
+  int bits = 0;
+  int uns = 0;
+  IRIntRange a;
+  if (in->op != IR_OP_CAST || in->is_float || !in->text ||
+      in->dest.float_bits != 0 || in->lhs.float_bits != 0 ||
+      (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL)) {
+    return 0;
+  }
+  if (!ir_int_type_name_info(in->text, &bits, &uns)) {
+    return 0;
+  }
+  ir_value_range_of(ctx, at, &in->lhs, &a);
+  return vr_oracle_bounds_fit(a.lo, a.hi, bits, uns);
+}
+
+int ir_drop_redundant_int_casts_pass(IRFunction *function, int *changed) {
+  IRValueRangeCtx ranges;
+  if (!function) {
+    return 1;
+  }
+  ir_value_range_ctx_init(&ranges, function);
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    IRInstruction *in = &function->instructions[i];
+    if (in->op != IR_OP_CAST || !vr_cast_is_identity(&ranges, i, in)) {
+      continue;
+    }
+    if (!ir_rewrite_to_assign_operand(in, &in->lhs, changed)) {
+      ir_value_range_ctx_destroy(&ranges);
+      return 0;
+    }
+  }
+  ir_value_range_ctx_destroy(&ranges);
+  return 1;
+}
+
 int ir_value_range_simplify(IRValueRangeCtx *ctx, size_t at, IRInstruction *in,
                             int *changed) {
   if (!ctx || !in) {
@@ -856,6 +927,7 @@ int ir_value_range_simplify(IRValueRangeCtx *ctx, size_t at, IRInstruction *in,
   if (in->op == IR_OP_BRANCH_ZERO || in->op == IR_OP_BRANCH_EQ) {
     return vr_try_resolve_branch(ctx, at, in, changed);
   }
+
   if (in->op != IR_OP_BINARY || in->is_float || !in->text) {
     return 1;
   }
