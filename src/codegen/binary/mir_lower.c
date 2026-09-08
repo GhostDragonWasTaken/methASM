@@ -10251,18 +10251,22 @@ static size_t mir_loop_reg_pressure_uncached(const MirFunction *fn,
   return best;
 }
 
+static size_t memo_generation;
+
 static size_t mir_loop_reg_pressure(const MirFunction *fn, size_t lo,
                                     size_t hi, MirRegClass rclass) {
+  static size_t memo_seen;
   static const MirFunction *memo_fn;
   static size_t memo_lo;
   static size_t memo_hi;
   static MirRegClass memo_class;
   static size_t memo_value;
-  if (memo_fn == fn && memo_lo == lo && memo_hi == hi &&
-      memo_class == rclass) {
+  if (memo_seen == memo_generation && memo_fn == fn && memo_lo == lo &&
+      memo_hi == hi && memo_class == rclass) {
     return memo_value;
   }
   memo_value = mir_loop_reg_pressure_uncached(fn, lo, hi, rclass);
+  memo_seen = memo_generation;
   memo_fn = fn;
   memo_lo = lo;
   memo_hi = hi;
@@ -10285,6 +10289,7 @@ static size_t mir_const_hoist_pressure_cap(MirRegClass rclass) {
 }
 
 static void mir_place_const_pool(MirFunction *fn) {
+  memo_generation++;
   if (!fn || (!fn->fconst_count && !fn->iconst_count) || fn->insn_count == 0) {
     return;
   }
