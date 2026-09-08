@@ -1,0 +1,98 @@
+import "std/io";
+
+fn mod_var(a: int32, b: int32) -> int32 {
+  return a % b;
+}
+
+fn mod_1024(a: int32) -> int32 {
+  return a % 1024;
+}
+
+fn mod_65536(a: int32) -> int32 {
+  return a % 65536;
+}
+
+fn div_1024(a: int32) -> int32 {
+  return a / 1024;
+}
+
+fn mod64_4096(a: int64) -> int64 {
+  return a % 4096;
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+
+  var probes: int32[14];
+  probes[0] = 0;
+  probes[1] = 1;
+  probes[2] = -1;
+  probes[3] = 1023;
+  probes[4] = -1023;
+  probes[5] = 1024;
+  probes[6] = -1024;
+  probes[7] = 1025;
+  probes[8] = -1025;
+  probes[9] = 2147483647;
+  probes[10] = -2147483648;
+  probes[11] = -70000;
+  probes[12] = 70000;
+  probes[13] = -12345;
+
+  var i: int32 = 0;
+  while (i < 14) {
+    var a: int32 = probes[i];
+
+    var got: int32 = mod_1024(a);
+    var want: int32 = mod_var(a, 1024);
+    if (got != want) {
+      println("FAIL {a} % 1024 = {got} want {want}");
+      fails = fails + 1;
+    }
+    if (a < 0 && got > 0) {
+      println("FAIL {a} % 1024 = {got} is positive for a negative dividend");
+      fails = fails + 1;
+    }
+
+    var got2: int32 = mod_65536(a);
+    var want2: int32 = mod_var(a, 65536);
+    if (got2 != want2) {
+      println("FAIL {a} % 65536 = {got2} want {want2}");
+      fails = fails + 1;
+    }
+
+    var q: int32 = div_1024(a);
+    if (q * 1024 + got != a) {
+      println("FAIL {a}: q*1024 + r = {q}*1024 + {got} does not reconstruct");
+      fails = fails + 1;
+    }
+
+    var w: int64 = (int64)a;
+    var got3: int64 = mod64_4096(w);
+    var want3: int64 = w - (w / 4096) * 4096;
+    if (got3 != want3) {
+      println("FAIL {w} % 4096 = {got3} want {want3}");
+      fails = fails + 1;
+    }
+
+    i = i + 1;
+  }
+
+  var sum: int64 = 0;
+  var k: int32 = 0;
+  while (k < 512) {
+    sum = sum + (int64)mod_1024((k * 1103515245 + 42 + 12345) % 1024);
+    k = k + 1;
+  }
+  if (sum != 2304) {
+    println("FAIL fill_data checksum = {sum} want 2304");
+    fails = fails + 1;
+  }
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("{fails} case(s) failed");
+  return 1;
+}
