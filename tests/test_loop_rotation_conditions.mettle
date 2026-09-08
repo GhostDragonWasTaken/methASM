@@ -1,0 +1,36 @@
+import "std/io";
+import "std/conv";
+
+fn check(buf: uint8*, n: int64, want_len: int32, w0: int32, w1: int32) -> int32 {
+  var len: int32 = int_to_dec(buf, n);
+  if (len != want_len) {
+    println("FAIL int_to_dec({n}): length {len} want {want_len}");
+    return 1;
+  }
+  var c0: int32 = (int32)buf[0];
+  var c1: int32 = (int32)buf[1];
+  if (c0 != w0 || c1 != w1) {
+    println("FAIL int_to_dec({n}): first two bytes {c0},{c1} want {w0},{w1}");
+    return 1;
+  }
+  return 0;
+}
+
+fn main() -> int32 {
+  var buf: uint8[32];
+  var fails: int32 = 0;
+
+  fails = fails + check(&buf[0], 42, 2, 52, 50);
+  fails = fails + check(&buf[0], 7, 1, 55, 0);
+  fails = fails + check(&buf[0], 0, 1, 48, 0);
+  fails = fails + check(&buf[0], 100, 3, 49, 48);
+  fails = fails + check(&buf[0], -42, 3, 45, 52);
+  fails = fails + check(&buf[0], 987654321, 9, 57, 56);
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("{fails} case(s) failed");
+  return 1;
+}

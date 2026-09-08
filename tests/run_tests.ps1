@@ -525,6 +525,11 @@ $cases = @(
   # incoming edge and folds the result away. The debug/release run differential
   # is the oracle: debug does not inline, so only release lost the result.
   @{ Name = "inline_return_from_loop"; Path = "tests/test_inline_return_from_loop.mettle"; ShouldSucceed = $true },
+  # Loop rotation may only move a header test that LEAVES the loop. An
+  # or-chain header spends its first test branching into the body, and
+  # rotating on that one drops the other disjunct: int_to_dec rendered 42
+  # as "0Z". Validated against a compiler built without that rule.
+  @{ Name = "loop_rotation_conditions"; Path = "tests/test_loop_rotation_conditions.mettle"; ShouldSucceed = $true },
   @{ Name = "control_flow"; Path = "tests/test_control_flow.mettle"; ShouldSucceed = $true },
   @{ Name = "nested_switch_loop"; Path = "tests/test_nested_switch_loop.mettle"; ShouldSucceed = $true },
   @{ Name = "elseif_chaining"; Path = "tests/test_elseif.mettle"; ShouldSucceed = $true },

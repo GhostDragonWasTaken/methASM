@@ -9564,6 +9564,29 @@ static void mir_build_jump_tables(MirFunction *fn) {
   }
 }
 
+#define MIR_ROTATE_MAX_BACK_EDGES 8
+
+static int mir_insert_at(MirFunction *fn, size_t at, const MirInst *inst) {
+  if (fn->insn_count >= fn->insn_capacity) {
+    size_t nc = fn->insn_capacity ? fn->insn_capacity * 2 : 32;
+    MirInst *grown = (MirInst *)realloc(fn->insns, nc * sizeof(MirInst));
+    if (!grown) {
+      fn->has_error = 1;
+      return 0;
+    }
+    fn->insns = grown;
+    fn->insn_capacity = nc;
+  }
+  if (at > fn->insn_count) {
+    at = fn->insn_count;
+  }
+  memmove(&fn->insns[at + 1], &fn->insns[at],
+          (fn->insn_count - at) * sizeof(MirInst));
+  fn->insns[at] = *inst;
+  fn->insn_count++;
+  return 1;
+}
+
 static void mir_rotate_loops(MirFunction *fn) {
   if (!fn || fn->insn_count < 3) {
     return;
@@ -9579,8 +9602,8 @@ static void mir_rotate_loops(MirFunction *fn) {
     const char *hname = fn->insns[j].dst.sym;
     const char *ename = fn->insns[j + 1].dst.sym;
 
-    size_t be = 0;
-    int nbe = 0;
+    size_t bes[MIR_ROTATE_MAX_BACK_EDGES];
+    size_t nbe = 0;
     int other_edge = 0;
     for (size_t k = 0; k < fn->insn_count; k++) {
       if (k == j || fn->insns[k].dst.kind != MIR_OPK_LABEL ||
@@ -9589,8 +9612,11 @@ static void mir_rotate_loops(MirFunction *fn) {
         continue;
       }
       if (fn->insns[k].op == MIR_JMP && k > j + 1) {
-        be = k;
-        nbe++;
+        if (nbe >= MIR_ROTATE_MAX_BACK_EDGES) {
+          other_edge = 1;
+          break;
+        }
+        bes[nbe++] = k;
       } else {
         other_edge = 1;
       }
@@ -9608,26 +9634,75 @@ static void mir_rotate_loops(MirFunction *fn) {
         }
       }
     }
-    if (nbe != 1 || other_edge) {
+    if (nbe == 0 || other_edge) {
       continue;
     }
-    if (be + 1 >= fn->insn_count || fn->insns[be + 1].op != MIR_LABEL ||
-        fn->insns[be + 1].dst.kind != MIR_OPK_LABEL ||
-        !fn->insns[be + 1].dst.sym ||
-        strcmp(fn->insns[be + 1].dst.sym, ename) != 0) {
-      continue;
+    /* The header test has to be the whole loop condition. An or-chain header
+       spends its first test branching to the BODY, and rotating on that one
+       alone drops the other disjunct. A test that leaves the loop names a
+       label outside the loop's span, so require that. */
+    {
+      size_t last_be = bes[0];
+      size_t elabel = (size_t)-1;
+      for (size_t e = 1; e < nbe; e++) {
+        if (bes[e] > last_be) {
+          last_be = bes[e];
+        }
+      }
+      for (size_t k = 0; k < fn->insn_count; k++) {
+        if (fn->insns[k].op == MIR_LABEL &&
+            fn->insns[k].dst.kind == MIR_OPK_LABEL && fn->insns[k].dst.sym &&
+            strcmp(fn->insns[k].dst.sym, ename) == 0) {
+          elabel = k;
+          break;
+        }
+      }
+      if (elabel == (size_t)-1 || (elabel > j && elabel <= last_be)) {
+        continue;
+      }
     }
-
-    fn->insns[be].op = MIR_CMPBR;
-    fn->insns[be].a = fn->insns[j + 1].a;
-    fn->insns[be].b = fn->insns[j + 1].b;
-    fn->insns[be].width = fn->insns[j + 1].width;
-    fn->insns[be].is_unsigned = fn->insns[j + 1].is_unsigned;
-    fn->insns[be].cc = (unsigned char)(fn->insns[j + 1].cc ^ 1u);
+    /* Every back edge carries the test the header used to make. Falling out of
+       it has to land on the exit, so where the exit label does not already
+       follow, a jump there costs one instruction taken once per loop exit,
+       against the one instruction and one taken branch every iteration pays
+       for an unrotated header. A loop that runs no iterations still leaves
+       through the guard and never reaches either. Whatever the header test
+       reads is defined on every back edge, since the header ran right after
+       each of them. */
+    MirInst test = fn->insns[j + 1];
 
     MirInst tmp = fn->insns[j];
     fn->insns[j] = fn->insns[j + 1];
     fn->insns[j + 1] = tmp;
+
+    for (size_t e = nbe; e-- > 0;) {
+      size_t be = bes[e];
+      int need_exit_jump = be + 1 >= fn->insn_count ||
+                           fn->insns[be + 1].op != MIR_LABEL ||
+                           fn->insns[be + 1].dst.kind != MIR_OPK_LABEL ||
+                           !fn->insns[be + 1].dst.sym ||
+                           strcmp(fn->insns[be + 1].dst.sym, ename) != 0;
+      int ir_index = fn->insns[be].ir_index;
+
+      fn->insns[be].op = MIR_CMPBR;
+      fn->insns[be].a = test.a;
+      fn->insns[be].b = test.b;
+      fn->insns[be].width = test.width;
+      fn->insns[be].is_unsigned = test.is_unsigned;
+      fn->insns[be].cc = (unsigned char)(test.cc ^ 1u);
+
+      if (need_exit_jump) {
+        MirInst leave;
+        memset(&leave, 0, sizeof(leave));
+        leave.op = MIR_JMP;
+        leave.dst = mir_op_label(ename);
+        leave.width = 8;
+        leave.ir_index = ir_index;
+        if (!mir_insert_at(fn, be + 1, &leave)) {
+          return;
+        }
+      }
+    }
   }
 }
 
