@@ -2123,6 +2123,107 @@ static int re_emit_hoist(IRFunction *function, size_t header, size_t index,
   return failed ? 0 : 1;
 }
 
+
+#define RE_PRESSURE_MAX_NAMES 64
+
+/* Names, not registers, so this over-counts: it includes values that live in
+   memory anyway. Swept against Suite 3 at 6, 8, 10, 12, 16, 20, 24, 28 and 34.
+   Below this the loops that legitimately need many live values lose their
+   hoists, above it the saturated ones keep making spills. */
+#define RE_HOIST_MAX_LOOP_LIVE_IN 28
+
+typedef struct {
+  const char *names[RE_PRESSURE_MAX_NAMES];
+  size_t count;
+  int overflowed;
+} RENameSet;
+
+static int re_name_set_add(RENameSet *set, const char *name) {
+  if (!name) {
+    return 0;
+  }
+  for (size_t i = 0; i < set->count; i++) {
+    if (set->names[i] == name || strcmp(set->names[i], name) == 0) {
+      return 0;
+    }
+  }
+  if (set->count >= RE_PRESSURE_MAX_NAMES) {
+    set->overflowed = 1;
+    return 0;
+  }
+  set->names[set->count++] = name;
+  return 1;
+}
+
+static int re_name_set_has(const RENameSet *set, const char *name) {
+  if (!name) {
+    return 0;
+  }
+  for (size_t i = 0; i < set->count; i++) {
+    if (set->names[i] == name || strcmp(set->names[i], name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void re_pressure_note_read(RENameSet *set, const IROperand *op) {
+  if (!op || (op->kind != IR_OPERAND_TEMP && op->kind != IR_OPERAND_SYMBOL)) {
+    return;
+  }
+  re_name_set_add(set, op->name);
+}
+
+/* Everything the loop reads without writing has to sit somewhere for the whole
+   loop, so that count is what a hoist competes with for registers. Hoisting a
+   load into a loop that is already over the machine's register file only moves
+   the load into the spill slot it will be reloaded from, once per iteration,
+   which is what it cost in the first place plus the frame traffic. */
+static size_t re_loop_live_in_count(const IRFunction *function, size_t header,
+                                    size_t latch) {
+  RENameSet written = {{0}, 0, 0};
+  RENameSet live_in = {{0}, 0, 0};
+
+  for (size_t i = header; i < latch; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (!ir_instruction_writes_destination(in)) {
+      continue;
+    }
+    if (in->dest.kind == IR_OPERAND_TEMP || in->dest.kind == IR_OPERAND_SYMBOL) {
+      re_name_set_add(&written, in->dest.name);
+    }
+  }
+  if (written.overflowed) {
+    return RE_PRESSURE_MAX_NAMES;
+  }
+
+  for (size_t i = header; i < latch; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    re_pressure_note_read(&live_in, &in->lhs);
+    re_pressure_note_read(&live_in, &in->rhs);
+    for (size_t a = 0; a < in->argument_count; a++) {
+      re_pressure_note_read(&live_in, &in->arguments[a]);
+    }
+    if (in->op == IR_OP_STORE) {
+      re_pressure_note_read(&live_in, &in->dest);
+    }
+  }
+  if (live_in.overflowed) {
+    return RE_PRESSURE_MAX_NAMES;
+  }
+
+  {
+    size_t live = 0;
+    for (size_t i = 0; i < live_in.count; i++) {
+      if (!re_name_set_has(&written, live_in.names[i])) {
+        live++;
+      }
+    }
+    return live;
+  }
+}
+
+
 static int re_try_hoist_one_load(IRFunction *function, const REDefs *defs_in,
                                  const IRTempValueMap *addr_taken,
                                  int *changed) {
@@ -2148,6 +2249,12 @@ static int re_try_hoist_one_load(IRFunction *function, const REDefs *defs_in,
 
     if (!re_collect_loop_writes(function, &defs, addr_taken, header + 1, latch,
                                 &writes)) {
+      re_kills_destroy(&writes);
+      continue;
+    }
+
+    if (re_loop_live_in_count(function, header, latch) >=
+        RE_HOIST_MAX_LOOP_LIVE_IN) {
       re_kills_destroy(&writes);
       continue;
     }
