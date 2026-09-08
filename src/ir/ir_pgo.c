@@ -161,6 +161,183 @@ static void ir_pgo_note_site(const char *function_name, SourceLocation location,
   }
 }
 
+static long long g_max_block_count = 0;
+
+long long ir_pgo_max_block_count(void) { return g_max_block_count; }
+
+static int ir_pgo_block_should_count(const IRFunction *function) {
+  const char *name = function ? function->name : NULL;
+  if (!name) {
+    return 0;
+  }
+  if (strncmp(name, "mettle_profile_", 15) == 0) {
+    return 0;
+  }
+  if (strncmp(name, "__inl_", 6) == 0) {
+    return 0;
+  }
+  return 1;
+}
+
+static char *ir_pgo_read_whole_file(const char *path, size_t *size_out) {
+  FILE *file = fopen(path, "rb");
+  char *data = NULL;
+  long length = 0;
+  if (!file) {
+    return NULL;
+  }
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  length = ftell(file);
+  if (length < 0 || fseek(file, 0, SEEK_SET) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  data = (char *)malloc((size_t)length + 1);
+  if (!data) {
+    fclose(file);
+    return NULL;
+  }
+  if (fread(data, 1, (size_t)length, file) != (size_t)length) {
+    free(data);
+    fclose(file);
+    return NULL;
+  }
+  data[length] = 0;
+  fclose(file);
+  if (size_out) {
+    *size_out = (size_t)length;
+  }
+  return data;
+}
+
+static long long *ir_pgo_parse_block_counts(const char *text, size_t *count_out) {
+  const char *cursor = strstr(text, "\"blocks\":[");
+  long long *counts = NULL;
+  size_t count = 0;
+  size_t capacity = 0;
+  if (!cursor) {
+    return NULL;
+  }
+  cursor += 10;
+  while (*cursor && *cursor != ']') {
+    char *end = NULL;
+    long long value;
+    while (*cursor == ' ' || *cursor == ',' || *cursor == '\n' ||
+           *cursor == '\r' || *cursor == '\t') {
+      cursor++;
+    }
+    if (*cursor == ']' || !*cursor) {
+      break;
+    }
+    value = strtoll(cursor, &end, 10);
+    if (end == cursor) {
+      break;
+    }
+    cursor = end;
+    if (count == capacity) {
+      size_t grown_capacity = capacity ? capacity * 2 : 256;
+      long long *grown =
+          (long long *)realloc(counts, grown_capacity * sizeof(long long));
+      if (!grown) {
+        free(counts);
+        return NULL;
+      }
+      counts = grown;
+      capacity = grown_capacity;
+    }
+    counts[count++] = value;
+  }
+  if (count_out) {
+    *count_out = count;
+  }
+  return counts;
+}
+
+int ir_pgo_load_profile(const char *path, IRProgram *program) {
+  char *text = NULL;
+  long long *counts = NULL;
+  size_t count_total = 0;
+  size_t next_block = 0;
+
+  ir_pgo_reset();
+  if (!path || !program) {
+    return 0;
+  }
+  text = ir_pgo_read_whole_file(path, NULL);
+  if (!text) {
+    return 0;
+  }
+  counts = ir_pgo_parse_block_counts(text, &count_total);
+  free(text);
+  if (!counts || count_total == 0) {
+    free(counts);
+    return 0;
+  }
+
+  for (size_t f = 0; f < program->function_count; f++) {
+    IRFunction *function = program->functions[f];
+    IRPgoEntry *entry = NULL;
+    long long body = 0;
+    long long entry_count = 0;
+    if (!function || !ir_pgo_block_should_count(function) ||
+        function->instruction_count == 0) {
+      continue;
+    }
+    if (next_block >= count_total) {
+      break;
+    }
+    entry_count = counts[next_block];
+    ir_pgo_note_site(function->name, function->instructions[0].location,
+                     entry_count);
+    body += entry_count;
+    if (entry_count > g_max_block_count) {
+      g_max_block_count = entry_count;
+    }
+    next_block++;
+    for (size_t i = 0; i < function->instruction_count; i++) {
+      long long block_count;
+      if (function->instructions[i].op != IR_OP_LABEL) {
+        continue;
+      }
+      if (next_block >= count_total) {
+        break;
+      }
+      block_count = counts[next_block];
+      ir_pgo_note_site(function->name, function->instructions[i].location,
+                       block_count);
+      body += block_count;
+      if (block_count > g_max_block_count) {
+        g_max_block_count = block_count;
+      }
+      next_block++;
+    }
+    entry = ir_pgo_entry(function->name, 1);
+    if (entry) {
+      entry->calls += entry_count;
+      entry->body_steps += body;
+    }
+    g_total_steps += body;
+  }
+  free(counts);
+  snprintf(g_run_status, sizeof(g_run_status), "loaded");
+  g_profile_valid = g_total_steps > 0;
+  if (g_profile_valid && getenv("METTLE_PGO_SUMMARY")) {
+    fprintf(stderr, "pgo: %zu functions, %zu sites, %lld steps, hottest %lld\n",
+            g_entry_count, g_site_count, g_total_steps, g_max_block_count);
+    for (size_t i = 0; i < g_entry_count; i++) {
+      if (g_entries[i].body_steps * 20 >= g_total_steps) {
+        fprintf(stderr, "pgo:   %-24s calls=%-10lld steps=%lld\n",
+                g_entries[i].name, g_entries[i].calls,
+                g_entries[i].body_steps);
+      }
+    }
+  }
+  return g_profile_valid;
+}
+
 int ir_pgo_profile_program(IRProgram *program) {
   ir_pgo_reset();
   if (!program) {

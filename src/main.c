@@ -1337,7 +1337,10 @@ static int mettle_link_elf_executable(const char *object_filename,
   const char *cc = "gcc";
   int result = 1;
   int profile_runtime =
-      options && compiler_options_use_profile_runtime(options) ? 1 : 0;
+      options && (compiler_options_use_profile_runtime(options) ||
+                  options->pgo_gen)
+          ? 1
+          : 0;
   int stack_trace = compiler_options_install_crash_handler(options);
   int needs_safety = 0;
 
@@ -2544,7 +2547,10 @@ static int mettle_link_object_file(const char *object_filename,
   plan.linker_mode = options ? options->linker_mode : LINKER_MODE_AUTO;
   plan.want_shared = options && options->shared_output ? 1 : 0;
   plan.profile_runtime =
-      options && compiler_options_use_profile_runtime(options) ? 1 : 0;
+      options && (compiler_options_use_profile_runtime(options) ||
+                  options->pgo_gen)
+          ? 1
+          : 0;
 
   if (!link_plan_validate(&plan) || !link_plan_prepare(&plan)) {
     goto cleanup;
@@ -3243,6 +3249,12 @@ static DriverFlagResult parse_flag_diagnostics(CompilerOptions *options,
     options->test_filter = argv[i] + 9;
   } else if (strcmp(argv[i], "--pgo") == 0) {
     options->pgo = 1;
+    options->optimize = 1;
+  } else if (strcmp(argv[i], "--pgo-gen") == 0) {
+    options->pgo_gen = 1;
+    options->optimize = 1;
+  } else if (strncmp(argv[i], "--pgo-use=", 10) == 0) {
+    options->pgo_use = argv[i] + 10;
     options->optimize = 1;
   } else if (strcmp(argv[i], "--verify") == 0) {
     const char *trusted = NULL;
@@ -5708,7 +5720,8 @@ static void compile_session_configure(CompileContext *ctx) {
       ctx->code_generator, options->release ? 1 : 0);
   code_generator_set_profile_runtime(
       ctx->code_generator,
-      compiler_options_use_profile_runtime(options) ? 1 : 0);
+      (compiler_options_use_profile_runtime(options) || options->pgo_gen) ? 1
+                                                                         : 0);
   code_generator_set_debug_hooks(ctx->code_generator,
                                  options->debug_hooks ? 1 : 0);
   ctx->code_generator->whole_program = options->building_executable ? 1 : 0;
@@ -6284,6 +6297,20 @@ static int compile_stage_hooks(CompileContext *ctx) {
     fprintf(stderr, "Error: Failed to instrument IR for runtime profiling\n");
     return 1;
   }
+  if (options->pgo_gen && options->pgo_use) {
+    fprintf(stderr, "Error: --pgo-gen and --pgo-use are mutually exclusive\n");
+    return 1;
+  }
+  if (options->pgo_gen && !ir_profile_instrument_blocks(ctx->ir_program)) {
+    fprintf(stderr, "Error: Failed to instrument IR for profile generation\n");
+    return 1;
+  }
+  if (options->pgo_use &&
+      !ir_pgo_load_profile(options->pgo_use, ctx->ir_program)) {
+    fprintf(stderr, "Error: Could not read a usable profile from '%s'\n",
+            options->pgo_use);
+    return 1;
+  }
   if (!options->debug_hooks) {
     return COMPILE_CONTINUE;
   }
@@ -6761,6 +6788,10 @@ void print_usage(const char *program_name) {
          "                      callee bypasses the inliner's static size budget like an\n"
          "                      explicit @inline. No instrumented build, no training\n"
          "                      run. Implies -O. METTLE_PGO_HOT sets the threshold.\n");
+  printf("  --pgo-gen           Instrument basic blocks for a measured profile.\n"
+         "                      Run the program, then feed the sidecar back with\n"
+         "                      --pgo-use. METTLE_PROFILE_OUT names the sidecar.\n");
+  printf("  --pgo-use=FILE      Optimize with counts measured by a --pgo-gen run.\n");
   printf("  --verify            Translation validation: after every optimization pass,\n"
          "                      execute each changed function's before/after IR on\n"
          "                      generated inputs and compare behavior. A diverging pass\n"

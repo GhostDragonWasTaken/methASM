@@ -141,6 +141,7 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
   size_t rdata_section = 0;
   size_t data_section = 0;
   size_t function_count = 0;
+  size_t emit_count = 0;
   char **name_symbols = NULL;
   char **file_symbols = NULL;
   const char **profile_names = NULL;
@@ -154,15 +155,13 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
 
   program = generator->ir_program;
   function_count = program->profile_entry_count;
-  if (function_count == 0) {
-    return 1;
-  }
+  emit_count = function_count > 0 ? function_count : 1u;
 
-  profile_names = calloc(function_count, sizeof(const char *));
-  profile_files = calloc(function_count, sizeof(const char *));
-  profile_lines = calloc(function_count, sizeof(uint64_t));
-  name_symbols = calloc(function_count, sizeof(char *));
-  file_symbols = calloc(function_count, sizeof(char *));
+  profile_names = calloc(emit_count, sizeof(const char *));
+  profile_files = calloc(emit_count, sizeof(const char *));
+  profile_lines = calloc(emit_count, sizeof(uint64_t));
+  name_symbols = calloc(emit_count, sizeof(char *));
+  file_symbols = calloc(emit_count, sizeof(char *));
   if (!profile_names || !profile_files || !profile_lines || !name_symbols ||
       !file_symbols) {
     free(profile_names);
@@ -175,6 +174,8 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
     return 0;
   }
 
+  profile_names[0] = "?";
+  profile_files[0] = "?";
   for (size_t i = 0; i < function_count; i++) {
     IRProfileEntry *entry = &program->profile_entries[i];
     profile_names[i] = entry->name ? entry->name : "?";
@@ -198,10 +199,10 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
 
   if (!code_generator_binary_emit_profile_cstring_table(
           generator, emitter, rdata_section, "mettle_profile_names",
-          profile_names, function_count, name_symbols) ||
+          profile_names, emit_count, name_symbols) ||
       !code_generator_binary_emit_profile_cstring_table(
           generator, emitter, rdata_section, "mettle_profile_files",
-          profile_files, function_count, file_symbols)) {
+          profile_files, emit_count, file_symbols)) {
     if (!generator->has_error) {
       code_generator_binary_emitter_error(
         generator, emitter, "Failed to emit profile string tables");
@@ -213,12 +214,12 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
     size_t lines_offset = 0;
     if (!binary_emitter_align_section(emitter, rdata_section, 8, 0) ||
         !binary_emitter_append_bytes(emitter, rdata_section, profile_lines,
-                                     function_count * sizeof(uint64_t),
+                                     emit_count * sizeof(uint64_t),
                                      &lines_offset) ||
         !binary_emitter_define_symbol(emitter, "mettle_profile_lines",
                                       BINARY_SYMBOL_GLOBAL, rdata_section,
                                       lines_offset,
-                                      function_count * sizeof(uint64_t))) {
+                                      emit_count * sizeof(uint64_t))) {
       code_generator_binary_emitter_error(
         generator, emitter, "Failed to emit profile line table");
       goto fail;
@@ -248,7 +249,7 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
     }
   }
 
-  for (size_t i = 0; i < function_count; i++) {
+  for (size_t i = 0; i < emit_count; i++) {
     free(name_symbols[i]);
     free(file_symbols[i]);
   }

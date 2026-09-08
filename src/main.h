@@ -127,6 +127,8 @@ typedef struct {
   int profile_runtime;
   int profile_runtime_ops;
   int profile_blocks;
+  int pgo_gen;
+  const char *pgo_use;
   int debug_hooks;
   int native_heap;
   int tracy;

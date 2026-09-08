@@ -19,6 +19,10 @@ long long ir_pgo_hot_threshold(void);
 
 int ir_pgo_function_is_hot(const char *name);
 
+int ir_pgo_load_profile(const char *path, IRProgram *program);
+
+long long ir_pgo_max_block_count(void);
+
 void ir_pgo_print_summary(void);
 
 #endif
