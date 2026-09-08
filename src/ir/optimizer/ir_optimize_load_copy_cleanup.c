@@ -1279,8 +1279,40 @@ static int ir_row_match_shape(const IRFunction *function, size_t header,
   return ir_row_pick_sides(function, header, latch, s, idx, out);
 }
 
+#define IR_ROW_MAX_CACHE 16
+
+typedef struct {
+  char base[128];
+  char name[48];
+  long long bias;
+  long long k;
+  IROperand inv;
+} IRRowCacheEntry;
+
+static void ir_row_cache_clear(IRRowCacheEntry *cache, size_t *count) {
+  for (size_t i = 0; i < *count; i++) {
+    ir_operand_destroy(&cache[i].inv);
+  }
+  *count = 0;
+}
+
+static int ir_row_cache_find(const IRRowCacheEntry *cache, size_t count,
+                             const char *base, long long bias, long long k,
+                             const IROperand *inv) {
+  for (size_t i = 0; i < count; i++) {
+    if (cache[i].bias == bias && cache[i].k == k &&
+        strcmp(cache[i].base, base) == 0 &&
+        ir_operand_same(&cache[i].inv, inv)) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
 int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
   static int g_row_counter;
+  IRRowCacheEntry cache[IR_ROW_MAX_CACHE];
+  size_t cache_count = 0;
   if (!function) {
     return 0;
   }
@@ -1297,6 +1329,7 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
     if (!latch) {
       continue;
     }
+    ir_row_cache_clear(cache, &cache_count);
 
     for (size_t s = header + 1; s < latch; s++) {
       long long k = 0;
@@ -1380,6 +1413,54 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
         ir_operand_destroy(&inv);
         ir_operand_destroy(&var);
         continue;
+      }
+
+      if (consumer_count == 1) {
+        int hit = ir_row_cache_find(cache, cache_count, base_names[0], bias, k,
+                                    &inv);
+        if (hit >= 0) {
+          IRInstruction *addr = &function->instructions[consumers[0]];
+          ir_operand_destroy(&addr->lhs);
+          addr->lhs = ir_operand_symbol(cache[hit].name);
+          {
+            IRInstruction *shl = &function->instructions[s];
+            ir_operand_destroy(&shl->lhs);
+            if (k == 0) {
+              ir_operand_destroy(&shl->rhs);
+              mettle_free_string(shl->text);
+              shl->text = NULL;
+              shl->op = IR_OP_ASSIGN;
+              shl->rhs = ir_operand_none();
+            }
+            shl->lhs = var;
+            var = ir_operand_none();
+          }
+          if (k != 0) {
+            IRInstruction *idx_ins = &function->instructions[idx_pos];
+            if (idx_ins->dest.kind == IR_OPERAND_TEMP && idx_ins->dest.name) {
+              int read_elsewhere = 0;
+              for (size_t j = 0; j < function->instruction_count; j++) {
+                if (j == idx_pos) {
+                  continue;
+                }
+                if (ir_row_instruction_reads_temp(&function->instructions[j],
+                                                  idx_ins->dest.name)) {
+                  read_elsewhere = 1;
+                  break;
+                }
+              }
+              if (!read_elsewhere) {
+                ir_instruction_make_nop(idx_ins);
+              }
+            }
+          }
+          ir_operand_destroy(&inv);
+          ir_operand_destroy(&var);
+          if (changed) {
+            *changed = 1;
+          }
+          continue;
+        }
       }
 
       snprintf(off_name, sizeof(off_name), "__rowoff_%d", g_row_counter);
@@ -1503,8 +1584,21 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
           inserted++;
         }
       }
+      if (!failed && consumer_count == 1 && cache_count < IR_ROW_MAX_CACHE) {
+        IRRowCacheEntry *entry = &cache[cache_count];
+        if (snprintf(entry->base, sizeof(entry->base), "%s", base_names[0]) <
+                (int)sizeof(entry->base) &&
+            snprintf(entry->name, sizeof(entry->name), "%s", row_names[0]) <
+                (int)sizeof(entry->name)) {
+          entry->bias = bias;
+          entry->k = k;
+          entry->inv = ir_operand_copy(&inv);
+          cache_count++;
+        }
+      }
       ir_operand_destroy(&inv);
       if (failed) {
+        ir_row_cache_clear(cache, &cache_count);
         return 0;
       }
       header += inserted;
@@ -1515,6 +1609,7 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
       }
     }
   }
+  ir_row_cache_clear(cache, &cache_count);
   return 1;
 }
 

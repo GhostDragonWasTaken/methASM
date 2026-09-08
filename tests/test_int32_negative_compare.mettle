@@ -1,0 +1,96 @@
+import "std/io";
+
+fn pick_max(dst: int32*, up: int32*, left: int32*, n: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    var u: int32 = up[i];
+    var l: int32 = left[i];
+    if (u >= l) {
+      dst[i] = u;
+    } else {
+      dst[i] = l;
+    }
+    i = i + 1;
+  }
+}
+
+fn sum_signed(a: int32*, n: int32) -> int64 {
+  var s: int64 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    s = s + (int64)a[i];
+    i = i + 1;
+  }
+  return s;
+}
+
+fn count_lt(a: int32*, b: int32*, n: int32) -> int32 {
+  var c: int32 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    if (a[i] < b[i]) {
+      c = c + 1;
+    }
+    i = i + 1;
+  }
+  return c;
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+
+  var up: int32[8];
+  var left: int32[8];
+  var dst: int32[8];
+
+  up[0] = -1;        left[0] = 0;
+  up[1] = 0;         left[1] = -1;
+  up[2] = -5;        left[2] = -7;
+  up[3] = -2147483648; left[3] = 2147483647;
+  up[4] = 2147483647;  left[4] = -2147483648;
+  up[5] = -100;      left[5] = -100;
+  up[6] = 7;         left[6] = -7;
+  up[7] = -65536;    left[7] = 65535;
+
+  var want: int32[8];
+  want[0] = 0;
+  want[1] = 0;
+  want[2] = -5;
+  want[3] = 2147483647;
+  want[4] = 2147483647;
+  want[5] = -100;
+  want[6] = 7;
+  want[7] = 65535;
+
+  pick_max(&dst[0], &up[0], &left[0], 8);
+
+  var i: int32 = 0;
+  while (i < 8) {
+    if (dst[i] != want[i]) {
+      var g: int32 = dst[i];
+      var w: int32 = want[i];
+      println("FAIL max(up[{i}]={up[i]}, left[{i}]={left[i]}) = {g} want {w}");
+      fails = fails + 1;
+    }
+    i = i + 1;
+  }
+
+  var s: int64 = sum_signed(&dst[0], 8);
+  if (s != 4295032731) {
+    println("FAIL sum of chosen values = {s} want 4295032731");
+    fails = fails + 1;
+  }
+
+  var c: int32 = count_lt(&up[0], &left[0], 8);
+  if (c != 3) {
+    println("FAIL count of up < left = {c} want 3");
+    fails = fails + 1;
+  }
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("{fails} case(s) failed");
+  return 1;
+}
