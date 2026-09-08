@@ -8,7 +8,7 @@ fn two_regions(p: float32*, q: float32*, n: int32) {
     while (i < n) { p[i] = 1.0; q[i] = 2.0; i = i + 1; }
 }
 
-// 1-byte elements: no kernel at that width yet.
+// 1-byte elements reach the splat kernel like every other width.
 fn byte_fill(p: uint8*, n: int32) {
     var i: int32 = 0;
     while (i < n) { p[i] = 7; i = i + 1; }

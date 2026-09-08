@@ -1423,17 +1423,6 @@ static int ir_simd_bail_store_only_fill(IrSimdBail *d) {
       ir_simd_diag(d, IR_SIMD_BAIL_STORE_ONLY_FILL);
       return 1;
     }
-    if (d->byte_store_count == d->store_count) {
-      snprintf(d->reason, d->reason_cap,
-               "the loop fills 1-byte elements, and the fill kernel covers "
-               "2-, 4- and 8-byte elements only");
-      snprintf(d->fix, d->fix_cap,
-               "nothing to change here: this is a gap in the compiler, not a "
-               "problem with the loop");
-      ir_simd_advisory(d);
-      ir_simd_diag(d, IR_SIMD_BAIL_STORE_ONLY_FILL);
-      return 1;
-    }
     if (d->rebased_array) {
       char element[64];
       ir_type_element_name(

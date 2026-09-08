@@ -1344,6 +1344,70 @@ static int ir_row_cache_find(const IRRowCacheEntry *cache, size_t count,
   return -1;
 }
 
+static void ir_row_replace_temp_with(IRFunction *function, const char *temp,
+                                     const IROperand *value) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    IRInstruction *in = &function->instructions[i];
+    IROperand *slots[2] = {&in->lhs, &in->rhs};
+    for (int s = 0; s < 2; s++) {
+      if (ir_operand_is_temp_named(slots[s], temp)) {
+        ir_operand_destroy(slots[s]);
+        *slots[s] = ir_operand_copy(value);
+      }
+    }
+    if (in->op == IR_OP_STORE && ir_operand_is_temp_named(&in->dest, temp)) {
+      ir_operand_destroy(&in->dest);
+      in->dest = ir_operand_copy(value);
+    }
+    for (size_t a = 0; a < in->argument_count; a++) {
+      if (ir_operand_is_temp_named(&in->arguments[a], temp)) {
+        ir_operand_destroy(&in->arguments[a]);
+        in->arguments[a] = ir_operand_copy(value);
+      }
+    }
+  }
+}
+
+static void ir_row_collapse_hop(IRFunction *function, size_t s, size_t hop_at) {
+  if (hop_at == (size_t)-1 || s >= function->instruction_count ||
+      hop_at >= function->instruction_count) {
+    return;
+  }
+  IRInstruction *assign = &function->instructions[s];
+  IRInstruction *cast = &function->instructions[hop_at];
+  const char *declared;
+  if (assign->op != IR_OP_ASSIGN || assign->lhs.kind != IR_OPERAND_SYMBOL ||
+      !assign->lhs.name || assign->dest.kind != IR_OPERAND_TEMP ||
+      !assign->dest.name || cast->op != IR_OP_CAST || cast->is_float ||
+      !cast->text || cast->dest.kind != IR_OPERAND_TEMP || !cast->dest.name ||
+      !ir_operand_is_temp_named(&cast->lhs, assign->dest.name)) {
+    return;
+  }
+  declared = ir_function_local_declared_type(function, assign->lhs.name);
+  if (!declared && function->parameter_names && function->parameter_types) {
+    for (size_t i = 0; i < function->parameter_count; i++) {
+      if (function->parameter_names[i] &&
+          strcmp(function->parameter_names[i], assign->lhs.name) == 0) {
+        declared = function->parameter_types[i];
+        break;
+      }
+    }
+  }
+  if (!declared || strcmp(declared, cast->text) != 0) {
+    return;
+  }
+  {
+    IROperand value = ir_operand_symbol(assign->lhs.name);
+    if (!value.name) {
+      return;
+    }
+    ir_row_replace_temp_with(function, cast->dest.name, &value);
+    ir_operand_destroy(&value);
+  }
+  ir_instruction_make_nop(cast);
+  ir_instruction_make_nop(assign);
+}
+
 int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
   static int g_row_counter;
   IRRowCacheEntry cache[IR_ROW_MAX_CACHE];
@@ -1496,6 +1560,7 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
           }
           ir_operand_destroy(&inv);
           ir_operand_destroy(&var);
+          ir_row_collapse_hop(function, s, hop_at);
           if (changed) {
             *changed = 1;
           }
@@ -1644,6 +1709,10 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
       header += inserted;
       s += inserted;
       latch += inserted;
+      if (hop_at != (size_t)-1) {
+        hop_at += inserted;
+      }
+      ir_row_collapse_hop(function, s, hop_at);
       if (changed) {
         *changed = 1;
       }

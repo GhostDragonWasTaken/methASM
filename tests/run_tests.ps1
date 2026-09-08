@@ -1230,15 +1230,13 @@ $cases = @(
     Env           = @{ METTLE_EXPLAIN_REPORT_LINES = "0" }
     OutputMustMatch = @(
       'two_regions \(loop @ line \d+\): vectorized',
-      'the loop fills 1-byte elements, and the fill kernel covers 2-, 4- and 8-byte elements only',
-      # a compiler gap is a note, not a fix: it must not be ranked as work
-      'note: nothing to change here: this is a gap in the compiler',
+      # 1-byte elements reach the splat kernel like every other width
+      'byte_fill \(loop @ line \d+\): vectorized -> 16-byte splat stores',
       'the loop fills the stack array `a`, whose address is retaken on every iteration',
       'fix: bind the array to a pointer once before the loop \(`var p: float32\* = &a\[0\];`\)',
       'local_fill_bound \(loop @ line \d+\): vectorized',
-      # two loops miss the kernel; only one of them has work to do,
-      # because the byte-width gap is the compiler's and not the code's
-      'where to start \(1 of 2 missed optimizations has a fix',
+      # one loop misses the kernel and it has work to do
+      'where to start \(1 of 1 missed optimization has a fix',
       # the stack-array advice is not believed, it is checked: the
       # compiler binds the pointer on a clone and re-runs, and the kernel
       # it names is the one local_fill_bound actually gets below

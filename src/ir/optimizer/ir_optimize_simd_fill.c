@@ -166,14 +166,24 @@ static int ir_fill_install(IRFunction *function, size_t header_index,
 
 static int ir_fill_frame(IRFunction *function, size_t header_index,
                          size_t *compare_out, size_t *branch_out,
-                         size_t *jump_out, int *matched) {
+                         size_t *jump_out, int *inclusive, int *matched) {
   *matched = 0;
+  *inclusive = 0;
   IRLoopShape loop;
   if (!ir_loop_shape_at(function, header_index, &loop)) {
     return 1;
   }
-  if (strcmp(loop.compare->text, "<") != 0 ||
-      !loop.branch->text) {
+  if (!loop.branch->text) {
+    return 1;
+  }
+  if (strcmp(loop.compare->text, "<=") == 0) {
+    if (loop.compare->rhs.kind != IR_OPERAND_INT ||
+        loop.compare->rhs.int_value < 0 ||
+        loop.compare->rhs.int_value >= (1LL << 30)) {
+      return 1;
+    }
+    *inclusive = 1;
+  } else if (strcmp(loop.compare->text, "<") != 0) {
     return 1;
   }
   IRInstruction *header = loop.header;
@@ -273,12 +283,38 @@ static int ir_fill_try_pointer_walk(IRFunction *function, size_t header_index,
   return ok;
 }
 
+static int ir_fill_dest_is_store_address(const IRInstruction *const *body,
+                                         size_t body_count,
+                                         const IRInstruction *ins) {
+  if (ins->dest.kind != IR_OPERAND_TEMP || !ins->dest.name) {
+    return 0;
+  }
+  for (size_t k = 0; k < body_count; k++) {
+    const IRInstruction *other = body[k];
+    if (other->op == IR_OP_STORE &&
+        ir_operand_is_temp_named(&other->dest, ins->dest.name)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
                                size_t branch_index, size_t jump_index,
                                const IRInstruction *compare,
                                const IRInstruction *const *body,
-                               size_t body_count, int *changed) {
+                               size_t body_count, int inclusive,
+                               int *changed) {
   const char *iv = compare->lhs.name;
+  IROperand count = {0};
+  const IROperand *count_op = &compare->rhs;
+  if (inclusive) {
+    if (compare->rhs.kind != IR_OPERAND_INT) {
+      return FILL_NO_MATCH;
+    }
+    count = ir_operand_int(compare->rhs.int_value + 1);
+    count_op = &count;
+  }
   if (compare->rhs.kind != IR_OPERAND_SYMBOL &&
       compare->rhs.kind != IR_OPERAND_INT) {
     return FILL_NO_MATCH;
@@ -301,6 +337,7 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
         !ins->is_float && !idx_add && !shl && !addr &&
         ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+        !ir_fill_dest_is_store_address(body, body_count, ins) &&
         (ir_operand_is_symbol_named(&ins->lhs, iv) ||
          ir_operand_is_symbol_named(&ins->rhs, iv))) {
       idx_add = ins;
@@ -463,7 +500,7 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
     return 0;
   }
   int ok = ir_fill_install(function, header_index, jump_index, 0,
-                           size, &addr->lhs, &compare->rhs, &value, start_op,
+                           size, &addr->lhs, count_op, &value, start_op,
                            offset_op, offset_producer, NULL, NULL, changed);
   if (ok && iv_name) {
     IRInstruction *fused =
@@ -606,8 +643,9 @@ static int ir_try_vectorize_fill_at(IRFunction *function, size_t header_index,
                                     int *changed) {
   size_t compare_index = 0, branch_index = 0, jump_index = 0;
   int matched = 0;
+  int inclusive = 0;
   if (!ir_fill_frame(function, header_index, &compare_index, &branch_index,
-                     &jump_index, &matched)) {
+                     &jump_index, &inclusive, &matched)) {
     return 0;
   }
   if (!matched) {
@@ -631,19 +669,24 @@ static int ir_try_vectorize_fill_at(IRFunction *function, size_t header_index,
     return 1;
   }
 
-  int r = ir_fill_try_pointer_walk(function, header_index, branch_index,
-                                   jump_index, compare, body, body_count,
-                                   changed);
+  int r = inclusive
+              ? FILL_NO_MATCH
+              : ir_fill_try_pointer_walk(function, header_index, branch_index,
+                                         jump_index, compare, body,
+                                         body_count, changed);
   if (r != FILL_NO_MATCH) {
     return r;
   }
   r = ir_fill_try_indexed(function, header_index, branch_index, jump_index,
-                          compare, body, body_count, changed);
+                          compare, body, body_count, inclusive, changed);
   if (r != FILL_NO_MATCH) {
     return r;
   }
-  r = ir_fill_try_byte_walk(function, header_index, branch_index, jump_index,
-                            compare, body, body_count, changed);
+  r = inclusive
+          ? FILL_NO_MATCH
+          : ir_fill_try_byte_walk(function, header_index, branch_index,
+                                  jump_index, compare, body, body_count,
+                                  changed);
   if (r != FILL_NO_MATCH) {
     return r;
   }
