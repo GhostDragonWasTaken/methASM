@@ -2132,6 +2132,13 @@ static int re_emit_hoist(IRFunction *function, size_t header, size_t index,
    hoists, above it the saturated ones keep making spills. */
 #define RE_HOIST_MAX_LOOP_LIVE_IN 28
 
+/* The inner budget is far smaller because an inner loop's live-ins are the
+   ones actually competing for registers, and because this gate only has to
+   catch the loops that are already full. Swept at 20, 16, 12, 10, 8, 7, 6, 5,
+   4, 3 and 2: at 7 and 6 only diff_lcs changes, and below 5 interp_ast and
+   word_freq start losing hoists they were paying for. */
+#define RE_HOIST_MAX_NESTED_LIVE_IN 6
+
 typedef struct {
   const char *names[RE_PRESSURE_MAX_NAMES];
   size_t count;
@@ -2179,6 +2186,39 @@ static void re_pressure_note_read(RENameSet *set, const IROperand *op) {
    load into a loop that is already over the machine's register file only moves
    the load into the spill slot it will be reloaded from, once per iteration,
    which is what it cost in the first place plus the frame traffic. */
+/* A hoist out of a loop that has another loop inside it holds its register
+   across every iteration of that inner loop, competing with everything the
+   inner loop needs, for the same one load saved per outer iteration. That is
+   a different price from a hoist out of an innermost loop, so it gets a
+   different budget. */
+static size_t re_loop_live_in_count(const IRFunction *function, size_t header,
+                                    size_t latch);
+
+/* The register a hoist takes is not contended where the hoist happens, it is
+   contended in the innermost loop it is held across. Ask that loop how full it
+   already is. */
+static size_t re_max_nested_live_in(const IRFunction *function, size_t header,
+                                    size_t latch) {
+  size_t worst = 0;
+  for (size_t i = header + 1; i < latch; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    size_t inner_latch;
+    size_t count;
+    if (in->op != IR_OP_LABEL || !re_label_is_loop_header(in->text)) {
+      continue;
+    }
+    inner_latch = re_loop_latch(function, i);
+    if (!inner_latch || inner_latch <= i || inner_latch > latch) {
+      continue;
+    }
+    count = re_loop_live_in_count(function, i, inner_latch);
+    if (count > worst) {
+      worst = count;
+    }
+  }
+  return worst;
+}
+
 static size_t re_loop_live_in_count(const IRFunction *function, size_t header,
                                     size_t latch) {
   RENameSet written = {{0}, 0, 0};
@@ -2254,7 +2294,9 @@ static int re_try_hoist_one_load(IRFunction *function, const REDefs *defs_in,
     }
 
     if (re_loop_live_in_count(function, header, latch) >=
-        RE_HOIST_MAX_LOOP_LIVE_IN) {
+            RE_HOIST_MAX_LOOP_LIVE_IN ||
+        re_max_nested_live_in(function, header, latch) >=
+            RE_HOIST_MAX_NESTED_LIVE_IN) {
       re_kills_destroy(&writes);
       continue;
     }
