@@ -8401,6 +8401,21 @@ static void mir_fuse_bit_test_branch(MirFunction *fn) {
       shl->width = 8;
       shl->is_unsigned = 0;
 
+      if (fn->iconst_count >= fn->iconst_capacity) {
+        size_t nc = fn->iconst_capacity ? fn->iconst_capacity * 2 : 8;
+        MirIConst *grown =
+            (MirIConst *)realloc(fn->iconsts, nc * sizeof(MirIConst));
+        if (grown) {
+          fn->iconsts = grown;
+          fn->iconst_capacity = nc;
+        }
+      }
+      if (fn->iconst_count < fn->iconst_capacity) {
+        fn->iconsts[fn->iconst_count].value = and_op->b.imm;
+        fn->iconsts[fn->iconst_count].vreg = mask_vreg;
+        fn->iconst_count++;
+      }
+
       and_op->op = MIR_NOP;
 
       br->op = MIR_BT;
@@ -10149,6 +10164,126 @@ static size_t mir_const_insert_index(const MirFunction *fn, size_t first_use,
   return insert;
 }
 
+static size_t mir_loop_reg_pressure_uncached(const MirFunction *fn,
+                                             size_t lo, size_t hi,
+                                             MirRegClass rclass) {
+  int *in_first = NULL;
+  int *in_last = NULL;
+  unsigned char *outside = NULL;
+  int *delta = NULL;
+  size_t best = 0;
+  size_t span = 0;
+  if (fn->vreg_count == 0 || fn->insn_count == 0 || hi < lo ||
+      hi >= fn->insn_count) {
+    return 0;
+  }
+  span = hi - lo + 2;
+  in_first = (int *)malloc(fn->vreg_count * sizeof(int));
+  in_last = (int *)malloc(fn->vreg_count * sizeof(int));
+  outside = (unsigned char *)calloc(fn->vreg_count, 1);
+  delta = (int *)calloc(span + 1, sizeof(int));
+  if (!in_first || !in_last || !outside || !delta) {
+    free(in_first);
+    free(in_last);
+    free(outside);
+    free(delta);
+    return (size_t)-1;
+  }
+  for (size_t v = 0; v < fn->vreg_count; v++) {
+    in_first[v] = -1;
+    in_last[v] = -1;
+  }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    const MirInst *in = &fn->insns[i];
+    const MirOperand *slots[3] = {&in->dst, &in->a, &in->b};
+    for (int s = 0; s < 3; s++) {
+      MirVregId ids[2];
+      size_t n = 0;
+      if (slots[s]->kind == MIR_OPK_VREG) {
+        ids[n++] = slots[s]->vreg;
+      } else if (slots[s]->kind == MIR_OPK_MEM) {
+        ids[n++] = slots[s]->mem.base;
+        ids[n++] = slots[s]->mem.index;
+      }
+      for (size_t k = 0; k < n; k++) {
+        MirVregId v = ids[k];
+        if (v == MIR_VREG_NONE || (size_t)v >= fn->vreg_count) {
+          continue;
+        }
+        if (i < lo || i > hi) {
+          outside[v] = 1;
+          continue;
+        }
+        if (in_first[v] < 0) {
+          in_first[v] = (int)i;
+        }
+        in_last[v] = (int)i;
+      }
+    }
+  }
+  for (size_t v = 0; v < fn->vreg_count; v++) {
+    int from;
+    int to;
+    if (fn->vregs[v].rclass != rclass) {
+      continue;
+    }
+    if (in_first[v] < 0) {
+      continue;
+    }
+    from = outside[v] ? (int)lo : in_first[v];
+    to = outside[v] ? (int)hi : in_last[v];
+    delta[from - (int)lo]++;
+    delta[to - (int)lo + 1]--;
+  }
+  {
+    int live = 0;
+    for (size_t i = 0; i + 1 < span; i++) {
+      live += delta[i];
+      if (live > 0 && (size_t)live > best) {
+        best = (size_t)live;
+      }
+    }
+  }
+  free(in_first);
+  free(in_last);
+  free(outside);
+  free(delta);
+  return best;
+}
+
+static size_t mir_loop_reg_pressure(const MirFunction *fn, size_t lo,
+                                    size_t hi, MirRegClass rclass) {
+  static const MirFunction *memo_fn;
+  static size_t memo_lo;
+  static size_t memo_hi;
+  static MirRegClass memo_class;
+  static size_t memo_value;
+  if (memo_fn == fn && memo_lo == lo && memo_hi == hi &&
+      memo_class == rclass) {
+    return memo_value;
+  }
+  memo_value = mir_loop_reg_pressure_uncached(fn, lo, hi, rclass);
+  memo_fn = fn;
+  memo_lo = lo;
+  memo_hi = hi;
+  memo_class = rclass;
+  return memo_value;
+}
+
+static size_t mir_const_hoist_pressure_cap(MirRegClass rclass) {
+  static long gp = -2;
+  static long xmm = -2;
+  if (gp == -2) {
+    const char *spec = getenv("METTLE_CONST_HOIST_GP");
+    gp = spec ? atol(spec) : 8;
+  }
+  if (xmm == -2) {
+    const char *spec = getenv("METTLE_CONST_HOIST_XMM");
+    xmm = spec ? atol(spec) : 8;
+  }
+  return (size_t)(rclass == MIR_RC_GP ? gp : xmm);
+}
+
 static void mir_place_const_pool(MirFunction *fn) {
   if (!fn || (!fn->fconst_count && !fn->iconst_count) || fn->insn_count == 0) {
     return;
@@ -10180,10 +10315,16 @@ static void mir_place_const_pool(MirFunction *fn) {
     }
     size_t loop_end = first;
     size_t insert = mir_const_insert_index(fn, first, &loop_end);
-    if (insert <= def + 1 || insert == first ||
+    if (insert == first || (insert > def && insert <= def + 1) ||
+        insert == def ||
         !mir_insert_point_is_reached(fn, insert) ||
         !mir_range_is_single_entry(fn, insert, loop_end) ||
         !mir_all_uses_in_range(fn, v, insert, loop_end)) {
+      continue;
+    }
+    if (insert < def &&
+        mir_loop_reg_pressure(fn, insert, loop_end, fn->vregs[v].rclass) >=
+            mir_const_hoist_pressure_cap(fn->vregs[v].rclass)) {
       continue;
     }
     moves[nmove].def = def;
@@ -10204,10 +10345,16 @@ static void mir_place_const_pool(MirFunction *fn) {
     }
     size_t loop_end = first;
     size_t insert = mir_const_insert_index(fn, first, &loop_end);
-    if (insert <= def + 1 || insert == first ||
+    if (insert == first || (insert > def && insert <= def + 1) ||
+        insert == def ||
         !mir_insert_point_is_reached(fn, insert) ||
         !mir_range_is_single_entry(fn, insert, loop_end) ||
         !mir_all_uses_in_range(fn, v, insert, loop_end)) {
+      continue;
+    }
+    if (insert < def &&
+        mir_loop_reg_pressure(fn, insert, loop_end, fn->vregs[v].rclass) >=
+            mir_const_hoist_pressure_cap(fn->vregs[v].rclass)) {
       continue;
     }
     moves[nmove].def = def;

@@ -1,0 +1,139 @@
+import "std/io";
+
+@noinline fn skip_class(s: uint8*, n: int32, start: int32) -> int32 {
+  var i: int32 = start;
+  while (i < n) {
+    var c: int32 = (int32)s[i];
+    if (c == 32 || c == 9 || c == 10 || c == 13) {
+      i += 1;
+    } else {
+      return i;
+    }
+  }
+  return n;
+}
+
+@noinline fn count_class(s: uint8*, n: int32) -> int32 {
+  var hits: int32 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    var c: int32 = (int32)s[i];
+    if (c == 40 || c == 41 || c == 91 || c == 93) {
+      hits += 1;
+    }
+    i += 1;
+  }
+  return hits;
+}
+
+@noinline fn scale_sum(a: int64*, n: int32) -> int64 {
+  var acc: int64 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    acc = acc + a[i] * 1000003;
+    i += 1;
+  }
+  return acc;
+}
+
+@noinline fn mixed(s: uint8*, n: int32) -> int64 {
+  var h: int64 = 1469598103934665603;
+  var i: int32 = 0;
+  while (i < n) {
+    var c: int32 = (int32)s[i];
+    if (c == 32 || c == 9) {
+      h = h * 31 + 1;
+    } else {
+      h = h * 1099511628211 + (int64)c;
+    }
+    i += 1;
+  }
+  return h;
+}
+
+fn main() -> int32 {
+  var buf: uint8[160];
+  var vals: int64[64];
+  var fails: int32 = 0;
+  var i: int32 = 0;
+  while (i < 160) {
+    buf[i] = (uint8)(97 + i % 5);
+    i += 1;
+  }
+  buf[0] = 32;
+  buf[1] = 9;
+  buf[2] = 10;
+  buf[3] = 13;
+  buf[4] = 65;
+  buf[20] = 40;
+  buf[21] = 41;
+  buf[22] = 91;
+  buf[23] = 93;
+  buf[24] = 32;
+  i = 0;
+  while (i < 64) {
+    vals[i] = (int64)i * 7 - 13;
+    i += 1;
+  }
+
+  if (skip_class(&buf[0], 160, 0) != 4) {
+    var a: int32 = skip_class(&buf[0], 160, 0);
+    println("FAIL skip_class from 0 = {a} want 4");
+    fails += 1;
+  }
+  if (skip_class(&buf[0], 160, 4) != 4) {
+    println("FAIL skip_class from 4 should not move");
+    fails += 1;
+  }
+  if (skip_class(&buf[0], 160, 24) != 25) {
+    var b: int32 = skip_class(&buf[0], 160, 24);
+    println("FAIL skip_class from 24 = {b} want 25");
+    fails += 1;
+  }
+  if (skip_class(&buf[0], 0, 0) != 0) {
+    println("FAIL skip_class with n 0");
+    fails += 1;
+  }
+
+  if (count_class(&buf[0], 160) != 4) {
+    var c: int32 = count_class(&buf[0], 160);
+    println("FAIL count_class = {c} want 4");
+    fails += 1;
+  }
+
+  var want: int64 = 0;
+  i = 0;
+  while (i < 64) {
+    want = want + vals[i] * 1000003;
+    i += 1;
+  }
+  var got: int64 = scale_sum(&vals[0], 64);
+  if (got != want) {
+    println("FAIL scale_sum = {got} want {want}");
+    fails += 1;
+  }
+
+  var wanth: int64 = 1469598103934665603;
+  i = 0;
+  while (i < 160) {
+    var cc: int32 = (int32)buf[i];
+    if (cc == 32 || cc == 9) {
+      wanth = wanth * 31 + 1;
+    } else {
+      wanth = wanth * 1099511628211 + (int64)cc;
+    }
+    i += 1;
+  }
+  var goth: int64 = mixed(&buf[0], 160);
+  if (goth != wanth) {
+    println("FAIL mixed = {goth} want {wanth}");
+    fails += 1;
+  }
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("{fails} case(s) failed");
+  return 1;
+}

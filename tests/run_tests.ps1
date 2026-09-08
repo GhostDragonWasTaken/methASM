@@ -536,6 +536,7 @@ $cases = @(
   @{ Name = "int32_wrap_not_provable"; Path = "tests/test_int32_wrap_not_provable.mettle"; ShouldSucceed = $true },
   @{ Name = "guarded_load_hoist"; Path = "tests/test_guarded_load_hoist.mettle"; ShouldSucceed = $true },
   @{ Name = "const_pool_dominates"; Path = "tests/test_const_pool_dominates.mettle"; ShouldSucceed = $true },
+  @{ Name = "const_hoist_out_of_loop"; Path = "tests/test_const_hoist_out_of_loop.mettle"; ShouldSucceed = $true },
   @{
     Name          = "simd_copy_kernel"
     Path          = "tests/test_simd_copy_kernel.mettle"
