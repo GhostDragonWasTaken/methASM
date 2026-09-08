@@ -536,6 +536,13 @@ $cases = @(
   @{ Name = "int32_wrap_not_provable"; Path = "tests/test_int32_wrap_not_provable.mettle"; ShouldSucceed = $true },
   @{ Name = "guarded_load_hoist"; Path = "tests/test_guarded_load_hoist.mettle"; ShouldSucceed = $true },
   @{ Name = "const_pool_dominates"; Path = "tests/test_const_pool_dominates.mettle"; ShouldSucceed = $true },
+  @{
+    Name          = "row_pointer_through_cast"
+    Path          = "tests/test_row_pointer_through_cast.mettle"
+    ShouldSucceed = $true
+    Args          = @("--release")
+    IrMustMatch   = @("__rowp_")
+  },
   @{ Name = "control_flow"; Path = "tests/test_control_flow.mettle"; ShouldSucceed = $true },
   @{ Name = "nested_switch_loop"; Path = "tests/test_nested_switch_loop.mettle"; ShouldSucceed = $true },
   @{ Name = "elseif_chaining"; Path = "tests/test_elseif.mettle"; ShouldSucceed = $true },

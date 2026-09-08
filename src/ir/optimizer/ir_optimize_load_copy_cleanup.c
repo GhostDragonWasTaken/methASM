@@ -1120,6 +1120,7 @@ typedef struct {
   long long k;
   long long bias;
   size_t idx_pos;
+  size_t hop_at;
   char sh_name[128];
   IROperand inv;
   IROperand var;
@@ -1140,6 +1141,30 @@ static int ir_row_index_is_read_in_loop(const IRFunction *function, size_t s,
 }
 
 static size_t ir_narrowing_width(const char *type_name);
+
+static const char *ir_row_index_through_narrowing(const IRFunction *function,
+                                                  const char *name,
+                                                  size_t *cast_at) {
+  const IRInstruction *cast = NULL;
+  size_t readers = 0;
+  for (size_t j = 0; j < function->instruction_count; j++) {
+    const IRInstruction *ins = &function->instructions[j];
+    if (!ir_row_instruction_reads_temp(ins, name)) {
+      continue;
+    }
+    readers++;
+    cast = ins;
+    *cast_at = j;
+  }
+  if (readers != 1 || !cast || cast->op != IR_OP_CAST || cast->is_float ||
+      !cast->text || ir_narrowing_width(cast->text) == 0 ||
+      cast->lhs.kind != IR_OPERAND_TEMP || !cast->lhs.name ||
+      strcmp(cast->lhs.name, name) != 0 ||
+      cast->dest.kind != IR_OPERAND_TEMP || !cast->dest.name) {
+    return NULL;
+  }
+  return cast->dest.name;
+}
 
 static const IRInstruction *ir_row_nearest_def(const IRFunction *function,
                                                size_t from, size_t header,
@@ -1249,6 +1274,7 @@ static int ir_row_match_shape(const IRFunction *function, size_t header,
                  shl->text && strcmp(shl->text, "+") == 0 &&
                  shl->dest.kind == IR_OPERAND_TEMP && shl->dest.name;
 
+  out->hop_at = (size_t)-1;
   if (!scaled && !unscaled) {
     return 0;
   }
@@ -1259,7 +1285,16 @@ static int ir_row_match_shape(const IRFunction *function, size_t header,
   out->k = scaled ? shl->rhs.int_value : 0;
 
   if (!ir_row_index_is_read_in_loop(function, s, latch, out->sh_name)) {
-    return 0;
+    size_t cast_at = (size_t)-1;
+    const char *through =
+        ir_row_index_through_narrowing(function, out->sh_name, &cast_at);
+    if (!through || cast_at <= s || cast_at >= latch ||
+        snprintf(out->sh_name, sizeof(out->sh_name), "%s", through) >=
+            (int)sizeof(out->sh_name) ||
+        !ir_row_index_is_read_in_loop(function, s, latch, out->sh_name)) {
+      return 0;
+    }
+    out->hop_at = cast_at;
   }
 
   if (scaled) {
@@ -1340,6 +1375,7 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
       IROperand inv = {0};
       IROperand var = {0};
       char sh_name[128];
+      size_t hop_at = (size_t)-1;
       int bad = 0;
 
       {
@@ -1350,6 +1386,7 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
         k = shape.k;
         bias = shape.bias;
         idx_pos = shape.idx_pos;
+        hop_at = shape.hop_at;
         memcpy(sh_name, shape.sh_name, sizeof(sh_name));
         inv = shape.inv;
         var = shape.var;
@@ -1357,6 +1394,9 @@ int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
 
       for (size_t j = 0; j < function->instruction_count && !bad; j++) {
         const IRInstruction *ins = &function->instructions[j];
+        if (j == hop_at) {
+          continue;
+        }
         if (j != s && ir_instruction_writes_destination(ins) &&
             ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
             strcmp(ins->dest.name, sh_name) == 0) {
