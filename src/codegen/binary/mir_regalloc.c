@@ -1189,6 +1189,29 @@ static int mir_reg_clobbered_in_range(const MirFunction *fn,
   return 0;
 }
 
+static int mir_vreg_is_param_in_reg(const MirFunction *fn, MirVregId v,
+                                    BinaryGpRegister reg) {
+  int ai = mir_reg_arg_index(reg);
+  if (ai < 0) {
+    return 0;
+  }
+  /* Only where the function calls nothing. A parameter that dies AT a call
+     does not cross it, so nothing else stops it sitting in an argument
+     register -- and then marshalling the outgoing arguments overwrites it
+     while it is still live. `invoke(cb, v)` placed v in RCX over cb and
+     called v. */
+  if (mir_fn_has_real_calls(fn)) {
+    return 0;
+  }
+  for (size_t i = 0; i < fn->param_count; i++) {
+    if (fn->params[i].vreg == v && !fn->params[i].is_float &&
+        fn->params[i].arg_index == ai) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static uint32_t mir_color_reg_mask(const MirFunction *fn, MirVregId v,
                                    const BinaryGpRegister *gp_leaf_pool,
                                    size_t gp_leaf_n,
@@ -1215,7 +1238,14 @@ static uint32_t mir_color_reg_mask(const MirFunction *fn, MirVregId v,
       }
       if (vr->entry_live) {
         int ai = mir_reg_arg_index(reg);
-        if (ai >= 0 && (size_t)ai < incoming) {
+        /* An incoming argument register is barred from holding a value that
+           is live at entry, because the prologue would have to shuffle the
+           arguments past each other to place it. The one register that needs
+           no shuffle is the one this parameter already arrives in: leaving it
+           there costs nothing and spares a callee-saved register, which is a
+           store in the prologue and a load at every exit on every call. */
+        if (ai >= 0 && (size_t)ai < incoming &&
+            !mir_vreg_is_param_in_reg(fn, v, reg)) {
           continue;
         }
       }
@@ -1749,9 +1779,19 @@ static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool
         chosen = hv->phys;
       }
     }
-    if (chosen < 0) {
+    /* A callee-saved register costs a store in the prologue and a load at
+       every exit, paid on each call. A value that outlives no call has no
+       need of one, so take a volatile register while any is free and
+       leave the saved set empty. Scanning by encoding number alone
+       reaches RBX, encoding 3, before RSI, RDI, R8 and R9. */
+    for (int pass = 0; pass < 2 && chosen < 0; pass++) {
       for (int r = 0; r < 16; r++) {
-        if (preferred & (1u << r)) {
+        if (!(preferred & (1u << r))) {
+          continue;
+        }
+        int nonvol = mir_gp_is_nonvolatile((BinaryGpRegister)r) ||
+                     r == BINARY_GP_RBP;
+        if (nonvol == pass) {
           chosen = r;
           break;
         }
