@@ -2916,11 +2916,21 @@ static int mir_emit_const_divmod(MirFunction *fn, MirOperand dst, MirOperand a,
     } else {
       MirVregId t1 = mir_new_vreg(fn, MIR_RC_GP, 8);
       MirVregId t2 = mir_new_vreg(fn, MIR_RC_GP, 8);
-      if (t1 == MIR_VREG_NONE || t2 == MIR_VREG_NONE ||
-          !mir_emit1(fn, MIR_SAR, mir_op_vreg(t1), A, mir_op_imm(63), 8, 0, 0) ||
-          !mir_emit1(fn, MIR_SHR, mir_op_vreg(t2), mir_op_vreg(t1),
-                     mir_op_imm(64 - k), 8, 1, 0) ||
-          !mir_emit1(fn, MIR_ADD, Q, A, mir_op_vreg(t2), 8, 0, 0) ||
+      if (t1 == MIR_VREG_NONE || t2 == MIR_VREG_NONE) {
+        return 0;
+      }
+      if (k == 1) {
+        if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(t2), A, mir_op_imm(63), 8, 1,
+                       0)) {
+          return 0;
+        }
+      } else if (!mir_emit1(fn, MIR_SAR, mir_op_vreg(t1), A, mir_op_imm(63), 8,
+                            0, 0) ||
+                 !mir_emit1(fn, MIR_SHR, mir_op_vreg(t2), mir_op_vreg(t1),
+                            mir_op_imm(64 - k), 8, 1, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_ADD, Q, A, mir_op_vreg(t2), 8, 0, 0) ||
           !mir_emit1(fn, MIR_SAR, Q, Q, mir_op_imm(k), 8, 0, 0)) {
         return 0;
       }

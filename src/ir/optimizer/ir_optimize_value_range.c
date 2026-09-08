@@ -942,14 +942,35 @@ int ir_value_range_simplify(IRValueRangeCtx *ctx, size_t at, IRInstruction *in,
       return 1;
     }
     IRIntRange a;
+    long long divisor = in->rhs.int_value;
+    long long shift = 0;
     ir_value_range_of(ctx, at, &in->lhs, &a);
-    if (a.lo < 0 || a.hi >= in->rhs.int_value) {
+    if (a.lo < 0) {
       return 1;
     }
-    if (is_div) {
-      return ir_rewrite_to_assign_int(in, 0, changed);
+    if (a.hi < divisor) {
+      if (is_div) {
+        return ir_rewrite_to_assign_int(in, 0, changed);
+      }
+      return ir_rewrite_to_assign_operand(in, &in->lhs, changed);
     }
-    return ir_rewrite_to_assign_operand(in, &in->lhs, changed);
+    if (!vr_pow2_shift(divisor, &shift)) {
+      return 1;
+    }
+    {
+      char *replacement = mettle_strdup(is_div ? ">>" : "&");
+      if (!replacement) {
+        return 0;
+      }
+      mettle_free_string(in->text);
+      in->text = replacement;
+      ir_operand_destroy(&in->rhs);
+      in->rhs = ir_operand_int(is_div ? shift : divisor - 1);
+      if (changed) {
+        *changed = 1;
+      }
+    }
+    return 1;
   }
 
   if (is_and) {
