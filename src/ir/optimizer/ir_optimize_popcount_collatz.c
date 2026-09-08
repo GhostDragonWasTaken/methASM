@@ -1207,3 +1207,260 @@ int ir_collatz_odd_step_fold_pass(IRFunction *function, int *changed) {
   return 1;
 }
 
+static int ir_kernighan_type_width(const char *type) {
+  if (!type) {
+    return 0;
+  }
+  if (strcmp(type, "int32") == 0 || strcmp(type, "uint32") == 0) {
+    return 4;
+  }
+  if (strcmp(type, "int64") == 0 || strcmp(type, "uint64") == 0) {
+    return 8;
+  }
+  return 0;
+}
+
+static int ir_kernighan_is_binary(const IRInstruction *in, const char *op) {
+  return in->op == IR_OP_BINARY && !in->is_float && in->text &&
+         strcmp(in->text, op) == 0;
+}
+
+static int ir_kernighan_label_has_one_source(const IRFunction *function,
+                                             const char *label,
+                                             size_t back_edge_index) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (i == back_edge_index) {
+      continue;
+    }
+    if (in->op != IR_OP_LABEL && in->text && strcmp(in->text, label) == 0) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int ir_try_fold_kernighan_popcount_at(IRFunction *function,
+                                             size_t header_index,
+                                             int *changed) {
+  const IRInstruction *header = &function->instructions[header_index];
+  size_t at[6];
+  const IRInstruction *ins[6];
+  const char *x_name;
+  const char *n_name;
+  const char *x_type;
+  const char *n_type;
+  const char *done_label;
+  const char *masked;
+  int width;
+  int next;
+  size_t jump_at;
+
+  if (header->op != IR_OP_LABEL || !header->text) {
+    return 1;
+  }
+  at[0] = header_index;
+  for (int k = 1; k < 6; k++) {
+    if (!ir_find_next_non_nop(function, at[k - 1] + 1, &at[k])) {
+      return 1;
+    }
+    ins[k] = &function->instructions[at[k]];
+  }
+
+  if (ins[1]->op != IR_OP_BRANCH_ZERO || !ins[1]->text ||
+      ins[1]->lhs.kind != IR_OPERAND_SYMBOL || !ins[1]->lhs.name) {
+    return 1;
+  }
+  x_name = ins[1]->lhs.name;
+  done_label = ins[1]->text;
+
+  if (!ir_kernighan_is_binary(ins[2], "-") ||
+      ins[2]->dest.kind != IR_OPERAND_TEMP || !ins[2]->dest.name ||
+      ins[2]->lhs.kind != IR_OPERAND_SYMBOL || !ins[2]->lhs.name ||
+      strcmp(ins[2]->lhs.name, x_name) != 0 ||
+      ins[2]->rhs.kind != IR_OPERAND_INT || ins[2]->rhs.int_value != 1) {
+    return 1;
+  }
+  masked = ins[2]->dest.name;
+
+  x_type = ir_function_local_declared_type(function, x_name);
+  width = ir_kernighan_type_width(x_type);
+  if (width == 0) {
+    return 1;
+  }
+
+  next = 3;
+  if (ins[3]->op == IR_OP_CAST && ins[3]->dest.kind == IR_OPERAND_TEMP &&
+      ins[3]->dest.name && ins[3]->lhs.kind == IR_OPERAND_TEMP &&
+      ins[3]->lhs.name && strcmp(ins[3]->lhs.name, masked) == 0) {
+    if (!ins[3]->text || strcmp(ins[3]->text, x_type) != 0) {
+      return 1;
+    }
+    masked = ins[3]->dest.name;
+    next = 4;
+  }
+
+  {
+    const IRInstruction *and_in = ins[next];
+    const IRInstruction *add_in = ins[next + 1];
+    if (!ir_kernighan_is_binary(and_in, "&") ||
+        and_in->dest.kind != IR_OPERAND_SYMBOL || !and_in->dest.name ||
+        strcmp(and_in->dest.name, x_name) != 0 ||
+        and_in->lhs.kind != IR_OPERAND_SYMBOL || !and_in->lhs.name ||
+        strcmp(and_in->lhs.name, x_name) != 0 ||
+        and_in->rhs.kind != IR_OPERAND_TEMP || !and_in->rhs.name ||
+        strcmp(and_in->rhs.name, masked) != 0) {
+      return 1;
+    }
+    if (!ir_kernighan_is_binary(add_in, "+") ||
+        add_in->dest.kind != IR_OPERAND_SYMBOL || !add_in->dest.name ||
+        add_in->lhs.kind != IR_OPERAND_SYMBOL || !add_in->lhs.name ||
+        strcmp(add_in->lhs.name, add_in->dest.name) != 0 ||
+        add_in->rhs.kind != IR_OPERAND_INT || add_in->rhs.int_value != 1) {
+      return 1;
+    }
+    n_name = add_in->dest.name;
+  }
+  if (strcmp(n_name, x_name) == 0) {
+    return 1;
+  }
+  n_type = ir_function_local_declared_type(function, n_name);
+  if (ir_kernighan_type_width(n_type) == 0) {
+    return 1;
+  }
+
+  if (!ir_find_next_non_nop(function, at[next + 1] + 1, &jump_at)) {
+    return 1;
+  }
+  {
+    const IRInstruction *jump = &function->instructions[jump_at];
+    if (jump->op != IR_OP_JUMP || !jump->text ||
+        strcmp(jump->text, header->text) != 0) {
+      return 1;
+    }
+  }
+  if (!ir_fused_loop_exit_is_adjacent(function, jump_at, done_label)) {
+    return 1;
+  }
+  if (!ir_kernighan_label_has_one_source(function, header->text, jump_at)) {
+    return 1;
+  }
+
+  {
+    char prefix[32];
+    char pop_temp[64];
+    char sum_temp[64];
+    IRInstructionVector vector = {0};
+    const char *pop_source;
+    snprintf(prefix, sizeof(prefix), "kpc%zu", header_index);
+    snprintf(pop_temp, sizeof(pop_temp), "%s_c", prefix);
+    snprintf(sum_temp, sizeof(sum_temp), "%s_s", prefix);
+
+    for (size_t i = 0; i < header_index; i++) {
+      IRInstruction cloned = {0};
+      if (!ir_clone_instruction_plain(&function->instructions[i], &cloned) ||
+          !ir_instruction_vector_append_move(&vector, &cloned)) {
+        ir_instruction_destroy_storage(&cloned);
+        ir_instruction_vector_destroy(&vector);
+        return 0;
+      }
+    }
+
+    pop_source = x_name;
+
+    {
+      IRInstruction pop = {0};
+      pop.op = IR_OP_UNARY;
+      pop.text = mettle_strdup(width == 8 ? "popcnt64" : "popcnt");
+      pop.dest = ir_operand_temp(pop_temp);
+      pop.lhs = ir_operand_symbol(pop_source);
+      if (!pop.text || !pop.dest.name || !pop.lhs.name ||
+          !ir_instruction_vector_append_move(&vector, &pop)) {
+        ir_instruction_destroy_storage(&pop);
+        ir_instruction_vector_destroy(&vector);
+        return 0;
+      }
+    }
+    {
+      IRInstruction cast = {0};
+      cast.op = IR_OP_CAST;
+      cast.text = mettle_strdup(n_type);
+      cast.dest = ir_operand_temp(sum_temp);
+      cast.lhs = ir_operand_temp(pop_temp);
+      if (!cast.text || !cast.dest.name || !cast.lhs.name ||
+          !ir_instruction_vector_append_move(&vector, &cast)) {
+        ir_instruction_destroy_storage(&cast);
+        ir_instruction_vector_destroy(&vector);
+        return 0;
+      }
+    }
+    {
+      IRInstruction acc = {0};
+      acc.op = IR_OP_BINARY;
+      acc.text = mettle_strdup("+");
+      acc.dest = ir_operand_symbol(n_name);
+      acc.lhs = ir_operand_symbol(n_name);
+      acc.rhs = ir_operand_temp(sum_temp);
+      if (!acc.text || !acc.dest.name || !acc.lhs.name || !acc.rhs.name ||
+          !ir_instruction_vector_append_move(&vector, &acc)) {
+        ir_instruction_destroy_storage(&acc);
+        ir_instruction_vector_destroy(&vector);
+        return 0;
+      }
+    }
+    {
+      IRInstruction clear = {0};
+      clear.op = IR_OP_ASSIGN;
+      clear.dest = ir_operand_symbol(x_name);
+      clear.lhs = ir_operand_int(0);
+      if (!clear.dest.name ||
+          !ir_instruction_vector_append_move(&vector, &clear)) {
+        ir_instruction_destroy_storage(&clear);
+        ir_instruction_vector_destroy(&vector);
+        return 0;
+      }
+    }
+
+    for (size_t i = jump_at + 1; i < function->instruction_count; i++) {
+      IRInstruction cloned = {0};
+      if (!ir_clone_instruction_plain(&function->instructions[i], &cloned) ||
+          !ir_instruction_vector_append_move(&vector, &cloned)) {
+        ir_instruction_destroy_storage(&cloned);
+        ir_instruction_vector_destroy(&vector);
+        return 0;
+      }
+    }
+
+    if (!ir_function_replace_instructions(function, &vector)) {
+      ir_instruction_vector_destroy(&vector);
+      return 0;
+    }
+  }
+
+  if (changed) {
+    *changed = 1;
+  }
+  return 1;
+}
+
+int ir_fold_kernighan_popcount_pass(IRFunction *function, int *changed) {
+  size_t i = 0;
+  if (!function) {
+    return 1;
+  }
+  while (function->instruction_count > 6 && i + 6 < function->instruction_count) {
+    int folded = 0;
+    if (!ir_try_fold_kernighan_popcount_at(function, i, &folded)) {
+      return 0;
+    }
+    if (folded) {
+      if (changed) {
+        *changed = 1;
+      }
+      i = 0;
+      continue;
+    }
+    i++;
+  }
+  return 1;
+}

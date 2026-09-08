@@ -1712,7 +1712,8 @@ static int mir_gate_convert(CodeGenerator *generator,
       }
     } else if (strcmp(in->text, "-") != 0 && strcmp(in->text, "~") != 0 &&
                strcmp(in->text, "+") != 0 && strcmp(in->text, "!") != 0 &&
-               strcmp(in->text, "popcnt") != 0) {
+               strcmp(in->text, "popcnt") != 0 &&
+               strcmp(in->text, "popcnt64") != 0) {
       return mir_trace_bail(ir_function, "unary:float_or_unsupported");
     }
     if (in->dest.kind != IR_OPERAND_TEMP && in->dest.kind != IR_OPERAND_SYMBOL) {
@@ -4381,6 +4382,9 @@ static int mir_lower_unary(MirFunction *fn, CodeGenerator *g,
       return mir_emit1(fn, MIR_SETCC, dst, a, mir_op_imm(0), 8, 0, cc);
     }
     if (strcmp(op, "popcnt") == 0) {
+      return mir_emit1(fn, MIR_POPCNT, dst, a, mir_op_none(), 4, 0, 0);
+    }
+    if (strcmp(op, "popcnt64") == 0) {
       return mir_emit1(fn, MIR_POPCNT, dst, a, mir_op_none(), 8, 0, 0);
     }
     fn->has_error = 1;

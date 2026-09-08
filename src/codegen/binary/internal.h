@@ -710,6 +710,7 @@ int wcs_pmaxsd(BinaryCodeBuffer *b, int dst, int src);
 int wcs_pminsd(BinaryCodeBuffer *b, int dst, int src);
 int wcs_pmovmskb(BinaryCodeBuffer *b, int gpr, int xmm);
 int wcs_popcnt(BinaryCodeBuffer *b, int dst, int src);
+int wcs_popcnt_sized(BinaryCodeBuffer *b, int dst, int src, int wide);
 int wcs_pshufd(BinaryCodeBuffer *b, int dst, int src, unsigned char imm);
 int wcs_shift_reg_imm(BinaryCodeBuffer *b, int gpr, int is_shr, unsigned char imm);
 int wcs_sse_66(BinaryCodeBuffer *b, unsigned char op, int dst, int src);

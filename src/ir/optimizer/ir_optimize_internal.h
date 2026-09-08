@@ -296,6 +296,7 @@ typedef struct {
   X(UNROLL_ANNOTATED_LOOPS, "unroll_annotated_loops")                         \
   X(FOLD_POPCOUNT_BYTE_LOOP, "fold_popcount_byte_loop")                      \
   X(FUSE_POPCOUNT_BUFFER_LOOP, "fuse_popcount_buffer_loop")                  \
+  X(FOLD_KERNIGHAN_POPCOUNT, "fold_kernighan_popcount")                      \
   X(COLLATZ_ODD_STEP_FOLD, "collatz_odd_step_fold")                          \
   X(COALESCE_SINGLE_USE_TEMP_ASSIGN, "coalesce_single_use_temp_assign")      \
   X(ELIMINATE_SINGLE_USE_FLOAT_SYMBOL_COPIES,                                 \
@@ -493,6 +494,7 @@ const IRInstruction *ir_find_temp_producer_before(const IRFunction *function,
 int ir_find_while_loop_bounds(IRFunction *function, size_t header_index,
                                      IRWhileLoopBounds *out);
 int ir_fold_popcount_byte_loop_pass(IRFunction *function, int *changed);
+int ir_fold_kernighan_popcount_pass(IRFunction *function, int *changed);
 void ir_function_index_reset(void);
 
 const char *ir_function_local_declared_type(const IRFunction *function,

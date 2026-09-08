@@ -52,8 +52,12 @@ int wcs_pmovmskb(BinaryCodeBuffer *b, int gpr, int xmm) {
 }
 
 int wcs_popcnt(BinaryCodeBuffer *b, int dst, int src) {
+  return wcs_popcnt_sized(b, dst, src, 0);
+}
+
+int wcs_popcnt_sized(BinaryCodeBuffer *b, int dst, int src, int wide) {
   return binary_code_buffer_append_u8(b, 0xF3) &&
-         binary_emit_rex(b, 0, dst >> 3, 0, src >> 3) &&
+         binary_emit_rex(b, wide ? 1 : 0, dst >> 3, 0, src >> 3) &&
          binary_code_buffer_append_u8(b, 0x0F) &&
          binary_code_buffer_append_u8(b, 0xB8) &&
          binary_code_buffer_append_u8(

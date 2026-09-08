@@ -2553,7 +2553,7 @@ static int mir_encode_scalar(MirEncodeState *st, const MirInst *in) {
           ok = 0;
           break;
         }
-        if (!wcs_popcnt(&ctx->code, D, D)) {
+        if (!wcs_popcnt_sized(&ctx->code, D, D, in->width == 8)) {
           ok = enc_err(fn, "out of memory in popcnt");
         }
         break;
@@ -2562,7 +2562,8 @@ static int mir_encode_scalar(MirEncodeState *st, const MirInst *in) {
         ok = 0;
         break;
       }
-      if (!wcs_popcnt(&ctx->code, SCRATCH_A, SCRATCH_A)) {
+      if (!wcs_popcnt_sized(&ctx->code, SCRATCH_A, SCRATCH_A,
+                            in->width == 8)) {
         ok = enc_err(fn, "out of memory in popcnt");
         break;
       }

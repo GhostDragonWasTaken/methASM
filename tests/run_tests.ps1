@@ -530,6 +530,7 @@ $cases = @(
   # rotating on that one drops the other disjunct: int_to_dec rendered 42
   # as "0Z". Validated against a compiler built without that rule.
   @{ Name = "loop_rotation_conditions"; Path = "tests/test_loop_rotation_conditions.mettle"; ShouldSucceed = $true },
+  @{ Name = "kernighan_popcount"; Path = "tests/test_kernighan_popcount.mettle"; ShouldSucceed = $true },
   @{ Name = "control_flow"; Path = "tests/test_control_flow.mettle"; ShouldSucceed = $true },
   @{ Name = "nested_switch_loop"; Path = "tests/test_nested_switch_loop.mettle"; ShouldSucceed = $true },
   @{ Name = "elseif_chaining"; Path = "tests/test_elseif.mettle"; ShouldSucceed = $true },
@@ -2176,6 +2177,14 @@ $cases = @(
     Args          = @("-O", "--dump-ir")
     IrMustMatch   = @(">> 1", "branch_zero @v ->")
     IrMustNotMatch = @("jump ir_while_", "%\.?t[0-9]+ = @v / 2")
+  },
+  @{
+    Name          = "opt_kernighan_popcount"
+    Path          = "tests/test_kernighan_popcount.mettle"
+    ShouldSucceed = $true
+    Args          = @("-O", "--dump-ir")
+    IrMustMatch   = @("%kpc[0-9]+_c = popcnt@", "%kpc[0-9]+_c = popcnt64@")
+    IrMustNotMatch = @("%\S*_x & %")
   },
   @{
     Name          = "opt_popcount_buffer_fuse"

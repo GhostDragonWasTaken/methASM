@@ -174,6 +174,10 @@ static const IROptScheduledPass g_ir_fixpoint_passes[] = {
                          ir_fuse_popcount_buffer_loop_pass,
                          IR_OPT_LABEL_JUMP | IR_OPT_FEATURE_BRANCH_ZERO |
                              IR_OPT_FEATURE_BINARY | IR_OPT_FEATURE_LOAD),
+    IR_OPT_PASS_WHEN_ALL(FOLD_KERNIGHAN_POPCOUNT,
+                         ir_fold_kernighan_popcount_pass,
+                         IR_OPT_LABEL_JUMP | IR_OPT_FEATURE_BRANCH_ZERO |
+                             IR_OPT_FEATURE_BINARY),
     IR_OPT_PASS_WHEN_ALL(COLLATZ_ODD_STEP_FOLD,
                          ir_collatz_odd_step_fold_pass,
                          IR_OPT_LABEL_JUMP | IR_OPT_FEATURE_BRANCH_ZERO |

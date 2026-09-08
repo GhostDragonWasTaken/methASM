@@ -1,0 +1,126 @@
+import "std/io";
+
+fn kern32(v: int32) -> int32 {
+  var n: int32 = 0;
+  var x: int32 = v;
+  while (x != 0) {
+    x &= (x - 1);
+    n += 1;
+  }
+  return n;
+}
+
+fn kern64(v: int64) -> int64 {
+  var n: int64 = 0;
+  var x: int64 = v;
+  while (x != 0) {
+    x &= (x - 1);
+    n += 1;
+  }
+  return n;
+}
+
+fn kernu32(v: uint32) -> int32 {
+  var n: int32 = 0;
+  var x: uint32 = v;
+  while (x != 0) {
+    x &= (x - 1);
+    n += 1;
+  }
+  return n;
+}
+
+fn ref32(v: int32) -> int32 {
+  var n: int32 = 0;
+  var i: int32 = 0;
+  while (i < 32) {
+    var bit: int32 = (v >> i) & 1;
+    n = n + bit;
+    i = i + 1;
+  }
+  return n;
+}
+
+fn ref64(v: int64) -> int64 {
+  var n: int64 = 0;
+  var i: int64 = 0;
+  while (i < 64) {
+    var bit: int64 = (v >> i) & 1;
+    n = n + bit;
+    i = i + 1;
+  }
+  return n;
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+
+  var m: int32 = 0;
+  while (m < 512) {
+    var got: int32 = kern32(m);
+    var want: int32 = ref32(m);
+    if (got != want) {
+      println("FAIL kern32({m}) = {got} want {want}");
+      fails = fails + 1;
+    }
+    m = m + 1;
+  }
+
+  var probes: int32[10];
+  probes[0] = 0;
+  probes[1] = -1;
+  probes[2] = -2;
+  probes[3] = 2147483647;
+  probes[4] = -2147483648;
+  probes[5] = 1;
+  probes[6] = -1431655766;
+  probes[7] = 1431655765;
+  probes[8] = -65536;
+  probes[9] = 65535;
+
+  var k: int32 = 0;
+  while (k < 10) {
+    var p: int32 = probes[k];
+    var g: int32 = kern32(p);
+    var w: int32 = ref32(p);
+    if (g != w) {
+      println("FAIL kern32({p}) = {g} want {w}");
+      fails = fails + 1;
+    }
+    var gu: int32 = kernu32((uint32)p);
+    if (gu != w) {
+      println("FAIL kernu32({p}) = {gu} want {w}");
+      fails = fails + 1;
+    }
+    k = k + 1;
+  }
+
+  var q64: int64[8];
+  q64[0] = 0;
+  q64[1] = -1;
+  q64[2] = 1;
+  q64[3] = 9223372036854775807;
+  q64[4] = -9223372036854775808;
+  q64[5] = -4294967296;
+  q64[6] = 4294967295;
+  q64[7] = -6148914691236517206;
+
+  var j: int32 = 0;
+  while (j < 8) {
+    var pv: int64 = q64[j];
+    var g6: int64 = kern64(pv);
+    var w6: int64 = ref64(pv);
+    if (g6 != w6) {
+      println("FAIL kern64({pv}) = {g6} want {w6}");
+      fails = fails + 1;
+    }
+    j = j + 1;
+  }
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("{fails} case(s) failed");
+  return 1;
+}
