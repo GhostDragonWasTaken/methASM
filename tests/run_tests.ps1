@@ -12942,6 +12942,35 @@ foreach ($variant in @("debug", "release")) {
   }
 }
 
+# --assume-no-signed-overflow drops the wrap-around truncation after signed
+# narrow arithmetic (docs/types.md, Integers). A program whose signed
+# int8/16/32 arithmetic never leaves its type must give identical answers
+# with the flag on and off; divides, shifts, widening, narrowing casts and
+# indexes are covered. Self-checking: exit code is the failing-check mask.
+foreach ($variant in @("plain", "assume")) {
+  $total++
+  try {
+    if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+    $exePath = Join-Path $tmpDir "assume_no_signed_overflow_$variant.exe"
+    $buildArgs = @("--build", "--release")
+    if ($variant -eq "assume") { $buildArgs += "--assume-no-signed-overflow" }
+    $buildArgs += @("tests/test_assume_no_signed_overflow.mettle", "-o", $exePath)
+
+      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
+
+    if ($LASTEXITCODE -ne 0) { throw "$variant build failed: $buildOut" }
+    if (-not (Test-Path $exePath)) { throw "$variant build produced no executable" }
+    & $exePath 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "non-overflowing signed arithmetic changed under $variant (mask $LASTEXITCODE)"
+    }
+    Write-CaseResult -Name "assume_no_signed_overflow_$variant" -Passed $true
+  }
+  catch {
+    $failed++
+    Write-CaseResult -Name "assume_no_signed_overflow_$variant" -Passed $false -Reason $_.Exception.Message
+  }
+}
 # Declarative rewrite engine (ir_optimize_rewrite.c): the Tier-1 algebraic
 # identity table and the Tier-2 constant-reassociation pass must preserve the
 # exact integer result of the arithmetic they rewrite. Exercised across

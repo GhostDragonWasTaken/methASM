@@ -1,0 +1,80 @@
+import "std/io";
+
+extern fn exit2(code: int32) -> int32 = "exit";
+
+@noinline fn id32(x: int32) -> int32 { return x; }
+
+@noinline fn mix(a: int32*, n: int32) -> int32 {
+  var acc: int32 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    acc = acc + a[i] * 3 - 1;
+    acc = acc ^ (i << 2);
+    i += 1;
+  }
+  return acc;
+}
+
+@noinline fn walk(p: uint8*, base: int32, n: int32) -> int32 {
+  var total: int32 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    total = total + (int32)p[base + i];
+    i += 1;
+  }
+  return total;
+}
+
+@noinline fn narrow_round(x: int32) -> int32 {
+  var h: int16 = (int16)(x % 1000);
+  var b: int8 = (int8)(x % 100);
+  return (int32)h * 2 + (int32)b;
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+  var vals: int32[64];
+  var bytes: uint8[32];
+  var i: int32 = 0;
+  while (i < 64) { vals[i] = i * 37 - 500; i += 1; }
+  i = 0;
+  while (i < 32) { bytes[i] = (uint8)(48 + i % 10); i += 1; }
+
+  var want: int32 = 0;
+  i = 0;
+  while (i < 64) {
+    want = want + vals[i] * 3 - 1;
+    want = want ^ (i << 2);
+    i += 1;
+  }
+  if (mix(&vals[0], 64) != want) { fails |= 1; }
+
+  var t: int32 = 0;
+  i = 0;
+  while (i < 24) { t = t + (int32)bytes[4 + i]; i += 1; }
+  if (walk(&bytes[0], id32(4), 24) != t) { fails |= 2; }
+
+  if (narrow_round(id32(123456)) != 456 * 2 + 56) { fails |= 4; }
+  if (narrow_round(id32(-7)) != (0 - 7) * 2 + (0 - 7)) { fails |= 8; }
+
+  var q: int32 = id32(1000000);
+  if (q / 7 != 142857) { fails |= 16; }
+  if (q % 7 != 1) { fails |= 16; }
+  if ((q >> 3) != 125000) { fails |= 16; }
+
+  var s: int32 = id32(-1000000);
+  if (s / 7 != (0 - 142857)) { fails |= 32; }
+  if ((s >> 3) != (0 - 125000)) { fails |= 32; }
+  if ((int64)s != (0 - 1000000)) { fails |= 32; }
+
+  var idx: int32 = id32(60);
+  if (vals[idx] != 60 * 37 - 500) { fails |= 64; }
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("FAIL mask {fails}");
+  exit2(fails);
+  return fails;
+}

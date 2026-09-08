@@ -565,6 +565,11 @@ typedef __int128 IROverflowWide;
 #define IR_OVERFLOW_WIDE 0
 #endif
 
+static int ir_narrow_type_is_signed(const char *narrow) {
+  return narrow && (strcmp(narrow, "int8") == 0 || strcmp(narrow, "int16") == 0 ||
+                    strcmp(narrow, "int32") == 0);
+}
+
 static int ir_overflow_check_wanted(IRLoweringContext *context,
                                     ASTNode *expression, ASTNode *left_node,
                                     ASTNode *right_node, const char *op,
@@ -2425,6 +2430,9 @@ static int ir_lower_binary_expression(IRLoweringContext *context,
       wants = 0;
       narrow = NULL;
     }
+    if (context->assume_no_signed_overflow && ir_narrow_type_is_signed(narrow)) {
+      narrow = NULL;
+    }
     if (narrow) {
       IROperand wrapped = ir_operand_none();
       if (!ir_make_temp_operand(context, &wrapped)) {
@@ -2592,6 +2600,9 @@ static int ir_lower_unary_expression(IRLoweringContext *context,
       narrow = NULL;
     }
     if (context->address_width_depth > 0) {
+      narrow = NULL;
+    }
+    if (context->assume_no_signed_overflow && ir_narrow_type_is_signed(narrow)) {
       narrow = NULL;
     }
     if (narrow) {

@@ -100,6 +100,7 @@ IRProgram *ir_lower_program(ASTNode *program, TypeChecker *type_checker,
   context.emit_refinement_checks = g_ir_lowering_refinement_checks;
   context.emit_task_checks = g_ir_lowering_task_checks;
   context.emit_overflow_checks = g_ir_lowering_overflow_checks;
+  context.assume_no_signed_overflow = g_ir_lowering_assume_no_signed_overflow;
   context.program = ir_program;
 
   Program *program_data = (Program *)program->data;
@@ -335,6 +336,7 @@ int g_ir_lowering_explain = 0;
 int g_ir_lowering_refinement_checks = 0;
 int g_ir_lowering_task_checks = 0;
 int g_ir_lowering_overflow_checks = 0;
+int g_ir_lowering_assume_no_signed_overflow = 0;
 
 void ir_lowering_set_explain(int enabled) { g_ir_lowering_explain = enabled; }
 
@@ -344,6 +346,10 @@ void ir_lowering_set_refinement_checks(int enabled) {
 
 void ir_lowering_set_task_checks(int enabled) {
   g_ir_lowering_task_checks = enabled;
+}
+
+void ir_lowering_set_assume_no_signed_overflow(int enabled) {
+  g_ir_lowering_assume_no_signed_overflow = enabled ? 1 : 0;
 }
 
 void ir_lowering_set_overflow_checks(int enabled) {

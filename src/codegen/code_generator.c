@@ -183,6 +183,13 @@ void code_generator_set_eliminate_unreachable_functions(
   }
 }
 
+void code_generator_set_assume_no_signed_overflow(CodeGenerator *generator,
+                                                 int enable) {
+  if (generator) {
+    generator->assume_no_signed_overflow = enable ? 1 : 0;
+  }
+}
+
 void code_generator_set_profile_runtime(CodeGenerator *generator, int enable) {
   if (generator) {
     generator->profile_runtime = enable ? 1 : 0;

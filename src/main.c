@@ -3250,6 +3250,8 @@ static DriverFlagResult parse_flag_diagnostics(CompilerOptions *options,
   } else if (strcmp(argv[i], "--pgo") == 0) {
     options->pgo = 1;
     options->optimize = 1;
+  } else if (strcmp(argv[i], "--assume-no-signed-overflow") == 0) {
+    options->assume_no_signed_overflow = 1;
   } else if (strcmp(argv[i], "--pgo-gen") == 0) {
     options->pgo_gen = 1;
     options->optimize = 1;
@@ -5718,6 +5720,8 @@ static void compile_session_configure(CompileContext *ctx) {
           : 0);
   code_generator_set_eliminate_unreachable_functions(
       ctx->code_generator, options->release ? 1 : 0);
+  code_generator_set_assume_no_signed_overflow(
+      ctx->code_generator, options->assume_no_signed_overflow);
   code_generator_set_profile_runtime(
       ctx->code_generator,
       (compiler_options_use_profile_runtime(options) || options->pgo_gen) ? 1
@@ -5962,6 +5966,7 @@ static int compile_stage_lowering_modes(CompileContext *ctx) {
       options->trace_function != NULL || ir_verify_enabled());
   ir_lowering_set_task_checks(options->check_tasks);
   ir_lowering_set_overflow_checks(options->check_overflow);
+  ir_lowering_set_assume_no_signed_overflow(options->assume_no_signed_overflow);
   ir_explain_safety_set_collect(options->explain && options->optimize,
                                 ctx->input_filename);
   return COMPILE_CONTINUE;
@@ -6792,6 +6797,10 @@ void print_usage(const char *program_name) {
          "                      Run the program, then feed the sidecar back with\n"
          "                      --pgo-use. METTLE_PROFILE_OUT names the sidecar.\n");
   printf("  --pgo-use=FILE      Optimize with counts measured by a --pgo-gen run.\n");
+  printf("  --assume-no-signed-overflow\n"
+         "                      Signed int8/int16/int32 arithmetic never leaves\n"
+         "                      its type, so results skip the wrap truncation.\n"
+         "                      Unsigned still wraps. See docs/types.md.\n");
   printf("  --verify            Translation validation: after every optimization pass,\n"
          "                      execute each changed function's before/after IR on\n"
          "                      generated inputs and compare behavior. A diverging pass\n"

@@ -11287,6 +11287,10 @@ int code_generator_binary_emit_function_via_mir(
                 vr_oracle && ir_value_range_result_is_narrow(
                                  vr_oracle, i, cw * 8, !signed_home);
           }
+          if (cw && signed_home && !fn.has_error &&
+              generator->assume_no_signed_overflow) {
+            range_canonical = 1;
+          }
           if (cw && !literal_canonical && !range_canonical && !fn.has_error) {
             MirOperand cd =
                 mir_value_operand(&fn, generator, context, &map, &cin->dest);

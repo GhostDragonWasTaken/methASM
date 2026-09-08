@@ -62,6 +62,14 @@ index still carries whatever wrapped value it holds, and a call inside an index
 still wraps its own arguments and result at their declared types. Ordinary
 arithmetic outside brackets is unchanged.
 
+Building with `--assume-no-signed-overflow` tells the compiler that signed
+`int8`, `int16` and `int32` arithmetic never leaves its type, so a result may
+stay in a full register and skip the truncation that would wrap it. Unsigned
+arithmetic still wraps modulo 2^n, because wrapping is what an unsigned type
+is for. A program that does overflow a signed narrow type reads a value the
+language no longer defines, so the flag is opt-in and belongs on code whose
+ranges you know.
+
 An integer literal with no other context is `int32`.
 
 ## Floats

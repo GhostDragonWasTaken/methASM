@@ -45,6 +45,7 @@ typedef struct {
   int emit_task_checks;
   int emitted_task_check;
   int emit_overflow_checks;
+  int assume_no_signed_overflow;
   const char *refine_binding_name;
   IROperand refine_binding_value;
   int refine_binding_active;
@@ -270,6 +271,7 @@ int ir_emit(IRLoweringContext *context, IRFunction *function,
 extern int g_ir_lowering_refinement_checks;
 extern int g_ir_lowering_task_checks;
 extern int g_ir_lowering_overflow_checks;
+extern int g_ir_lowering_assume_no_signed_overflow;
 int ir_emit_refinement_predicate(IRLoweringContext *context,
                                  IRFunction *function, SourceLocation location,
                                  const IROperand *value, const Type *refined,
