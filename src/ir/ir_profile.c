@@ -308,6 +308,7 @@ static int ir_profile_instruction_op_class(const IRInstruction *instruction,
     }
     return 1;
   case IR_OP_MEMCPY_INLINE:
+  case IR_OP_SIMD_COPY:
     *op_class_out = METTLE_PROFILE_OP_MEM_PRIMITIVE;
     return 1;
   case IR_OP_COUNT_WORD_STARTS:

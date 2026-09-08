@@ -3015,6 +3015,7 @@ static const int IR_HAS_SIDE_EFFECT[IR_OP_KIND_COUNT] = {
     [IR_OP_CALL] = 1,
     [IR_OP_CALL_INDIRECT] = 1,
     [IR_OP_MEMCPY_INLINE] = 1,
+    [IR_OP_SIMD_COPY] = 1,
     [IR_OP_COUNT_WORD_STARTS] = 1,
     [IR_OP_SIMD_SUM_I32] = 1,
     [IR_OP_SIMD_SUM_U8] = 1,

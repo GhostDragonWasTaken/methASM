@@ -84,6 +84,7 @@ static const IROptNamedPass g_ir_recognizer_passes[] = {
     {"simd_minmax_reduce", ir_simd_minmax_reduce_pass, IR_GATE_LOOP_LOAD},
     {"induction_pointer", ir_pointer_induction_pass, IR_GATE_LOOP},
     {"simd_fill", ir_simd_fill_pass, IR_GATE_LOOP},
+    {"simd_copy", ir_simd_copy_pass, IR_GATE_LOOP},
     {"prefix_sum_i32", ir_prefix_sum_i32_pass, IR_GATE_LOOP_LOAD},
     {"simd_minmax_i32", ir_simd_minmax_i32_pass, IR_GATE_LOOP_LOAD},
     {"simd_affine_map_float", ir_simd_affine_map_float_pass, IR_GATE_LOOP},

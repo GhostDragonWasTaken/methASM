@@ -271,6 +271,7 @@ static const int IR_WRITES_SYMBOL[IR_OP_KIND_COUNT] = {
     [IR_OP_COUNT_WORD_STARTS] = 1,
     [IR_OP_MEMCPY_INLINE] = 1,
     [IR_OP_SIMD_FILL] = 1,
+    [IR_OP_SIMD_COPY] = 1,
     [IR_OP_SIMD_SUM_I32] = 1,
     [IR_OP_SIMD_SUM_U8] = 1,
     [IR_OP_SIMD_MATMUL_N32] = 1,
@@ -329,6 +330,7 @@ static const int IR_WRITES_DESTINATION[IR_OP_KIND_COUNT] = {
     [IR_OP_COUNT_WORD_STARTS] = 1,
     [IR_OP_MEMCPY_INLINE] = 1,
     [IR_OP_SIMD_FILL] = 1,
+    [IR_OP_SIMD_COPY] = 1,
     [IR_OP_SIMD_SUM_I32] = 1,
     [IR_OP_SIMD_SUM_U8] = 1,
     [IR_OP_SIMD_MATMUL_N32] = 1,
@@ -2376,6 +2378,7 @@ int ir_collect_instruction_temp_uses(IRTempUseMap *uses,
   switch (instruction->op) {
   case IR_OP_STORE:
   case IR_OP_MEMCPY_INLINE:
+  case IR_OP_SIMD_COPY:
   case IR_OP_COUNT_WORD_STARTS:
   case IR_OP_SIMD_SUM_I32:
   case IR_OP_SIMD_SUM_U8:

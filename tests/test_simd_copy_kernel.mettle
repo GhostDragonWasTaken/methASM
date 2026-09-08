@@ -1,0 +1,204 @@
+import "std/io";
+
+@noinline fn copy_u8(dst: uint8*, src: uint8*, n: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    dst[i] = src[i];
+    i += 1;
+  }
+}
+
+@noinline fn copy_i32(dst: int32*, src: int32*, n: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    dst[i] = src[i];
+    i += 1;
+  }
+}
+
+@noinline fn copy_i64(dst: int64*, src: int64*, n: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    dst[i] = src[i];
+    i += 1;
+  }
+}
+
+@noinline fn ref_u8(dst: uint8*, src: uint8*, n: int32, zero: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    var v: int32 = (int32)src[i] ^ zero;
+    dst[i] = (uint8)v;
+    i += 1;
+  }
+}
+
+@noinline fn ref_i32(dst: int32*, src: int32*, n: int32, zero: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    var v: int32 = src[i] ^ zero;
+    dst[i] = v;
+    i += 1;
+  }
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+  var zero: int32 = 0;
+
+  var src8: uint8[192];
+  var got8: uint8[192];
+  var want8: uint8[192];
+  var i: int32 = 0;
+  while (i < 192) {
+    src8[i] = (uint8)(i * 7 + 3);
+    i += 1;
+  }
+
+  var n: int32 = 0;
+  while (n <= 40) {
+    i = 0;
+    while (i < 192) {
+      got8[i] = 200;
+      want8[i] = 200;
+      i += 1;
+    }
+    copy_u8(&got8[8], &src8[0], n);
+    ref_u8(&want8[8], &src8[0], n, zero);
+    i = 0;
+    while (i < 192) {
+      if (got8[i] != want8[i]) {
+        var a: int32 = (int32)got8[i];
+        var b: int32 = (int32)want8[i];
+        println("FAIL u8 n={n} at {i}: {a} want {b}");
+        fails += 1;
+        i = 192;
+      }
+      i += 1;
+    }
+    n += 1;
+  }
+
+  var src4: int32[96];
+  var got4: int32[96];
+  var want4: int32[96];
+  i = 0;
+  while (i < 96) {
+    src4[i] = i * 131 - 17;
+    i += 1;
+  }
+  n = 0;
+  while (n <= 40) {
+    i = 0;
+    while (i < 96) {
+      got4[i] = -999;
+      want4[i] = -999;
+      i += 1;
+    }
+    copy_i32(&got4[4], &src4[0], n);
+    ref_i32(&want4[4], &src4[0], n, zero);
+    i = 0;
+    while (i < 96) {
+      if (got4[i] != want4[i]) {
+        var a2: int32 = got4[i];
+        var b2: int32 = want4[i];
+        println("FAIL i32 n={n} at {i}: {a2} want {b2}");
+        fails += 1;
+        i = 96;
+      }
+      i += 1;
+    }
+    n += 1;
+  }
+
+  var src8w: int64[48];
+  var got8w: int64[48];
+  i = 0;
+  while (i < 48) {
+    src8w[i] = (int64)i * 1000003 + 7;
+    got8w[i] = -1;
+    i += 1;
+  }
+  copy_i64(&got8w[0], &src8w[0], 33);
+  i = 0;
+  while (i < 33) {
+    if (got8w[i] != src8w[i]) {
+      println("FAIL i64 at {i}");
+      fails += 1;
+      i = 33;
+    }
+    i += 1;
+  }
+  if (got8w[33] != -1) {
+    println("FAIL i64 wrote past its length");
+    fails += 1;
+  }
+
+  var over: uint8[128];
+  var overref: uint8[128];
+  var shift: int32 = 1;
+  while (shift <= 40) {
+    i = 0;
+    while (i < 128) {
+      over[i] = (uint8)(i * 3 + 1);
+      overref[i] = (uint8)(i * 3 + 1);
+      i += 1;
+    }
+    copy_u8(&over[shift], &over[0], 70);
+    ref_u8(&overref[shift], &overref[0], 70, zero);
+    i = 0;
+    while (i < 128) {
+      if (over[i] != overref[i]) {
+        var a3: int32 = (int32)over[i];
+        var b3: int32 = (int32)overref[i];
+        println("FAIL overlap up shift={shift} at {i}: {a3} want {b3}");
+        fails += 1;
+        i = 128;
+      }
+      i += 1;
+    }
+    i = 0;
+    while (i < 128) {
+      over[i] = (uint8)(i * 3 + 1);
+      overref[i] = (uint8)(i * 3 + 1);
+      i += 1;
+    }
+    copy_u8(&over[0], &over[shift], 70);
+    ref_u8(&overref[0], &overref[shift], 70, zero);
+    i = 0;
+    while (i < 128) {
+      if (over[i] != overref[i]) {
+        var a4: int32 = (int32)over[i];
+        var b4: int32 = (int32)overref[i];
+        println("FAIL overlap down shift={shift} at {i}: {a4} want {b4}");
+        fails += 1;
+        i = 128;
+      }
+      i += 1;
+    }
+    shift += 1;
+  }
+
+  i = 0;
+  while (i < 128) {
+    over[i] = (uint8)(i * 3 + 1);
+    i += 1;
+  }
+  copy_u8(&over[0], &over[0], 64);
+  i = 0;
+  while (i < 64) {
+    if (over[i] != (uint8)(i * 3 + 1)) {
+      println("FAIL self copy at {i}");
+      fails += 1;
+      i = 64;
+    }
+    i += 1;
+  }
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("{fails} case(s) failed");
+  return 1;
+}

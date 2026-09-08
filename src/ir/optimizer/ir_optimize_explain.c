@@ -3942,6 +3942,7 @@ IRFunction *ir_explain_clone_function(const IRFunction *src) {
 static const char *const IR_KERNEL_DESC[IR_OP_KIND_COUNT] = {
     [IR_OP_COUNT_WORD_STARTS] = "SSE2 word-start scan, 16 bytes/iteration",
     [IR_OP_MEMCPY_INLINE] = "inline memcpy (constant size)",
+    [IR_OP_SIMD_COPY] = "32-byte AVX2 element copy (scalar when the regions overlap)",
     [IR_OP_SIMD_SUM_I32] = "vpaddd, 8-wide int32 sum (AVX2)",
     [IR_OP_SIMD_SUM_U8] = "vpsadbw, 32-wide byte sum (AVX2)",
     [IR_OP_SIMD_BYTE_MAP] = "32-wide byte map (AVX2)",

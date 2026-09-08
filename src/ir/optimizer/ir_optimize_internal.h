@@ -792,6 +792,7 @@ int ir_simd_minmax_reduce_pass(IRFunction *function, int *changed);
 int ir_simd_sum_float_pass(IRFunction *function, int *changed);
 int ir_simd_sum_i32_pass(IRFunction *function, int *changed);
 int ir_simd_sum_u8_pass(IRFunction *function, int *changed);
+int ir_simd_copy_pass(IRFunction *function, int *changed);
 int ir_simd_fill_pass(IRFunction *function, int *changed);
 #define IR_SAFETY_TEMP_PREFIX ".safe"
 

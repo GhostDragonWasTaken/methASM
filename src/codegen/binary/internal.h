@@ -537,6 +537,7 @@ int code_generator_binary_emit_global_symbol_load( CodeGenerator *generator, Bin
 int code_generator_binary_emit_global_symbol_store( CodeGenerator *generator, BinaryFunctionContext *context, const char *symbol_name, MtlcType *type, int declare_external, BinaryGpRegister source_register);
 int code_generator_binary_emit_load_from_address( CodeGenerator *generator, BinaryFunctionContext *context, BinaryGpRegister address_register, int size, BinaryGpRegister target_register);
 int code_generator_binary_emit_local_string_store( CodeGenerator *generator, BinaryFunctionContext *context, int offset, BinaryGpRegister source_register);
+int code_generator_binary_emit_simd_copy(CodeGenerator *generator, BinaryFunctionContext *context, const IRInstruction *instruction);
 int code_generator_binary_emit_memcpy_inline( CodeGenerator *generator, BinaryFunctionContext *context, const IRInstruction *instruction);
 int code_generator_binary_emit_operand_load( CodeGenerator *generator, BinaryFunctionContext *context, const IROperand *operand, BinaryGpRegister target_register);
 int code_generator_binary_emit_profile_enter(CodeGenerator *generator,

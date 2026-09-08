@@ -537,6 +537,13 @@ $cases = @(
   @{ Name = "guarded_load_hoist"; Path = "tests/test_guarded_load_hoist.mettle"; ShouldSucceed = $true },
   @{ Name = "const_pool_dominates"; Path = "tests/test_const_pool_dominates.mettle"; ShouldSucceed = $true },
   @{
+    Name          = "simd_copy_kernel"
+    Path          = "tests/test_simd_copy_kernel.mettle"
+    ShouldSucceed = $true
+    Args          = @("--release")
+    IrMustMatch   = @("simd_copy")
+  },
+  @{
     Name          = "row_pointer_through_cast"
     Path          = "tests/test_row_pointer_through_cast.mettle"
     ShouldSucceed = $true

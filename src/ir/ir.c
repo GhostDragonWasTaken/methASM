@@ -2320,6 +2320,7 @@ static const char *const IR_OPCODE_NAMES[IR_OP_KIND_COUNT] = {
     [IR_OP_SIMD_SUM_U8] = "simd_sum_u8",
     [IR_OP_SIMD_BYTE_MAP] = "simd_byte_map",
     [IR_OP_SIMD_FILL] = "simd_fill",
+    [IR_OP_SIMD_COPY] = "simd_copy",
     [IR_OP_SIMD_MATMUL_N32] = "simd_matmul_n32",
     [IR_OP_SIMD_INSERTION_SORT_I32] = "simd_insertion_sort_i32",
     [IR_OP_SIMD_DOT_I32] = "simd_dot_i32",
@@ -2802,6 +2803,10 @@ static int ir_format_simd_int_line(const IRInstruction *instruction,
   (void)rhs;
   *handled = 1;
   switch (instruction->op) {
+  case IR_OP_SIMD_COPY:
+    written = snprintf(buffer, buffer_size,
+                       "simd_copy(dst=%s, src=%s, len=%s)", dest, lhs, rhs);
+    break;
   case IR_OP_MEMCPY_INLINE:
     written = snprintf(buffer, buffer_size, "%s = memcpy_inline %s, %s", dest,
                        lhs, rhs);

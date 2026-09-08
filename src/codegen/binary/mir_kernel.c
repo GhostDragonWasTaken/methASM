@@ -40,6 +40,8 @@ static const MirIrKernel kMirIrKernels[] = {
     {IR_OP_SIMD_DOT_F32, "simd_dot_f32",
      code_generator_binary_emit_simd_dot_f32, 0},
 
+    {IR_OP_SIMD_COPY, "simd_copy", code_generator_binary_emit_simd_copy,
+     0},
     {IR_OP_MEMCPY_INLINE, "memcpy_inline",
      code_generator_binary_emit_memcpy_inline, 0},
 

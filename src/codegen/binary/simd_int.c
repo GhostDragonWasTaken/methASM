@@ -920,6 +920,142 @@ int code_generator_binary_emit_simd_scale_i32(
                                                       BINARY_GP_RAX);
 }
 
+static int copy_move_element(BinaryCodeBuffer *b, long long size) {
+  if (size == 1) {
+    return binary_emit_movzx_reg_mem8(b, BINARY_GP_RAX, BINARY_GP_RDX, 0) &&
+           binary_emit_mov_mem_reg8(b, BINARY_GP_RCX, 0, BINARY_GP_RAX);
+  }
+  if (size == 2) {
+    return binary_emit_movzx_reg_mem16(b, BINARY_GP_RAX, BINARY_GP_RDX, 0) &&
+           binary_emit_mov_mem_reg16(b, BINARY_GP_RCX, 0, BINARY_GP_RAX);
+  }
+  if (size == 4) {
+    return binary_emit_mov_reg_mem32(b, BINARY_GP_RAX, BINARY_GP_RDX, 0) &&
+           binary_emit_mov_mem_reg32(b, BINARY_GP_RCX, 0, BINARY_GP_RAX);
+  }
+  return binary_emit_mov_reg_mem(b, BINARY_GP_RAX, BINARY_GP_RDX, 0) &&
+         binary_emit_mov_mem_reg(b, BINARY_GP_RCX, 0, BINARY_GP_RAX);
+}
+
+int code_generator_binary_emit_simd_copy(CodeGenerator *generator,
+                                         BinaryFunctionContext *context,
+                                         const IRInstruction *instruction) {
+  BinaryCodeBuffer *b = NULL;
+  long long size = 0;
+  unsigned char shift = 0;
+  size_t j_empty = 0;
+  size_t j_scalar = 0;
+  size_t j_tail = 0;
+  size_t j_tail_done = 0;
+  size_t j_scalar_done = 0;
+  size_t j_vec_join = 0;
+  size_t vec_top = 0;
+  size_t tail_top = 0;
+  size_t scalar_top = 0;
+
+  if (!generator || !context || !instruction ||
+      instruction->argument_count < 1 ||
+      instruction->arguments[0].kind != IR_OPERAND_INT) {
+    return 0;
+  }
+  size = instruction->arguments[0].int_value;
+  if (size != 1 && size != 2 && size != 4 && size != 8) {
+    return 0;
+  }
+  shift = size == 1 ? 0 : size == 2 ? 1 : size == 4 ? 2 : 3;
+  b = &context->code;
+
+  if (!code_generator_binary_emit_operand_load(generator, context,
+                                               &instruction->dest,
+                                               BINARY_GP_RCX) ||
+      !code_generator_binary_emit_operand_load(generator, context,
+                                               &instruction->lhs,
+                                               BINARY_GP_RDX) ||
+      !code_generator_binary_emit_operand_load(generator, context,
+                                               &instruction->rhs,
+                                               BINARY_GP_R8)) {
+    return 0;
+  }
+
+  if (!binary_emit_movsxd_reg_reg32(b, BINARY_GP_R8, BINARY_GP_R8) ||
+      !wcs_cmp_reg_imm32(b, BINARY_GP_R8, 0) ||
+      !wcs_jcc(b, 0x8E, &j_empty) ||
+      !binary_emit_mov_reg_reg(b, BINARY_GP_R9, BINARY_GP_R8)) {
+    return 0;
+  }
+  if (shift && !wcs_shift_reg_imm(b, BINARY_GP_R9, 0, shift)) {
+    return 0;
+  }
+
+  if (!binary_emit_mov_reg_reg(b, BINARY_GP_RAX, BINARY_GP_RCX) ||
+      !binary_emit_alu_reg_reg(b, 0x29, BINARY_GP_RAX, BINARY_GP_RDX) ||
+      !binary_emit_cmp_reg_reg(b, BINARY_GP_RAX, BINARY_GP_R9) ||
+      !wcs_jcc(b, 0x82, &j_scalar)) {
+    return 0;
+  }
+
+  vec_top = b->size;
+  if (!wcs_cmp_reg_imm32(b, BINARY_GP_R9, 32) ||
+      !wcs_jcc(b, 0x82, &j_tail) ||
+      !wcs_avx_vmovdqu_ymm_mem(b, 0, BINARY_GP_RDX, 0) ||
+      !wcs_avx_vmovdqu_mem_ymm(b, BINARY_GP_RCX, 0, 0) ||
+      !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 32) ||
+      !wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 32) ||
+      !wcs_addsub_reg_imm8(b, BINARY_GP_R9, 1, 32)) {
+    return 0;
+  }
+  {
+    size_t j_back = 0;
+    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, vec_top)) {
+      return 0;
+    }
+  }
+
+  if (!wcs_patch_here(b, j_tail) || !wcs_avx_vzeroupper(b)) {
+    return 0;
+  }
+  tail_top = b->size;
+  if (!wcs_cmp_reg_imm32(b, BINARY_GP_R9, 0) ||
+      !wcs_jcc(b, 0x8E, &j_tail_done) ||
+      !binary_emit_movzx_reg_mem8(b, BINARY_GP_RAX, BINARY_GP_RDX, 0) ||
+      !binary_emit_mov_mem_reg8(b, BINARY_GP_RCX, 0, BINARY_GP_RAX) ||
+      !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 1) ||
+      !wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 1) ||
+      !wcs_addsub_reg_imm8(b, BINARY_GP_R9, 1, 1)) {
+    return 0;
+  }
+  {
+    size_t j_back = 0;
+    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, tail_top)) {
+      return 0;
+    }
+  }
+  if (!wcs_patch_here(b, j_tail_done) || !wcs_jcc(b, 0, &j_vec_join)) {
+    return 0;
+  }
+
+  if (!wcs_patch_here(b, j_scalar)) {
+    return 0;
+  }
+  scalar_top = b->size;
+  if (!wcs_cmp_reg_imm32(b, BINARY_GP_R8, 0) ||
+      !wcs_jcc(b, 0x8E, &j_scalar_done) || !copy_move_element(b, size) ||
+      !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, (unsigned char)size) ||
+      !wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, (unsigned char)size) ||
+      !wcs_addsub_reg_imm8(b, BINARY_GP_R8, 1, 1)) {
+    return 0;
+  }
+  {
+    size_t j_back = 0;
+    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, scalar_top)) {
+      return 0;
+    }
+  }
+
+  return wcs_patch_here(b, j_scalar_done) && wcs_patch_here(b, j_vec_join) &&
+         wcs_patch_here(b, j_empty);
+}
+
 int code_generator_binary_emit_simd_reverse_copy_i32(
     CodeGenerator *generator, BinaryFunctionContext *context,
     const IRInstruction *instruction) {

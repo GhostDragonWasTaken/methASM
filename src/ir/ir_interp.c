@@ -3649,6 +3649,37 @@ static int ii_exec_fill(IRInterpMachine *machine, IIFrame *frame,
                       const IRInstruction *insn, int *handled) {
   *handled = 1;
   switch (insn->op) {
+  case IR_OP_SIMD_COPY: {
+    unsigned long long dst_addr;
+    unsigned long long src_addr;
+    long long count;
+    long long elem;
+    if (insn->argument_count < 1 ||
+        insn->arguments[0].kind != IR_OPERAND_INT) {
+      ii_fail(machine, IR_INTERP_UNSUPPORTED, "simd_copy arity");
+      return 0;
+    }
+    elem = insn->arguments[0].int_value;
+    if (elem != 1 && elem != 2 && elem != 4 && elem != 8) {
+      ii_fail(machine, IR_INTERP_UNSUPPORTED, "simd_copy element size");
+      return 0;
+    }
+    if (!ii_fetch_addr(machine, frame, &insn->dest, &dst_addr) ||
+        !ii_fetch_addr(machine, frame, &insn->lhs, &src_addr) ||
+        !ii_fetch_int(machine, frame, &insn->rhs, &count)) {
+      return 0;
+    }
+    for (long long i = 0; i < count; i++) {
+      unsigned long long bits = 0;
+      unsigned long long off = (unsigned long long)(i * elem);
+      if (!ii_mem_read(machine, src_addr + off, (int)elem, &bits) ||
+          !ii_mem_write(machine, dst_addr + off, (int)elem, bits)) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+
   case IR_OP_SIMD_FILL: {
     if (insn->argument_count < 3) {
       ii_fail(machine, IR_INTERP_UNSUPPORTED, "simd_fill arity");
