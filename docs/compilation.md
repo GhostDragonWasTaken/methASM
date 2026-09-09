@@ -77,6 +77,12 @@ frequencies to the optimizer, so a hot callee bypasses the inliner's size
 budget. No instrumented build and no training run. It implies `-O`. See
 [Profile-guided optimization](pgo.md).
 
+`--pgo-gen` builds an instrumented program that counts every basic block and
+writes them to the file named by `METTLE_PROFILE_OUT`; `--pgo-use=FILE` reads
+those counts back into the same consumers. That measures a real run on real
+input, where `--pgo` guesses from an interpreted `main()`. Both imply `-O` and
+they are mutually exclusive. See [Profile-guided optimization](pgo.md).
+
 `--verify` executes each function's before-and-after IR on generated inputs
 after every pass and compares. A diverging pass is reported with a
 counterexample, quarantined for that function, and the build continues from
@@ -271,6 +277,7 @@ itself.
 | Variable | Effect |
 |----------|--------|
 | `METTLE_PGO_HOT` | Call-frequency threshold for `--pgo`. |
+| `METTLE_PARALLEL_THREADS` | Cores `std/parallel` uses, capped at 16. |
 | `METTLE_SKIP_PASS` | Skip a named optimizer pass, for bisecting a miscompile. |
 | `METTLE_TIME_IR_PASSES` | Time each IR pass. |
 | `METTLE_TRACE_IR_PASSES` | Trace each IR pass. |
@@ -280,7 +287,7 @@ itself.
 | `METTLE_NO_SIMD` | Turn the vectorizers off. |
 | `METTLE_LINK_GC_REPORT` | Report what link-time section collection removed. |
 | `METTLE_VERIFY_STATS` | Statistics from `--verify`. |
-| `METTLE_PROFILE_OUT` | Output path for `--profile-blocks`. |
+| `METTLE_PROFILE_OUT` | Where a `--pgo-gen` or `--profile-blocks` build writes its counts. |
 | `NO_COLOR`, `CLICOLOR_FORCE` | Turn diagnostic color off or on. |
 | `TRACY_DIR` | Tracy repo root for `--tracy`. |
 

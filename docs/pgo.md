@@ -73,6 +73,37 @@ A program whose real hot path depends on input the interpreter never sees will
 measure the wrong thing. Give `main()` a representative default path if you
 want `--pgo` to be worth turning on.
 
+## Measuring a real run instead
+
+Where `--pgo` guesses from an interpreted `main()`, `--pgo-gen` and
+`--pgo-use` measure the program actually running on real input.
+
+```bash
+mettle --release --pgo-gen --build program.mettle -o train.exe
+METTLE_PROFILE_OUT=program.mprof ./train.exe <your real input>
+mettle --release --pgo-use=program.mprof --build program.mettle -o program.exe
+```
+
+The `--pgo-gen` build counts how many times each basic block runs and writes
+the counts to the file named by `METTLE_PROFILE_OUT`, defaulting to
+`mettle.mprof`. It is much slower than a normal build, because every block
+carries a counter; it is for the training run only.
+
+`--pgo-use` reads those counts back and hands them to the same consumers
+`--pgo` feeds: the inliner, the loop unroller, the prefetcher and the
+deadline analysis. Both flags imply `-O`, and they are mutually exclusive.
+
+The counts are joined to your source by location, so the optimized build does
+not have to match the instrumented one instruction for instruction. Editing
+the program between the two steps is fine; blocks whose line moved simply
+stop matching and fall back to the static heuristic.
+
+This is worth reaching for when `main()` cannot exercise the real workload,
+which is exactly the case `--pgo` says it does nothing for. It costs a build
+and a run, so measure whether it pays for your program rather than assuming:
+on a suite of sixteen application benchmarks it landed inside the noise, and
+more aggressive use of the counts to widen inlining measured slower.
+
 ## See also
 
 - [Compile-time execution](testing.md)
