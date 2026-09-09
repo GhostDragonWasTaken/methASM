@@ -11,8 +11,7 @@ extern char *getenv(const char *name);
 #define MTP_YIELD_ROUNDS 2048u
 #define MTP_MEMORY_CHUNK_BYTES 262144ll
 #define MTP_STREAM_THRESHOLD_BYTES (8ll << 20)
-#define MTP_TICKET_COUNT_SHIFT 32u
-#define MTP_TICKET_NEXT_SHIFT 48u
+#define MTP_TICKET_NEXT_SHIFT 32u
 
 typedef struct {
   MettleParallelBody body;
@@ -24,18 +23,23 @@ typedef struct {
 } MtpJob;
 
 typedef struct {
+  uint64_t completed __attribute__((aligned(MTP_CACHE_LINE)));
+} MtpSlot;
+
+typedef struct {
   MtpJob job __attribute__((aligned(MTP_CACHE_LINE)));
   uint64_t ticket __attribute__((aligned(MTP_CACHE_LINE)));
   uint32_t generation __attribute__((aligned(MTP_CACHE_LINE)));
-  uint32_t completed __attribute__((aligned(MTP_CACHE_LINE)));
   int32_t parked __attribute__((aligned(MTP_CACHE_LINE)));
   int32_t busy __attribute__((aligned(MTP_CACHE_LINE)));
   unsigned threads;
   unsigned workers;
   int spawned;
+  uint64_t dispatched;
 } MtpPool;
 
 static MtpPool g_pool;
+static MtpSlot g_slots[METTLE_PARALLEL_MAX_THREADS];
 
 static void mtp_worker(unsigned index);
 
@@ -271,29 +275,30 @@ static unsigned mtp_threads(void) {
   return threads;
 }
 
-static uint64_t mtp_ticket(uint32_t generation, unsigned count) {
-  return (uint64_t)generation | ((uint64_t)count << MTP_TICKET_COUNT_SHIFT);
-}
-
 static unsigned mtp_ticket_count(uint64_t ticket) {
-  return (unsigned)(ticket >> MTP_TICKET_COUNT_SHIFT) & 0xffffu;
+  return (unsigned)ticket;
 }
 
 static unsigned mtp_ticket_next(uint64_t ticket) {
   return (unsigned)(ticket >> MTP_TICKET_NEXT_SHIFT);
 }
 
+static int mtp_ticket_exhausted(uint64_t ticket) {
+  return mtp_ticket_next(ticket) >= mtp_ticket_count(ticket);
+}
+
 static int mtp_claim(unsigned *chunk) {
   uint64_t ticket = __atomic_load_n(&g_pool.ticket, __ATOMIC_ACQUIRE);
-  while (mtp_ticket_next(ticket) < mtp_ticket_count(ticket)) {
-    uint64_t claimed = ticket + (1ull << MTP_TICKET_NEXT_SHIFT);
-    if (__atomic_compare_exchange_n(&g_pool.ticket, &ticket, claimed, 1,
-                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-      *chunk = mtp_ticket_next(ticket);
-      return 1;
-    }
+  if (mtp_ticket_exhausted(ticket)) {
+    return 0;
   }
-  return 0;
+  ticket = __atomic_fetch_add(&g_pool.ticket, 1ull << MTP_TICKET_NEXT_SHIFT,
+                              __ATOMIC_ACQ_REL);
+  if (mtp_ticket_exhausted(ticket)) {
+    return 0;
+  }
+  *chunk = mtp_ticket_next(ticket);
+  return 1;
 }
 
 static void mtp_run(const MtpJob *job, long long lo, long long hi,
@@ -312,7 +317,8 @@ static void mtp_work(unsigned slot) {
     long long start = job->lo + job->span * (long long)chunk;
     long long end = start + job->span;
     mtp_run(job, start, end < job->hi ? end : job->hi, slot);
-    __atomic_add_fetch(&g_pool.completed, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_slots[slot].completed, g_slots[slot].completed + 1u,
+                     __ATOMIC_RELEASE);
   }
 }
 
@@ -382,9 +388,8 @@ static void mtp_publish(unsigned count) {
   uint32_t generation =
       __atomic_load_n(&g_pool.generation, __ATOMIC_RELAXED) + 1u;
   int32_t parked;
-  __atomic_store_n(&g_pool.completed, 0u, __ATOMIC_RELAXED);
-  __atomic_store_n(&g_pool.ticket, mtp_ticket(generation, count),
-                   __ATOMIC_RELEASE);
+  g_pool.dispatched += count;
+  __atomic_store_n(&g_pool.ticket, (uint64_t)count, __ATOMIC_RELEASE);
   __atomic_store_n(&g_pool.generation, generation, __ATOMIC_SEQ_CST);
   parked = __atomic_load_n(&g_pool.parked, __ATOMIC_SEQ_CST);
   if (parked > 0) {
@@ -392,9 +397,17 @@ static void mtp_publish(unsigned count) {
   }
 }
 
-static void mtp_join(unsigned count) {
+static uint64_t mtp_completed(void) {
+  uint64_t total = 0;
+  for (unsigned slot = 0; slot <= g_pool.workers; slot++) {
+    total += __atomic_load_n(&g_slots[slot].completed, __ATOMIC_ACQUIRE);
+  }
+  return total;
+}
+
+static void mtp_join(void) {
   unsigned rounds = 0;
-  while (__atomic_load_n(&g_pool.completed, __ATOMIC_ACQUIRE) != count) {
+  while (mtp_completed() != g_pool.dispatched) {
     mtp_relax(&rounds);
   }
 }
@@ -428,7 +441,7 @@ static void mtp_dispatch(MtpJob *job, long long min_chunk) {
   g_pool.job = *job;
   mtp_publish(count);
   mtp_work(g_pool.workers);
-  mtp_join(count);
+  mtp_join();
   mtp_pool_release();
 }
 

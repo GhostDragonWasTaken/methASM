@@ -8056,17 +8056,142 @@ static int mir_call_returns_canonical_narrow(const MirFunction *fn,
   return 1;
 }
 
-static void mir_extension_facts(const MirFunction *fn, unsigned char *sx32,
-                                unsigned char *zx32) {
-  unsigned char *defined = (unsigned char *)calloc(fn->vreg_count, 1);
-  int changed = 1;
-  if (!defined) {
-    memset(sx32, 0, fn->vreg_count);
-    memset(zx32, 0, fn->vreg_count);
-    return;
+static size_t mir_prev_real_insn(const MirFunction *fn, size_t i) {
+  while (i > 0) {
+    i--;
+    if (fn->insns[i].op != MIR_NOP) {
+      return i;
+    }
   }
-  memset(sx32, 1, fn->vreg_count);
-  memset(zx32, 1, fn->vreg_count);
+  return fn->insn_count;
+}
+
+static size_t mir_next_real_insn(const MirFunction *fn, size_t i) {
+  for (i++; i < fn->insn_count; i++) {
+    if (fn->insns[i].op != MIR_NOP) {
+      return i;
+    }
+  }
+  return fn->insn_count;
+}
+
+typedef struct {
+  int sx;
+  int zx;
+} MirExtFacts;
+
+static MirExtFacts mir_ext_facts_none(void) {
+  MirExtFacts facts = {0, 0};
+  return facts;
+}
+
+static MirExtFacts mir_ext_facts_of_extend(const MirInst *in) {
+  MirExtFacts facts = mir_ext_facts_none();
+
+  if (in->width == 4) {
+    facts.sx = in->op == MIR_MOVSX;
+    facts.zx = in->op == MIR_MOVZX;
+    return facts;
+  }
+  if (in->width < 4) {
+    facts.sx = 1;
+    facts.zx = in->op == MIR_MOVZX;
+  }
+  return facts;
+}
+
+static MirExtFacts mir_ext_facts_of_mov(const MirFunction *fn,
+                                        const MirInst *in,
+                                        const unsigned char *sx32,
+                                        const unsigned char *zx32) {
+  MirExtFacts facts = mir_ext_facts_none();
+
+  if (in->a.kind == MIR_OPK_VREG) {
+    if (in->a.vreg >= 0 && (size_t)in->a.vreg < fn->vreg_count) {
+      facts.sx = sx32[in->a.vreg];
+      facts.zx = zx32[in->a.vreg];
+    }
+    return facts;
+  }
+  if (in->a.kind == MIR_OPK_IMM) {
+    facts.sx = in->a.imm >= -2147483648LL && in->a.imm <= 2147483647LL;
+    facts.zx = in->a.imm >= 0 && in->a.imm <= 4294967295LL;
+    return facts;
+  }
+  if (in->a.kind == MIR_OPK_MEM && in->width == 4) {
+    facts.sx = !in->is_unsigned;
+    facts.zx = in->is_unsigned;
+    return facts;
+  }
+  if (in->a.kind == MIR_OPK_MEM && (in->width == 1 || in->width == 2)) {
+    facts.sx = 1;
+    facts.zx = in->is_unsigned;
+  }
+  return facts;
+}
+
+static MirExtFacts mir_ext_facts_of_return_value(const MirFunction *fn,
+                                                 size_t at) {
+  MirExtFacts facts = mir_ext_facts_none();
+  size_t call = mir_prev_real_insn(fn, at);
+  int signed_ret = 0;
+
+  if (call < fn->insn_count &&
+      mir_call_returns_canonical_narrow(fn, &fn->insns[call], &signed_ret)) {
+    facts.sx = signed_ret;
+    facts.zx = !signed_ret;
+  }
+  return facts;
+}
+
+static MirExtFacts mir_ext_facts_of_def(const MirFunction *fn, size_t at,
+                                        const unsigned char *sx32,
+                                        const unsigned char *zx32) {
+  const MirInst *in = &fn->insns[at];
+
+  if (in->is_float) {
+    return mir_ext_facts_none();
+  }
+  if (in->op == MIR_MOVSX || in->op == MIR_MOVZX) {
+    return mir_ext_facts_of_extend(in);
+  }
+  if (in->op == MIR_SETCC) {
+    MirExtFacts facts = {1, 1};
+    return facts;
+  }
+  if (in->op == MIR_MOV && in->a.kind == MIR_OPK_PHYS &&
+      in->a.phys == BINARY_GP_RAX && at > 0) {
+    return mir_ext_facts_of_return_value(fn, at);
+  }
+  if (in->op == MIR_MOV) {
+    return mir_ext_facts_of_mov(fn, in, sx32, zx32);
+  }
+  return mir_ext_facts_none();
+}
+
+static MirExtFacts mir_ext_facts_of_following_extend(const MirFunction *fn,
+                                                     size_t at, MirVregId d) {
+  MirExtFacts facts = mir_ext_facts_none();
+  size_t next = mir_next_real_insn(fn, at);
+  const MirInst *nx;
+
+  if (next >= fn->insn_count) {
+    return facts;
+  }
+  nx = &fn->insns[next];
+  if ((nx->op == MIR_MOVSX || nx->op == MIR_MOVZX) && nx->width == 4 &&
+      !nx->is_float && nx->dst.kind == MIR_OPK_VREG && nx->dst.vreg == d &&
+      nx->a.kind == MIR_OPK_VREG && nx->a.vreg == d) {
+    facts.sx = nx->op == MIR_MOVSX;
+    facts.zx = nx->op == MIR_MOVZX;
+  }
+  return facts;
+}
+
+static void mir_ext_facts_seed_params(const MirFunction *fn,
+                                      unsigned char *defined,
+                                      unsigned char *sx32,
+                                      unsigned char *zx32) {
   for (size_t v = 0; v < fn->vreg_count; v++) {
     if (fn->vregs[v].address_taken || fn->vregs[v].rclass != MIR_RC_GP) {
       sx32[v] = 0;
@@ -8088,89 +8213,54 @@ static void mir_extension_facts(const MirFunction *fn, unsigned char *sx32,
       sx32[param->vreg] = 0;
     }
   }
-  while (changed) {
-    changed = 0;
-    for (size_t i = 0; i < fn->insn_count; i++) {
-      const MirInst *in = &fn->insns[i];
-      MirVregId d;
-      int s = 0;
-      int z = 0;
-      if (in->op == MIR_NOP || in->dst.kind != MIR_OPK_VREG) {
-        continue;
-      }
-      d = in->dst.vreg;
-      if (d < 0 || (size_t)d >= fn->vreg_count) {
-        continue;
-      }
-      defined[d] = 1;
-      if (in->is_float) {
-        s = 0;
-      } else if (in->op == MIR_MOVSX && in->width == 4) {
-        s = 1;
-      } else if (in->op == MIR_MOVZX && in->width == 4) {
-        z = 1;
-      } else if (in->op == MIR_MOVZX && in->width < 4) {
-        s = 1;
-        z = 1;
-      } else if (in->op == MIR_MOVSX && in->width < 4) {
-        s = 1;
-      } else if (in->op == MIR_SETCC) {
-        s = 1;
-        z = 1;
-      } else if (in->op == MIR_MOV && in->a.kind == MIR_OPK_VREG) {
-        if (in->a.vreg >= 0 && (size_t)in->a.vreg < fn->vreg_count) {
-          s = sx32[in->a.vreg];
-          z = zx32[in->a.vreg];
-        }
-      } else if (in->op == MIR_MOV && in->a.kind == MIR_OPK_IMM) {
-        s = in->a.imm >= -2147483648LL && in->a.imm <= 2147483647LL;
-        z = in->a.imm >= 0 && in->a.imm <= 4294967295LL;
-      } else if (in->op == MIR_MOV && in->a.kind == MIR_OPK_MEM &&
-                 in->width == 4) {
-        s = !in->is_unsigned;
-        z = in->is_unsigned;
-      } else if (in->op == MIR_MOV && in->a.kind == MIR_OPK_MEM &&
-                 (in->width == 1 || in->width == 2)) {
-        s = 1;
-        z = in->is_unsigned;
-      } else if (in->op == MIR_MOV && in->a.kind == MIR_OPK_PHYS &&
-                 in->a.phys == BINARY_GP_RAX && i > 0) {
-        size_t j = i - 1;
-        int signed_ret = 0;
-        while (j > 0 && fn->insns[j].op == MIR_NOP) {
-          j--;
-        }
-        if (mir_call_returns_canonical_narrow(fn, &fn->insns[j],
-                                              &signed_ret)) {
-          s = signed_ret;
-          z = !signed_ret;
-        }
-      }
-      if (!s && !z) {
-        size_t j = i + 1;
-        while (j < fn->insn_count && fn->insns[j].op == MIR_NOP) {
-          j++;
-        }
-        if (j < fn->insn_count) {
-          const MirInst *nx = &fn->insns[j];
-          if ((nx->op == MIR_MOVSX || nx->op == MIR_MOVZX) && nx->width == 4 &&
-              !nx->is_float && nx->dst.kind == MIR_OPK_VREG &&
-              nx->dst.vreg == d && nx->a.kind == MIR_OPK_VREG &&
-              nx->a.vreg == d) {
-            s = nx->op == MIR_MOVSX;
-            z = nx->op == MIR_MOVZX;
-          }
-        }
-      }
-      if (sx32[d] && !s) {
-        sx32[d] = 0;
-        changed = 1;
-      }
-      if (zx32[d] && !z) {
-        zx32[d] = 0;
-        changed = 1;
-      }
+}
+
+static int mir_ext_facts_round(const MirFunction *fn, unsigned char *defined,
+                               unsigned char *sx32, unsigned char *zx32) {
+  int changed = 0;
+
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    const MirInst *in = &fn->insns[i];
+    MirExtFacts facts;
+    MirVregId d;
+
+    if (in->op == MIR_NOP || in->dst.kind != MIR_OPK_VREG) {
+      continue;
     }
+    d = in->dst.vreg;
+    if (d < 0 || (size_t)d >= fn->vreg_count) {
+      continue;
+    }
+    defined[d] = 1;
+    facts = mir_ext_facts_of_def(fn, i, sx32, zx32);
+    if (!facts.sx && !facts.zx) {
+      facts = mir_ext_facts_of_following_extend(fn, i, d);
+    }
+    if (sx32[d] && !facts.sx) {
+      sx32[d] = 0;
+      changed = 1;
+    }
+    if (zx32[d] && !facts.zx) {
+      zx32[d] = 0;
+      changed = 1;
+    }
+  }
+  return changed;
+}
+
+static void mir_extension_facts(const MirFunction *fn, unsigned char *sx32,
+                                unsigned char *zx32) {
+  unsigned char *defined = (unsigned char *)calloc(fn->vreg_count, 1);
+
+  if (!defined) {
+    memset(sx32, 0, fn->vreg_count);
+    memset(zx32, 0, fn->vreg_count);
+    return;
+  }
+  memset(sx32, 1, fn->vreg_count);
+  memset(zx32, 1, fn->vreg_count);
+  mir_ext_facts_seed_params(fn, defined, sx32, zx32);
+  while (mir_ext_facts_round(fn, defined, sx32, zx32)) {
   }
   for (size_t v = 0; v < fn->vreg_count; v++) {
     if (!defined[v]) {
@@ -8508,15 +8598,6 @@ static int mir_count_vreg_uses_defs(const MirFunction *fn, int **uses_out,
   return 1;
 }
 
-static size_t mir_prev_real_insn(const MirFunction *fn, size_t i) {
-  while (i > 0) {
-    i--;
-    if (fn->insns[i].op != MIR_NOP) {
-      return i;
-    }
-  }
-  return fn->insn_count;
-}
 
 static void mir_fuse_extend_then_mov(MirFunction *fn) {
   int *uses = NULL;
@@ -8568,14 +8649,6 @@ static void mir_fuse_extend_then_mov(MirFunction *fn) {
   free(defs);
 }
 
-static size_t mir_next_real_insn(const MirFunction *fn, size_t i) {
-  for (i++; i < fn->insn_count; i++) {
-    if (fn->insns[i].op != MIR_NOP) {
-      return i;
-    }
-  }
-  return fn->insn_count;
-}
 
 /* `(1 << c) & mask` tested against zero is a bit test. x86 has one: BT reads
    the bit the second operand names out of the first, so the shift, the mask
@@ -9049,15 +9122,6 @@ static size_t mir_load_table_intersect(MirAvailableLoad *dst, size_t dst_n,
   return n;
 }
 
-static int mir_prev_real(const MirFunction *fn, size_t index) {
-  for (size_t k = index; k > 0; k--) {
-    if (fn->insns[k - 1].op != MIR_NOP) {
-      return (int)(k - 1);
-    }
-  }
-  return -1;
-}
-
 static void mir_cse_loads(MirFunction *fn) {
   if (!fn || fn->insn_count < 2) {
     return;
@@ -9156,9 +9220,9 @@ static void mir_cse_loads(MirFunction *fn) {
         table_n = 0;
       } else {
         const MirAvailableLoad *slot = snap + (size_t)o * MIR_LOAD_TABLE_MAX;
-        int prev = mir_prev_real(fn, i);
+        size_t prev = mir_prev_real_insn(fn, i);
         int falls_through =
-            prev >= 0 && fn->insns[prev].op != MIR_JMP &&
+            prev < fn->insn_count && fn->insns[prev].op != MIR_JMP &&
             fn->insns[prev].op != MIR_RET;
         if (falls_through) {
           table_n = mir_load_table_intersect(table, table_n, slot, snap_n[o]);
@@ -11346,6 +11410,287 @@ static int mir_cache_globals(MirFunction *fn, CodeGenerator *generator,
   return 1;
 }
 
+static int mir_writeback_add_at(MirGlobalWriteback *wb, size_t *cap,
+                                const char *name) {
+  for (size_t j = 0; j < wb->at_count; j++) {
+    if (strcmp(wb->at[j], name) == 0) {
+      return 1;
+    }
+  }
+  if (wb->at_count >= *cap) {
+    size_t nc = *cap ? *cap * 2 : 4;
+    const char **grown = (const char **)realloc(wb->at, nc * sizeof(*grown));
+    if (!grown) {
+      return 0;
+    }
+    wb->at = grown;
+    *cap = nc;
+  }
+  wb->at[wb->at_count++] = name;
+  return 1;
+}
+
+static int mir_collect_aliased_globals(CodeGenerator *generator,
+                                       const IRFunction *ir_function,
+                                       const MirNameMap *map,
+                                       MirGlobalWriteback *wb,
+                                       size_t *at_cap) {
+  for (size_t i = 0; i < ir_function->instruction_count; i++) {
+    const IRInstruction *in = &ir_function->instructions[i];
+    if (in->op != IR_OP_ADDRESS_OF || in->lhs.kind != IR_OPERAND_SYMBOL ||
+        !in->lhs.name || !mir_name_is_global_scalar(generator, in->lhs.name) ||
+        !mir_name_map_has(map, in->lhs.name)) {
+      continue;
+    }
+    if (mir_address_only_feeds_calls(ir_function, in)) {
+      continue;
+    }
+    if (!mir_writeback_add_at(wb, at_cap, in->lhs.name)) {
+      return 0;
+    }
+  }
+  for (size_t i = 0; i < wb->all_count; i++) {
+    if (!mir_global_address_escapes_via_initializer(generator, wb->all[i]) &&
+        !mir_global_address_taken_in_module(generator, wb->all[i])) {
+      continue;
+    }
+    if (!mir_writeback_add_at(wb, at_cap, wb->all[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int mir_literal_fits_narrow_home(const IRInstruction *in, int width,
+                                        int signed_home) {
+  int bits = width * 8;
+
+  if (in->op != IR_OP_ASSIGN || in->lhs.kind != IR_OPERAND_INT) {
+    return 0;
+  }
+  if (signed_home) {
+    return in->lhs.int_value >= -(1ll << (bits - 1)) &&
+           in->lhs.int_value <= (1ll << (bits - 1)) - 1;
+  }
+  return in->lhs.int_value >= 0 &&
+         (uint64_t)in->lhs.int_value < (1ull << bits);
+}
+
+static int mir_result_is_canonical_by_range(CodeGenerator *generator,
+                                            IRFunction *ir_function, size_t at,
+                                            const IRInstruction *in, int width,
+                                            int signed_home,
+                                            void **vr_oracle) {
+  if (signed_home && generator->assume_no_signed_overflow) {
+    return 1;
+  }
+  if (in->op != IR_OP_BINARY && in->op != IR_OP_ASSIGN) {
+    return 0;
+  }
+  if (!*vr_oracle) {
+    *vr_oracle = ir_value_range_oracle_create(ir_function);
+  }
+  return *vr_oracle && ir_value_range_result_is_narrow(*vr_oracle, at,
+                                                       width * 8,
+                                                       !signed_home);
+}
+
+static int mir_dest_takes_canonical_extend(const IRInstruction *in) {
+  return in->op == IR_OP_ASSIGN || in->op == IR_OP_BINARY ||
+         in->op == IR_OP_UNARY || in->op == IR_OP_CALL ||
+         in->op == IR_OP_CALL_INDIRECT;
+}
+
+static int mir_emit_canonical_extend(MirFunction *fn, CodeGenerator *generator,
+                                     BinaryFunctionContext *context,
+                                     MirNameMap *map, IRFunction *ir_function,
+                                     size_t at, const IRInstruction *in,
+                                     void **vr_oracle) {
+  int signed_home = 0;
+  int width;
+  MirOperand dest;
+
+  if (!mir_dest_takes_canonical_extend(in) || fn->has_error) {
+    return 1;
+  }
+  width = mir_dest_integer_narrow_width(generator, context, &in->dest,
+                                        &signed_home);
+  if (!width) {
+    return 1;
+  }
+  if (mir_literal_fits_narrow_home(in, width, signed_home) ||
+      mir_result_is_canonical_by_range(generator, ir_function, at, in,
+                                       width, signed_home, vr_oracle)) {
+    return 1;
+  }
+  dest = mir_value_operand(fn, generator, context, map, &in->dest);
+  if (dest.kind != MIR_OPK_VREG) {
+    return 1;
+  }
+  return mir_emit1(fn, signed_home ? MIR_MOVSX : MIR_MOVZX, dest, dest,
+                   mir_op_none(), width, !signed_home, 0);
+}
+
+static int mir_call_writes_globals(CodeGenerator *generator,
+                                   IRFunction *ir_function, size_t at,
+                                   const IRInstruction *in) {
+  if (in->op == IR_OP_INLINE_ASM) {
+    return 1;
+  }
+  return mir_call_may_write_globals(generator, ir_function, at, in);
+}
+
+static int mir_lower_call_globals(MirFunction *fn, CodeGenerator *generator,
+                                  MirNameMap *map, const IRInstruction *in,
+                                  MirGlobalWriteback *wb,
+                                  int writes_globals) {
+  const IROperand *dest = &in->dest;
+  const char *except = (dest->kind == IR_OPERAND_SYMBOL && dest->name &&
+                        mir_name_is_global_scalar(generator, dest->name))
+                           ? dest->name
+                           : NULL;
+
+  if (!writes_globals || wb->all_count == 0) {
+    return 1;
+  }
+  return mir_emit_global_reloads_except(fn, generator, map, wb, except);
+}
+
+static int mir_lower_general(MirFunction *fn, CodeGenerator *generator,
+                             BinaryFunctionContext *context, MirNameMap *map,
+                             IRFunction *ir_function, size_t at,
+                             MirGlobalWriteback *wb, void **vr_oracle) {
+  const IRInstruction *in = &ir_function->instructions[at];
+  int is_call = in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT ||
+                in->op == IR_OP_INLINE_ASM;
+  int writes_globals =
+      is_call ? mir_call_writes_globals(generator, ir_function, at, in) : 0;
+
+  if (is_call && wb->all_count > 0 &&
+      !mir_emit_global_writebacks(fn, generator, map, wb)) {
+    return 0;
+  }
+  if (!mir_lower_instruction(fn, generator, context, map, in, wb) ||
+      !mir_emit_volatile_global_write(fn, generator, map, in)) {
+    return 0;
+  }
+  if (is_call &&
+      !mir_lower_call_globals(fn, generator, map, in, wb, writes_globals)) {
+    return 0;
+  }
+  return mir_emit_canonical_extend(fn, generator, context, map, ir_function, at,
+                                   in, vr_oracle);
+}
+
+static int mir_lower_at(MirFunction *fn, CodeGenerator *generator,
+                        BinaryFunctionContext *context, MirNameMap *map,
+                        IRFunction *ir_function, size_t *at,
+                        const MirAddrFold *folds, MirGlobalWriteback *wb,
+                        void **vr_oracle) {
+  const IRInstruction *in = &ir_function->instructions[*at];
+
+  if (!mir_emit_volatile_global_reads(fn, generator, map, in, &folds[*at])) {
+    return 0;
+  }
+  if (folds[*at].valid) {
+    return mir_lower_folded_access(fn, generator, context, map, in,
+                                   &folds[*at]) &&
+           mir_emit_volatile_global_write(fn, generator, map, in);
+  }
+  if (mir_fuses_compare_branch(generator, ir_function, *at)) {
+    if (!mir_lower_compare_branch(fn, generator, context, map, ir_function, in,
+                                  &ir_function->instructions[*at + 1])) {
+      return 0;
+    }
+    (*at)++;
+    return 1;
+  }
+  return mir_lower_general(fn, generator, context, map, ir_function, *at, wb,
+                           vr_oracle);
+}
+
+static int mir_lower_instructions(MirFunction *fn, CodeGenerator *generator,
+                                  BinaryFunctionContext *context,
+                                  MirNameMap *map, IRFunction *ir_function,
+                                  MirGlobalWriteback *wb, void **vr_oracle) {
+  char *fold_skip = NULL;
+  MirAddrFold *folds = NULL;
+  int ok = 1;
+
+  if (ir_function->instruction_count == 0) {
+    return 1;
+  }
+  fold_skip = (char *)calloc(ir_function->instruction_count, sizeof(char));
+  folds = (MirAddrFold *)calloc(ir_function->instruction_count,
+                                sizeof(MirAddrFold));
+  if (!fold_skip || !folds) {
+    free(fold_skip);
+    free(folds);
+    return 0;
+  }
+  {
+    MirTempUseIndex uses;
+    if (!mir_temp_use_build(ir_function, &uses)) {
+      free(fold_skip);
+      free(folds);
+      return 0;
+    }
+    mir_compute_address_folds(ir_function, &uses, fold_skip, folds);
+    mir_compute_const_compare_skips(generator, context, ir_function, &uses,
+                                    fold_skip);
+    mir_compute_select_compare_skips(ir_function, fold_skip);
+    mir_temp_use_destroy(&uses);
+  }
+  for (size_t i = 0; ok && i < ir_function->instruction_count; i++) {
+    IROpcode op = ir_function->instructions[i].op;
+    int kernel_op =
+        mir_ir_kernel_index_for_op(op) >= 0 || op == IR_OP_INLINE_ASM;
+    int mem_op = op == IR_OP_LOAD || op == IR_OP_STORE || kernel_op;
+    int store_op = op == IR_OP_STORE || kernel_op;
+
+    fn->cur_ir_index = (int)i;
+    if (fold_skip[i]) {
+      continue;
+    }
+    if (mem_op && wb->at_count > 0) {
+      ok = mir_emit_global_alias_flush(fn, generator, map, wb);
+    }
+    ok = ok && mir_lower_at(fn, generator, context, map, ir_function, &i, folds,
+                            wb, vr_oracle);
+    if (ok && store_op && wb->at_count > 0) {
+      ok = mir_emit_global_reload_names(fn, generator, map, wb->at,
+                                       wb->at_count);
+    }
+    if (fn->has_error) {
+      ok = 0;
+    }
+  }
+  free(fold_skip);
+  free(folds);
+  return ok;
+}
+
+static void mir_maybe_dump_function(MirFunction *fn,
+                                    const IRFunction *ir_function) {
+  static int dump = -1;
+  static const char *dump_only = NULL;
+
+  if (dump < 0) {
+    const char *env = getenv("METTLE_MIR_DUMP");
+    dump = env ? 1 : 0;
+    if (env && env[0] && strcmp(env, "1") != 0) {
+      dump_only = env;
+    }
+  }
+  if (!dump || (dump_only && (!ir_function->name ||
+                              strcmp(ir_function->name, dump_only) != 0))) {
+    return;
+  }
+  fprintf(stderr, "; MIR function %s\n",
+          ir_function->name ? ir_function->name : "?");
+  mir_function_dump(fn, stderr);
+}
+
 int code_generator_binary_emit_function_via_mir(
     CodeGenerator *generator,
     IRFunction *ir_function, BinaryFunctionContext *context) {
@@ -11406,62 +11751,9 @@ int code_generator_binary_emit_function_via_mir(
     goto oom;
   }
 
-  for (size_t i = 0; i < ir_function->instruction_count; i++) {
-    const IRInstruction *in = &ir_function->instructions[i];
-    if (in->op != IR_OP_ADDRESS_OF || in->lhs.kind != IR_OPERAND_SYMBOL ||
-        !in->lhs.name || !mir_name_is_global_scalar(generator, in->lhs.name) ||
-        !mir_name_map_has(&map, in->lhs.name)) {
-      continue;
-    }
-    if (mir_address_only_feeds_calls(ir_function, in)) {
-      continue;
-    }
-    int present = 0;
-    for (size_t j = 0; j < wb.at_count; j++) {
-      if (strcmp(wb.at[j], in->lhs.name) == 0) {
-        present = 1;
-        break;
-      }
-    }
-    if (present) {
-      continue;
-    }
-    if (wb.at_count >= wb_at_cap) {
-      size_t nc = wb_at_cap ? wb_at_cap * 2 : 4;
-      const char **grown = (const char **)realloc(wb.at, nc * sizeof(*grown));
-      if (!grown) {
-        goto oom;
-      }
-      wb.at = grown;
-      wb_at_cap = nc;
-    }
-    wb.at[wb.at_count++] = in->lhs.name;
-  }
-  for (size_t i = 0; i < wb.all_count; i++) {
-    if (!mir_global_address_escapes_via_initializer(generator, wb.all[i]) &&
-        !mir_global_address_taken_in_module(generator, wb.all[i])) {
-      continue;
-    }
-    int present = 0;
-    for (size_t j = 0; j < wb.at_count; j++) {
-      if (strcmp(wb.at[j], wb.all[i]) == 0) {
-        present = 1;
-        break;
-      }
-    }
-    if (present) {
-      continue;
-    }
-    if (wb.at_count >= wb_at_cap) {
-      size_t nc = wb_at_cap ? wb_at_cap * 2 : 4;
-      const char **grown = (const char **)realloc(wb.at, nc * sizeof(*grown));
-      if (!grown) {
-        goto oom;
-      }
-      wb.at = grown;
-      wb_at_cap = nc;
-    }
-    wb.at[wb.at_count++] = wb.all[i];
+  if (!mir_collect_aliased_globals(generator, ir_function, &map, &wb,
+                                  &wb_at_cap)) {
+    goto oom;
   }
 
   dirty_masks = mir_compute_global_dirty_masks(ir_function, wb.names, wb.count);
@@ -11471,174 +11763,11 @@ int code_generator_binary_emit_function_via_mir(
     goto oom;
   }
 
-  char *fold_skip = NULL;
-  MirAddrFold *folds = NULL;
-  if (ir_function->instruction_count > 0) {
-    fold_skip = (char *)calloc(ir_function->instruction_count, sizeof(char));
-    folds = (MirAddrFold *)calloc(ir_function->instruction_count,
-                                  sizeof(MirAddrFold));
-    if (!fold_skip || !folds) {
-      free(fold_skip);
-      free(folds);
-      goto oom;
-    }
-    MirTempUseIndex uses;
-    if (!mir_temp_use_build(ir_function, &uses)) {
-      free(fold_skip);
-      free(folds);
-      goto oom;
-    }
-    mir_compute_address_folds(ir_function, &uses, fold_skip, folds);
-    mir_compute_const_compare_skips(generator, context, ir_function, &uses,
-                                    fold_skip);
-    mir_compute_select_compare_skips(ir_function, fold_skip);
-    mir_temp_use_destroy(&uses);
+  if (!mir_lower_instructions(&fn, generator, context, &map, ir_function, &wb,
+                             &vr_oracle)) {
+    goto oom;
   }
 
-  for (size_t i = 0; i < ir_function->instruction_count; i++) {
-    fn.cur_ir_index = (int)i;
-    if (fold_skip[i]) {
-      continue;
-    }
-    int kernel_op =
-        mir_ir_kernel_index_for_op(ir_function->instructions[i].op) >= 0 ||
-        ir_function->instructions[i].op == IR_OP_INLINE_ASM;
-    int mem_op = ir_function->instructions[i].op == IR_OP_LOAD ||
-                 ir_function->instructions[i].op == IR_OP_STORE || kernel_op;
-    int store_op = ir_function->instructions[i].op == IR_OP_STORE || kernel_op;
-    if (mem_op && wb.at_count > 0 &&
-        !mir_emit_global_alias_flush(&fn, generator, &map, &wb)) {
-      free(fold_skip);
-      free(folds);
-      goto oom;
-    }
-    if (!mir_emit_volatile_global_reads(&fn, generator, &map,
-                                        &ir_function->instructions[i],
-                                        &folds[i])) {
-      free(fold_skip);
-      free(folds);
-      goto oom;
-    }
-    if (folds[i].valid) {
-      if (!mir_lower_folded_access(&fn, generator, context, &map,
-                                   &ir_function->instructions[i], &folds[i]) ||
-          !mir_emit_volatile_global_write(&fn, generator, &map,
-                                          &ir_function->instructions[i])) {
-        free(fold_skip);
-        free(folds);
-        goto oom;
-      }
-    } else if (mir_fuses_compare_branch(generator, ir_function, i)) {
-      if (!mir_lower_compare_branch(&fn, generator, context, &map, ir_function,
-                                    &ir_function->instructions[i],
-                                    &ir_function->instructions[i + 1])) {
-        free(fold_skip);
-        free(folds);
-        goto oom;
-      }
-      i++;
-    } else {
-      const IRInstruction *cin = &ir_function->instructions[i];
-      int is_call = cin->op == IR_OP_CALL || cin->op == IR_OP_CALL_INDIRECT ||
-                    cin->op == IR_OP_INLINE_ASM;
-      int call_writes_globals =
-          cin->op == IR_OP_INLINE_ASM
-              ? 1
-              : (is_call ? mir_call_may_write_globals(generator, ir_function,
-                                                      i, cin)
-                         : 0);
-      if (is_call && wb.all_count > 0 &&
-          !mir_emit_global_writebacks(&fn, generator, &map, &wb)) {
-        free(fold_skip);
-        free(folds);
-        goto oom;
-      }
-      if (!mir_lower_instruction(&fn, generator, context, &map,
-                                 &ir_function->instructions[i], &wb) ||
-          !mir_emit_volatile_global_write(&fn, generator, &map, cin)) {
-        free(fold_skip);
-        free(folds);
-        goto oom;
-      }
-      if (is_call && call_writes_globals && wb.all_count > 0) {
-        const IROperand *cd = &cin->dest;
-        const char *except =
-            (cd->kind == IR_OPERAND_SYMBOL && cd->name &&
-             mir_name_is_global_scalar(generator, cd->name))
-                ? cd->name
-                : NULL;
-        if (!mir_emit_global_reloads_except(&fn, generator, &map, &wb, except)) {
-          free(fold_skip);
-          free(folds);
-          goto oom;
-        }
-      }
-      {
-        if (cin->op == IR_OP_ASSIGN || cin->op == IR_OP_BINARY ||
-            cin->op == IR_OP_UNARY || cin->op == IR_OP_CALL ||
-            cin->op == IR_OP_CALL_INDIRECT) {
-          int signed_home = 0;
-          int cw =
-              mir_dest_integer_narrow_width(generator, context, &cin->dest,
-                                            &signed_home);
-          int literal_canonical = 0;
-          if (cw && cin->op == IR_OP_ASSIGN &&
-              cin->lhs.kind == IR_OPERAND_INT) {
-            int bits = cw * 8;
-            if (signed_home) {
-              int64_t minv = -(1ll << (bits - 1));
-              int64_t maxv = (1ll << (bits - 1)) - 1;
-              literal_canonical = cin->lhs.int_value >= minv &&
-                                  cin->lhs.int_value <= maxv;
-            } else {
-              literal_canonical = cin->lhs.int_value >= 0 &&
-                                  (uint64_t)cin->lhs.int_value <
-                                      (1ull << bits);
-            }
-          }
-          int range_canonical = 0;
-          if (cw && !literal_canonical && !fn.has_error &&
-              (cin->op == IR_OP_BINARY || cin->op == IR_OP_ASSIGN)) {
-            if (!vr_oracle) {
-              vr_oracle = ir_value_range_oracle_create(ir_function);
-            }
-            range_canonical =
-                vr_oracle && ir_value_range_result_is_narrow(
-                                 vr_oracle, i, cw * 8, !signed_home);
-          }
-          if (cw && signed_home && !fn.has_error &&
-              generator->assume_no_signed_overflow) {
-            range_canonical = 1;
-          }
-          if (cw && !literal_canonical && !range_canonical && !fn.has_error) {
-            MirOperand cd =
-                mir_value_operand(&fn, generator, context, &map, &cin->dest);
-            if (cd.kind == MIR_OPK_VREG &&
-                !mir_emit1(&fn, signed_home ? MIR_MOVSX : MIR_MOVZX, cd, cd,
-                           mir_op_none(), cw, !signed_home, 0)) {
-              free(fold_skip);
-              free(folds);
-              goto oom;
-            }
-          }
-        }
-      }
-    }
-    if (store_op && wb.at_count > 0 &&
-        !mir_emit_global_reload_names(&fn, generator, &map, wb.at,
-                                      wb.at_count)) {
-      free(fold_skip);
-      free(folds);
-      goto oom;
-    }
-    if (fn.has_error) {
-      free(fold_skip);
-      free(folds);
-      goto oom;
-    }
-  }
-  free(fold_skip);
-  free(folds);
 
   mir_fuse_mov_then_extend(&fn);
   mir_fuse_extend_then_mov(&fn);
@@ -11663,23 +11792,7 @@ int code_generator_binary_emit_function_via_mir(
     goto oom;
   }
   mir_root_local_addresses(&fn);
-  {
-    static int dump = -1;
-    static const char *dump_only = NULL;
-    if (dump < 0) {
-      const char *env = getenv("METTLE_MIR_DUMP");
-      dump = env ? 1 : 0;
-      if (env && env[0] && strcmp(env, "1") != 0) {
-        dump_only = env;
-      }
-    }
-    if (dump && (!dump_only || (ir_function->name &&
-                                strcmp(ir_function->name, dump_only) == 0))) {
-      fprintf(stderr, "; MIR function %s\n",
-              ir_function->name ? ir_function->name : "?");
-      mir_function_dump(&fn, stderr);
-    }
-  }
+  mir_maybe_dump_function(&fn, ir_function);
   fn.cur_ir_index = -1;
   if (mir_annotate_enabled()) {
     mir_annotate_begin_function(
