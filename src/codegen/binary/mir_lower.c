@@ -10244,6 +10244,20 @@ static size_t mir_first_use_index(const MirFunction *fn, MirVregId v,
   return (size_t)-1;
 }
 
+static size_t mir_last_use_index(const MirFunction *fn, MirVregId v,
+                                 size_t def) {
+  size_t last = (size_t)-1;
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    if (i == def) {
+      continue;
+    }
+    if (mir_inst_uses_vreg(&fn->insns[i], v)) {
+      last = i;
+    }
+  }
+  return last;
+}
+
 static size_t mir_const_def_index(const MirFunction *fn, MirVregId v,
                                   int is_float) {
   for (size_t i = 0; i < fn->insn_count; i++) {
@@ -10321,6 +10335,17 @@ static int mir_insert_point_is_reached(const MirFunction *fn, size_t insert) {
   return previous->op != MIR_JMP && previous->op != MIR_RET;
 }
 
+static size_t mir_preheader_insert_index(const MirFunction *fn,
+                                        size_t header) {
+  if (header == 0) {
+    return header;
+  }
+  if (fn->insns[header - 1].op == MIR_JMP) {
+    return header - 1;
+  }
+  return header;
+}
+
 static size_t mir_const_insert_index(const MirFunction *fn, size_t first_use,
                                      size_t *loop_end) {
   size_t insert = first_use;
@@ -10340,7 +10365,7 @@ static size_t mir_const_insert_index(const MirFunction *fn, size_t first_use,
       continue;
     }
     if (insert == first_use || l > insert) {
-      insert = l;
+      insert = mir_preheader_insert_index(fn, l);
       *loop_end = b;
     }
   }
@@ -10503,8 +10528,14 @@ static void mir_place_const_pool(MirFunction *fn) {
     }
     size_t loop_end = first;
     size_t insert = mir_const_insert_index(fn, first, &loop_end);
-    if (insert == first || (insert > def && insert <= def + 1) ||
-        insert == def ||
+    if (insert == first) {
+      size_t last = mir_last_use_index(fn, v, def);
+      if (last == (size_t)-1) {
+        continue;
+      }
+      loop_end = last;
+    }
+    if ((insert > def && insert <= def + 1) || insert == def ||
         !mir_insert_point_is_reached(fn, insert) ||
         !mir_range_is_single_entry(fn, insert, loop_end) ||
         !mir_all_uses_in_range(fn, v, insert, loop_end)) {
@@ -10533,8 +10564,14 @@ static void mir_place_const_pool(MirFunction *fn) {
     }
     size_t loop_end = first;
     size_t insert = mir_const_insert_index(fn, first, &loop_end);
-    if (insert == first || (insert > def && insert <= def + 1) ||
-        insert == def ||
+    if (insert == first) {
+      size_t last = mir_last_use_index(fn, v, def);
+      if (last == (size_t)-1) {
+        continue;
+      }
+      loop_end = last;
+    }
+    if ((insert > def && insert <= def + 1) || insert == def ||
         !mir_insert_point_is_reached(fn, insert) ||
         !mir_range_is_single_entry(fn, insert, loop_end) ||
         !mir_all_uses_in_range(fn, v, insert, loop_end)) {

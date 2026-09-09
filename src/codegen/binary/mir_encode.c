@@ -1227,6 +1227,12 @@ static int encode_mov(MirFunction *fn, const MirInst *in) {
       }
       return 1;
     }
+    if (in->a.kind == MIR_OPK_FIMM) {
+      BinaryXmmRegister target;
+      if (dst_is_xmm_reg(fn, &in->dst, &target)) {
+        return xmm_load_fimm(fn, (uint64_t)in->a.imm, target, w);
+      }
+    }
     BinaryXmmRegister sval = xmm_value(fn, &in->a, FSCRATCH_A, w, &ok);
     if (!ok) {
       return 0;
