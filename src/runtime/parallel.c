@@ -85,9 +85,24 @@ struct mettle_parallel_timespec {
 extern int pthread_create(unsigned long *thread, const void *attributes,
                           void *(*start)(void *), void *argument);
 extern int pthread_detach(unsigned long thread);
-extern int sched_yield(void);
-extern int nanosleep(const struct mettle_parallel_timespec *request,
-                     struct mettle_parallel_timespec *remaining);
+
+static long mettle_parallel_syscall(long number, long first, long second,
+                                    long third) {
+#if defined(__x86_64__)
+  long result;
+  __asm__ __volatile__("syscall"
+                       : "=a"(result)
+                       : "a"(number), "D"(first), "S"(second), "d"(third)
+                       : "rcx", "r11", "memory");
+  return result;
+#else
+  (void)number;
+  (void)first;
+  (void)second;
+  (void)third;
+  return -1;
+#endif
+}
 
 static void *mettle_parallel_entry(void *argument) {
   mettle_parallel_worker((long)(size_t)argument);
@@ -102,11 +117,8 @@ static unsigned mettle_parallel_hardware_threads(void) {
   for (unsigned i = 0; i < 16u; i++) {
     mask[i] = 0;
   }
-  __asm__ __volatile__("syscall"
-                       : "=a"(result)
-                       : "a"(204L), "D"(0L), "S"((long)sizeof(mask)),
-                         "d"((long)(size_t)mask)
-                       : "rcx", "r11", "memory");
+  result = mettle_parallel_syscall(204L, 0L, (long)sizeof(mask),
+                                   (long)(size_t)mask);
   if (result > 0) {
     for (unsigned i = 0; i < (unsigned)result / 8u && i < 16u; i++) {
       unsigned long long word = mask[i];
@@ -132,13 +144,15 @@ static int mettle_parallel_spawn(long index) {
   return 1;
 }
 
-static void mettle_parallel_yield(void) { (void)sched_yield(); }
+static void mettle_parallel_yield(void) {
+  (void)mettle_parallel_syscall(24L, 0L, 0L, 0L);
+}
 
 static void mettle_parallel_nap(void) {
   struct mettle_parallel_timespec request;
   request.seconds = 0;
   request.nanoseconds = 1000000;
-  (void)nanosleep(&request, NULL);
+  (void)mettle_parallel_syscall(35L, (long)(size_t)&request, 0L, 0L);
 }
 
 #endif

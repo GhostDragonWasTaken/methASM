@@ -330,6 +330,33 @@ static int ir_par_label_index(const IRFunction *function, const char *label,
 static int ir_par_label_index(const IRFunction *function, const char *label,
                               size_t *out);
 
+static int ir_par_is_back_edge_target(const IRFunction *function, size_t at) {
+  const char *label = function->instructions[at].text;
+  if (!label) {
+    return 0;
+  }
+  for (size_t i = at + 1u; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if ((in->op == IR_OP_JUMP || in->op == IR_OP_BRANCH_ZERO ||
+         in->op == IR_OP_BRANCH_EQ) &&
+        in->text && strcmp(in->text, label) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static size_t ir_par_next_loop_header(const IRFunction *function,
+                                      size_t marker) {
+  for (size_t i = marker + 1u; i < function->instruction_count; i++) {
+    if (function->instructions[i].op == IR_OP_LABEL &&
+        ir_par_is_back_edge_target(function, i)) {
+      return i;
+    }
+  }
+  return function->instruction_count;
+}
+
 static int ir_par_find_loop(IRParLoop *loop) {
   IRFunction *function = loop->function;
   const char *wanted = function->instructions[loop->marker].text +
@@ -342,11 +369,12 @@ static int ir_par_find_loop(IRParLoop *loop) {
   while (*wanted && *wanted != ':') {
     wanted++;
   }
-  if (*wanted != ':' || !ir_par_label_index(function, wanted + 1, &i)) {
-    ir_par_reject(loop, "the loop this marks is no longer here", NULL);
-    return 0;
+  if (*wanted != ':' ||
+      !ir_par_label_index(function, wanted + 1, &i) || i <= loop->marker) {
+    i = ir_par_next_loop_header(function, loop->marker);
   }
-  if (i <= loop->marker || i + 2u >= function->instruction_count) {
+  if (i >= function->instruction_count || i + 2u >= function->instruction_count ||
+      function->instructions[i].op != IR_OP_LABEL) {
     ir_par_reject(loop, "the loop this marks is no longer here", NULL);
     return 0;
   }

@@ -37,6 +37,20 @@ var table: int64[8];
   }
 }
 
+fn shift_rows(out: int64*, src: int64*, width: int32, height: int32,
+              gain: int64) {
+  var row: int32 = 0;
+  @parallel while (row < height) {
+    var y: int32 = row * width;
+    var x: int32 = 0;
+    while (x < width) {
+      out[y + x] = src[y + x] * gain + (int64)row;
+      x += 1;
+    }
+    row += 1;
+  }
+}
+
 fn main() -> int32 {
   var a: int64* = (int64*)malloc(8 * (int64)N);
   var b: int64* = (int64*)malloc(8 * (int64)N);
@@ -78,6 +92,15 @@ fn main() -> int32 {
     i += 1;
   }
 
+  var lifted: int64* = (int64*)malloc(8 * 4096);
+  shift_rows(lifted, wide, 64, 64, 5);
+  var shifted: int64 = 0;
+  i = 0;
+  while (i < 4096) {
+    shifted = shifted ^ lifted[i];
+    i += 1;
+  }
+
   println("mixed = {mixed}");
   println("striped = {striped}");
   if (mixed != 392376813670142450) {
@@ -91,6 +114,11 @@ fn main() -> int32 {
   println("reused = {reused}");
   if (reused != 8386585251840) {
     println("FAIL: the counter or the globals did not survive the loop");
+    return 1;
+  }
+  println("shifted = {shifted}");
+  if (shifted != -228173824) {
+    println("FAIL: the inlined marked loop did not reproduce the serial answer");
     return 1;
   }
   println("ok");

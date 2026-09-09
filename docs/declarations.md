@@ -309,7 +309,7 @@ runtime, which hands each thread a slice of the counter's range.
   var y: int32 = row * width;
   var x: int32 = 0;
   while (x < width) {
-    out[y + x] = shade(scene, x, row);
+    out[y + x] = shade[y + x] * gain + bias;
     x += 1;
   }
   row += 1;
