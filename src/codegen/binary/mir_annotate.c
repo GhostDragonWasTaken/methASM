@@ -281,7 +281,12 @@ static void render_vreg(const MirFunction *fn, MirVregId v, int width, int att,
 static void render_mem(const MirFunction *fn, const MirMem *m, int att, Sb *out) {
   const char *base = NULL;
   char basebuf[16];
-  if (m->phys_base_valid) {
+  if (m->frame_home_valid && fn && (size_t)m->frame_home < fn->vreg_count) {
+    base = gp_name(fn->context && fn->context->omit_frame_pointer
+                       ? BINARY_GP_RSP
+                       : BINARY_GP_RBP,
+                   8);
+  } else if (m->phys_base_valid) {
     base = gp_name(m->phys_base, 8);
   } else if (m->base != MIR_VREG_NONE && fn && (size_t)m->base < fn->vreg_count &&
              fn->vregs[m->base].in_register) {

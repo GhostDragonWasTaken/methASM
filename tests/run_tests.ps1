@@ -6475,6 +6475,12 @@ $simdRuntimeCases = @(
     IrMustMatch     = @("chase_ref")
   },
   @{
+    Name            = "local_address_root"
+    Path            = "tests/local_address_root_check.mettle"
+    OutputMustMatch = "LOCAL ADDRESS ROOT: ALL OK"
+    IrMustMatch     = @("bump_pair")
+  },
+  @{
     Name            = "index_scale_fold"
     Path            = "tests/index_scale_fold_check.mettle"
     OutputMustMatch = "INDEX SCALE FOLD: ALL OK"

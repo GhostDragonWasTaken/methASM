@@ -221,6 +221,8 @@ MirOperand mir_op_mem_vreg(MirVregId base, MirVregId index, int scale,
   op.mem.scale = scale;
   op.mem.disp = disp;
   op.mem.phys_base_valid = 0;
+  op.mem.frame_home_valid = 0;
+  op.mem.frame_home = MIR_VREG_NONE;
   return op;
 }
 
@@ -356,7 +358,9 @@ static void mir_dump_operand(const MirFunction *fn, const MirOperand *op,
     break;
   case MIR_OPK_MEM:
     fputc('[', out);
-    if (op->mem.phys_base_valid) {
+    if (op->mem.frame_home_valid) {
+      fprintf(out, "home(v%d)%+d", op->mem.frame_home, op->mem.disp);
+    } else if (op->mem.phys_base_valid) {
       fprintf(out, "rbp%+d", op->mem.disp);
     } else {
       if (op->mem.base != MIR_VREG_NONE) {

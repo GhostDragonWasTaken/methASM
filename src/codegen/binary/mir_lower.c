@@ -8653,6 +8653,91 @@ static int mir_inst_reads_vreg(const MirInst *in, MirVregId v) {
   return 0;
 }
 
+static int mir_operand_reads_vreg_outside_mem_base(const MirOperand *op,
+                                                   MirVregId v) {
+  if (op->kind == MIR_OPK_VREG) {
+    return op->vreg == v;
+  }
+  if (op->kind == MIR_OPK_MEM) {
+    return op->mem.index == v;
+  }
+  return 0;
+}
+
+static void mir_root_local_addresses(MirFunction *fn) {
+  size_t i;
+  if (!fn || fn->insn_count == 0 || fn->vreg_count == 0) {
+    return;
+  }
+  for (i = 0; i < fn->insn_count; i++) {
+    MirInst *lea = &fn->insns[i];
+    MirVregId addr;
+    MirVregId local;
+    size_t u;
+    int usable = 1;
+    int folded = 0;
+    if (lea->op != MIR_LEA_LOCAL || lea->dst.kind != MIR_OPK_VREG ||
+        lea->a.kind != MIR_OPK_VREG) {
+      continue;
+    }
+    addr = lea->dst.vreg;
+    local = lea->a.vreg;
+    if ((size_t)local >= fn->vreg_count || fn->vregs[local].in_register ||
+        fn->vregs[addr].address_taken) {
+      continue;
+    }
+    for (u = 0; u < fn->insn_count && usable; u++) {
+      const MirInst *in = &fn->insns[u];
+      const MirOperand *ops[3];
+      int k;
+      if (u == i || in->op == MIR_NOP) {
+        continue;
+      }
+      if (in->dst.kind == MIR_OPK_VREG && in->dst.vreg == addr) {
+        usable = 0;
+        break;
+      }
+      ops[0] = &in->a;
+      ops[1] = &in->b;
+      ops[2] = &in->dst;
+      for (k = 0; k < 3; k++) {
+        if (mir_operand_reads_vreg_outside_mem_base(ops[k], addr)) {
+          usable = 0;
+          break;
+        }
+      }
+    }
+    if (!usable) {
+      continue;
+    }
+    for (u = 0; u < fn->insn_count; u++) {
+      MirInst *in = &fn->insns[u];
+      MirOperand *ops[3];
+      int k;
+      if (u == i || in->op == MIR_NOP) {
+        continue;
+      }
+      ops[0] = &in->a;
+      ops[1] = &in->b;
+      ops[2] = &in->dst;
+      for (k = 0; k < 3; k++) {
+        MirOperand *op = ops[k];
+        if (op->kind != MIR_OPK_MEM || op->mem.base != addr ||
+            op->mem.phys_base_valid || op->mem.frame_home_valid) {
+          continue;
+        }
+        op->mem.base = MIR_VREG_NONE;
+        op->mem.frame_home_valid = 1;
+        op->mem.frame_home = local;
+        folded = 1;
+      }
+    }
+    if (folded) {
+      lea->op = MIR_NOP;
+    }
+  }
+}
+
 static void mir_fold_index_scale(MirFunction *fn) {
   int *uses = NULL;
   int *defs = NULL;
@@ -11495,6 +11580,7 @@ int code_generator_binary_emit_function_via_mir(
   if (!mir_regalloc(&fn) || fn.has_error) {
     goto oom;
   }
+  mir_root_local_addresses(&fn);
   {
     static int dump = -1;
     static const char *dump_only = NULL;

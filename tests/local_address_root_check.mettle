@@ -1,0 +1,231 @@
+import "std/io";
+
+struct Pair {
+  a: int64;
+  b: int64;
+}
+
+struct Wide {
+  a: int64;
+  b: int32;
+  c: int32;
+  d: float64;
+  e: uint8;
+}
+
+@noinline fn bump_pair(p: Pair*) {
+  p->a = p->a + 100;
+  p->b = p->b + 200;
+}
+
+@noinline fn read_pair(p: Pair*) -> int64 {
+  return p->a * 3 + p->b;
+}
+
+@noinline fn keep(p: int64*) -> int64* {
+  return p;
+}
+
+@noinline fn sink(v: int64) -> int64 {
+  return v;
+}
+
+fn direct_fields() -> int64 {
+  var p: Pair;
+  p.a = 0;
+  p.b = 0;
+  p.a = 7;
+  p.b = 11;
+  return p.a * 1000 + p.b;
+}
+
+fn escaped_fields() -> int64 {
+  var p: Pair;
+  p.a = 7;
+  p.b = 11;
+  bump_pair(&p);
+  return p.a * 1000 + p.b;
+}
+
+fn mixed_escape() -> int64 {
+  var p: Pair;
+  p.a = 1;
+  p.b = 2;
+  var r: int64 = read_pair(&p);
+  p.a = p.a + r;
+  bump_pair(&p);
+  return p.a * 1000 + p.b;
+}
+
+fn indexed_local(n: int32) -> int64 {
+  var buf: int64[16];
+  var i: int32 = 0;
+  while (i < n) {
+    buf[i] = (int64)i * 7 + 1;
+    i = i + 1;
+  }
+  var s: int64 = 0;
+  i = 0;
+  while (i < n) {
+    s = s + buf[i];
+    i = i + 1;
+  }
+  return s;
+}
+
+fn indexed_struct_local(n: int32) -> int64 {
+  var rows: Pair[16];
+  var i: int32 = 0;
+  while (i < n) {
+    rows[i].a = (int64)i * 3;
+    rows[i].b = (int64)i * 5;
+    i = i + 1;
+  }
+  var s: int64 = 0;
+  i = 0;
+  while (i < n) {
+    s = s + rows[i].a * 2 + rows[i].b;
+    i = i + 1;
+  }
+  return s;
+}
+
+fn wide_fields() -> int64 {
+  var w: Wide;
+  w.a = 5;
+  w.b = 6;
+  w.c = 7;
+  w.d = 2.5;
+  w.e = 9;
+  var s: int64 = w.a;
+  s = s + (int64)w.b * 10;
+  s = s + (int64)w.c * 100;
+  s = s + (int64)(w.d * 4.0) * 1000;
+  s = s + (int64)w.e * 100000;
+  return s;
+}
+
+fn pointer_into_local() -> int64 {
+  var x: int64 = 3;
+  var y: int64 = 4;
+  var px: int64* = keep(&x);
+  var py: int64* = keep(&y);
+  *px = *py + 10;
+  *py = *px + 10;
+  return x * 1000 + y;
+}
+
+fn address_then_direct() -> int64 {
+  var p: Pair;
+  p.a = 1;
+  p.b = 2;
+  var q: Pair* = &p;
+  q->a = q->a + 5;
+  p.b = p.b + 5;
+  q->b = q->b + 5;
+  return p.a * 1000 + p.b;
+}
+
+fn spill_pressure(n: int64) -> int64 {
+  var p: Pair;
+  p.a = n;
+  p.b = n + 1;
+  var a: int64 = sink(n + 1);
+  var b: int64 = sink(n + 2);
+  var c: int64 = sink(n + 3);
+  var d: int64 = sink(n + 4);
+  var e: int64 = sink(n + 5);
+  var f: int64 = sink(n + 6);
+  var g: int64 = sink(n + 7);
+  var h: int64 = sink(n + 8);
+  p.a = p.a + a + b + c + d;
+  p.b = p.b + e + f + g + h;
+  return p.a * 1000 + p.b;
+}
+
+fn main() -> int32 {
+  var bad: int32 = 0;
+
+  var v: int64 = direct_fields();
+  if (v != 7011) {
+    println("direct_fields = {v}, wanted 7011");
+    bad = bad + 1;
+  }
+
+  v = escaped_fields();
+  if (v != 107211) {
+    println("escaped_fields = {v}, wanted 107211");
+    bad = bad + 1;
+  }
+
+  v = mixed_escape();
+  if (v != 106202) {
+    println("mixed_escape = {v}, wanted 106202");
+    bad = bad + 1;
+  }
+
+  var n: int32 = 0;
+  while (n <= 16) {
+    var want: int64 = 0;
+    var k: int32 = 0;
+    while (k < n) {
+      want = want + (int64)k * 7 + 1;
+      k = k + 1;
+    }
+    var got: int64 = indexed_local(n);
+    if (got != want) {
+      println("indexed_local({n}) = {got}, wanted {want}");
+      bad = bad + 1;
+    }
+
+    want = 0;
+    k = 0;
+    while (k < n) {
+      want = want + (int64)k * 3 * 2 + (int64)k * 5;
+      k = k + 1;
+    }
+    got = indexed_struct_local(n);
+    if (got != want) {
+      println("indexed_struct_local({n}) = {got}, wanted {want}");
+      bad = bad + 1;
+    }
+    n = n + 1;
+  }
+
+  v = wide_fields();
+  if (v != 910765) {
+    println("wide_fields = {v}, wanted 910765");
+    bad = bad + 1;
+  }
+
+  v = pointer_into_local();
+  if (v != 14024) {
+    println("pointer_into_local = {v}, wanted 14024");
+    bad = bad + 1;
+  }
+
+  v = address_then_direct();
+  if (v != 6012) {
+    println("address_then_direct = {v}, wanted 6012");
+    bad = bad + 1;
+  }
+
+  var s: int64 = 0;
+  while (s < 5) {
+    var got: int64 = spill_pressure(s);
+    var wa: int64 = s + (s + 1) + (s + 2) + (s + 3) + (s + 4);
+    var wb: int64 = (s + 1) + (s + 5) + (s + 6) + (s + 7) + (s + 8);
+    var want: int64 = wa * 1000 + wb;
+    if (got != want) {
+      println("spill_pressure({s}) = {got}, wanted {want}");
+      bad = bad + 1;
+    }
+    s = s + 1;
+  }
+
+  if (bad != 0) {
+    return 1;
+  }
+  println("LOCAL ADDRESS ROOT: ALL OK");
+  return 0;
+}

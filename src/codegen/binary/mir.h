@@ -58,6 +58,8 @@ typedef struct {
   int disp;
   int phys_base_valid;
   int phys_base;
+  int frame_home_valid;
+  MirVregId frame_home;
 } MirMem;
 
 typedef struct {
