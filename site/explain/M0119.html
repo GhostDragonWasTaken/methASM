@@ -30,7 +30,7 @@
     var ok:    int32 = (int32)n;  // says the wrap is meant
 }</code></pre>
 <p>A compile-time constant is exempt: its value is known, so <code>var b: uint8 = 200;</code> is checked rather than refused (see M0118 for the case where it does not fit).</p>
-<p>Two destinations sit outside the rule because they are not range conversions: <code>bool</code> is a truth coercion, and an enum names a set. Floating-point conversions are unchanged and still silent.</p>
+<p>Two destinations sit outside the rule because they are not range conversions: <code>bool</code> is a truth coercion, and an enum names a set. float32 -&gt; float64 widens silently and float64 -&gt; float32 stays silent. float32 -&gt; float16 and float32 -&gt; bfloat16 narrow loudly, like int64 -&gt; int8. A float literal that is exactly representable needs no cast.</p>
 
 <h2>Related</h2>
 <ul class="codelist"><li><a href="E0001.html"><span class="c">E0001</span><span class="t">Lexical error</span></a></li><li><a href="E0002.html"><span class="c">E0002</span><span class="t">Syntax error</span></a></li><li><a href="E0003.html"><span class="c">E0003</span><span class="t">Semantic error</span></a></li><li><a href="E0004.html"><span class="c">E0004</span><span class="t">Type mismatch</span></a></li><li><a href="E0005.html"><span class="c">E0005</span><span class="t">Scope error</span></a></li><li><a href="E0006.html"><span class="c">E0006</span><span class="t">I/O error</span></a></li><li><a href="E0007.html"><span class="c">E0007</span><span class="t">Internal compiler error</span></a></li><li><a href="M0101.html"><span class="c">M0101</span><span class="t">Use after free</span></a></li></ul>

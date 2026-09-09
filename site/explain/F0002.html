@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>F0002: A function requires an effect nothing provides | Mettle</title>
+<meta name="description" content="F0002: A function requires an effect nothing provides" />
+<link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Courier+Prime:ital,wght@0,400;0,700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../assets/doc.css" />
+</head>
+<body>
+<header class="bar"><div class="wrap">
+  <a class="brand" href="../index.html"><img src="../assets/mark.svg" alt="" width="22" height="22" />Mettle</a>
+  <nav><a href="../index.html">Home</a><a href="../internals.html">Internals</a><a href="../reading-diagnostics.html">Diagnostics</a><a href="../reading-the-report.html">The report</a><a href="index.html" aria-current="page">Codes</a></nav>
+</div></header>
+<main class="wrap">
+<h1><span class="code">F0002</span>A function requires an effect nothing provides</h1>
+<p class="lede">Reported by the compiler as an error or warning.</p>
+<pre><code>mettle explain F0002</code></pre>
+
+<p>A function declared <code>requires E</code> may only run where E is provided, and the compiler found a way to reach it from a place that provides nothing: <code>main</code>, an interrupt handler, a naked function, a kernel, a test, or an exported function of a shared library.</p>
+<p>A requirement travels up the call graph until a caller declares <code>provides E</code>, which grants the effect to everything its body calls. This is how thread affinity, a held lock, or an initialised subsystem becomes something the compiler checks: the function that owns the thread provides the effect, and every function that needs it says so.</p>
+<p>Fix: call the function from inside something that <code>provides E</code>, or make the entry point provide it because it really does.</p>
+
+<h2>Related</h2>
+<ul class="codelist"><li><a href="E0001.html"><span class="c">E0001</span><span class="t">Lexical error</span></a></li><li><a href="E0002.html"><span class="c">E0002</span><span class="t">Syntax error</span></a></li><li><a href="E0003.html"><span class="c">E0003</span><span class="t">Semantic error</span></a></li><li><a href="E0004.html"><span class="c">E0004</span><span class="t">Type mismatch</span></a></li><li><a href="E0005.html"><span class="c">E0005</span><span class="t">Scope error</span></a></li><li><a href="E0006.html"><span class="c">E0006</span><span class="t">I/O error</span></a></li><li><a href="E0007.html"><span class="c">E0007</span><span class="t">Internal compiler error</span></a></li><li><a href="M0101.html"><span class="c">M0101</span><span class="t">Use after free</span></a></li></ul>
+
+</main>
+<footer class="foot"><div class="wrap">
+  <span>Generated from <code>src/error/error_explain.c</code>.</span>
+  <span class="sp"><a href="https://github.com/suidvandiewereld/Mettle">GitHub</a></span>
+</div></footer>
+</body>
+</html>

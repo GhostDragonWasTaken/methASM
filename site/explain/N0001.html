@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>N0001: A described machine is not one the compiler can read | Mettle</title>
+<meta name="description" content="N0001: A described machine is not one the compiler can read" />
+<link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Courier+Prime:ital,wght@0,400;0,700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../assets/doc.css" />
+</head>
+<body>
+<header class="bar"><div class="wrap">
+  <a class="brand" href="../index.html"><img src="../assets/mark.svg" alt="" width="22" height="22" />Mettle</a>
+  <nav><a href="../index.html">Home</a><a href="../internals.html">Internals</a><a href="../reading-diagnostics.html">Diagnostics</a><a href="../reading-the-report.html">The report</a><a href="index.html" aria-current="page">Codes</a></nav>
+</div></header>
+<main class="wrap">
+<h1><span class="code">N0001</span>A described machine is not one the compiler can read</h1>
+<p class="lede">Reported by the compiler as an error or warning.</p>
+<pre><code>mettle explain N0001</code></pre>
+
+<p>A machine is a <code>const</code> of <code>std/machine</code>&#x27;s <code>MachineInsn</code>, one row per instruction, and every field of a row is a literal, because all of it is answered before anything runs.</p>
+<h3>Example</h3>
+<pre><code>const ISA: MachineInsn[1] = [
+  { name: &quot;addi&quot;, encoding: &quot;10 %0 %1&quot;, operands: 2,
+    reads: &quot;%1&quot;, writes: &quot;%0&quot;, semantics: &quot;ins_addi&quot; },
+];</code></pre>
+<p>An encoding is pairs of hex digits and operand slots, it starts with at least one fixed byte, and no two instructions share their fixed prefix, because that prefix is what a decoder matches on. <code>reads</code> and <code>writes</code> may only name operands the encoding actually carries. A semantics function takes the three operand slots and returns the next instruction index or -1.</p>
+
+<h2>Related</h2>
+<ul class="codelist"><li><a href="E0001.html"><span class="c">E0001</span><span class="t">Lexical error</span></a></li><li><a href="E0002.html"><span class="c">E0002</span><span class="t">Syntax error</span></a></li><li><a href="E0003.html"><span class="c">E0003</span><span class="t">Semantic error</span></a></li><li><a href="E0004.html"><span class="c">E0004</span><span class="t">Type mismatch</span></a></li><li><a href="E0005.html"><span class="c">E0005</span><span class="t">Scope error</span></a></li><li><a href="E0006.html"><span class="c">E0006</span><span class="t">I/O error</span></a></li><li><a href="E0007.html"><span class="c">E0007</span><span class="t">Internal compiler error</span></a></li><li><a href="M0101.html"><span class="c">M0101</span><span class="t">Use after free</span></a></li></ul>
+
+</main>
+<footer class="foot"><div class="wrap">
+  <span>Generated from <code>src/error/error_explain.c</code>.</span>
+  <span class="sp"><a href="https://github.com/suidvandiewereld/Mettle">GitHub</a></span>
+</div></footer>
+</body>
+</html>

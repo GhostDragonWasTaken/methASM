@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>M0123: A signed operation left its type | Mettle</title>
+<meta name="description" content="M0123: A signed operation left its type" />
+<link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Courier+Prime:ital,wght@0,400;0,700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../assets/doc.css" />
+</head>
+<body>
+<header class="bar"><div class="wrap">
+  <a class="brand" href="../index.html"><img src="../assets/mark.svg" alt="" width="22" height="22" />Mettle</a>
+  <nav><a href="../index.html">Home</a><a href="../internals.html">Internals</a><a href="../reading-diagnostics.html">Diagnostics</a><a href="../reading-the-report.html">The report</a><a href="index.html" aria-current="page">Codes</a></nav>
+</div></header>
+<main class="wrap">
+<h1><span class="code">M0123</span>A signed operation left its type</h1>
+<p class="lede">Reported by the compiler as an error or warning.</p>
+<pre><code>mettle explain M0123</code></pre>
+
+<p>Signed <code>+</code>, <code>-</code> and <code>*</code> in Mettle wrap rather than trapping, the way the machine does. <code>--check-overflow</code> says to stop instead, and this is what it stops on: the result of the operation is not a value the type can hold.</p>
+<h3>Example</h3>
+<pre><code>var big: int32 = 2000000000;
+var sum: int32 = big + big;    // M0123 under --check-overflow</code></pre>
+<p>The check is not emitted where a declared type already bounds the operands tightly enough that the result has to fit:</p>
+<pre><code>type Half = int32 where value &gt;= 0 &amp;&amp; value &lt;= 1000000000;
+fn blend(a: Half, b: Half) -&gt; int32 { return a + b; }</code></pre>
+<p>Two Halves sum to at most two billion, which an int32 holds, so nothing is emitted and <code>--explain</code> reports the deletion under **proven by type**. A program whose every signed operation is proven that way compiles to the same bytes with the flag as without it.</p>
+<p>Unsigned arithmetic is not checked. Wrapping is what unsigned types are reached for in a hash or a checksum, and a check there would refuse the programs that want it.</p>
+
+<h2>Related</h2>
+<ul class="codelist"><li><a href="E0001.html"><span class="c">E0001</span><span class="t">Lexical error</span></a></li><li><a href="E0002.html"><span class="c">E0002</span><span class="t">Syntax error</span></a></li><li><a href="E0003.html"><span class="c">E0003</span><span class="t">Semantic error</span></a></li><li><a href="E0004.html"><span class="c">E0004</span><span class="t">Type mismatch</span></a></li><li><a href="E0005.html"><span class="c">E0005</span><span class="t">Scope error</span></a></li><li><a href="E0006.html"><span class="c">E0006</span><span class="t">I/O error</span></a></li><li><a href="E0007.html"><span class="c">E0007</span><span class="t">Internal compiler error</span></a></li><li><a href="M0101.html"><span class="c">M0101</span><span class="t">Use after free</span></a></li></ul>
+
+</main>
+<footer class="foot"><div class="wrap">
+  <span>Generated from <code>src/error/error_explain.c</code>.</span>
+  <span class="sp"><a href="https://github.com/suidvandiewereld/Mettle">GitHub</a></span>
+</div></footer>
+</body>
+</html>
