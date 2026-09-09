@@ -1240,203 +1240,227 @@ static int ir_kernighan_label_has_one_source(const IRFunction *function,
   return 1;
 }
 
-static int ir_try_fold_kernighan_popcount_at(IRFunction *function,
-                                             size_t header_index,
-                                             int *changed) {
+typedef struct {
+  const char *x_name;
+  const char *n_name;
+  const char *n_type;
+  int width;
+  size_t jump_at;
+} IRKernighanLoop;
+
+static int ir_kernighan_is_mask_decrement(const IRInstruction *in,
+                                          const char *x_name) {
+  return ir_kernighan_is_binary(in, "-") && in->dest.kind == IR_OPERAND_TEMP &&
+         in->dest.name && in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+         strcmp(in->lhs.name, x_name) == 0 &&
+         in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 1;
+}
+
+static int ir_kernighan_is_mask_cast(const IRInstruction *in,
+                                     const char *masked) {
+  return in->op == IR_OP_CAST && in->dest.kind == IR_OPERAND_TEMP &&
+         in->dest.name && in->lhs.kind == IR_OPERAND_TEMP && in->lhs.name &&
+         strcmp(in->lhs.name, masked) == 0;
+}
+
+static int ir_kernighan_is_mask_and(const IRInstruction *in,
+                                    const char *x_name, const char *masked) {
+  return ir_kernighan_is_binary(in, "&") &&
+         in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+         strcmp(in->dest.name, x_name) == 0 &&
+         in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+         strcmp(in->lhs.name, x_name) == 0 &&
+         in->rhs.kind == IR_OPERAND_TEMP && in->rhs.name &&
+         strcmp(in->rhs.name, masked) == 0;
+}
+
+static int ir_kernighan_is_counter_bump(const IRInstruction *in) {
+  return ir_kernighan_is_binary(in, "+") &&
+         in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+         in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+         strcmp(in->lhs.name, in->dest.name) == 0 &&
+         in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 1;
+}
+
+static int ir_kernighan_closes_loop(const IRFunction *function, size_t after,
+                                    const char *header_label,
+                                    const char *done_label, size_t *jump_at) {
+  const IRInstruction *jump;
+
+  if (!ir_find_next_non_nop(function, after + 1, jump_at)) {
+    return 0;
+  }
+  jump = &function->instructions[*jump_at];
+  if (jump->op != IR_OP_JUMP || !jump->text ||
+      strcmp(jump->text, header_label) != 0) {
+    return 0;
+  }
+  return ir_fused_loop_exit_is_adjacent(function, *jump_at, done_label) &&
+         ir_kernighan_label_has_one_source(function, header_label, *jump_at);
+}
+
+static int ir_kernighan_match(const IRFunction *function, size_t header_index,
+                              IRKernighanLoop *loop) {
   const IRInstruction *header = &function->instructions[header_index];
   size_t at[6];
   const IRInstruction *ins[6];
-  const char *x_name;
-  const char *n_name;
   const char *x_type;
-  const char *n_type;
-  const char *done_label;
   const char *masked;
-  int width;
+  const char *done_label;
   int next;
-  size_t jump_at;
 
   if (header->op != IR_OP_LABEL || !header->text) {
-    return 1;
+    return 0;
   }
   at[0] = header_index;
   for (int k = 1; k < 6; k++) {
     if (!ir_find_next_non_nop(function, at[k - 1] + 1, &at[k])) {
-      return 1;
+      return 0;
     }
     ins[k] = &function->instructions[at[k]];
   }
-
   if (ins[1]->op != IR_OP_BRANCH_ZERO || !ins[1]->text ||
       ins[1]->lhs.kind != IR_OPERAND_SYMBOL || !ins[1]->lhs.name) {
-    return 1;
+    return 0;
   }
-  x_name = ins[1]->lhs.name;
+  loop->x_name = ins[1]->lhs.name;
   done_label = ins[1]->text;
-
-  if (!ir_kernighan_is_binary(ins[2], "-") ||
-      ins[2]->dest.kind != IR_OPERAND_TEMP || !ins[2]->dest.name ||
-      ins[2]->lhs.kind != IR_OPERAND_SYMBOL || !ins[2]->lhs.name ||
-      strcmp(ins[2]->lhs.name, x_name) != 0 ||
-      ins[2]->rhs.kind != IR_OPERAND_INT || ins[2]->rhs.int_value != 1) {
-    return 1;
+  if (!ir_kernighan_is_mask_decrement(ins[2], loop->x_name)) {
+    return 0;
   }
   masked = ins[2]->dest.name;
-
-  x_type = ir_function_local_declared_type(function, x_name);
-  width = ir_kernighan_type_width(x_type);
-  if (width == 0) {
-    return 1;
+  x_type = ir_function_local_declared_type(function, loop->x_name);
+  loop->width = ir_kernighan_type_width(x_type);
+  if (loop->width == 0) {
+    return 0;
   }
-
   next = 3;
-  if (ins[3]->op == IR_OP_CAST && ins[3]->dest.kind == IR_OPERAND_TEMP &&
-      ins[3]->dest.name && ins[3]->lhs.kind == IR_OPERAND_TEMP &&
-      ins[3]->lhs.name && strcmp(ins[3]->lhs.name, masked) == 0) {
+  if (ir_kernighan_is_mask_cast(ins[3], masked)) {
     if (!ins[3]->text || strcmp(ins[3]->text, x_type) != 0) {
-      return 1;
+      return 0;
     }
     masked = ins[3]->dest.name;
     next = 4;
   }
-
-  {
-    const IRInstruction *and_in = ins[next];
-    const IRInstruction *add_in = ins[next + 1];
-    if (!ir_kernighan_is_binary(and_in, "&") ||
-        and_in->dest.kind != IR_OPERAND_SYMBOL || !and_in->dest.name ||
-        strcmp(and_in->dest.name, x_name) != 0 ||
-        and_in->lhs.kind != IR_OPERAND_SYMBOL || !and_in->lhs.name ||
-        strcmp(and_in->lhs.name, x_name) != 0 ||
-        and_in->rhs.kind != IR_OPERAND_TEMP || !and_in->rhs.name ||
-        strcmp(and_in->rhs.name, masked) != 0) {
-      return 1;
-    }
-    if (!ir_kernighan_is_binary(add_in, "+") ||
-        add_in->dest.kind != IR_OPERAND_SYMBOL || !add_in->dest.name ||
-        add_in->lhs.kind != IR_OPERAND_SYMBOL || !add_in->lhs.name ||
-        strcmp(add_in->lhs.name, add_in->dest.name) != 0 ||
-        add_in->rhs.kind != IR_OPERAND_INT || add_in->rhs.int_value != 1) {
-      return 1;
-    }
-    n_name = add_in->dest.name;
+  if (!ir_kernighan_is_mask_and(ins[next], loop->x_name, masked) ||
+      !ir_kernighan_is_counter_bump(ins[next + 1])) {
+    return 0;
   }
-  if (strcmp(n_name, x_name) == 0) {
+  loop->n_name = ins[next + 1]->dest.name;
+  if (strcmp(loop->n_name, loop->x_name) == 0) {
+    return 0;
+  }
+  loop->n_type = ir_function_local_declared_type(function, loop->n_name);
+  if (ir_kernighan_type_width(loop->n_type) == 0) {
+    return 0;
+  }
+  return ir_kernighan_closes_loop(function, at[next + 1], header->text,
+                                  done_label, &loop->jump_at);
+}
+
+static int ir_kpc_append(IRInstructionVector *vector, IRInstruction *in,
+                         int ready) {
+  if (ready && ir_instruction_vector_append_move(vector, in)) {
     return 1;
   }
-  n_type = ir_function_local_declared_type(function, n_name);
-  if (ir_kernighan_type_width(n_type) == 0) {
-    return 1;
-  }
+  ir_instruction_destroy_storage(in);
+  return 0;
+}
 
-  if (!ir_find_next_non_nop(function, at[next + 1] + 1, &jump_at)) {
-    return 1;
-  }
-  {
-    const IRInstruction *jump = &function->instructions[jump_at];
-    if (jump->op != IR_OP_JUMP || !jump->text ||
-        strcmp(jump->text, header->text) != 0) {
-      return 1;
-    }
-  }
-  if (!ir_fused_loop_exit_is_adjacent(function, jump_at, done_label)) {
-    return 1;
-  }
-  if (!ir_kernighan_label_has_one_source(function, header->text, jump_at)) {
-    return 1;
-  }
-
-  {
-    char prefix[32];
-    char pop_temp[64];
-    char sum_temp[64];
-    IRInstructionVector vector = {0};
-    const char *pop_source;
-    snprintf(prefix, sizeof(prefix), "kpc%zu", header_index);
-    snprintf(pop_temp, sizeof(pop_temp), "%s_c", prefix);
-    snprintf(sum_temp, sizeof(sum_temp), "%s_s", prefix);
-
-    for (size_t i = 0; i < header_index; i++) {
-      IRInstruction cloned = {0};
-      if (!ir_clone_instruction_plain(&function->instructions[i], &cloned) ||
-          !ir_instruction_vector_append_move(&vector, &cloned)) {
-        ir_instruction_destroy_storage(&cloned);
-        ir_instruction_vector_destroy(&vector);
-        return 0;
-      }
-    }
-
-    pop_source = x_name;
-
-    {
-      IRInstruction pop = {0};
-      pop.op = IR_OP_UNARY;
-      pop.text = mettle_strdup(width == 8 ? "popcnt64" : "popcnt");
-      pop.dest = ir_operand_temp(pop_temp);
-      pop.lhs = ir_operand_symbol(pop_source);
-      if (!pop.text || !pop.dest.name || !pop.lhs.name ||
-          !ir_instruction_vector_append_move(&vector, &pop)) {
-        ir_instruction_destroy_storage(&pop);
-        ir_instruction_vector_destroy(&vector);
-        return 0;
-      }
-    }
-    {
-      IRInstruction cast = {0};
-      cast.op = IR_OP_CAST;
-      cast.text = mettle_strdup(n_type);
-      cast.dest = ir_operand_temp(sum_temp);
-      cast.lhs = ir_operand_temp(pop_temp);
-      if (!cast.text || !cast.dest.name || !cast.lhs.name ||
-          !ir_instruction_vector_append_move(&vector, &cast)) {
-        ir_instruction_destroy_storage(&cast);
-        ir_instruction_vector_destroy(&vector);
-        return 0;
-      }
-    }
-    {
-      IRInstruction acc = {0};
-      acc.op = IR_OP_BINARY;
-      acc.text = mettle_strdup("+");
-      acc.dest = ir_operand_symbol(n_name);
-      acc.lhs = ir_operand_symbol(n_name);
-      acc.rhs = ir_operand_temp(sum_temp);
-      if (!acc.text || !acc.dest.name || !acc.lhs.name || !acc.rhs.name ||
-          !ir_instruction_vector_append_move(&vector, &acc)) {
-        ir_instruction_destroy_storage(&acc);
-        ir_instruction_vector_destroy(&vector);
-        return 0;
-      }
-    }
-    {
-      IRInstruction clear = {0};
-      clear.op = IR_OP_ASSIGN;
-      clear.dest = ir_operand_symbol(x_name);
-      clear.lhs = ir_operand_int(0);
-      if (!clear.dest.name ||
-          !ir_instruction_vector_append_move(&vector, &clear)) {
-        ir_instruction_destroy_storage(&clear);
-        ir_instruction_vector_destroy(&vector);
-        return 0;
-      }
-    }
-
-    for (size_t i = jump_at + 1; i < function->instruction_count; i++) {
-      IRInstruction cloned = {0};
-      if (!ir_clone_instruction_plain(&function->instructions[i], &cloned) ||
-          !ir_instruction_vector_append_move(&vector, &cloned)) {
-        ir_instruction_destroy_storage(&cloned);
-        ir_instruction_vector_destroy(&vector);
-        return 0;
-      }
-    }
-
-    if (!ir_function_replace_instructions(function, &vector)) {
-      ir_instruction_vector_destroy(&vector);
+static int ir_kpc_clone_range(IRInstructionVector *vector,
+                              const IRFunction *function, size_t lo,
+                              size_t hi) {
+  for (size_t i = lo; i < hi; i++) {
+    IRInstruction cloned = {0};
+    int cloned_ok = ir_clone_instruction_plain(&function->instructions[i],
+                                               &cloned);
+    if (!ir_kpc_append(vector, &cloned, cloned_ok)) {
       return 0;
     }
   }
+  return 1;
+}
 
+static int ir_kpc_emit_popcount(IRInstructionVector *vector, const char *dest,
+                                const char *source, int width) {
+  IRInstruction pop = {0};
+
+  pop.op = IR_OP_UNARY;
+  pop.text = mettle_strdup(width == 8 ? "popcnt64" : "popcnt");
+  pop.dest = ir_operand_temp(dest);
+  pop.lhs = ir_operand_symbol(source);
+  return ir_kpc_append(vector, &pop,
+                       pop.text && pop.dest.name && pop.lhs.name);
+}
+
+static int ir_kpc_emit_cast(IRInstructionVector *vector, const char *dest,
+                            const char *source, const char *type) {
+  IRInstruction cast = {0};
+
+  cast.op = IR_OP_CAST;
+  cast.text = mettle_strdup(type);
+  cast.dest = ir_operand_temp(dest);
+  cast.lhs = ir_operand_temp(source);
+  return ir_kpc_append(vector, &cast,
+                       cast.text && cast.dest.name && cast.lhs.name);
+}
+
+static int ir_kpc_emit_accumulate(IRInstructionVector *vector,
+                                  const char *counter, const char *addend) {
+  IRInstruction acc = {0};
+
+  acc.op = IR_OP_BINARY;
+  acc.text = mettle_strdup("+");
+  acc.dest = ir_operand_symbol(counter);
+  acc.lhs = ir_operand_symbol(counter);
+  acc.rhs = ir_operand_temp(addend);
+  return ir_kpc_append(vector, &acc,
+                       acc.text && acc.dest.name && acc.lhs.name &&
+                           acc.rhs.name);
+}
+
+static int ir_kpc_emit_zero(IRInstructionVector *vector, const char *name) {
+  IRInstruction clear = {0};
+
+  clear.op = IR_OP_ASSIGN;
+  clear.dest = ir_operand_symbol(name);
+  clear.lhs = ir_operand_int(0);
+  return ir_kpc_append(vector, &clear, clear.dest.name != NULL);
+}
+
+static int ir_kpc_rewrite(IRFunction *function, size_t header_index,
+                          const IRKernighanLoop *loop) {
+  IRInstructionVector vector = {0};
+  char pop_temp[64];
+  char sum_temp[64];
+
+  snprintf(pop_temp, sizeof(pop_temp), "kpc%zu_c", header_index);
+  snprintf(sum_temp, sizeof(sum_temp), "kpc%zu_s", header_index);
+  if (!ir_kpc_clone_range(&vector, function, 0, header_index) ||
+      !ir_kpc_emit_popcount(&vector, pop_temp, loop->x_name, loop->width) ||
+      !ir_kpc_emit_cast(&vector, sum_temp, pop_temp, loop->n_type) ||
+      !ir_kpc_emit_accumulate(&vector, loop->n_name, sum_temp) ||
+      !ir_kpc_emit_zero(&vector, loop->x_name) ||
+      !ir_kpc_clone_range(&vector, function, loop->jump_at + 1,
+                          function->instruction_count) ||
+      !ir_function_replace_instructions(function, &vector)) {
+    ir_instruction_vector_destroy(&vector);
+    return 0;
+  }
+  return 1;
+}
+
+static int ir_try_fold_kernighan_popcount_at(IRFunction *function,
+                                             size_t header_index,
+                                             int *changed) {
+  IRKernighanLoop loop = {0};
+
+  if (!ir_kernighan_match(function, header_index, &loop)) {
+    return 1;
+  }
+  if (!ir_kpc_rewrite(function, header_index, &loop)) {
+    return 0;
+  }
   if (changed) {
     *changed = 1;
   }

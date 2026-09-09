@@ -125,11 +125,146 @@ static size_t ir_inline_measured_size(const IRFunction *function) {
   return size;
 }
 
+typedef struct {
+  size_t non_nop_count;
+  size_t cleaned_count;
+  int cleaned_known;
+  size_t call_count;
+  int has_return;
+  int has_while_label;
+} IRInlineScan;
+
+static size_t ir_inline_loop_body_budget(int site_loop_depth) {
+  return site_loop_depth >= 2 ? 2u * IR_INLINE_LOOP_BODY_INSTRUCTIONS
+                              : IR_INLINE_LOOP_BODY_INSTRUCTIONS;
+}
+
+static int ir_inline_label_is_while(const IRInstruction *instruction) {
+  return instruction->op == IR_OP_LABEL && instruction->text &&
+         (strncmp(instruction->text, "ir_while_", 9) == 0 ||
+          strstr(instruction->text, "_lbl_ir_while_") != NULL);
+}
+
+static int ir_inline_signature_rejects(const IRFunction *function, int forced,
+                                       const char **why_not,
+                                       const char **fix) {
+  if (!forced && ir_function_name_is_inline_denylisted(function->name)) {
+    IR_INLINE_WHY(why_not, "callee-denylisted",
+                  "the callee is on the compiler's inline denylist "
+                  "(a compile-time-blowup guard)");
+    return 1;
+  }
+  if (!forced && function->parameter_count > IR_INLINE_MAX_PARAMETERS) {
+    IR_INLINE_WHY(why_not, "too-many-parameters",
+                  "the callee has more than 16 parameters");
+    *fix = "pass a struct instead of a long parameter list";
+    return 1;
+  }
+  if (function->parameter_count > 0 && !function->parameter_names) {
+    IR_INLINE_WHY(why_not, "callee-parameter-names",
+                  "the callee's parameter names are unavailable to the inliner");
+    return 1;
+  }
+  return 0;
+}
+
+static int ir_inline_over_body_budget(const IRFunction *function, int forced,
+                                      size_t body_budget, IRInlineScan *scan) {
+  if (forced || scan->non_nop_count <= body_budget) {
+    return 0;
+  }
+  if (!scan->cleaned_known) {
+    scan->cleaned_count = ir_inline_measured_size(function);
+    scan->cleaned_known = 1;
+  }
+  return scan->cleaned_count > body_budget;
+}
+
+static int ir_inline_scan_body(const IRFunction *function, int forced,
+                               size_t body_budget, size_t nested_call_budget,
+                               IRInlineScan *scan, const char **why_not,
+                               const char **fix) {
+  scan->non_nop_count = 0;
+  scan->cleaned_count = SIZE_MAX;
+  scan->cleaned_known = 0;
+  scan->call_count = 0;
+  scan->has_return = 0;
+  scan->has_while_label = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+
+    if (!instruction || instruction->op == IR_OP_NOP) {
+      continue;
+    }
+    scan->non_nop_count++;
+    if (ir_inline_over_body_budget(function, forced, body_budget, scan)) {
+      IR_INLINE_WHY(why_not, "callee-over-budget",
+                    "the callee's body is over the profile-adjusted inline "
+                    "instruction budget");
+      *fix = "mark the callee @inline to override the budget, or compile "
+             "with --pgo so a measured-hot callee overrides it";
+      return 0;
+    }
+    if (instruction->op == IR_OP_INLINE_ASM) {
+      IR_INLINE_WHY(why_not, "callee-inline-asm",
+                    "the callee contains inline assembly");
+      return 0;
+    }
+    if (ir_inline_label_is_while(instruction)) {
+      scan->has_while_label = 1;
+    }
+    if (instruction->op == IR_OP_CALL ||
+        instruction->op == IR_OP_CALL_INDIRECT) {
+      scan->call_count++;
+      if (!forced && scan->call_count > nested_call_budget) {
+        IR_INLINE_WHY(why_not, "callee-call-count",
+                      "the callee makes more calls of its own than the "
+                      "profile-adjusted inline call-count budget allows");
+        *fix = "mark the callee @inline to override the call-count cap";
+        return 0;
+      }
+    }
+    if (instruction->op == IR_OP_RETURN) {
+      scan->has_return = 1;
+    }
+  }
+  return 1;
+}
+
+static int ir_inline_loop_body_rejects(const IRFunction *function, int forced,
+                                       int site_loop_depth, IRInlineScan *scan,
+                                       const char **why_not,
+                                       const char **fix) {
+  size_t budget = ir_inline_loop_body_budget(site_loop_depth);
+
+  if (forced || !scan->has_while_label) {
+    return 0;
+  }
+  if (!scan->cleaned_known &&
+      scan->non_nop_count > IR_INLINE_LOOP_BODY_INSTRUCTIONS) {
+    scan->cleaned_count = ir_inline_measured_size(function);
+    scan->cleaned_known = 1;
+  }
+  if (scan->non_nop_count <= budget || scan->cleaned_count <= budget) {
+    return 0;
+  }
+  IR_INLINE_WHY(why_not, "callee-has-loop",
+                "the callee's loop body is over the inline size budget for "
+                "a loop-bearing callee (the call itself costs little next "
+                "to the loop inside it)");
+  *fix = "mark the callee @inline to inline it anyway";
+  return 1;
+}
+
 static int ir_function_is_inline_candidate_at(const IRFunction *function,
                                               int site_loop_depth,
                                               const char **why_not,
                                               const char **fix) {
   const char *unused;
+  IRInlineScan scan;
+  int forced;
+  size_t body_budget;
+
   if (!why_not) {
     why_not = &unused;
   }
@@ -149,126 +284,24 @@ static int ir_function_is_inline_candidate_at(const IRFunction *function,
     *fix = "remove @noinline if inlining is wanted here";
     return 0;
   }
-  int forced = function->is_inline;
-  size_t body_budget = ir_opt_inline_body_budget(function);
+  forced = function->is_inline;
+  body_budget = ir_opt_inline_body_budget(function);
   if (site_loop_depth >= 2) {
     body_budget *= 2u;
   }
-  size_t nested_call_budget = ir_opt_inline_nested_call_budget(function);
-
-  if (!forced && ir_function_name_is_inline_denylisted(function->name)) {
-    IR_INLINE_WHY(why_not, "callee-denylisted",
-                  "the callee is on the compiler's inline denylist "
-                  "(a compile-time-blowup guard)");
+  if (ir_inline_signature_rejects(function, forced, why_not, fix)) {
     return 0;
   }
-  if (!forced && function->parameter_count > IR_INLINE_MAX_PARAMETERS) {
-    IR_INLINE_WHY(why_not, "too-many-parameters",
-                  "the callee has more than 16 parameters");
-    *fix = "pass a struct instead of a long parameter list";
+  if (!ir_inline_scan_body(function, forced, body_budget,
+                           ir_opt_inline_nested_call_budget(function), &scan,
+                           why_not, fix)) {
     return 0;
   }
-  if (function->parameter_count > 0 && !function->parameter_names) {
-    IR_INLINE_WHY(why_not, "callee-parameter-names",
-                  "the callee's parameter names are unavailable to the inliner");
+  if (ir_inline_loop_body_rejects(function, forced, site_loop_depth, &scan,
+                                  why_not, fix)) {
     return 0;
   }
-
-  size_t non_nop_count = 0;
-  size_t cleaned_count = SIZE_MAX;
-  int cleaned_known = 0;
-  size_t call_count = 0;
-  int has_return = 0;
-  int has_while_label = 0;
-  int has_less_compare = 0;
-  int has_greater_compare = 0;
-  int has_subtract = 0;
-  int has_multiply = 0;
-  for (size_t i = 0; i < function->instruction_count; i++) {
-    const IRInstruction *instruction = &function->instructions[i];
-    if (!instruction || instruction->op == IR_OP_NOP) {
-      continue;
-    }
-
-    non_nop_count++;
-    if (!forced && non_nop_count > body_budget && !cleaned_known) {
-      cleaned_count = ir_inline_measured_size(function);
-      cleaned_known = 1;
-    }
-    if (!forced && non_nop_count > body_budget && cleaned_count > body_budget) {
-      IR_INLINE_WHY(why_not, "callee-over-budget",
-                    "the callee's body is over the profile-adjusted inline "
-                    "instruction budget");
-      *fix = "mark the callee @inline to override the budget, or compile "
-             "with --pgo so a measured-hot callee overrides it";
-      return 0;
-    }
-
-    if (instruction->op == IR_OP_INLINE_ASM) {
-      IR_INLINE_WHY(why_not, "callee-inline-asm",
-                    "the callee contains inline assembly");
-      return 0;
-    }
-
-    if (instruction->op == IR_OP_LABEL && instruction->text) {
-      if (strncmp(instruction->text, "ir_while_", 9) == 0 ||
-          strstr(instruction->text, "_lbl_ir_while_") != NULL) {
-        has_while_label = 1;
-      }
-    }
-    if (instruction->op == IR_OP_BINARY && instruction->text) {
-      if (strcmp(instruction->text, "<") == 0) {
-        has_less_compare = 1;
-      } else if (strcmp(instruction->text, ">") == 0) {
-        has_greater_compare = 1;
-      } else if (strcmp(instruction->text, "-") == 0) {
-        has_subtract = 1;
-      } else if (strcmp(instruction->text, "*") == 0) {
-        has_multiply = 1;
-      }
-    }
-
-    if (instruction->op == IR_OP_CALL ||
-        instruction->op == IR_OP_CALL_INDIRECT) {
-      call_count++;
-      if (!forced && call_count > nested_call_budget) {
-        IR_INLINE_WHY(why_not, "callee-call-count",
-                      "the callee makes more calls of its own than the "
-                      "profile-adjusted inline call-count budget allows");
-        *fix = "mark the callee @inline to override the call-count cap";
-        return 0;
-      }
-    }
-
-    if (instruction->op == IR_OP_RETURN) {
-      has_return = 1;
-    }
-  }
-
-  if (!forced && has_while_label && !cleaned_known &&
-      non_nop_count > IR_INLINE_LOOP_BODY_INSTRUCTIONS) {
-    cleaned_count = ir_inline_measured_size(function);
-    cleaned_known = 1;
-  }
-  if (!forced && has_while_label &&
-      non_nop_count > (site_loop_depth >= 2
-                           ? 2u * IR_INLINE_LOOP_BODY_INSTRUCTIONS
-                           : IR_INLINE_LOOP_BODY_INSTRUCTIONS) &&
-      cleaned_count > (site_loop_depth >= 2
-                           ? 2u * IR_INLINE_LOOP_BODY_INSTRUCTIONS
-                           : IR_INLINE_LOOP_BODY_INSTRUCTIONS)) {
-    IR_INLINE_WHY(why_not, "callee-has-loop",
-                  "the callee's loop body is over the inline size budget for "
-                  "a loop-bearing callee (the call itself costs little next "
-                  "to the loop inside it)");
-    *fix = "mark the callee @inline to inline it anyway";
-    return 0;
-  }
-  (void)has_less_compare;
-  (void)has_greater_compare;
-  (void)has_subtract;
-  (void)has_multiply;
-  if (!has_return) {
+  if (!scan.has_return) {
     IR_INLINE_WHY(why_not, "callee-no-return",
                   "the callee has no return instruction the inliner can rewrite");
     return 0;

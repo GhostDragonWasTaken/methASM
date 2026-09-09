@@ -841,6 +841,66 @@ int ir_optimize_safety_analysis(IRProgram *program, int preserve_boundaries) {
   return ok;
 }
 
+typedef struct {
+  const char *name;
+  const char *timing_label;
+  int (*run)(IRProgram *program, int *changed);
+  const char *ice_message;
+  int needs_boundaries_free;
+  int needs_whole_program;
+  int unskippable;
+} IRProgramPass;
+
+static const IRProgramPass kProgramPasses[] = {
+    {"hoist_pure_calls", "hoist_pure_calls_pre_inline [program]",
+     ir_hoist_pure_calls_pass,
+     "IR optimization pure-call hoisting pass failed", 0, 0, 0},
+    {"tail_recursion_elim", "tail_recursion_elim [program]",
+     ir_tail_recursion_elimination_pass,
+     "IR tail-recursion elimination pass failed", 1, 0, 0},
+    {"inline_small_functions", "inline_small_functions [program]",
+     ir_inline_small_functions_pass, "IR optimization inlining pass failed", 1,
+     0, 0},
+    {"inline_self_recursion", "inline_self_recursion [program]",
+     ir_inline_self_recursion_pass,
+     "IR optimization self-recursion inlining failed", 1, 0, 0},
+    {"hoist_pure_calls", "hoist_pure_calls [program]",
+     ir_hoist_pure_calls_pass,
+     "IR optimization pure-call hoisting pass failed", 0, 0, 0},
+    {"layout_factor", "layout_factor [program]", ir_layout_factor_pass,
+     "IR layout factorization pass failed", 1, 1, 0},
+};
+
+static const IRProgramPass kParallelizePass = {
+    "parallelize_marked_loops", "parallelize_marked_loops [program]",
+    ir_parallelize_marked_loops_pass, "IR loop parallelization pass failed", 0,
+    0, 1};
+
+static void ir_run_program_pass(IRProgram *program,
+                                const IROptimizeOptions *options,
+                                const IRProgramPass *pass) {
+  int changed = 0;
+  double started;
+
+  if (pass->needs_boundaries_free && options &&
+      options->preserve_function_boundaries) {
+    return;
+  }
+  if (pass->needs_whole_program && (!options || !options->whole_program)) {
+    return;
+  }
+  if (!pass->unskippable && ir_pass_name_is_skipped(pass->name)) {
+    return;
+  }
+  mettle_compiler_ctx_set_pass_name(pass->name);
+  mettle_compiler_ctx_set_fixpoint_iteration(0);
+  started = ir_pass_time_begin();
+  if (!pass->run(program, &changed)) {
+    mettle_compiler_ice(pass->ice_message);
+  }
+  ir_pass_time_end(pass->timing_label, started);
+}
+
 int ir_optimize_program_pipeline(IRProgram *program,
                                  const IROptimizeOptions *options) {
   if (!program) {
@@ -892,86 +952,13 @@ int ir_optimize_program_pipeline(IRProgram *program,
     }
   }
 
-  if (!ir_pass_name_is_skipped("hoist_pure_calls")) {
-    int pure_licm_changed = 0;
-    mettle_compiler_ctx_set_pass_name("hoist_pure_calls");
-    mettle_compiler_ctx_set_fixpoint_iteration(0);
-    double t0 = ir_pass_time_begin();
-    if (!ir_hoist_pure_calls_pass(program, &pure_licm_changed)) {
-      mettle_compiler_ice("IR optimization pure-call hoisting pass failed");
-    }
-    ir_pass_time_end("hoist_pure_calls_pre_inline [program]", t0);
-  }
-
-  if ((!options || !options->preserve_function_boundaries) &&
-      !ir_pass_name_is_skipped("tail_recursion_elim")) {
-    int tre_changed = 0;
-    mettle_compiler_ctx_set_pass_name("tail_recursion_elim");
-    mettle_compiler_ctx_set_fixpoint_iteration(0);
-    double t0 = ir_pass_time_begin();
-    if (!ir_tail_recursion_elimination_pass(program, &tre_changed)) {
-      mettle_compiler_ice("IR tail-recursion elimination pass failed");
-    }
-    ir_pass_time_end("tail_recursion_elim [program]", t0);
-  }
-
-  if ((!options || !options->preserve_function_boundaries) &&
-      !ir_pass_name_is_skipped("inline_small_functions")) {
-    int inlining_changed = 0;
-    mettle_compiler_ctx_set_pass_name("inline_small_functions");
-    mettle_compiler_ctx_set_fixpoint_iteration(0);
-    double t0 = ir_pass_time_begin();
-    if (!ir_inline_small_functions_pass(program, &inlining_changed)) {
-      mettle_compiler_ice("IR optimization inlining pass failed");
-    }
-    ir_pass_time_end("inline_small_functions [program]", t0);
-  }
-
-  if ((!options || !options->preserve_function_boundaries) &&
-      !ir_pass_name_is_skipped("inline_self_recursion")) {
-    int self_inline_changed = 0;
-    mettle_compiler_ctx_set_pass_name("inline_self_recursion");
-    mettle_compiler_ctx_set_fixpoint_iteration(0);
-    double t0 = ir_pass_time_begin();
-    if (!ir_inline_self_recursion_pass(program, &self_inline_changed)) {
-      mettle_compiler_ice("IR optimization self-recursion inlining failed");
-    }
-    ir_pass_time_end("inline_self_recursion [program]", t0);
-  }
-
-  if (!ir_pass_name_is_skipped("hoist_pure_calls")) {
-    int pure_licm_changed = 0;
-    mettle_compiler_ctx_set_pass_name("hoist_pure_calls");
-    mettle_compiler_ctx_set_fixpoint_iteration(0);
-    double t0 = ir_pass_time_begin();
-    if (!ir_hoist_pure_calls_pass(program, &pure_licm_changed)) {
-      mettle_compiler_ice("IR optimization pure-call hoisting pass failed");
-    }
-    ir_pass_time_end("hoist_pure_calls [program]", t0);
-  }
-
-  if (options && options->whole_program &&
-      !options->preserve_function_boundaries &&
-      !ir_pass_name_is_skipped("layout_factor")) {
-    int layout_changed = 0;
-    mettle_compiler_ctx_set_pass_name("layout_factor");
-    mettle_compiler_ctx_set_fixpoint_iteration(0);
-    double t0 = ir_pass_time_begin();
-    if (!ir_layout_factor_pass(program, &layout_changed)) {
-      mettle_compiler_ice("IR layout factorization pass failed");
-    }
-    ir_pass_time_end("layout_factor [program]", t0);
+  for (size_t i = 0; i < sizeof(kProgramPasses) / sizeof(kProgramPasses[0]);
+       i++) {
+    ir_run_program_pass(program, options, &kProgramPasses[i]);
   }
 
   {
-    int parallel_changed = 0;
-    mettle_compiler_ctx_set_pass_name("parallelize_marked_loops");
-    mettle_compiler_ctx_set_fixpoint_iteration(0);
-    double t0 = ir_pass_time_begin();
-    if (!ir_parallelize_marked_loops_pass(program, &parallel_changed)) {
-      mettle_compiler_ice("IR loop parallelization pass failed");
-    }
-    ir_pass_time_end("parallelize_marked_loops [program]", t0);
+    ir_run_program_pass(program, options, &kParallelizePass);
     if (ir_optimize_had_user_error()) {
       ir_explain_flush();
       ir_verify_end_program();
