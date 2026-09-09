@@ -48,6 +48,28 @@ static const IROptNamedPass g_ir_pre_inline_canonical[] = {
     {"scan_from_first", ir_normalize_scan_from_first_pass, IR_GATE_LOOP_LOAD},
 };
 
+static const IROptNamedPass g_ir_pre_inline_leaf_cleanup[] = {
+    {"leaf_branch_simplify", ir_constant_and_branch_simplify_pass, {0, 0}},
+    {"leaf_unreachable", ir_eliminate_unreachable_straightline_pass, {0, 0}},
+    {"leaf_redundant_jumps", ir_remove_redundant_jumps_pass, {0, 0}},
+    {"leaf_unused_labels", ir_remove_unused_labels_pass, {0, 0}},
+    {"leaf_forward_stored_values", ir_forward_stored_values_pass,
+     {IR_OPT_FEATURE_LOAD, IR_OPT_REQUIRE_NONE}},
+    {"leaf_copy_prop", ir_copy_and_constant_propagation_pass, {0, 0}},
+    {"leaf_dead_temps", ir_eliminate_dead_temp_writes_pass, {0, 0}},
+};
+
+static int ir_function_makes_no_calls(const IRFunction *function) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    IROpcode op = function->instructions[i].op;
+    if (op == IR_OP_CALL || op == IR_OP_CALL_INDIRECT ||
+        op == IR_OP_INLINE_ASM) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static const IROptNamedPass g_ir_pre_inline_recognizers[] = {
     {"user_rewrite", ir_user_rewrite_pass,
      {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
@@ -347,6 +369,42 @@ int ir_optimize_pre_inline_function(IRFunction *function) {
       IR_ARRAY_COUNT(g_ir_pre_inline_recognizers),
       IR_OPT_RECOGNIZER_MAX_ITERATIONS, "pre-inline idiom recognition",
       "IR optimization pre-inline pass failed", 0);
+}
+
+size_t ir_inline_cleaned_instruction_count(const IRFunction *function) {
+  if (!function || function->has_volatile_access ||
+      !ir_function_makes_no_calls(function)) {
+    return SIZE_MAX;
+  }
+  IRFunction *clone = ir_function_create(function->name);
+  if (!clone) {
+    return SIZE_MAX;
+  }
+  int ok = ir_function_set_parameters(
+      clone, (const char **)function->parameter_names,
+      (const char **)function->parameter_types, function->parameter_count);
+  for (size_t i = 0; ok && i < function->instruction_count; i++) {
+    IRInstruction cloned = {0};
+    ok = ir_clone_instruction_plain(&function->instructions[i], &cloned) &&
+         ir_function_append_instruction(clone, &cloned);
+    ir_instruction_destroy_storage(&cloned);
+  }
+  clone->entry_block = function->entry_block;
+  size_t count = SIZE_MAX;
+  if (ok && ir_run_named_stage_fixpoint(
+                clone, g_ir_pre_inline_leaf_cleanup,
+                IR_ARRAY_COUNT(g_ir_pre_inline_leaf_cleanup), 1,
+                "inline size measurement",
+                "IR optimization pre-inline pass failed", 0)) {
+    count = 0;
+    for (size_t i = 0; i < clone->instruction_count; i++) {
+      if (clone->instructions[i].op != IR_OP_NOP) {
+        count++;
+      }
+    }
+  }
+  ir_function_destroy(clone);
+  return count;
 }
 
 #define IR_FP_MAX_LOOPS 64

@@ -104,6 +104,27 @@ static MTLC_THREAD_LOCAL const char *g_inline_refusal_code = NULL;
     g_inline_refusal_code = (id);                                              \
   } while (0)
 
+#define IR_INLINE_SIZE_CACHE 8
+
+static size_t ir_inline_measured_size(const IRFunction *function) {
+  static const IRFunction *cached_fn[IR_INLINE_SIZE_CACHE];
+  static size_t cached_count[IR_INLINE_SIZE_CACHE];
+  static size_t cached_size[IR_INLINE_SIZE_CACHE];
+  static size_t next_slot;
+  for (size_t i = 0; i < IR_INLINE_SIZE_CACHE; i++) {
+    if (cached_fn[i] == function &&
+        cached_count[i] == function->instruction_count) {
+      return cached_size[i];
+    }
+  }
+  size_t size = ir_inline_cleaned_instruction_count(function);
+  cached_fn[next_slot] = function;
+  cached_count[next_slot] = function->instruction_count;
+  cached_size[next_slot] = size;
+  next_slot = (next_slot + 1) % IR_INLINE_SIZE_CACHE;
+  return size;
+}
+
 static int ir_function_is_inline_candidate_at(const IRFunction *function,
                                               int site_loop_depth,
                                               const char **why_not,
@@ -154,6 +175,8 @@ static int ir_function_is_inline_candidate_at(const IRFunction *function,
   }
 
   size_t non_nop_count = 0;
+  size_t cleaned_count = SIZE_MAX;
+  int cleaned_known = 0;
   size_t call_count = 0;
   int has_return = 0;
   int has_while_label = 0;
@@ -168,7 +191,11 @@ static int ir_function_is_inline_candidate_at(const IRFunction *function,
     }
 
     non_nop_count++;
-    if (!forced && non_nop_count > body_budget) {
+    if (!forced && non_nop_count > body_budget && !cleaned_known) {
+      cleaned_count = ir_inline_measured_size(function);
+      cleaned_known = 1;
+    }
+    if (!forced && non_nop_count > body_budget && cleaned_count > body_budget) {
       IR_INLINE_WHY(why_not, "callee-over-budget",
                     "the callee's body is over the profile-adjusted inline "
                     "instruction budget");
@@ -218,8 +245,16 @@ static int ir_function_is_inline_candidate_at(const IRFunction *function,
     }
   }
 
+  if (!forced && has_while_label && !cleaned_known &&
+      non_nop_count > IR_INLINE_LOOP_BODY_INSTRUCTIONS) {
+    cleaned_count = ir_inline_measured_size(function);
+    cleaned_known = 1;
+  }
   if (!forced && has_while_label &&
       non_nop_count > (site_loop_depth >= 2
+                           ? 2u * IR_INLINE_LOOP_BODY_INSTRUCTIONS
+                           : IR_INLINE_LOOP_BODY_INSTRUCTIONS) &&
+      cleaned_count > (site_loop_depth >= 2
                            ? 2u * IR_INLINE_LOOP_BODY_INSTRUCTIONS
                            : IR_INLINE_LOOP_BODY_INSTRUCTIONS)) {
     IR_INLINE_WHY(why_not, "callee-has-loop",
