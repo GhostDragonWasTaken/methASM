@@ -4640,6 +4640,10 @@ int ir_forward_stored_values_pass(IRFunction *function, int *changed) {
     }
   }
 
+  if (getenv("METTLE_FWD_TRACE")) {
+    fprintf(stderr, "[fwd] %s: ok=%d converged=%d blocks=%zu\n",
+            function->name ? function->name : "?", ok, converged, block_count);
+  }
   if (ok && converged) {
     for (size_t k = 0; ok && k < order_count; k++) {
       size_t b = order[k];

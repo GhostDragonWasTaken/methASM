@@ -928,3 +928,208 @@ int ir_sroa_pass(IRFunction *function, int *changed) {
   }
   return 1;
 }
+
+typedef struct {
+  char *local;
+  int bytes;
+  int is_unsigned;
+  size_t decl_index;
+  size_t address_index;
+  char *address_temp;
+  char *alias_symbol;
+  size_t alias_index;
+  int eligible;
+} IRDemoteCandidate;
+
+static int ir_demote_name_matches(const IROperand *operand, IROperandKind kind,
+                                  const char *name) {
+  return operand && name && operand->kind == kind && operand->name &&
+         strcmp(operand->name, name) == 0;
+}
+
+static int ir_demote_operand_mentions(const IRInstruction *in,
+                                      IROperandKind kind, const char *name) {
+  if (ir_demote_name_matches(&in->dest, kind, name) ||
+      ir_demote_name_matches(&in->lhs, kind, name) ||
+      ir_demote_name_matches(&in->rhs, kind, name)) {
+    return 1;
+  }
+  for (size_t a = 0; a < in->argument_count; a++) {
+    if (ir_demote_name_matches(&in->arguments[a], kind, name)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int ir_demote_access_ok(const IRInstruction *in, IROperandKind kind,
+                               const char *pointer, int bytes) {
+  if (in->is_volatile || in->rhs.kind != IR_OPERAND_INT ||
+      in->rhs.int_value != bytes || in->is_float) {
+    return 0;
+  }
+  if (in->op == IR_OP_LOAD) {
+    return ir_demote_name_matches(&in->lhs, kind, pointer) &&
+           (in->dest.kind == IR_OPERAND_TEMP ||
+            in->dest.kind == IR_OPERAND_SYMBOL);
+  }
+  if (in->op == IR_OP_STORE) {
+    return ir_demote_name_matches(&in->dest, kind, pointer) &&
+           (in->lhs.kind == IR_OPERAND_TEMP ||
+            in->lhs.kind == IR_OPERAND_SYMBOL ||
+            in->lhs.kind == IR_OPERAND_INT) &&
+           !ir_demote_name_matches(&in->lhs, kind, pointer);
+  }
+  return 0;
+}
+
+static int ir_demote_uses_are_direct(const IRFunction *function,
+                                     IROperandKind kind, const char *pointer,
+                                     size_t def_index, int bytes,
+                                     size_t *alias_out) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (i == def_index || in->op == IR_OP_NOP ||
+        in->op == IR_OP_DECLARE_LOCAL ||
+        !ir_demote_operand_mentions(in, kind, pointer)) {
+      continue;
+    }
+    if (ir_demote_access_ok(in, kind, pointer, bytes)) {
+      continue;
+    }
+    if (kind == IR_OPERAND_TEMP && alias_out && *alias_out == SIZE_MAX &&
+        in->op == IR_OP_ASSIGN && in->dest.kind == IR_OPERAND_SYMBOL &&
+        in->dest.name && ir_demote_name_matches(&in->lhs, kind, pointer)) {
+      *alias_out = i;
+      continue;
+    }
+    return 0;
+  }
+  return 1;
+}
+
+static int ir_demote_symbol_written_once(const IRFunction *function,
+                                         const char *symbol, size_t at) {
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (i == at || in->op == IR_OP_NOP) {
+      continue;
+    }
+    if (in->op == IR_OP_DECLARE_LOCAL) {
+      continue;
+    }
+    if (ir_instruction_writes_destination(in) &&
+        ir_demote_name_matches(&in->dest, IR_OPERAND_SYMBOL, symbol)) {
+      return 0;
+    }
+    if (in->op == IR_OP_ADDRESS_OF &&
+        ir_demote_name_matches(&in->lhs, IR_OPERAND_SYMBOL, symbol)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int ir_demote_rewrite_access(IRInstruction *in, const char *local,
+                                    int is_unsigned, int *changed) {
+  if (in->op == IR_OP_LOAD) {
+    IROperand source = ir_operand_symbol(local);
+    int keep_unsigned = in->is_unsigned;
+    MtlcType *keep_type = in->value_type;
+    if (!source.name || !ir_rewrite_to_assign_operand(in, &source, changed)) {
+      ir_operand_destroy(&source);
+      return 0;
+    }
+    ir_operand_destroy(&source);
+    in->is_unsigned = keep_unsigned;
+    in->value_type = keep_type;
+    return 1;
+  }
+  IROperand value = ir_operand_copy(&in->lhs);
+  IROperand target = ir_operand_symbol(local);
+  if (!target.name) {
+    ir_operand_destroy(&value);
+    return 0;
+  }
+  ir_instruction_destroy_storage(in);
+  memset(in, 0, sizeof(*in));
+  in->op = IR_OP_ASSIGN;
+  in->dest = target;
+  in->lhs = value;
+  in->is_unsigned = is_unsigned;
+  if (changed) {
+    *changed = 1;
+  }
+  return 1;
+}
+
+int ir_demote_scalar_addresses_pass(IRFunction *function, int *changed) {
+  if (!function || function->instruction_count == 0) {
+    return 1;
+  }
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *addr = &function->instructions[i];
+    if (addr->op != IR_OP_ADDRESS_OF || addr->lhs.kind != IR_OPERAND_SYMBOL ||
+        !addr->lhs.name || addr->dest.kind != IR_OPERAND_TEMP ||
+        !addr->dest.name) {
+      continue;
+    }
+    const char *type_name =
+        ir_function_local_declared_type(function, addr->lhs.name);
+    int bits = 0;
+    int is_unsigned = 0;
+    if (!type_name || !ir_int_type_name_info(type_name, &bits, &is_unsigned) ||
+        bits < 8 || bits > 64) {
+      continue;
+    }
+    int bytes = bits / 8;
+    size_t other_address = SIZE_MAX;
+    for (size_t k = 0; k < function->instruction_count; k++) {
+      const IRInstruction *in = &function->instructions[k];
+      if (k != i && in->op == IR_OP_ADDRESS_OF &&
+          ir_demote_name_matches(&in->lhs, IR_OPERAND_SYMBOL, addr->lhs.name)) {
+        other_address = k;
+        break;
+      }
+    }
+    if (other_address != SIZE_MAX) {
+      continue;
+    }
+    size_t alias_at = SIZE_MAX;
+    if (!ir_demote_uses_are_direct(function, IR_OPERAND_TEMP, addr->dest.name,
+                                   i, bytes, &alias_at)) {
+      continue;
+    }
+    const char *alias_symbol = NULL;
+    if (alias_at != SIZE_MAX) {
+      alias_symbol = function->instructions[alias_at].dest.name;
+      if (!ir_demote_symbol_written_once(function, alias_symbol, alias_at) ||
+          !ir_demote_uses_are_direct(function, IR_OPERAND_SYMBOL, alias_symbol,
+                                     alias_at, bytes, NULL)) {
+        continue;
+      }
+    }
+    for (size_t k = 0; k < function->instruction_count; k++) {
+      IRInstruction *in = &function->instructions[k];
+      if (in->op != IR_OP_LOAD && in->op != IR_OP_STORE) {
+        continue;
+      }
+      if (ir_demote_access_ok(in, IR_OPERAND_TEMP, addr->dest.name, bytes) ||
+          (alias_symbol &&
+           ir_demote_access_ok(in, IR_OPERAND_SYMBOL, alias_symbol, bytes))) {
+        if (!ir_demote_rewrite_access(in, addr->lhs.name, is_unsigned,
+                                      changed)) {
+          return 0;
+        }
+      }
+    }
+    if (alias_at != SIZE_MAX) {
+      ir_instruction_make_nop(&function->instructions[alias_at]);
+    }
+    ir_instruction_make_nop(&function->instructions[i]);
+    if (changed) {
+      *changed = 1;
+    }
+  }
+  return 1;
+}

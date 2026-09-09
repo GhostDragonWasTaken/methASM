@@ -6469,6 +6469,12 @@ $simdRuntimeCases = @(
     IrMustMatch     = @("__prom_")
   },
   @{
+    Name            = "demote_scalar_addresses"
+    Path            = "tests/demote_scalar_addresses_check.mettle"
+    OutputMustMatch = "DEMOTE SCALAR ADDRESSES: ALL OK"
+    IrMustMatch     = @("poke")
+  },
+  @{
     Name            = "forward_stored_values"
     Path            = "tests/forward_stored_values_check.mettle"
     OutputMustMatch = "FORWARD STORED VALUES: ALL OK"

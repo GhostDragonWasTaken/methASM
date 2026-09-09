@@ -86,6 +86,8 @@ static const IROptNamedPass g_ir_pre_inline_recognizers[] = {
 static const IROptNamedPass g_ir_loop_canonical_passes[] = {
     {"drop_dead_narrowing", ir_drop_dead_narrowing_pass,
      {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
+    {"demote_scalar_addresses", ir_demote_scalar_addresses_pass,
+     {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
     {"unify_param_copy_spelling", ir_unify_param_copy_spelling_pass,
      IR_GATE_LOOP},
     {"hoist_body_locals", ir_hoist_body_locals_pass, IR_GATE_LOOP},

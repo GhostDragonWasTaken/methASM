@@ -1,0 +1,79 @@
+import "std/io";
+
+fn set_out(out: int32*, v: int32) {
+  *out = v + 1;
+}
+
+fn read_back(src: int32*) -> int32 {
+  return *src * 2;
+}
+
+fn set_byte(out: uint8*, v: int32) {
+  *out = (uint8)v;
+}
+
+@noinline fn poke(p: int32*) {
+  *p = *p + 100;
+}
+
+fn keep(p: int32*) -> int32* {
+  return p;
+}
+
+fn main() -> int32 {
+  var bad: int32 = 0;
+
+  var a: int32 = 0;
+  set_out(&a, 41);
+  if (a != 42) {
+    println("out param a = {a}, wanted 42");
+    bad = bad + 1;
+  }
+
+  var b: int32 = 7;
+  var twice: int32 = read_back(&b);
+  b = b + 1;
+  if (twice != 14 || b != 8) {
+    println("read back = {twice} b = {b}, wanted 14 and 8");
+    bad = bad + 1;
+  }
+
+  var c: uint8 = 0;
+  set_byte(&c, 300);
+  if ((int32)c != 44) {
+    println("byte out = {c}, wanted 44");
+    bad = bad + 1;
+  }
+
+  var d: int32 = 5;
+  poke(&d);
+  if (d != 105) {
+    println("poked d = {d}, wanted 105");
+    bad = bad + 1;
+  }
+
+  var e: int32 = 1;
+  var q: int32* = keep(&e);
+  set_out(&e, 9);
+  if (*q != 10) {
+    println("kept pointer sees {*q}, wanted 10");
+    bad = bad + 1;
+  }
+
+  var f: int32 = 3;
+  var g: int32 = 4;
+  var pf: int32* = &f;
+  var pg: int32* = &g;
+  *pf = *pg + 10;
+  *pg = *pf + 10;
+  if (f != 14 || g != 24) {
+    println("f = {f} g = {g}, wanted 14 and 24");
+    bad = bad + 1;
+  }
+
+  if (bad != 0) {
+    return 1;
+  }
+  println("DEMOTE SCALAR ADDRESSES: ALL OK");
+  return 0;
+}
