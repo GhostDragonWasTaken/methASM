@@ -1,0 +1,282 @@
+import "std/io";
+
+struct S12 {
+  a: int32;
+  b: int32;
+  c: int32;
+}
+
+struct S20 {
+  a: int32;
+  b: int32;
+  c: int32;
+  d: int32;
+  e: int32;
+}
+
+struct S24 {
+  a: int64;
+  b: int64;
+  c: int64;
+}
+
+struct S40 {
+  a: int64;
+  b: int64;
+  c: int64;
+  d: int64;
+  e: int64;
+}
+
+struct S72 {
+  a: int64;
+  b: int64;
+  c: int64;
+  d: int64;
+  e: int64;
+  f: int64;
+  g: int64;
+  h: int64;
+  i: int64;
+}
+
+@noinline fn peek64(base: uint8*, off: int64) -> int64 {
+  var p: int64* = (int64*)(base + off);
+  return *p;
+}
+
+@noinline fn peek32(base: uint8*, off: int64) -> int32 {
+  var p: int32* = (int32*)(base + off);
+  return *p;
+}
+
+@noinline fn poke64(base: uint8*, off: int64, v: int64) {
+  var p: int64* = (int64*)(base + off);
+  *p = v;
+}
+
+@noinline fn poke32(base: uint8*, off: int64, v: int32) {
+  var p: int32* = (int32*)(base + off);
+  *p = v;
+}
+
+fn fill12(p: S12*, n: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    p[i].a = i * 7 + 1;
+    p[i].b = i * 7 + 2;
+    p[i].c = i * 7 + 3;
+    i = i + 1;
+  }
+}
+
+fn fill20(p: S20*, n: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    p[i].a = i * 11 + 1;
+    p[i].e = i * 11 + 5;
+    i = i + 1;
+  }
+}
+
+fn fill24(p: S24*, n: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    p[i].a = (int64)i * 1000 + 1;
+    p[i].b = (int64)i * 1000 + 2;
+    p[i].c = (int64)i * 1000 + 3;
+    i = i + 1;
+  }
+}
+
+fn fill40(p: S40*, n: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    p[i].a = (int64)i * 1000 + 1;
+    p[i].c = (int64)i * 1000 + 3;
+    p[i].e = (int64)i * 1000 + 5;
+    i = i + 1;
+  }
+}
+
+fn fill72(p: S72*, n: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    p[i].a = (int64)i * 1000 + 1;
+    p[i].e = (int64)i * 1000 + 5;
+    p[i].i = (int64)i * 1000 + 9;
+    i = i + 1;
+  }
+}
+
+fn sum24(p: S24*, n: int32) -> int64 {
+  var s: int64 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    s = s + p[i].a + p[i].b + p[i].c;
+    i = i + 1;
+  }
+  return s;
+}
+
+fn sum40_c(p: S40*, n: int32) -> int64 {
+  var s: int64 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    s = s + p[i].c;
+    i = i + 1;
+  }
+  return s;
+}
+
+fn main() -> int32 {
+  var bad: int32 = 0;
+  var n: int32 = 17;
+
+  var a12: S12[17];
+  var a20: S20[17];
+  var a24: S24[17];
+  var a40: S40[17];
+  var a72: S72[17];
+
+  fill12(&a12[0], n);
+  fill20(&a20[0], n);
+  fill24(&a24[0], n);
+  fill40(&a40[0], n);
+  fill72(&a72[0], n);
+
+  var b12: uint8* = (uint8*)&a12[0];
+  var b20: uint8* = (uint8*)&a20[0];
+  var b24: uint8* = (uint8*)&a24[0];
+  var b40: uint8* = (uint8*)&a40[0];
+  var b72: uint8* = (uint8*)&a72[0];
+
+  var o12: int64 = 0;
+  var o20: int64 = 0;
+  var o24: int64 = 0;
+  var o40: int64 = 0;
+  var o72: int64 = 0;
+
+  var i: int32 = 0;
+  while (i < n) {
+    var g32: int32 = peek32(b12, o12);
+    if (g32 != i * 7 + 1) {
+      println("s12.a i={i} peek={g32} want={i}*7+1");
+      bad = bad + 1;
+    }
+    g32 = peek32(b12, o12 + 8);
+    if (g32 != i * 7 + 3) {
+      println("s12.c i={i} peek={g32}");
+      bad = bad + 1;
+    }
+    if (a12[i].b != i * 7 + 2) {
+      println("s12.b i={i} idx={a12[i].b}");
+      bad = bad + 1;
+    }
+
+    g32 = peek32(b20, o20 + 16);
+    if (g32 != i * 11 + 5) {
+      println("s20.e i={i} peek={g32}");
+      bad = bad + 1;
+    }
+    if (a20[i].a != i * 11 + 1) {
+      println("s20.a i={i} idx={a20[i].a}");
+      bad = bad + 1;
+    }
+
+    var g64: int64 = peek64(b24, o24 + 8);
+    if (g64 != (int64)i * 1000 + 2) {
+      println("s24.b i={i} peek={g64}");
+      bad = bad + 1;
+    }
+    if (a24[i].c != (int64)i * 1000 + 3) {
+      println("s24.c i={i} idx={a24[i].c}");
+      bad = bad + 1;
+    }
+
+    g64 = peek64(b40, o40 + 16);
+    if (g64 != (int64)i * 1000 + 3) {
+      println("s40.c i={i} peek={g64}");
+      bad = bad + 1;
+    }
+    if (a40[i].e != (int64)i * 1000 + 5) {
+      println("s40.e i={i} idx={a40[i].e}");
+      bad = bad + 1;
+    }
+
+    g64 = peek64(b72, o72 + 64);
+    if (g64 != (int64)i * 1000 + 9) {
+      println("s72.i i={i} peek={g64}");
+      bad = bad + 1;
+    }
+    if (a72[i].a != (int64)i * 1000 + 1) {
+      println("s72.a i={i} idx={a72[i].a}");
+      bad = bad + 1;
+    }
+
+    o12 = o12 + 12;
+    o20 = o20 + 20;
+    o24 = o24 + 24;
+    o40 = o40 + 40;
+    o72 = o72 + 72;
+    i = i + 1;
+  }
+
+  var want24: int64 = 0;
+  var want40: int64 = 0;
+  i = 0;
+  while (i < n) {
+    want24 = want24 + ((int64)i * 1000 + 1) + ((int64)i * 1000 + 2) +
+             ((int64)i * 1000 + 3);
+    want40 = want40 + ((int64)i * 1000 + 3);
+    i = i + 1;
+  }
+  var got24: int64 = sum24(&a24[0], n);
+  if (got24 != want24) {
+    println("sum24 got={got24} want={want24}");
+    bad = bad + 1;
+  }
+  var got40: int64 = sum40_c(&a40[0], n);
+  if (got40 != want40) {
+    println("sum40 got={got40} want={want40}");
+    bad = bad + 1;
+  }
+
+  o24 = 0;
+  i = 0;
+  while (i < n) {
+    poke64(b24, o24 + 16, (int64)i * 77 + 5);
+    o24 = o24 + 24;
+    i = i + 1;
+  }
+  i = 0;
+  while (i < n) {
+    if (a24[i].c != (int64)i * 77 + 5) {
+      println("poke24 i={i} idx={a24[i].c}");
+      bad = bad + 1;
+    }
+    i = i + 1;
+  }
+
+  o12 = 0;
+  i = 0;
+  while (i < n) {
+    poke32(b12, o12 + 4, i * 13 + 6);
+    o12 = o12 + 12;
+    i = i + 1;
+  }
+  i = 0;
+  while (i < n) {
+    if (a12[i].b != i * 13 + 6) {
+      println("poke12 i={i} idx={a12[i].b}");
+      bad = bad + 1;
+    }
+    i = i + 1;
+  }
+
+  if (bad != 0) {
+    return 1;
+  }
+  println("INDEX SCALE FOLD: ALL OK");
+  return 0;
+}

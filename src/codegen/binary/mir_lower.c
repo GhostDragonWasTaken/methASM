@@ -8613,6 +8613,121 @@ static void mir_fuse_bit_test_branch(MirFunction *fn) {
   free(defs);
 }
 
+static int mir_index_scale_split(long long stride, int *scale,
+                                 long long *rest) {
+  int s;
+  if (stride <= 0) {
+    return 0;
+  }
+  for (s = 8; s >= 2; s >>= 1) {
+    long long m;
+    if (stride % s != 0) {
+      continue;
+    }
+    m = stride / s;
+    if (m == 1 || m == 3 || m == 5 || m == 9) {
+      *scale = s;
+      *rest = m;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int mir_inst_reads_vreg(const MirInst *in, MirVregId v) {
+  const MirOperand *ops[3] = {&in->a, &in->b, &in->dst};
+  int k;
+  for (k = 0; k < 3; k++) {
+    MirVregId r[2];
+    int e;
+    if (ops[k] == &in->dst && in->dst.kind == MIR_OPK_VREG) {
+      continue;
+    }
+    mir_operand_reads_pair(ops[k], r);
+    for (e = 0; e < 2; e++) {
+      if (r[e] == v) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static void mir_fold_index_scale(MirFunction *fn) {
+  int *uses = NULL;
+  int *defs = NULL;
+  size_t i;
+  if (!fn || fn->insn_count < 2 || fn->vreg_count == 0) {
+    return;
+  }
+  if (!mir_count_vreg_uses_defs(fn, &uses, &defs)) {
+    return;
+  }
+  for (i = 0; i < fn->insn_count; i++) {
+    MirInst *mul = &fn->insns[i];
+    MirVregId idx;
+    MirVregId source;
+    int scale = 0;
+    long long rest = 0;
+    MirOperand *mem = NULL;
+    int source_clobbered = 0;
+    size_t u;
+    if (mul->op != MIR_IMUL || mul->is_float || mul->width != 8 ||
+        mul->dst.kind != MIR_OPK_VREG || mul->a.kind != MIR_OPK_VREG ||
+        mul->b.kind != MIR_OPK_IMM) {
+      continue;
+    }
+    idx = mul->dst.vreg;
+    source = mul->a.vreg;
+    if (idx == source || uses[idx] != 1 || defs[idx] != 1 ||
+        fn->vregs[idx].address_taken) {
+      continue;
+    }
+    if (!mir_index_scale_split(mul->b.imm, &scale, &rest)) {
+      continue;
+    }
+    for (u = i + 1; u < fn->insn_count; u++) {
+      MirInst *in = &fn->insns[u];
+      if (in->op == MIR_NOP) {
+        continue;
+      }
+      if (in->a.kind == MIR_OPK_MEM && in->a.mem.index == idx) {
+        mem = &in->a;
+      } else if (in->dst.kind == MIR_OPK_MEM && in->dst.mem.index == idx) {
+        mem = &in->dst;
+      }
+      if (mem) {
+        break;
+      }
+      if (mir_inst_reads_vreg(in, idx)) {
+        break;
+      }
+      if (in->dst.kind == MIR_OPK_VREG && in->dst.vreg == source) {
+        source_clobbered = 1;
+      }
+    }
+    if (!mem || mem->mem.scale != 1 || mem->mem.phys_base_valid ||
+        mem->mem.base == MIR_VREG_NONE || mem->mem.base == idx) {
+      continue;
+    }
+    if (rest == 1) {
+      if (source_clobbered) {
+        continue;
+      }
+      mem->mem.index = source;
+      mem->mem.scale = scale;
+      mul->op = MIR_NOP;
+      uses[source]++;
+      uses[idx] = 0;
+      continue;
+    }
+    mem->mem.scale = scale;
+    mul->b.imm = rest;
+  }
+  free(uses);
+  free(defs);
+}
+
 static void mir_fold_address_offsets(MirFunction *fn) {
   if (!fn || fn->insn_count < 2 || fn->vreg_count == 0) {
     return;
@@ -11366,6 +11481,7 @@ int code_generator_binary_emit_function_via_mir(
   mir_elide_guarded_sext(&fn);
   mir_fold_widening_of_canonical(&fn);
   mir_fold_address_offsets(&fn);
+  mir_fold_index_scale(&fn);
   mir_cse_loads(&fn);
   mir_slp_pair_f64(&fn);
   mir_build_jump_tables(&fn);

@@ -2703,6 +2703,101 @@ static int mir_byte_compare_fusable(const MirFunction *fn, size_t i) {
   return mir_vreg_is_byte_load(fn, i, cmp->a.vreg);
 }
 
+static void mir_encode_operand_reads(const MirOperand *op, MirVregId out[2]) {
+  out[0] = MIR_VREG_NONE;
+  out[1] = MIR_VREG_NONE;
+  if (!op) {
+    return;
+  }
+  if (op->kind == MIR_OPK_VREG) {
+    out[0] = op->vreg;
+  } else if (op->kind == MIR_OPK_MEM) {
+    out[0] = op->mem.base;
+    out[1] = op->mem.index;
+  }
+}
+
+static int *mir_encode_count_vreg_uses(const MirFunction *fn) {
+  int *uses = (int *)calloc(fn->vreg_count ? fn->vreg_count : 1, sizeof(int));
+  size_t i;
+  if (!uses) {
+    return NULL;
+  }
+  for (i = 0; i < fn->insn_count; i++) {
+    const MirInst *in = &fn->insns[i];
+    const MirOperand *ops[3];
+    int k;
+    if (in->op == MIR_NOP) {
+      continue;
+    }
+    ops[0] = &in->a;
+    ops[1] = &in->b;
+    ops[2] = &in->dst;
+    for (k = 0; k < 3; k++) {
+      MirVregId r[2];
+      int e;
+      if (ops[k] == &in->dst && in->dst.kind == MIR_OPK_VREG) {
+        continue;
+      }
+      mir_encode_operand_reads(ops[k], r);
+      for (e = 0; e < 2; e++) {
+        if (r[e] >= 0 && (size_t)r[e] < fn->vreg_count) {
+          uses[r[e]]++;
+        }
+      }
+    }
+  }
+  return uses;
+}
+
+static int mir_load_compare_fusable(const MirFunction *fn, const int *uses,
+                                    size_t i, int *side) {
+  const MirInst *load;
+  const MirInst *cmp;
+  const MirVreg *loaded;
+  if (i + 1 >= fn->insn_count) {
+    return 0;
+  }
+  load = &fn->insns[i];
+  cmp = &fn->insns[i + 1];
+  if (load->op != MIR_MOV || load->is_float ||
+      (load->width != 4 && load->width != 8) ||
+      load->dst.kind != MIR_OPK_VREG ||
+      !mir_mem_operand_in_registers(fn, &load->a)) {
+    return 0;
+  }
+  if (cmp->op != MIR_CMPBR || cmp->is_float || cmp->width != load->width) {
+    return 0;
+  }
+  loaded = &fn->vregs[load->dst.vreg];
+  if (!loaded->in_register || loaded->address_taken ||
+      loaded->live_end != (int)(i + 1)) {
+    return 0;
+  }
+  if (!uses || uses[load->dst.vreg] != 1) {
+    return 0;
+  }
+  if (cmp->b.kind == MIR_OPK_VREG && cmp->b.vreg == load->dst.vreg &&
+      cmp->a.kind == MIR_OPK_VREG && cmp->a.vreg != load->dst.vreg &&
+      fn->vregs[cmp->a.vreg].in_register) {
+    *side = 1;
+    return 1;
+  }
+  if (cmp->a.kind == MIR_OPK_VREG && cmp->a.vreg == load->dst.vreg &&
+      cmp->b.kind == MIR_OPK_VREG && cmp->b.vreg != load->dst.vreg &&
+      fn->vregs[cmp->b.vreg].in_register) {
+    *side = 0;
+    return 1;
+  }
+  if (cmp->a.kind == MIR_OPK_VREG && cmp->a.vreg == load->dst.vreg &&
+      cmp->b.kind == MIR_OPK_IMM && cmp->b.imm >= -2147483648LL &&
+      cmp->b.imm <= 2147483647LL) {
+    *side = 2;
+    return 1;
+  }
+  return 0;
+}
+
 static int mir_jump_is_fallthrough(const MirFunction *fn, size_t index) {
   const MirInst *jmp = &fn->insns[index];
   if (jmp->dst.kind != MIR_OPK_LABEL || !jmp->dst.sym) {
@@ -2733,6 +2828,9 @@ typedef struct {
   MirFunction *fn;
   size_t index;
   size_t fused_byte_load;
+  size_t fused_cmp_load;
+  int fused_cmp_side;
+  const int *vreg_uses;
   size_t fused_mask_test;
   size_t prev_cmpbr;
   MirPendingTable pending_tables[MIR_MAX_JUMP_TABLES];
@@ -2783,13 +2881,20 @@ static int mir_encode_scalar(MirEncodeState *st, const MirInst *in) {
   switch (in->op) {
     case MIR_NOP:
       break;
-    case MIR_MOV:
+    case MIR_MOV: {
+      int side = 0;
       if (mir_byte_compare_fusable(fn, i)) {
         st->fused_byte_load = i;
         break;
       }
+      if (mir_load_compare_fusable(fn, st->vreg_uses, i, &side)) {
+        st->fused_cmp_load = i;
+        st->fused_cmp_side = side;
+        break;
+      }
       ok = encode_mov(fn, in);
       break;
+    }
     case MIR_ADD:
     case MIR_SUB:
     case MIR_AND:
@@ -3750,6 +3855,49 @@ static int mir_cmpbr_fused_byte_load(MirEncodeState *st,
   return 1;
 }
 
+static int mir_cmpbr_fused_load(MirEncodeState *st) {
+  MirFunction *fn = st->fn;
+  BinaryCodeBuffer *code = &fn->context->code;
+  const MirInst *load = &fn->insns[st->index - 1];
+  const MirInst *cmp = &fn->insns[st->index];
+  const MirMem *m = &load->a.mem;
+  BinaryGpRegister base = (BinaryGpRegister)fn->vregs[m->base].phys;
+  BinaryGpRegister other;
+  unsigned char opcode;
+  int rex_w = load->width == 8;
+  int emitted;
+
+  if (st->fused_cmp_side == 2) {
+    int has_index = m->index != MIR_VREG_NONE;
+    BinaryGpRegister index =
+        has_index ? (BinaryGpRegister)fn->vregs[m->index].phys : BINARY_GP_RAX;
+    if (!binary_emit_cmp_mem_imm_width(code, base, has_index, index, m->scale,
+                                       m->disp, cmp->b.imm, load->width)) {
+      return enc_err(fn, "out of memory in fused load compare immediate");
+    }
+    return 1;
+  }
+  if (st->fused_cmp_side == 1) {
+    other = (BinaryGpRegister)fn->vregs[cmp->a.vreg].phys;
+    opcode = 0x3B;
+  } else {
+    other = (BinaryGpRegister)fn->vregs[cmp->b.vreg].phys;
+    opcode = 0x39;
+  }
+  if (m->index != MIR_VREG_NONE) {
+    BinaryGpRegister index = (BinaryGpRegister)fn->vregs[m->index].phys;
+    emitted = binary_emit_memory_access_sib(code, 0, rex_w, opcode, 0, 0, other,
+                                            base, index, m->scale, m->disp);
+  } else {
+    emitted = binary_emit_memory_access_ex(code, 0, rex_w, opcode, 0, 0, other,
+                                           base, m->disp);
+  }
+  if (!emitted) {
+    return enc_err(fn, "out of memory in fused load compare");
+  }
+  return 1;
+}
+
 static int mir_cmpbr_narrow_compare(MirEncodeState *st, const MirInst *in,
                                     BinaryGpRegister areg) {
   MirFunction *fn = st->fn;
@@ -3831,6 +3979,15 @@ static int mir_encode_compare_branch(MirEncodeState *st, const MirInst *in) {
   if (mir_cmpbr_reuses_flags(st, in)) {
     ok = mir_cmpbr_emit_branch(st, in);
     st->prev_cmpbr = i;
+    return ok;
+  }
+  if (st->fused_cmp_load != (size_t)-1 && st->fused_cmp_load + 1 == i) {
+    ok = mir_cmpbr_fused_load(st);
+    if (!ok) {
+      return 0;
+    }
+    ok = mir_cmpbr_emit_branch(st, in);
+    st->prev_cmpbr = (size_t)-1;
     return ok;
   }
   areg = value_reg(fn, &in->a, SCRATCH_A, &rok);
@@ -4122,6 +4279,7 @@ int mir_encode(MirFunction *fn) {
   memset(&st, 0, sizeof(st));
   st.fn = fn;
   st.fused_byte_load = (size_t)-1;
+  st.fused_cmp_load = (size_t)-1;
   st.fused_mask_test = (size_t)-1;
   st.prev_cmpbr = (size_t)-1;
   snprintf(st.epilogue_label, sizeof(st.epilogue_label), ".Lmtlc.epi.%p",
@@ -4129,6 +4287,10 @@ int mir_encode(MirFunction *fn) {
 
   home_fwd_clear();
   if (!mir_layout_frame(fn) || !mir_emit_prologue(fn)) {
+    return 0;
+  }
+  st.vreg_uses = mir_encode_count_vreg_uses(fn);
+  if (!st.vreg_uses) {
     return 0;
   }
   if (annot && ctx->code.size > annot_base) {
@@ -4170,8 +4332,10 @@ int mir_encode(MirFunction *fn) {
          mir_emit_epilogue(fn);
   }
   if (!ok || !mir_encode_jump_tables(&st)) {
+    free((void *)st.vreg_uses);
     return 0;
   }
+  free((void *)st.vreg_uses);
   return code_generator_binary_resolve_fixups(fn->generator, ctx,
                                               ctx->code.size);
 }

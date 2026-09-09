@@ -6469,6 +6469,18 @@ $simdRuntimeCases = @(
     IrMustMatch     = @("__prom_")
   },
   @{
+    Name            = "fused_load_compare"
+    Path            = "tests/fused_load_compare_check.mettle"
+    OutputMustMatch = "FUSED LOAD COMPARE: ALL OK"
+    IrMustMatch     = @("chase_ref")
+  },
+  @{
+    Name            = "index_scale_fold"
+    Path            = "tests/index_scale_fold_check.mettle"
+    OutputMustMatch = "INDEX SCALE FOLD: ALL OK"
+    IrMustMatch     = @("sum24")
+  },
+  @{
     Name            = "const_multiply"
     Path            = "tests/const_multiply_check.mettle"
     OutputMustMatch = "CONST MULTIPLY: ALL OK"
