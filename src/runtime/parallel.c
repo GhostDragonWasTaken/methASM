@@ -8,7 +8,8 @@ extern char *getenv(const char *name);
 #define MTP_VECTOR_BYTES 16u
 #define MTP_CHUNKS_PER_THREAD 4u
 #define MTP_SPIN_ROUNDS 4096u
-#define MTP_YIELD_ROUNDS 2048u
+#define MTP_YIELD_ROUNDS 16384u
+#define MTP_WAKE_FANOUT 2u
 #define MTP_MEMORY_CHUNK_BYTES 262144ll
 #define MTP_STREAM_THRESHOLD_BYTES (8ll << 20)
 #define MTP_TICKET_NEXT_SHIFT 32u
@@ -31,6 +32,7 @@ typedef struct {
   uint64_t ticket __attribute__((aligned(MTP_CACHE_LINE)));
   uint32_t generation __attribute__((aligned(MTP_CACHE_LINE)));
   int32_t parked __attribute__((aligned(MTP_CACHE_LINE)));
+  int32_t wake_budget __attribute__((aligned(MTP_CACHE_LINE)));
   int32_t busy __attribute__((aligned(MTP_CACHE_LINE)));
   unsigned threads;
   unsigned workers;
@@ -74,10 +76,8 @@ __declspec(dllimport) void *__stdcall CreateThread(
 __declspec(dllimport) int __stdcall CloseHandle(void *handle);
 __declspec(dllimport) int __stdcall SwitchToThread(void);
 __declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
-__declspec(dllimport) void *__stdcall CreateSemaphoreW(void *attributes,
-                                                       long initial,
-                                                       long maximum,
-                                                       const unsigned short *name);
+__declspec(dllimport) void *__stdcall CreateSemaphoreW(
+    void *attributes, long initial, long maximum, const unsigned short *name);
 __declspec(dllimport) int __stdcall ReleaseSemaphore(void *semaphore,
                                                      long count,
                                                      long *previous);
@@ -252,8 +252,11 @@ static long mtp_parse_count(const char *text) {
   while (*text == ' ' || *text == '\t') {
     text++;
   }
-  while (*text >= '0' && *text <= '9' && value <= (long)METTLE_PARALLEL_MAX_THREADS) {
+  while (*text >= '0' && *text <= '9') {
     value = value * 10 + (*text - '0');
+    if (value > (long)METTLE_PARALLEL_MAX_THREADS) {
+      return (long)METTLE_PARALLEL_MAX_THREADS;
+    }
     text++;
   }
   return value;
@@ -331,10 +334,25 @@ static void mtp_relax(unsigned *rounds) {
   *rounds += 1u;
 }
 
+static void mtp_wake_some(void) {
+  int32_t budget = __atomic_load_n(&g_pool.wake_budget, __ATOMIC_ACQUIRE);
+  while (budget > 0) {
+    int32_t share =
+        budget > (int32_t)MTP_WAKE_FANOUT ? (int32_t)MTP_WAKE_FANOUT : budget;
+    if (__atomic_compare_exchange_n(&g_pool.wake_budget, &budget,
+                                    budget - share, 1, __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE)) {
+      mtp_os_wake(&g_pool.generation, (unsigned)share);
+      return;
+    }
+  }
+}
+
 static void mtp_park(uint32_t seen) {
   __atomic_add_fetch(&g_pool.parked, 1, __ATOMIC_SEQ_CST);
   mtp_os_wait(&g_pool.generation, seen);
   __atomic_sub_fetch(&g_pool.parked, 1, __ATOMIC_SEQ_CST);
+  mtp_wake_some();
 }
 
 static uint32_t mtp_await_generation(uint32_t seen) {
@@ -359,29 +377,34 @@ static void mtp_worker(unsigned index) {
   }
 }
 
+static void mtp_pool_release(void) {
+  __atomic_store_n(&g_pool.busy, 0, __ATOMIC_RELEASE);
+}
+
+static void mtp_pool_spawn_once(void) {
+  unsigned threads = mtp_threads();
+  if (g_pool.spawned) {
+    return;
+  }
+  g_pool.spawned = 1;
+  mtp_os_init();
+  while (g_pool.workers + 1u < threads && mtp_os_spawn(g_pool.workers)) {
+    g_pool.workers++;
+  }
+}
+
 static int mtp_pool_acquire(void) {
   int32_t idle = 0;
   if (!__atomic_compare_exchange_n(&g_pool.busy, &idle, 1, 0, __ATOMIC_ACQ_REL,
                                    __ATOMIC_ACQUIRE)) {
     return 0;
   }
-  if (!g_pool.spawned) {
-    unsigned threads = mtp_threads();
-    g_pool.spawned = 1;
-    mtp_os_init();
-    while (g_pool.workers + 1u < threads && mtp_os_spawn(g_pool.workers)) {
-      g_pool.workers++;
-    }
-  }
+  mtp_pool_spawn_once();
   if (!g_pool.workers) {
-    __atomic_store_n(&g_pool.busy, 0, __ATOMIC_RELEASE);
+    mtp_pool_release();
     return 0;
   }
   return 1;
-}
-
-static void mtp_pool_release(void) {
-  __atomic_store_n(&g_pool.busy, 0, __ATOMIC_RELEASE);
 }
 
 static void mtp_publish(unsigned count) {
@@ -393,7 +416,8 @@ static void mtp_publish(unsigned count) {
   __atomic_store_n(&g_pool.generation, generation, __ATOMIC_SEQ_CST);
   parked = __atomic_load_n(&g_pool.parked, __ATOMIC_SEQ_CST);
   if (parked > 0) {
-    mtp_os_wake(&g_pool.generation, (unsigned)parked);
+    __atomic_store_n(&g_pool.wake_budget, parked, __ATOMIC_RELEASE);
+    mtp_wake_some();
   }
 }
 
@@ -626,9 +650,10 @@ static void mtp_copy_body(void *ctx, long long lo, long long hi) {
 void mettle_parallel_fill(void *destination, long long count, long long value,
                           int element_size) {
   MtpMemoryJob job;
-  unsigned period = (element_size == 2 || element_size == 4 || element_size == 8)
-                        ? (unsigned)element_size
-                        : 1u;
+  unsigned period = 1u;
+  if (element_size == 2 || element_size == 4 || element_size == 8) {
+    period = (unsigned)element_size;
+  }
   if (!destination || count <= 0) {
     return;
   }

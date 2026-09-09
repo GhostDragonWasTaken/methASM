@@ -1,6 +1,20 @@
 #include "ir_optimize_internal.h"
 #include "../ir_explain_ledger.h"
 
+static IROpcode ir_cleanup_op_before(const IRFunction *function, size_t at) {
+  size_t p = at - 1;
+
+  while (p > 0 && function->instructions[p].op == IR_OP_NOP) {
+    p--;
+  }
+  return function->instructions[p].op;
+}
+
+static int ir_cleanup_op_leaves_block(IROpcode op) {
+  return op == IR_OP_JUMP || op == IR_OP_RETURN || op == IR_OP_BRANCH_ZERO ||
+         op == IR_OP_BRANCH_EQ;
+}
+
 static size_t ir_load_copy_count_symbol_reads(const IRInstruction *ins,
                                               const char *sym) {
   size_t count = 0;
@@ -704,16 +718,8 @@ static int ir_hoist_invariant_at_header(IRFunction *function,
   if (!latch || header == 0) {
     return 1;
   }
-  {
-    size_t p = header - 1;
-    while (p > 0 && function->instructions[p].op == IR_OP_NOP) {
-      p--;
-    }
-    IROpcode prev = function->instructions[p].op;
-    if (prev == IR_OP_JUMP || prev == IR_OP_RETURN ||
-        prev == IR_OP_BRANCH_ZERO || prev == IR_OP_BRANCH_EQ) {
-      return 1;
-    }
+  if (ir_cleanup_op_leaves_block(ir_cleanup_op_before(function, header))) {
+    return 1;
   }
   for (size_t i = header + 1; i < latch; i++) {
     const IRInstruction *ins = &function->instructions[i];
@@ -1028,16 +1034,8 @@ int ir_hoist_invariant_arith_pass(IRFunction *function, int *changed) {
     if (!latch || header == 0 || latch - header > 40) {
       continue;
     }
-    {
-      size_t p = header - 1;
-      while (p > 0 && function->instructions[p].op == IR_OP_NOP) {
-        p--;
-      }
-      IROpcode prev = function->instructions[p].op;
-      if (prev == IR_OP_JUMP || prev == IR_OP_RETURN ||
-          prev == IR_OP_BRANCH_ZERO || prev == IR_OP_BRANCH_EQ) {
-        continue;
-      }
+    if (ir_cleanup_op_leaves_block(ir_cleanup_op_before(function, header))) {
+      continue;
     }
 
     for (size_t i = header + 1; i < latch && pick_count < IR_LICM_MAX_PER_LOOP;
@@ -1408,317 +1406,367 @@ static void ir_row_collapse_hop(IRFunction *function, size_t s, size_t hop_at) {
   ir_instruction_make_nop(assign);
 }
 
-int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
+typedef struct {
+  IRFunction *function;
+  IRRowCacheEntry *cache;
+  size_t cache_count;
+  size_t header;
+  size_t latch;
+  int *changed;
+} IRRowPass;
+
+static void ir_row_retarget_shift(IRFunction *function, size_t s, long long k,
+                                  IROperand *var) {
+  IRInstruction *shl = &function->instructions[s];
+
+  ir_operand_destroy(&shl->lhs);
+  if (k == 0) {
+    ir_operand_destroy(&shl->rhs);
+    mettle_free_string(shl->text);
+    shl->text = NULL;
+    shl->op = IR_OP_ASSIGN;
+    shl->rhs = ir_operand_none();
+  }
+  shl->lhs = *var;
+  *var = ir_operand_none();
+}
+
+static void ir_row_drop_dead_index(IRFunction *function, size_t idx_pos) {
+  IRInstruction *idx_ins = &function->instructions[idx_pos];
+
+  if (idx_ins->dest.kind != IR_OPERAND_TEMP || !idx_ins->dest.name) {
+    return;
+  }
+  for (size_t j = 0; j < function->instruction_count; j++) {
+    if (j == idx_pos) {
+      continue;
+    }
+    if (ir_row_instruction_reads_temp(&function->instructions[j],
+                                      idx_ins->dest.name)) {
+      return;
+    }
+  }
+  ir_instruction_make_nop(idx_ins);
+}
+
+static int ir_row_insert(IRFunction *function, size_t *at, size_t *inserted,
+                         IRInstruction *in, int ready) {
+  int ok = ready && ir_function_insert_instruction(function, *at, in);
+
+  ir_instruction_destroy_storage(in);
+  if (ok) {
+    (*at)++;
+    (*inserted)++;
+  }
+  return ok;
+}
+
+static int ir_row_consumer_is_base_add(const IRFunction *function,
+                                       size_t header, size_t latch,
+                                       const IRInstruction *ins,
+                                       const char *sh_name) {
+  if (!(ins->op == IR_OP_BINARY && !ins->is_float && ins->text &&
+        strcmp(ins->text, "+") == 0 && ins->lhs.kind == IR_OPERAND_SYMBOL &&
+        ins->lhs.name && ir_operand_is_temp_named(&ins->rhs, sh_name) &&
+        ins->dest.kind == IR_OPERAND_TEMP)) {
+    return 0;
+  }
+  return ir_row_symbol_pointer_type(function, ins->lhs.name) != NULL &&
+         !ir_row_symbol_written(function, header + 1, latch, ins->lhs.name) &&
+         !ir_symbol_address_taken(function, ins->lhs.name);
+}
+
+static int ir_row_collect_consumers(const IRFunction *function, size_t header,
+                                    size_t latch, size_t s, size_t hop_at,
+                                    const char *sh_name, size_t *consumers,
+                                    size_t *out_count) {
+  size_t count = 0;
+
+  for (size_t j = 0; j < function->instruction_count; j++) {
+    const IRInstruction *ins = &function->instructions[j];
+
+    if (j == hop_at) {
+      continue;
+    }
+    if (j != s && ir_instruction_writes_destination(ins) &&
+        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+        strcmp(ins->dest.name, sh_name) == 0) {
+      return 0;
+    }
+    if (j == s || !ir_row_instruction_reads_temp(ins, sh_name)) {
+      continue;
+    }
+    if (j <= s || j >= latch || count >= IR_ROW_MAX_CONSUMERS) {
+      return 0;
+    }
+    if (!ir_row_consumer_is_base_add(function, header, latch, ins, sh_name)) {
+      return 0;
+    }
+    consumers[count++] = j;
+  }
+  *out_count = count;
+  return count > 0;
+}
+
+static int ir_row_consumer_names(const IRFunction *function,
+                                 const size_t *consumers, size_t count,
+                                 char base_names[][128],
+                                 char ptr_types[][64]) {
+  for (size_t c = 0; c < count; c++) {
+    const IRInstruction *addr = &function->instructions[consumers[c]];
+    const char *pt = ir_row_symbol_pointer_type(function, addr->lhs.name);
+
+    if (!pt ||
+        snprintf(base_names[c], 128, "%s", addr->lhs.name) >= 128 ||
+        snprintf(ptr_types[c], 64, "%s", pt) >= 64) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int ir_row_reuse_cached(IRRowPass *pass, IRRowShape *shape, size_t s,
+                               size_t consumer, const char *base) {
+  IRFunction *function = pass->function;
+  int hit = ir_row_cache_find(pass->cache, pass->cache_count, base,
+                              shape->bias, shape->k, &shape->inv);
+  IRInstruction *addr;
+
+  if (hit < 0) {
+    return 0;
+  }
+  addr = &function->instructions[consumer];
+  ir_operand_destroy(&addr->lhs);
+  addr->lhs = ir_operand_symbol(pass->cache[hit].name);
+  ir_row_retarget_shift(function, s, shape->k, &shape->var);
+  if (shape->k != 0) {
+    ir_row_drop_dead_index(function, shape->idx_pos);
+  }
+  ir_row_collapse_hop(function, s, shape->hop_at);
+  if (pass->changed) {
+    *pass->changed = 1;
+  }
+  return 1;
+}
+
+static int ir_row_emit_bias(IRRowPass *pass, size_t *at, size_t *inserted,
+                            IROperand *inv, long long *bias,
+                            const char *bias_name) {
+  IRInstruction adj = {0};
+
+  if (*bias == 0 || inv->kind == IR_OPERAND_INT) {
+    return 1;
+  }
+  adj.op = IR_OP_BINARY;
+  adj.text = mettle_strdup("+");
+  adj.dest = ir_operand_temp(bias_name);
+  adj.lhs = ir_operand_copy(inv);
+  adj.rhs = ir_operand_int(*bias);
+  if (!ir_row_insert(pass->function, at, inserted, &adj,
+                     adj.text && adj.dest.name)) {
+    return 0;
+  }
+  ir_operand_destroy(inv);
+  *inv = ir_operand_temp(bias_name);
+  *bias = 0;
+  return 1;
+}
+
+static int ir_row_emit_offset(IRRowPass *pass, size_t *at, size_t *inserted,
+                              const IROperand *inv, long long k,
+                              const char *off_name) {
+  IRInstruction off = {0};
+
+  off.op = IR_OP_BINARY;
+  off.text = mettle_strdup("<<");
+  off.dest = ir_operand_temp(off_name);
+  off.lhs = ir_operand_copy(inv);
+  off.rhs = ir_operand_int(k);
+  return ir_row_insert(pass->function, at, inserted, &off,
+                       off.text && off.dest.name);
+}
+
+static int ir_row_emit_row_add(IRRowPass *pass, size_t *at, size_t *inserted,
+                               const char *row_name, const char *base_name,
+                               const IROperand *inv, long long bias,
+                               long long k, int need_off_temp,
+                               const char *off_name) {
+  IRInstruction add = {0};
+
+  add.op = IR_OP_BINARY;
+  add.text = mettle_strdup("+");
+  add.dest = ir_operand_symbol(row_name);
+  add.lhs = ir_operand_symbol(base_name);
+  add.rhs = need_off_temp ? ir_operand_temp(off_name)
+                          : (inv->kind == IR_OPERAND_INT
+                                 ? ir_operand_int((inv->int_value + bias) << k)
+                                 : ir_operand_copy(inv));
+  return ir_row_insert(pass->function, at, inserted, &add,
+                       add.text && add.dest.name && add.lhs.name);
+}
+
+static int ir_row_emit_declarations(IRRowPass *pass, size_t *at,
+                                    size_t *inserted, size_t count,
+                                    char row_names[][48],
+                                    char ptr_types[][64]) {
+  for (size_t c = 0; c < count; c++) {
+    IRInstruction decl = {0};
+
+    decl.op = IR_OP_DECLARE_LOCAL;
+    decl.dest = ir_operand_symbol(row_names[c]);
+    decl.text = mettle_strdup(ptr_types[c]);
+    if (!ir_row_insert(pass->function, at, inserted, &decl,
+                       decl.dest.name && decl.text)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void ir_row_cache_record(IRRowPass *pass, const char *base,
+                                const char *row_name, long long bias,
+                                long long k, const IROperand *inv) {
+  IRRowCacheEntry *entry;
+
+  if (pass->cache_count >= IR_ROW_MAX_CACHE) {
+    return;
+  }
+  entry = &pass->cache[pass->cache_count];
+  if (snprintf(entry->base, sizeof(entry->base), "%s", base) >=
+          (int)sizeof(entry->base) ||
+      snprintf(entry->name, sizeof(entry->name), "%s", row_name) >=
+          (int)sizeof(entry->name)) {
+    return;
+  }
+  entry->bias = bias;
+  entry->k = k;
+  entry->inv = ir_operand_copy(inv);
+  pass->cache_count++;
+}
+
+static int ir_row_hoist_shift(IRRowPass *pass, size_t s, size_t *out_inserted) {
   static int g_row_counter;
+  IRFunction *function = pass->function;
+  IRRowShape shape = {0};
+  size_t consumers[IR_ROW_MAX_CONSUMERS];
+  size_t consumer_count = 0;
+  char base_names[IR_ROW_MAX_CONSUMERS][128];
+  char ptr_types[IR_ROW_MAX_CONSUMERS][64];
+  char row_names[IR_ROW_MAX_CONSUMERS][48];
+  char off_name[48];
+  char bias_name[48];
+  size_t at = pass->header;
+  size_t inserted = 0;
+  int need_off_temp;
+  int ok;
+
+  *out_inserted = 0;
+  if (!ir_row_match_shape(function, pass->header, pass->latch, s, &shape)) {
+    return 1;
+  }
+  if (!ir_row_collect_consumers(function, pass->header, pass->latch, s,
+                                shape.hop_at, shape.sh_name, consumers,
+                                &consumer_count) ||
+      !ir_row_consumer_names(function, consumers, consumer_count, base_names,
+                             ptr_types)) {
+    ir_operand_destroy(&shape.inv);
+    ir_operand_destroy(&shape.var);
+    return 1;
+  }
+  if (consumer_count == 1 &&
+      ir_row_reuse_cached(pass, &shape, s, consumers[0], base_names[0])) {
+    ir_operand_destroy(&shape.inv);
+    ir_operand_destroy(&shape.var);
+    return 1;
+  }
+
+  need_off_temp = shape.k != 0 && shape.inv.kind != IR_OPERAND_INT;
+  snprintf(off_name, sizeof(off_name), "__rowoff_%d", g_row_counter);
+  snprintf(bias_name, sizeof(bias_name), "__rowbias_%d", g_row_counter);
+  for (size_t c = 0; c < consumer_count; c++) {
+    IRInstruction *addr = &function->instructions[consumers[c]];
+    snprintf(row_names[c], sizeof(row_names[c]), "__rowp_%d_%zu",
+             g_row_counter, c);
+    ir_operand_destroy(&addr->lhs);
+    addr->lhs = ir_operand_symbol(row_names[c]);
+  }
+  g_row_counter++;
+  ir_row_retarget_shift(function, s, shape.k, &shape.var);
+  if (shape.k != 0) {
+    ir_row_drop_dead_index(function, shape.idx_pos);
+  }
+
+  ok = ir_row_emit_declarations(pass, &at, &inserted, consumer_count,
+                                row_names, ptr_types) &&
+       ir_row_emit_bias(pass, &at, &inserted, &shape.inv, &shape.bias,
+                        bias_name) &&
+       (!need_off_temp ||
+        ir_row_emit_offset(pass, &at, &inserted, &shape.inv, shape.k,
+                           off_name));
+  for (size_t c = 0; ok && c < consumer_count; c++) {
+    ok = ir_row_emit_row_add(pass, &at, &inserted, row_names[c], base_names[c],
+                             &shape.inv, shape.bias, shape.k, need_off_temp,
+                             off_name);
+  }
+  if (ok && consumer_count == 1) {
+    ir_row_cache_record(pass, base_names[0], row_names[0], shape.bias, shape.k,
+                        &shape.inv);
+  }
+  ir_operand_destroy(&shape.inv);
+  ir_operand_destroy(&shape.var);
+  if (!ok) {
+    return 0;
+  }
+  pass->header += inserted;
+  pass->latch += inserted;
+  if (shape.hop_at != (size_t)-1) {
+    shape.hop_at += inserted;
+  }
+  ir_row_collapse_hop(function, s + inserted, shape.hop_at);
+  if (pass->changed) {
+    *pass->changed = 1;
+  }
+  *out_inserted = inserted;
+  return 1;
+}
+
+int ir_hoist_row_pointers_pass(IRFunction *function, int *changed) {
   IRRowCacheEntry cache[IR_ROW_MAX_CACHE];
-  size_t cache_count = 0;
+  IRRowPass pass;
+
   if (!function) {
     return 0;
   }
+  pass.function = function;
+  pass.cache = cache;
+  pass.cache_count = 0;
+  pass.changed = changed;
   for (size_t header = 0; header < function->instruction_count; header++) {
-    size_t latch = 0;
-    {
-      const IRInstruction *label = &function->instructions[header];
-      if (label->op != IR_OP_LABEL ||
-          !ir_cleanup_label_is_loop_header(label->text)) {
-        continue;
-      }
-      latch = ir_cleanup_loop_latch(function, header, label->text);
+    const IRInstruction *label = &function->instructions[header];
+    size_t latch;
+
+    if (label->op != IR_OP_LABEL ||
+        !ir_cleanup_label_is_loop_header(label->text)) {
+      continue;
     }
+    latch = ir_cleanup_loop_latch(function, header, label->text);
     if (!latch) {
       continue;
     }
-    ir_row_cache_clear(cache, &cache_count);
-
-    for (size_t s = header + 1; s < latch; s++) {
-      long long k = 0;
-      long long bias = 0;
-      size_t idx_pos = 0;
-      size_t consumers[IR_ROW_MAX_CONSUMERS];
-      size_t consumer_count = 0;
-      IROperand inv = {0};
-      IROperand var = {0};
-      char sh_name[128];
-      size_t hop_at = (size_t)-1;
-      int bad = 0;
-
-      {
-        IRRowShape shape = {0};
-        if (!ir_row_match_shape(function, header, latch, s, &shape)) {
-          continue;
-        }
-        k = shape.k;
-        bias = shape.bias;
-        idx_pos = shape.idx_pos;
-        hop_at = shape.hop_at;
-        memcpy(sh_name, shape.sh_name, sizeof(sh_name));
-        inv = shape.inv;
-        var = shape.var;
-      }
-
-      for (size_t j = 0; j < function->instruction_count && !bad; j++) {
-        const IRInstruction *ins = &function->instructions[j];
-        if (j == hop_at) {
-          continue;
-        }
-        if (j != s && ir_instruction_writes_destination(ins) &&
-            ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
-            strcmp(ins->dest.name, sh_name) == 0) {
-          bad = 1;
-          break;
-        }
-        if (j == s || !ir_row_instruction_reads_temp(ins, sh_name)) {
-          continue;
-        }
-        if (j <= s || j >= latch || consumer_count >= IR_ROW_MAX_CONSUMERS) {
-          bad = 1;
-          break;
-        }
-        if (!(ins->op == IR_OP_BINARY && !ins->is_float && ins->text &&
-              strcmp(ins->text, "+") == 0 &&
-              ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
-              ir_operand_is_temp_named(&ins->rhs, sh_name) &&
-              ins->dest.kind == IR_OPERAND_TEMP)) {
-          bad = 1;
-          break;
-        }
-        if (!ir_row_symbol_pointer_type(function, ins->lhs.name) ||
-            ir_row_symbol_written(function, header + 1, latch, ins->lhs.name) ||
-            ir_symbol_address_taken(function, ins->lhs.name)) {
-          bad = 1;
-          break;
-        }
-        consumers[consumer_count++] = j;
-      }
-      if (bad || consumer_count == 0) {
-        ir_operand_destroy(&inv);
-        ir_operand_destroy(&var);
-        continue;
-      }
-
-      char base_names[IR_ROW_MAX_CONSUMERS][128];
-      char ptr_types[IR_ROW_MAX_CONSUMERS][64];
-      char row_names[IR_ROW_MAX_CONSUMERS][48];
-      char off_name[48];
-      char bias_name[48];
-      int need_off_temp = k != 0 && inv.kind != IR_OPERAND_INT;
-      for (size_t c = 0; c < consumer_count && !bad; c++) {
-        const IRInstruction *addr = &function->instructions[consumers[c]];
-        const char *pt = ir_row_symbol_pointer_type(function, addr->lhs.name);
-        if (!pt ||
-            snprintf(base_names[c], sizeof(base_names[c]), "%s",
-                     addr->lhs.name) >= (int)sizeof(base_names[c]) ||
-            snprintf(ptr_types[c], sizeof(ptr_types[c]), "%s", pt) >=
-                (int)sizeof(ptr_types[c])) {
-          bad = 1;
-        }
-      }
-      if (bad) {
-        ir_operand_destroy(&inv);
-        ir_operand_destroy(&var);
-        continue;
-      }
-
-      if (consumer_count == 1) {
-        int hit = ir_row_cache_find(cache, cache_count, base_names[0], bias, k,
-                                    &inv);
-        if (hit >= 0) {
-          IRInstruction *addr = &function->instructions[consumers[0]];
-          ir_operand_destroy(&addr->lhs);
-          addr->lhs = ir_operand_symbol(cache[hit].name);
-          {
-            IRInstruction *shl = &function->instructions[s];
-            ir_operand_destroy(&shl->lhs);
-            if (k == 0) {
-              ir_operand_destroy(&shl->rhs);
-              mettle_free_string(shl->text);
-              shl->text = NULL;
-              shl->op = IR_OP_ASSIGN;
-              shl->rhs = ir_operand_none();
-            }
-            shl->lhs = var;
-            var = ir_operand_none();
-          }
-          if (k != 0) {
-            IRInstruction *idx_ins = &function->instructions[idx_pos];
-            if (idx_ins->dest.kind == IR_OPERAND_TEMP && idx_ins->dest.name) {
-              int read_elsewhere = 0;
-              for (size_t j = 0; j < function->instruction_count; j++) {
-                if (j == idx_pos) {
-                  continue;
-                }
-                if (ir_row_instruction_reads_temp(&function->instructions[j],
-                                                  idx_ins->dest.name)) {
-                  read_elsewhere = 1;
-                  break;
-                }
-              }
-              if (!read_elsewhere) {
-                ir_instruction_make_nop(idx_ins);
-              }
-            }
-          }
-          ir_operand_destroy(&inv);
-          ir_operand_destroy(&var);
-          ir_row_collapse_hop(function, s, hop_at);
-          if (changed) {
-            *changed = 1;
-          }
-          continue;
-        }
-      }
-
-      snprintf(off_name, sizeof(off_name), "__rowoff_%d", g_row_counter);
-      snprintf(bias_name, sizeof(bias_name), "__rowbias_%d", g_row_counter);
-      for (size_t c = 0; c < consumer_count; c++) {
-        snprintf(row_names[c], sizeof(row_names[c]), "__rowp_%d_%zu",
-                 g_row_counter, c);
-        IRInstruction *addr = &function->instructions[consumers[c]];
-        ir_operand_destroy(&addr->lhs);
-        addr->lhs = ir_operand_symbol(row_names[c]);
-      }
-      g_row_counter++;
-      {
-        IRInstruction *shl = &function->instructions[s];
-        ir_operand_destroy(&shl->lhs);
-        if (k == 0) {
-          ir_operand_destroy(&shl->rhs);
-          mettle_free_string(shl->text);
-          shl->text = NULL;
-          shl->op = IR_OP_ASSIGN;
-          shl->rhs = ir_operand_none();
-        }
-        shl->lhs = var;
-        var = ir_operand_none();
-      }
-
-      if (k != 0) {
-        IRInstruction *idx_ins = &function->instructions[idx_pos];
-        if (idx_ins->dest.kind == IR_OPERAND_TEMP && idx_ins->dest.name) {
-          int read_elsewhere = 0;
-          for (size_t j = 0; j < function->instruction_count; j++) {
-            if (j == idx_pos) {
-              continue;
-            }
-            if (ir_row_instruction_reads_temp(&function->instructions[j],
-                                              idx_ins->dest.name)) {
-              read_elsewhere = 1;
-              break;
-            }
-          }
-          if (!read_elsewhere) {
-            ir_instruction_make_nop(idx_ins);
-          }
-        }
-      }
-
-      size_t at = header;
+    ir_row_cache_clear(cache, &pass.cache_count);
+    pass.header = header;
+    pass.latch = latch;
+    for (size_t s = pass.header + 1; s < pass.latch; s++) {
       size_t inserted = 0;
-      int failed = 0;
-      for (size_t c = 0; c < consumer_count && !failed; c++) {
-        IRInstruction decl = {0};
-        decl.op = IR_OP_DECLARE_LOCAL;
-        decl.dest = ir_operand_symbol(row_names[c]);
-        decl.text = mettle_strdup(ptr_types[c]);
-        if (!decl.dest.name || !decl.text ||
-            !ir_function_insert_instruction(function, at, &decl)) {
-          failed = 1;
-        }
-        ir_instruction_destroy_storage(&decl);
-        if (!failed) {
-          at++;
-          inserted++;
-        }
-      }
-      if (!failed && bias != 0 && inv.kind != IR_OPERAND_INT) {
-        IRInstruction adj = {0};
-        adj.op = IR_OP_BINARY;
-        adj.text = mettle_strdup("+");
-        adj.dest = ir_operand_temp(bias_name);
-        adj.lhs = ir_operand_copy(&inv);
-        adj.rhs = ir_operand_int(bias);
-        if (!adj.text || !adj.dest.name ||
-            !ir_function_insert_instruction(function, at, &adj)) {
-          failed = 1;
-        }
-        ir_instruction_destroy_storage(&adj);
-        if (!failed) {
-          at++;
-          inserted++;
-          ir_operand_destroy(&inv);
-          inv = ir_operand_temp(bias_name);
-          bias = 0;
-        }
-      }
-      if (!failed && need_off_temp) {
-        IRInstruction off = {0};
-        off.op = IR_OP_BINARY;
-        off.text = mettle_strdup("<<");
-        off.dest = ir_operand_temp(off_name);
-        off.lhs = ir_operand_copy(&inv);
-        off.rhs = ir_operand_int(k);
-        if (!off.text || !off.dest.name ||
-            !ir_function_insert_instruction(function, at, &off)) {
-          failed = 1;
-        }
-        ir_instruction_destroy_storage(&off);
-        if (!failed) {
-          at++;
-          inserted++;
-        }
-      }
-      for (size_t c = 0; c < consumer_count && !failed; c++) {
-        IRInstruction add = {0};
-        add.op = IR_OP_BINARY;
-        add.text = mettle_strdup("+");
-        add.dest = ir_operand_symbol(row_names[c]);
-        add.lhs = ir_operand_symbol(base_names[c]);
-        add.rhs =
-            need_off_temp
-                ? ir_operand_temp(off_name)
-                : (inv.kind == IR_OPERAND_INT
-                       ? ir_operand_int((inv.int_value + bias) << k)
-                       : ir_operand_copy(&inv));
-        if (!add.text || !add.dest.name || !add.lhs.name ||
-            !ir_function_insert_instruction(function, at, &add)) {
-          failed = 1;
-        }
-        ir_instruction_destroy_storage(&add);
-        if (!failed) {
-          at++;
-          inserted++;
-        }
-      }
-      if (!failed && consumer_count == 1 && cache_count < IR_ROW_MAX_CACHE) {
-        IRRowCacheEntry *entry = &cache[cache_count];
-        if (snprintf(entry->base, sizeof(entry->base), "%s", base_names[0]) <
-                (int)sizeof(entry->base) &&
-            snprintf(entry->name, sizeof(entry->name), "%s", row_names[0]) <
-                (int)sizeof(entry->name)) {
-          entry->bias = bias;
-          entry->k = k;
-          entry->inv = ir_operand_copy(&inv);
-          cache_count++;
-        }
-      }
-      ir_operand_destroy(&inv);
-      if (failed) {
-        ir_row_cache_clear(cache, &cache_count);
+      if (!ir_row_hoist_shift(&pass, s, &inserted)) {
+        ir_row_cache_clear(cache, &pass.cache_count);
         return 0;
       }
-      header += inserted;
       s += inserted;
-      latch += inserted;
-      if (hop_at != (size_t)-1) {
-        hop_at += inserted;
-      }
-      ir_row_collapse_hop(function, s, hop_at);
-      if (changed) {
-        *changed = 1;
-      }
     }
+    header = pass.header;
   }
-  ir_row_cache_clear(cache, &cache_count);
+  ir_row_cache_clear(cache, &pass.cache_count);
   return 1;
 }
 
@@ -2811,131 +2859,151 @@ static int ir_guard_header_entry_is_sole(const IRFunction *function,
    the preheader would read memory a zero-trip loop never touched, so copy the
    loop's own entry test in front of it: the read then happens exactly when the
    first iteration would have made it. */
+typedef struct {
+  const char *header_label;
+  const IRInstruction *test;
+  const IRInstruction *branch;
+  size_t latch;
+} IRGuardLoop;
+
+static int ir_guard_match_loop(const IRFunction *function, size_t header,
+                               IRGuardLoop *loop) {
+  const IRInstruction *label = &function->instructions[header];
+  IROpcode before;
+
+  if (label->op != IR_OP_LABEL || !label->text ||
+      !ir_cleanup_label_is_loop_header(label->text)) {
+    return 0;
+  }
+  loop->header_label = label->text;
+  loop->test = &function->instructions[header + 1];
+  loop->branch = &function->instructions[header + 2];
+  if (loop->test->op != IR_OP_BINARY || loop->test->is_float ||
+      !loop->test->text || loop->test->dest.kind != IR_OPERAND_TEMP ||
+      !loop->test->dest.name ||
+      !ir_licm_op_is_pure_arith(function, loop->test)) {
+    return 0;
+  }
+  if (loop->branch->op != IR_OP_BRANCH_ZERO || !loop->branch->text ||
+      loop->branch->lhs.kind != IR_OPERAND_TEMP || !loop->branch->lhs.name ||
+      strcmp(loop->branch->lhs.name, loop->test->dest.name) != 0) {
+    return 0;
+  }
+  loop->latch = ir_cleanup_loop_latch(function, header, loop->header_label);
+  if (!loop->latch || header == 0 || loop->latch <= header + 3) {
+    return 0;
+  }
+  before = ir_cleanup_op_before(function, header);
+  if (ir_cleanup_op_leaves_block(before) || before == IR_OP_LABEL) {
+    return 0;
+  }
+  return ir_guard_header_entry_is_sole(function, loop->header_label, header,
+                                       loop->latch) &&
+         ir_guard_body_is_quiet(function, header + 3, loop->latch);
+}
+
+static size_t ir_guard_body_prefix_end(const IRFunction *function, size_t from,
+                                       size_t latch) {
+  size_t at = from;
+
+  while (at < latch) {
+    IROpcode op = function->instructions[at].op;
+    if (op == IR_OP_LABEL || ir_cleanup_op_leaves_block(op)) {
+      break;
+    }
+    at++;
+  }
+  return at;
+}
+
+static int ir_guard_load_is_hoistable(const IRFunction *function,
+                                      size_t header, size_t latch, size_t at) {
+  const IRInstruction *in = &function->instructions[at];
+  size_t addr_def;
+
+  if (in->op != IR_OP_LOAD || in->is_volatile ||
+      in->rhs.kind != IR_OPERAND_INT || in->lhs.kind != IR_OPERAND_TEMP ||
+      !in->lhs.name || in->dest.kind != IR_OPERAND_TEMP || !in->dest.name) {
+    return 0;
+  }
+  addr_def = ir_guard_temp_def_index(function, in->lhs.name);
+  return addr_def != (size_t)-1 && addr_def < header &&
+         ir_guard_temp_def_index(function, in->dest.name) == at &&
+         ir_licm_read_count(function, header + 3, latch, at, in->dest.name) != 0;
+}
+
+static size_t ir_guard_pick_load(const IRFunction *function, size_t header,
+                                 size_t latch, size_t prefix_end) {
+  for (size_t i = header + 3; i < prefix_end; i++) {
+    if (ir_guard_load_is_hoistable(function, header, latch, i)) {
+      return i;
+    }
+  }
+  return (size_t)-1;
+}
+
+static int ir_guard_emit(IRFunction *function, size_t header, size_t pick,
+                         const char *guard_name) {
+  IRInstruction guard_test = {0};
+  IRInstruction guard_branch = {0};
+  IRInstruction hoisted = {0};
+  int ok;
+
+  if (!ir_clone_instruction_plain(&function->instructions[header + 1],
+                                  &guard_test) ||
+      !ir_clone_instruction_plain(&function->instructions[header + 2],
+                                  &guard_branch) ||
+      !ir_clone_instruction_plain(&function->instructions[pick], &hoisted)) {
+    ir_instruction_destroy_storage(&guard_test);
+    ir_instruction_destroy_storage(&guard_branch);
+    ir_instruction_destroy_storage(&hoisted);
+    return 0;
+  }
+  ir_operand_destroy(&guard_test.dest);
+  guard_test.dest = ir_operand_temp(guard_name);
+  ir_operand_destroy(&guard_branch.lhs);
+  guard_branch.lhs = ir_operand_temp(guard_name);
+  ok = guard_test.dest.name && guard_branch.lhs.name &&
+       ir_function_insert_instruction(function, header, &guard_test) &&
+       ir_function_insert_instruction(function, header + 1, &guard_branch) &&
+       ir_function_insert_instruction(function, header + 2, &hoisted);
+  ir_instruction_destroy_storage(&guard_test);
+  ir_instruction_destroy_storage(&guard_branch);
+  ir_instruction_destroy_storage(&hoisted);
+  if (!ok) {
+    return 0;
+  }
+  ir_instruction_make_nop(&function->instructions[pick + 3]);
+  return 1;
+}
+
 int ir_guard_loop_and_hoist_load_pass(IRFunction *function, int *changed) {
   static int g_guard_counter;
+
   if (!function || function->instruction_count == 0) {
     return 1;
   }
   for (size_t header = 0; header + 3 < function->instruction_count; header++) {
-    const IRInstruction *label = &function->instructions[header];
-    const IRInstruction *test;
-    const IRInstruction *branch;
-    const char *header_label;
-    const char *exit_label;
-    size_t latch;
-    size_t body_prefix_end;
-    size_t pick = (size_t)-1;
+    IRGuardLoop loop = {0};
+    size_t pick;
     char guard_name[48];
 
-    if (label->op != IR_OP_LABEL || !label->text ||
-        !ir_cleanup_label_is_loop_header(label->text)) {
+    if (!ir_guard_match_loop(function, header, &loop)) {
       continue;
     }
-    header_label = label->text;
-    test = &function->instructions[header + 1];
-    branch = &function->instructions[header + 2];
-    if (test->op != IR_OP_BINARY || test->is_float || !test->text ||
-        test->dest.kind != IR_OPERAND_TEMP || !test->dest.name ||
-        !ir_licm_op_is_pure_arith(function, test)) {
-      continue;
-    }
-    if (branch->op != IR_OP_BRANCH_ZERO || !branch->text ||
-        branch->lhs.kind != IR_OPERAND_TEMP || !branch->lhs.name ||
-        strcmp(branch->lhs.name, test->dest.name) != 0) {
-      continue;
-    }
-    exit_label = branch->text;
-    latch = ir_cleanup_loop_latch(function, header, header_label);
-    if (!latch || header == 0 || latch <= header + 3) {
-      continue;
-    }
-    {
-      size_t p = header - 1;
-      while (p > 0 && function->instructions[p].op == IR_OP_NOP) {
-        p--;
-      }
-      IROpcode prev = function->instructions[p].op;
-      if (prev == IR_OP_JUMP || prev == IR_OP_RETURN ||
-          prev == IR_OP_BRANCH_ZERO || prev == IR_OP_BRANCH_EQ ||
-          prev == IR_OP_LABEL) {
-        continue;
-      }
-    }
-    if (!ir_guard_header_entry_is_sole(function, header_label, header, latch) ||
-        !ir_guard_body_is_quiet(function, header + 3, latch)) {
-      continue;
-    }
-    body_prefix_end = header + 3;
-    while (body_prefix_end < latch) {
-      IROpcode op = function->instructions[body_prefix_end].op;
-      if (op == IR_OP_LABEL || op == IR_OP_JUMP || op == IR_OP_RETURN ||
-          op == IR_OP_BRANCH_ZERO || op == IR_OP_BRANCH_EQ) {
-        break;
-      }
-      body_prefix_end++;
-    }
-    for (size_t i = header + 3; i < body_prefix_end; i++) {
-      const IRInstruction *in = &function->instructions[i];
-      size_t addr_def;
-      if (in->op != IR_OP_LOAD || in->is_volatile ||
-          in->rhs.kind != IR_OPERAND_INT ||
-          in->lhs.kind != IR_OPERAND_TEMP || !in->lhs.name ||
-          in->dest.kind != IR_OPERAND_TEMP || !in->dest.name) {
-        continue;
-      }
-      addr_def = ir_guard_temp_def_index(function, in->lhs.name);
-      if (addr_def == (size_t)-1 || addr_def >= header ||
-          ir_guard_temp_def_index(function, in->dest.name) != i ||
-          ir_licm_read_count(function, header + 3, latch, i,
-                             in->dest.name) == 0) {
-        continue;
-      }
-      pick = i;
-      break;
-    }
+    pick = ir_guard_pick_load(
+        function, header, loop.latch,
+        ir_guard_body_prefix_end(function, header + 3, loop.latch));
     if (pick == (size_t)-1) {
       continue;
     }
-
     snprintf(guard_name, sizeof(guard_name), "__lguard_%d", g_guard_counter++);
-    {
-      IRInstruction guard_test = {0};
-      IRInstruction guard_branch = {0};
-      IRInstruction hoisted = {0};
-      int failed = 0;
-      if (!ir_clone_instruction_plain(&function->instructions[header + 1],
-                                      &guard_test) ||
-          !ir_clone_instruction_plain(&function->instructions[header + 2],
-                                      &guard_branch) ||
-          !ir_clone_instruction_plain(&function->instructions[pick],
-                                      &hoisted)) {
-        ir_instruction_destroy_storage(&guard_test);
-        ir_instruction_destroy_storage(&guard_branch);
-        ir_instruction_destroy_storage(&hoisted);
-        return 0;
-      }
-      ir_operand_destroy(&guard_test.dest);
-      guard_test.dest = ir_operand_temp(guard_name);
-      ir_operand_destroy(&guard_branch.lhs);
-      guard_branch.lhs = ir_operand_temp(guard_name);
-      if (!guard_test.dest.name || !guard_branch.lhs.name ||
-          !ir_function_insert_instruction(function, header, &guard_test) ||
-          !ir_function_insert_instruction(function, header + 1,
-                                          &guard_branch) ||
-          !ir_function_insert_instruction(function, header + 2, &hoisted)) {
-        failed = 1;
-      }
-      ir_instruction_destroy_storage(&guard_test);
-      ir_instruction_destroy_storage(&guard_branch);
-      ir_instruction_destroy_storage(&hoisted);
-      if (failed) {
-        return 0;
-      }
-      ir_instruction_make_nop(&function->instructions[pick + 3]);
-      header += 3;
-      if (changed) {
-        *changed = 1;
-      }
+    if (!ir_guard_emit(function, header, pick, guard_name)) {
+      return 0;
+    }
+    header += 3;
+    if (changed) {
+      *changed = 1;
     }
   }
   return 1;
