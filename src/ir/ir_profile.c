@@ -277,114 +277,108 @@ static int ir_profile_call_is_mem_primitive(const IRInstruction *instruction) {
          strcmp(instruction->text, "memset") == 0;
 }
 
+static int ir_profile_call_op_class(const IRInstruction *instruction,
+                                   uint32_t *op_class_out) {
+  if (instruction->text &&
+      strncmp(instruction->text, "mettle_profile_", 15) == 0) {
+    return 0;
+  }
+  *op_class_out = ir_profile_call_is_mem_primitive(instruction)
+                      ? METTLE_PROFILE_OP_MEM_PRIMITIVE
+                      : METTLE_PROFILE_OP_CALL;
+  return 1;
+}
+
+static int ir_profile_binary_op_class(const char *text,
+                                      uint32_t *op_class_out) {
+  static const struct {
+    const char *text;
+    uint32_t op_class;
+  } kOps[] = {
+    {"+", METTLE_PROFILE_OP_ADD},     {"-", METTLE_PROFILE_OP_ADD},
+    {"*", METTLE_PROFILE_OP_MUL},     {"/", METTLE_PROFILE_OP_DIV},
+    {"%", METTLE_PROFILE_OP_MOD},     {"<<", METTLE_PROFILE_OP_SHIFT},
+    {">>", METTLE_PROFILE_OP_SHIFT},  {"&", METTLE_PROFILE_OP_BITWISE},
+    {"|", METTLE_PROFILE_OP_BITWISE}, {"^", METTLE_PROFILE_OP_BITWISE},
+  };
+
+  for (size_t i = 0; i < sizeof(kOps) / sizeof(kOps[0]); i++) {
+    if (strcmp(text, kOps[i].text) == 0) {
+      *op_class_out = kOps[i].op_class;
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int ir_profile_instruction_op_class(const IRInstruction *instruction,
                                            uint32_t *op_class_out) {
+  static const struct {
+    IROpcode op;
+    uint32_t op_class;
+  } kClasses[] = {
+    {IR_OP_LOAD, METTLE_PROFILE_OP_LOAD},
+    {IR_OP_STORE, METTLE_PROFILE_OP_STORE},
+    {IR_OP_JUMP, METTLE_PROFILE_OP_BRANCH},
+    {IR_OP_BRANCH_ZERO, METTLE_PROFILE_OP_BRANCH},
+    {IR_OP_BRANCH_EQ, METTLE_PROFILE_OP_BRANCH},
+    {IR_OP_MEMCPY_INLINE, METTLE_PROFILE_OP_MEM_PRIMITIVE},
+    {IR_OP_SIMD_COPY, METTLE_PROFILE_OP_MEM_PRIMITIVE},
+    {IR_OP_COUNT_WORD_STARTS, METTLE_PROFILE_OP_POPCNT},
+    {IR_OP_SIMD_SUM_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_SUM_U8, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_BYTE_MAP, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_FILL, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_MATMUL_N32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_INSERTION_SORT_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_DOT_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_DOT_I8, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_SLP_MAC_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_SLP_MAC_I8, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_SCALE_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_CLAMP_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_REVERSE_COPY_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_LOWER_BOUND_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_PREFIX_SUM_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_MINMAX_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_SUM_F64, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_SUM_F32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_DOT_F64, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_DOT_F32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_AFFINE_MAP_F64, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_AFFINE_MAP_F32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_EXP_F32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_I2F_REDUCE_F64, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_VLOOP_F64, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_VLOOP_I32, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_FIND, METTLE_PROFILE_OP_SIMD},
+    {IR_OP_SIMD_OUTER_LANE_F64, METTLE_PROFILE_OP_SIMD},
+  };
+
   if (!instruction || !op_class_out) {
     return 0;
   }
-
-  switch (instruction->op) {
-  case IR_OP_LOAD:
-    *op_class_out = METTLE_PROFILE_OP_LOAD;
-    return 1;
-  case IR_OP_STORE:
-    *op_class_out = METTLE_PROFILE_OP_STORE;
-    return 1;
-  case IR_OP_JUMP:
-  case IR_OP_BRANCH_ZERO:
-  case IR_OP_BRANCH_EQ:
-    *op_class_out = METTLE_PROFILE_OP_BRANCH;
-    return 1;
-  case IR_OP_CALL:
-  case IR_OP_CALL_INDIRECT:
-    if (instruction->text &&
-        strncmp(instruction->text, "mettle_profile_", 15) == 0) {
-      return 0;
-    }
-    if (ir_profile_call_is_mem_primitive(instruction)) {
-      *op_class_out = METTLE_PROFILE_OP_MEM_PRIMITIVE;
-    } else {
-      *op_class_out = METTLE_PROFILE_OP_CALL;
-    }
-    return 1;
-  case IR_OP_MEMCPY_INLINE:
-  case IR_OP_SIMD_COPY:
-    *op_class_out = METTLE_PROFILE_OP_MEM_PRIMITIVE;
-    return 1;
-  case IR_OP_COUNT_WORD_STARTS:
-    *op_class_out = METTLE_PROFILE_OP_POPCNT;
-    return 1;
-  case IR_OP_SIMD_SUM_I32:
-  case IR_OP_SIMD_SUM_U8:
-  case IR_OP_SIMD_BYTE_MAP:
-  case IR_OP_SIMD_FILL:
-  case IR_OP_SIMD_MATMUL_N32:
-  case IR_OP_SIMD_INSERTION_SORT_I32:
-  case IR_OP_SIMD_DOT_I32:
-  case IR_OP_SIMD_DOT_I8:
-  case IR_OP_SIMD_SLP_MAC_I32:
-  case IR_OP_SIMD_SLP_MAC_I8:
-  case IR_OP_SIMD_SCALE_I32:
-  case IR_OP_SIMD_CLAMP_I32:
-  case IR_OP_SIMD_REVERSE_COPY_I32:
-  case IR_OP_LOWER_BOUND_I32:
-  case IR_OP_PREFIX_SUM_I32:
-  case IR_OP_SIMD_MINMAX_I32:
-  case IR_OP_SIMD_SUM_F64:
-  case IR_OP_SIMD_SUM_F32:
-  case IR_OP_SIMD_DOT_F64:
-  case IR_OP_SIMD_DOT_F32:
-  case IR_OP_SIMD_AFFINE_MAP_F64:
-  case IR_OP_SIMD_AFFINE_MAP_F32:
-  case IR_OP_SIMD_EXP_F32:
-  case IR_OP_SIMD_I2F_REDUCE_F64:
-  case IR_OP_SIMD_VLOOP_F64:
-  case IR_OP_SIMD_VLOOP_I32:
-  case IR_OP_SIMD_FIND:
-  case IR_OP_SIMD_OUTER_LANE_F64:
-    *op_class_out = METTLE_PROFILE_OP_SIMD;
-    return 1;
-  case IR_OP_BINARY:
-    if (!instruction->text) {
-      return 0;
-    }
-    if (strcmp(instruction->text, "+") == 0 ||
-        strcmp(instruction->text, "-") == 0) {
-      *op_class_out = METTLE_PROFILE_OP_ADD;
-      return 1;
-    }
-    if (strcmp(instruction->text, "*") == 0) {
-      *op_class_out = METTLE_PROFILE_OP_MUL;
-      return 1;
-    }
-    if (strcmp(instruction->text, "/") == 0) {
-      *op_class_out = METTLE_PROFILE_OP_DIV;
-      return 1;
-    }
-    if (strcmp(instruction->text, "%") == 0) {
-      *op_class_out = METTLE_PROFILE_OP_MOD;
-      return 1;
-    }
-    if (strcmp(instruction->text, "<<") == 0 ||
-        strcmp(instruction->text, ">>") == 0) {
-      *op_class_out = METTLE_PROFILE_OP_SHIFT;
-      return 1;
-    }
-    if (strcmp(instruction->text, "&") == 0 || strcmp(instruction->text, "|") == 0 ||
-        strcmp(instruction->text, "^") == 0) {
-      *op_class_out = METTLE_PROFILE_OP_BITWISE;
-      return 1;
-    }
-    return 0;
-  case IR_OP_UNARY:
-    if (instruction->text && strcmp(instruction->text, "~") == 0) {
-      *op_class_out = METTLE_PROFILE_OP_BITWISE;
-      return 1;
-    }
-    return 0;
-  default:
-    return 0;
+  if (instruction->op == IR_OP_CALL || instruction->op == IR_OP_CALL_INDIRECT) {
+    return ir_profile_call_op_class(instruction, op_class_out);
   }
+  if (instruction->op == IR_OP_BINARY) {
+    return instruction->text &&
+           ir_profile_binary_op_class(instruction->text, op_class_out);
+  }
+  if (instruction->op == IR_OP_UNARY) {
+    if (!instruction->text || strcmp(instruction->text, "~") != 0) {
+      return 0;
+    }
+    *op_class_out = METTLE_PROFILE_OP_BITWISE;
+    return 1;
+  }
+  for (size_t i = 0; i < sizeof(kClasses) / sizeof(kClasses[0]); i++) {
+    if (kClasses[i].op == instruction->op) {
+      *op_class_out = kClasses[i].op_class;
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static int ir_profile_instrument_function_ops(IRFunction *function) {

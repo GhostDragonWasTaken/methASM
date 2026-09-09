@@ -2369,74 +2369,62 @@ void ir_name_index_destroy(IRNameIndex *index) {
   index->capacity = 0;
 }
 
+static int ir_op_reads_destination(IROpcode op) {
+  static const IROpcode kOps[] = {
+      IR_OP_STORE, IR_OP_MEMCPY_INLINE, IR_OP_SIMD_COPY,
+      IR_OP_COUNT_WORD_STARTS, IR_OP_SIMD_SUM_I32, IR_OP_SIMD_SUM_U8,
+      IR_OP_SIMD_BYTE_MAP, IR_OP_SIMD_FILL, IR_OP_SIMD_MATMUL_N32,
+      IR_OP_SIMD_INSERTION_SORT_I32, IR_OP_SIMD_DOT_I32, IR_OP_SIMD_DOT_I8,
+      IR_OP_SIMD_SLP_MAC_I32, IR_OP_SIMD_SLP_MAC_I8, IR_OP_SIMD_SCALE_I32,
+      IR_OP_SIMD_CLAMP_I32, IR_OP_SIMD_REVERSE_COPY_I32,
+      IR_OP_LOWER_BOUND_I32, IR_OP_PREFIX_SUM_I32, IR_OP_SIMD_MINMAX_I32,
+      IR_OP_SIMD_SUM_F64, IR_OP_SIMD_SUM_F32, IR_OP_SIMD_DOT_F64,
+      IR_OP_SIMD_DOT_F32, IR_OP_SIMD_AFFINE_MAP_F64,
+      IR_OP_SIMD_AFFINE_MAP_F32, IR_OP_SIMD_EXP_F32, IR_OP_SIMD_SILU_F32,
+      IR_OP_SIMD_I2F_REDUCE_F64, IR_OP_SIMD_VLOOP_F64, IR_OP_SIMD_VLOOP_I32,
+      IR_OP_SIMD_FIND, IR_OP_SIMD_OUTER_LANE_F64
+  };
+
+  for (size_t i = 0; i < sizeof(kOps) / sizeof(kOps[0]); i++) {
+    if (kOps[i] == op) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int ir_op_reads_side_operands(IROpcode op) {
+  static const IROpcode kOps[] = {
+      IR_OP_ASSIGN, IR_OP_ADDRESS_OF, IR_OP_LOAD, IR_OP_BINARY, IR_OP_UNARY,
+      IR_OP_CAST, IR_OP_NEW, IR_OP_BRANCH_ZERO, IR_OP_BRANCH_EQ, IR_OP_CALL,
+      IR_OP_CALL_INDIRECT, IR_OP_PREFETCH, IR_OP_RETURN, IR_OP_SELECT
+  };
+
+  if (ir_op_reads_destination(op)) {
+    return 1;
+  }
+  for (size_t i = 0; i < sizeof(kOps) / sizeof(kOps[0]); i++) {
+    if (kOps[i] == op) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 int ir_collect_instruction_temp_uses(IRTempUseMap *uses,
                                             const IRInstruction *instruction) {
   if (!uses || !instruction) {
     return 0;
   }
-
-  switch (instruction->op) {
-  case IR_OP_STORE:
-  case IR_OP_MEMCPY_INLINE:
-  case IR_OP_SIMD_COPY:
-  case IR_OP_COUNT_WORD_STARTS:
-  case IR_OP_SIMD_SUM_I32:
-  case IR_OP_SIMD_SUM_U8:
-  case IR_OP_SIMD_BYTE_MAP:
-  case IR_OP_SIMD_FILL:
-  case IR_OP_SIMD_MATMUL_N32:
-  case IR_OP_SIMD_INSERTION_SORT_I32:
-  case IR_OP_SIMD_DOT_I32:
-  case IR_OP_SIMD_DOT_I8:
-  case IR_OP_SIMD_SLP_MAC_I32:
-  case IR_OP_SIMD_SLP_MAC_I8:
-  case IR_OP_SIMD_SCALE_I32:
-  case IR_OP_SIMD_CLAMP_I32:
-  case IR_OP_SIMD_REVERSE_COPY_I32:
-  case IR_OP_LOWER_BOUND_I32:
-  case IR_OP_PREFIX_SUM_I32:
-  case IR_OP_SIMD_MINMAX_I32:
-  case IR_OP_SIMD_SUM_F64:
-  case IR_OP_SIMD_SUM_F32:
-  case IR_OP_SIMD_DOT_F64:
-  case IR_OP_SIMD_DOT_F32:
-  case IR_OP_SIMD_AFFINE_MAP_F64:
-  case IR_OP_SIMD_AFFINE_MAP_F32:
-  case IR_OP_SIMD_EXP_F32:
-  case IR_OP_SIMD_SILU_F32:
-  case IR_OP_SIMD_I2F_REDUCE_F64:
-  case IR_OP_SIMD_VLOOP_F64:
-  case IR_OP_SIMD_VLOOP_I32:
-  case IR_OP_SIMD_FIND:
-  case IR_OP_SIMD_OUTER_LANE_F64:
-    if (!ir_collect_operand_temp_use(uses, &instruction->dest) ||
-        !ir_collect_operand_temp_use(uses, &instruction->lhs) ||
-        !ir_collect_operand_temp_use(uses, &instruction->rhs)) {
+  if (ir_op_reads_side_operands(instruction->op)) {
+    if (ir_op_reads_destination(instruction->op) &&
+        !ir_collect_operand_temp_use(uses, &instruction->dest)) {
       return 0;
     }
-    break;
-
-  case IR_OP_ASSIGN:
-  case IR_OP_ADDRESS_OF:
-  case IR_OP_LOAD:
-  case IR_OP_BINARY:
-  case IR_OP_UNARY:
-  case IR_OP_CAST:
-  case IR_OP_NEW:
-  case IR_OP_BRANCH_ZERO:
-  case IR_OP_BRANCH_EQ:
-  case IR_OP_CALL:
-  case IR_OP_CALL_INDIRECT:
-  case IR_OP_PREFETCH:
-  case IR_OP_RETURN:
-  case IR_OP_SELECT:
     if (!ir_collect_operand_temp_use(uses, &instruction->lhs) ||
         !ir_collect_operand_temp_use(uses, &instruction->rhs)) {
       return 0;
     }
-    break;
-  default:
-    break;
   }
 
   for (size_t i = 0; i < instruction->argument_count; i++) {

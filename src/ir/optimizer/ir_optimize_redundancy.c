@@ -2671,6 +2671,477 @@ static size_t re_promote_exit_block_position(const IRFunction *function,
   return end;
 }
 
+typedef struct {
+  IRFunction *function;
+  const REAddr *region;
+  const char *region_name;
+  const char *local_name;
+  long long size;
+  unsigned char promoted_class;
+  int id;
+} REPromotion;
+
+static int re_prom_trace(void) {
+  static int cached = -1;
+
+  if (cached < 0) {
+    cached = getenv("METTLE_PROM_TRACE") ? 1 : 0;
+  }
+  return cached;
+}
+
+static int re_preheader_falls_in(const IRFunction *function, size_t header) {
+  const IRInstruction *prev;
+  size_t p;
+
+  if (header == 0) {
+    return 1;
+  }
+  p = header - 1;
+  prev = &function->instructions[p];
+  while (p > 0 && prev->op == IR_OP_NOP) {
+    prev = &function->instructions[--p];
+  }
+  return prev->op != IR_OP_JUMP && prev->op != IR_OP_RETURN &&
+         prev->op != IR_OP_BRANCH_ZERO && prev->op != IR_OP_BRANCH_EQ;
+}
+
+static int re_promote_region_is_usable(const REAddr *region) {
+  return region->valid && region->name && region->portable &&
+         region->offset >= 0 && region->offset < 4096 &&
+         !(region->kind == IR_OPERAND_TEMP && !region->is_address_of);
+}
+
+static int re_promote_region_names(const REAddr *region, char *base,
+                                   size_t base_size, char *name,
+                                   size_t name_size) {
+  return snprintf(base, base_size, "%c%s", region->is_address_of ? '&' : 's',
+                  region->name) < (int)base_size &&
+         snprintf(name, name_size, "%s", region->name) < (int)name_size;
+}
+
+static int re_promote_function_ends_in_terminator(const IRFunction *function) {
+  size_t last = function->instruction_count;
+
+  while (last > 0 && function->instructions[last - 1].op == IR_OP_NOP) {
+    last--;
+  }
+  return last != 0 && (function->instructions[last - 1].op == IR_OP_RETURN ||
+                       function->instructions[last - 1].op == IR_OP_JUMP);
+}
+
+static size_t re_promote_prefix_end(const IRFunction *function, size_t header,
+                                    size_t latch) {
+  for (size_t i = header + 1; i <= latch; i++) {
+    IROpcode op = function->instructions[i].op;
+    if (op == IR_OP_BRANCH_ZERO || op == IR_OP_BRANCH_EQ ||
+        op == IR_OP_JUMP || op == IR_OP_LABEL || op == IR_OP_RETURN) {
+      return i;
+    }
+  }
+  return latch;
+}
+
+static int re_promote_touches_prefix(const REPromoteSites *sites,
+                                     size_t prefix_end) {
+  for (size_t k = 0; k < sites->load_count; k++) {
+    if (sites->loads[k] < prefix_end) {
+      return 1;
+    }
+  }
+  for (size_t k = 0; k < sites->store_count; k++) {
+    if (sites->stores[k] < prefix_end) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void re_promote_build_pieces(const REPromotion *pr,
+                                    const REPromoteSites *sites,
+                                    const char *type_name,
+                                    const char *addr_name, size_t header,
+                                    IRInstruction *pieces) {
+  const REAddr *region = pr->region;
+
+  memset(pieces, 0, sizeof(*pieces) * 4);
+  pieces[0].op = IR_OP_DECLARE_LOCAL;
+  pieces[0].dest = ir_operand_symbol(pr->local_name);
+  pieces[0].text = mettle_strdup(type_name);
+  if (region->is_address_of) {
+    pieces[1].op = IR_OP_ADDRESS_OF;
+    pieces[1].dest = ir_operand_temp(addr_name);
+    pieces[1].lhs = ir_operand_symbol(region->name);
+    pieces[2].op = IR_OP_BINARY;
+    pieces[2].text = mettle_strdup("+");
+    pieces[2].dest = ir_operand_temp(addr_name);
+    pieces[2].lhs = ir_operand_temp(addr_name);
+    pieces[2].rhs = ir_operand_int(region->offset);
+  } else {
+    pieces[1].op = IR_OP_BINARY;
+    pieces[1].text = mettle_strdup("+");
+    pieces[1].dest = ir_operand_temp(addr_name);
+    pieces[1].lhs = ir_operand_symbol(region->name);
+    pieces[1].rhs = ir_operand_int(region->offset);
+    pieces[2].op = IR_OP_NOP;
+  }
+  pieces[3].op = IR_OP_LOAD;
+  pieces[3].dest = ir_operand_symbol(pr->local_name);
+  pieces[3].lhs = ir_operand_temp(addr_name);
+  pieces[3].rhs = ir_operand_int(pr->size);
+  pieces[3].is_unsigned = sites->is_unsigned;
+  pieces[3].float_bits = sites->float_bits;
+  pieces[3].value_type = sites->value_type;
+  pieces[3].alias_class = pr->promoted_class;
+  for (int k = 0; k < 4; k++) {
+    pieces[k].location = pr->function->instructions[header].location;
+  }
+}
+
+static int re_promote_insert_pieces(IRFunction *function, size_t header,
+                                    IRInstruction *pieces,
+                                    size_t *out_inserted) {
+  size_t inserted = 0;
+  int ok = 1;
+
+  for (int k = 0; k < 4 && ok; k++) {
+    if (pieces[k].op == IR_OP_NOP) {
+      continue;
+    }
+    ok = ir_function_insert_instruction(function, header + inserted,
+                                        &pieces[k]);
+    ir_instruction_destroy_storage(&pieces[k]);
+    if (ok) {
+      inserted++;
+    }
+  }
+  *out_inserted = inserted;
+  return ok;
+}
+
+static void re_promote_shift_sites(REPromoteSites *sites, size_t inserted) {
+  for (size_t k = 0; k < sites->load_count; k++) {
+    sites->loads[k] += inserted;
+  }
+  for (size_t k = 0; k < sites->store_count; k++) {
+    sites->stores[k] += inserted;
+  }
+  for (size_t k = 0; k < sites->exit_count; k++) {
+    sites->exits[k].at += inserted;
+  }
+}
+
+static void re_promote_rewrite_loads(IRFunction *function,
+                                     const REPromoteSites *sites,
+                                     const char *local_name) {
+  for (size_t k = 0; k < sites->load_count; k++) {
+    IRInstruction *ld = &function->instructions[sites->loads[k]];
+    IROperand dest = ir_operand_temp(ld->dest.name);
+    int keep_unsigned = ld->is_unsigned;
+    int keep_float_bits = ld->float_bits;
+    MtlcType *keep_type = ld->value_type;
+
+    ir_instruction_destroy_storage(ld);
+    memset(ld, 0, sizeof(*ld));
+    ld->op = IR_OP_ASSIGN;
+    ld->dest = dest;
+    ld->lhs = ir_operand_symbol(local_name);
+    ld->is_unsigned = keep_unsigned;
+    ld->float_bits = keep_float_bits;
+    ld->value_type = keep_type;
+  }
+}
+
+static void re_promote_rewrite_stores(IRFunction *function,
+                                     const REPromoteSites *sites,
+                                     const char *local_name) {
+  for (size_t k = 0; k < sites->store_count; k++) {
+    IRInstruction *st = &function->instructions[sites->stores[k]];
+    IROperand value = ir_operand_copy(&st->lhs);
+
+    ir_instruction_destroy_storage(st);
+    memset(st, 0, sizeof(*st));
+    st->op = IR_OP_ASSIGN;
+    st->dest = ir_operand_symbol(local_name);
+    st->lhs = value;
+  }
+}
+
+static int re_promote_mirror_stores(IRFunction *function,
+                                    REPromoteSites *sites,
+                                    const char *local_name) {
+  for (size_t k = 0; k < sites->store_count; k++) {
+    IRInstruction upd = {0};
+    int ok;
+
+    upd.op = IR_OP_ASSIGN;
+    upd.dest = ir_operand_symbol(local_name);
+    upd.lhs = ir_operand_copy(&function->instructions[sites->stores[k]].lhs);
+    upd.location = function->instructions[sites->stores[k]].location;
+    ok = ir_function_insert_instruction(function, sites->stores[k] + 1, &upd);
+    ir_instruction_destroy_storage(&upd);
+    if (!ok) {
+      return 0;
+    }
+    for (size_t m = k + 1; m < sites->store_count; m++) {
+      sites->stores[m]++;
+    }
+  }
+  return 1;
+}
+
+typedef struct {
+  char target[RE_PROMOTE_MAX_EXITS][64];
+  char tail[RE_PROMOTE_MAX_EXITS][64];
+  size_t count;
+} REPromoteTails;
+
+static int re_promote_tails_find(const REPromoteTails *tails,
+                                 const char *target) {
+  for (size_t m = 0; m < tails->count; m++) {
+    if (target && strcmp(tails->target[m], target) == 0) {
+      return (int)m;
+    }
+  }
+  return -1;
+}
+
+static void re_promote_tails_add(REPromoteTails *tails, const char *target,
+                                 const char *tail_name) {
+  if (tails->count >= RE_PROMOTE_MAX_EXITS ||
+      strlen(target) >= sizeof(tails->target[0])) {
+    return;
+  }
+  snprintf(tails->target[tails->count], sizeof(tails->target[0]), "%s", target);
+  snprintf(tails->tail[tails->count], sizeof(tails->tail[0]), "%s", tail_name);
+  tails->count++;
+}
+
+static int re_promote_return_exit(REPromotion *pr, REPromoteSites *sites,
+                                 size_t k, size_t *latch) {
+  IRFunction *function = pr->function;
+  size_t at = sites->exits[k].at;
+  SourceLocation where = function->instructions[at].location;
+  size_t inserted = 0;
+
+  if (!re_promote_insert_exit_store(function, at, pr->region->is_address_of,
+                                    pr->region_name, pr->region->offset,
+                                    pr->local_name, pr->size,
+                                    pr->promoted_class, where, pr->id, k,
+                                    &inserted)) {
+    return 0;
+  }
+  for (size_t m = 0; m < sites->exit_count; m++) {
+    if (sites->exits[m].at >= at) {
+      sites->exits[m].at += inserted;
+    }
+  }
+  *latch += inserted;
+  return 1;
+}
+
+static int re_promote_branch_exit(REPromotion *pr, REPromoteSites *sites,
+                                  size_t k, REPromoteTails *tails,
+                                  size_t *latch) {
+  IRFunction *function = pr->function;
+  IRInstruction *br = &function->instructions[sites->exits[k].at];
+  SourceLocation where = br->location;
+  IRInstruction tail_label = {0};
+  IRInstruction tail_jump = {0};
+  char tail_name[64];
+  char *old_target;
+  size_t inserted = 0;
+  size_t end;
+  int shared = re_promote_tails_find(tails, br->text);
+  int ok;
+
+  if (shared >= 0) {
+    mettle_free_string(br->text);
+    br->text = mettle_strdup(tails->tail[shared]);
+    return br->text != NULL;
+  }
+  snprintf(tail_name, sizeof(tail_name), "__promx_%d_%zu", pr->id, k);
+  old_target = mettle_strdup(br->text);
+  if (!old_target) {
+    return 0;
+  }
+  re_promote_tails_add(tails, old_target, tail_name);
+  mettle_free_string(br->text);
+  br->text = mettle_strdup(tail_name);
+  if (!br->text) {
+    free(old_target);
+    return 0;
+  }
+  tail_label.op = IR_OP_LABEL;
+  tail_label.text = mettle_strdup(tail_name);
+  tail_jump.op = IR_OP_JUMP;
+  tail_jump.text = old_target;
+  end = re_promote_exit_block_position(function, old_target,
+                                       sites->exits[k].at);
+  ok = tail_label.text &&
+       ir_function_insert_instruction(function, end, &tail_label) &&
+       re_promote_insert_exit_store(function, end + 1,
+                                    pr->region->is_address_of, pr->region_name,
+                                    pr->region->offset, pr->local_name,
+                                    pr->size, pr->promoted_class, where, pr->id,
+                                    k, &inserted) &&
+       ir_function_insert_instruction(function, end + 1 + inserted, &tail_jump);
+  ir_instruction_destroy_storage(&tail_label);
+  ir_instruction_destroy_storage(&tail_jump);
+  if (!ok) {
+    return 0;
+  }
+  for (size_t m = 0; m < sites->exit_count; m++) {
+    if (sites->exits[m].at >= end) {
+      sites->exits[m].at += inserted + 2;
+    }
+  }
+  if (*latch >= end) {
+    *latch += inserted + 2;
+  }
+  return 1;
+}
+
+static int re_promote_exits(REPromotion *pr, REPromoteSites *sites,
+                            size_t *latch) {
+  REPromoteTails tails;
+
+  tails.count = 0;
+  for (size_t k = 0; k < sites->exit_count; k++) {
+    if (sites->exits[k].is_return) {
+      if (!re_promote_return_exit(pr, sites, k, latch)) {
+        return 0;
+      }
+      continue;
+    }
+    if (!re_promote_branch_exit(pr, sites, k, &tails, latch)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int re_promote_is_viable(const REPromoteSites *sites,
+                                const IRFunction *function, size_t header,
+                                size_t latch, int *strong) {
+  if (re_prom_trace()) {
+    fprintf(stderr,
+            "[prom]   viable=%d strong=%d loads=%zu stores=%zu exits=%zu "
+            "float=%d\n",
+            sites->viable, sites->strong, sites->load_count,
+            sites->store_count, sites->exit_count, sites->is_float);
+  }
+  if (!sites->viable || sites->store_count == 0 || sites->load_count == 0 ||
+      sites->is_float) {
+    return 0;
+  }
+  *strong = sites->strong;
+  if (sites->exit_count == 0) {
+    *strong = 0;
+  }
+  if (!re_promote_function_ends_in_terminator(function)) {
+    if (re_prom_trace()) {
+      fprintf(stderr, "[prom]   no-terminator: weak only\n");
+    }
+    *strong = 0;
+  }
+  if (!re_promote_touches_prefix(sites,
+                                 re_promote_prefix_end(function, header,
+                                                       latch))) {
+    if (re_prom_trace()) {
+      fprintf(stderr, "[prom]   bail: prefix-unsafe\n");
+    }
+    return 0;
+  }
+  return 1;
+}
+
+static int re_promote_seed(IRFunction *function, const REDefs *defs,
+                           const IRTempValueMap *addr_taken, size_t *header,
+                           size_t *latch, size_t s, int *counter,
+                           int *changed, int *applied) {
+  const IRInstruction *seed = &function->instructions[s];
+  REAddr region = {0};
+  REPromoteSites sites;
+  REPromotion pr;
+  char region_base[RE_NAME_MAX + 1];
+  char region_name[RE_NAME_MAX + 1];
+  char local_name[48];
+  char addr_name[48];
+  const char *type_name;
+  IRInstruction pieces[4];
+  size_t inserted = 0;
+  int strong = 0;
+
+  *applied = 0;
+  if (seed->op != IR_OP_STORE || seed->rhs.kind != IR_OPERAND_INT) {
+    return 1;
+  }
+  re_resolve_addr(function, defs, &seed->dest, &region, 0);
+  if (re_prom_trace()) {
+    fprintf(stderr,
+            "[prom] %s store@%zu valid=%d name=%s port=%d off=%lld kind=%d "
+            "ao=%d\n",
+            function->name ? function->name : "?", s, region.valid,
+            region.name ? region.name : "-", region.portable, region.offset,
+            (int)region.kind, region.is_address_of);
+  }
+  if (!re_promote_region_is_usable(&region) ||
+      !re_promote_region_names(&region, region_base, sizeof(region_base),
+                               region_name, sizeof(region_name))) {
+    return 1;
+  }
+  pr.function = function;
+  pr.region = &region;
+  pr.region_name = region_name;
+  pr.size = seed->rhs.int_value;
+  re_promote_collect_sites(function, defs, addr_taken, *header, *latch,
+                           region_base, &region, pr.size, seed, &sites);
+  if (!re_promote_is_viable(&sites, function, *header, *latch, &strong)) {
+    return 1;
+  }
+  pr.id = (*counter)++;
+  pr.promoted_class = sites.promoted_class;
+  snprintf(local_name, sizeof(local_name), "__prom_%d", pr.id);
+  snprintf(addr_name, sizeof(addr_name), "__proma_%d", pr.id);
+  pr.local_name = local_name;
+  type_name = pr.size == 8 ? "int64"
+                           : (sites.is_unsigned ? "uint32" : "int32");
+  if (pr.size != 4 && pr.size != 8) {
+    if (re_prom_trace()) {
+      fprintf(stderr, "[prom]   bail: size\n");
+    }
+    return 1;
+  }
+  re_promote_build_pieces(&pr, &sites, type_name, addr_name, *header, pieces);
+  if (!re_promote_insert_pieces(function, *header, pieces, &inserted)) {
+    return 0;
+  }
+  *header += inserted;
+  *latch += inserted;
+  re_promote_shift_sites(&sites, inserted);
+  re_promote_rewrite_loads(function, &sites, local_name);
+  if (!strong) {
+    if (!re_promote_mirror_stores(function, &sites, local_name)) {
+      return 0;
+    }
+    if (changed) {
+      *changed = 1;
+    }
+    *applied = 1;
+    return 1;
+  }
+  re_promote_rewrite_stores(function, &sites, local_name);
+  if (!re_promote_exits(&pr, &sites, latch)) {
+    return 0;
+  }
+  if (changed) {
+    *changed = 1;
+  }
+  *applied = 1;
+  return 1;
+}
+
 static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
                               const IRTempValueMap *addr_taken, int *changed) {
   const REDefs defs = *defs_in;
@@ -2678,347 +3149,24 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
 
   for (size_t header = 0; header < function->instruction_count; header++) {
     const IRInstruction *label = &function->instructions[header];
+    size_t latch;
+
     if (label->op != IR_OP_LABEL || !re_label_is_loop_header(label->text)) {
       continue;
     }
-    size_t latch = re_loop_latch(function, header);
-    if (!latch) {
+    latch = re_loop_latch(function, header);
+    if (!latch || !re_preheader_falls_in(function, header)) {
       continue;
     }
-    if (header > 0) {
-      const IRInstruction *prev = &function->instructions[header - 1];
-      size_t p = header - 1;
-      while (p > 0 && prev->op == IR_OP_NOP) {
-        prev = &function->instructions[--p];
-      }
-      if (prev->op == IR_OP_JUMP || prev->op == IR_OP_RETURN ||
-          prev->op == IR_OP_BRANCH_ZERO || prev->op == IR_OP_BRANCH_EQ) {
-        continue;
-      }
-    }
-
     for (size_t s = header + 1; s < latch; s++) {
-      const IRInstruction *seed = &function->instructions[s];
-      REAddr region = {0};
-      if (seed->op != IR_OP_STORE || seed->rhs.kind != IR_OPERAND_INT) {
-        continue;
-      }
-      re_resolve_addr(function, &defs, &seed->dest, &region, 0);
-      if (getenv("METTLE_PROM_TRACE")) {
-        fprintf(stderr, "[prom] %s store@%zu valid=%d name=%s port=%d off=%lld kind=%d ao=%d\n",
-                function->name ? function->name : "?", s, region.valid,
-                region.name ? region.name : "-", region.portable,
-                region.offset, (int)region.kind, region.is_address_of);
-      }
-      if (!region.valid || !region.name || !region.portable ||
-          region.offset < 0 || region.offset >= 4096 ||
-          (region.kind == IR_OPERAND_TEMP && !region.is_address_of)) {
-        continue;
-      }
-      long long size = seed->rhs.int_value;
-      char region_base[RE_NAME_MAX + 1];
-      char region_name[RE_NAME_MAX + 1];
-      if (snprintf(region_base, sizeof(region_base), "%c%s",
-                   region.is_address_of ? '&' : 's',
-                   region.name) >= (int)sizeof(region_base) ||
-          snprintf(region_name, sizeof(region_name), "%s", region.name) >=
-              (int)sizeof(region_name)) {
-        continue;
-      }
-
-      REPromoteSites sites;
-      re_promote_collect_sites(function, &defs, addr_taken, header, latch,
-                               region_base, &region, size, seed, &sites);
-      size_t *loads = sites.loads;
-      size_t *stores = sites.stores;
-      size_t load_count = sites.load_count;
-      size_t store_count = sites.store_count;
-      REExit *exits = sites.exits;
-      size_t exit_count = sites.exit_count;
-      int header_exit = sites.header_exit;
-      int viable = sites.viable;
-      int strong = sites.strong;
-      int is_float = sites.is_float;
-      int float_bits = sites.float_bits;
-      int is_unsigned = sites.is_unsigned;
-      MtlcType *value_type = sites.value_type;
-      unsigned char promoted_class = sites.promoted_class;
-
-      if (getenv("METTLE_PROM_TRACE")) {
-        fprintf(stderr, "[prom]   viable=%d strong=%d loads=%zu stores=%zu exits=%zu float=%d\n",
-                viable, strong, load_count, store_count, exit_count, is_float);
-      }
-      if (!viable || store_count == 0 || load_count == 0 || is_float) {
-        continue;
-      }
-      if (exit_count == 0) {
-        strong = 0;
-      }
-      (void)header_exit;
-      {
-        size_t last = function->instruction_count;
-        while (last > 0 && function->instructions[last - 1].op == IR_OP_NOP) {
-          last--;
-        }
-        if (last == 0 ||
-            (function->instructions[last - 1].op != IR_OP_RETURN &&
-             function->instructions[last - 1].op != IR_OP_JUMP)) {
-      if (getenv("METTLE_PROM_TRACE")) {
-        fprintf(stderr, "[prom]   no-terminator: weak only\n");
-      }
-          strong = 0;
-        }
-      }
-
-      size_t prefix_end = latch;
-      for (size_t i = header + 1; i <= latch; i++) {
-        IROpcode op = function->instructions[i].op;
-        if (op == IR_OP_BRANCH_ZERO || op == IR_OP_BRANCH_EQ ||
-            op == IR_OP_JUMP || op == IR_OP_LABEL || op == IR_OP_RETURN) {
-          prefix_end = i;
-          break;
-        }
-      }
-      int safe = 0;
-      for (size_t k = 0; k < load_count && !safe; k++) {
-        safe = loads[k] < prefix_end;
-      }
-      for (size_t k = 0; k < store_count && !safe; k++) {
-        safe = stores[k] < prefix_end;
-      }
-      if (!safe) {
-      if (getenv("METTLE_PROM_TRACE")) {
-        fprintf(stderr, "[prom]   bail: prefix-unsafe\n");
-      }
-        continue;
-      }
-
-      char local_name[48];
-      char addr_name[48];
-      snprintf(local_name, sizeof(local_name), "__prom_%d", counter);
-      snprintf(addr_name, sizeof(addr_name), "__proma_%d", counter);
-      counter++;
-
-      const char *type_name =
-          size == 8 ? "int64" : (is_unsigned ? "uint32" : "int32");
-      if (size != 4 && size != 8) {
-      if (getenv("METTLE_PROM_TRACE")) {
-        fprintf(stderr, "[prom]   bail: size\n");
-      }
-        continue;
-      }
-
-      IRInstruction pieces[4];
-      memset(pieces, 0, sizeof(pieces));
-      pieces[0].op = IR_OP_DECLARE_LOCAL;
-      pieces[0].dest = ir_operand_symbol(local_name);
-      pieces[0].text = mettle_strdup(type_name);
-      if (region.is_address_of) {
-        pieces[1].op = IR_OP_ADDRESS_OF;
-        pieces[1].dest = ir_operand_temp(addr_name);
-        pieces[1].lhs = ir_operand_symbol(region.name);
-        pieces[2].op = IR_OP_BINARY;
-        pieces[2].text = mettle_strdup("+");
-        pieces[2].dest = ir_operand_temp(addr_name);
-        pieces[2].lhs = ir_operand_temp(addr_name);
-        pieces[2].rhs = ir_operand_int(region.offset);
-      } else {
-        pieces[1].op = IR_OP_BINARY;
-        pieces[1].text = mettle_strdup("+");
-        pieces[1].dest = ir_operand_temp(addr_name);
-        pieces[1].lhs = ir_operand_symbol(region.name);
-        pieces[1].rhs = ir_operand_int(region.offset);
-        pieces[2].op = IR_OP_NOP;
-      }
-      pieces[3].op = IR_OP_LOAD;
-      pieces[3].dest = ir_operand_symbol(local_name);
-      pieces[3].lhs = ir_operand_temp(addr_name);
-      pieces[3].rhs = ir_operand_int(size);
-      pieces[3].is_unsigned = is_unsigned;
-      pieces[3].float_bits = float_bits;
-      pieces[3].value_type = value_type;
-      pieces[3].alias_class = promoted_class;
-      for (int k = 0; k < 4; k++) {
-        pieces[k].location = function->instructions[header].location;
-      }
-
-      size_t inserted = 0;
-      int failed = 0;
-      for (int k = 0; k < 4 && !failed; k++) {
-        if (pieces[k].op == IR_OP_NOP) {
-          continue;
-        }
-        if (!ir_function_insert_instruction(function, header + inserted,
-                                            &pieces[k])) {
-          failed = 1;
-        }
-        ir_instruction_destroy_storage(&pieces[k]);
-        if (!failed) {
-          inserted++;
-        }
-      }
-      if (failed) {
+      int applied = 0;
+      if (!re_promote_seed(function, &defs, addr_taken, &header, &latch, s,
+                           &counter, changed, &applied)) {
         return 0;
       }
-      header += inserted;
-      latch += inserted;
-      for (size_t k = 0; k < load_count; k++) {
-        loads[k] += inserted;
-      }
-      for (size_t k = 0; k < store_count; k++) {
-        stores[k] += inserted;
-      }
-      for (size_t k = 0; k < exit_count; k++) {
-        exits[k].at += inserted;
-      }
-
-      for (size_t k = 0; k < load_count; k++) {
-        IRInstruction *ld = &function->instructions[loads[k]];
-        IROperand dest = ir_operand_temp(ld->dest.name);
-        int keep_unsigned = ld->is_unsigned;
-        int keep_float_bits = ld->float_bits;
-        MtlcType *keep_type = ld->value_type;
-        ir_instruction_destroy_storage(ld);
-        memset(ld, 0, sizeof(*ld));
-        ld->op = IR_OP_ASSIGN;
-        ld->dest = dest;
-        ld->lhs = ir_operand_symbol(local_name);
-        ld->is_unsigned = keep_unsigned;
-        ld->float_bits = keep_float_bits;
-        ld->value_type = keep_type;
-      }
-      if (strong) {
-        for (size_t k = 0; k < store_count; k++) {
-          IRInstruction *st = &function->instructions[stores[k]];
-          IROperand value = ir_operand_copy(&st->lhs);
-          ir_instruction_destroy_storage(st);
-          memset(st, 0, sizeof(*st));
-          st->op = IR_OP_ASSIGN;
-          st->dest = ir_operand_symbol(local_name);
-          st->lhs = value;
-        }
-      } else {
-        for (size_t k = 0; k < store_count; k++) {
-          IRInstruction upd = {0};
-          upd.op = IR_OP_ASSIGN;
-          upd.dest = ir_operand_symbol(local_name);
-          upd.lhs = ir_operand_copy(&function->instructions[stores[k]].lhs);
-          upd.location = function->instructions[stores[k]].location;
-          if (!ir_function_insert_instruction(function, stores[k] + 1, &upd)) {
-            ir_instruction_destroy_storage(&upd);
-            return 0;
-          }
-          ir_instruction_destroy_storage(&upd);
-          for (size_t m = k + 1; m < store_count; m++) {
-            stores[m]++;
-          }
-        }
-        if (changed) {
-          *changed = 1;
-        }
+      if (applied) {
         return 1;
       }
-
-      char shared_target[RE_PROMOTE_MAX_EXITS][64];
-      char shared_tail[RE_PROMOTE_MAX_EXITS][64];
-      size_t shared_count = 0;
-      for (size_t k = 0; k < exit_count; k++) {
-        SourceLocation where = function->instructions[exits[k].at].location;
-        size_t inserted_here = 0;
-
-        if (exits[k].is_return) {
-          if (!re_promote_insert_exit_store(function, exits[k].at,
-                                            region.is_address_of, region_name,
-                                            region.offset, local_name, size,
-                                            promoted_class, where, counter - 1,
-                                            k, &inserted_here)) {
-            return 0;
-          }
-          for (size_t m = 0; m < exit_count; m++) {
-            if (exits[m].at >= exits[k].at) {
-              exits[m].at += inserted_here;
-            }
-          }
-          latch += inserted_here;
-          continue;
-        }
-
-        IRInstruction *br = &function->instructions[exits[k].at];
-        char tail_name[64];
-        size_t shared = shared_count;
-        for (size_t m = 0; m < shared_count; m++) {
-          if (br->text && strcmp(shared_target[m], br->text) == 0) {
-            shared = m;
-            break;
-          }
-        }
-        if (shared < shared_count) {
-          mettle_free_string(br->text);
-          br->text = mettle_strdup(shared_tail[shared]);
-          if (!br->text) {
-            return 0;
-          }
-          continue;
-        }
-        snprintf(tail_name, sizeof(tail_name), "__promx_%d_%zu", counter - 1,
-                 k);
-        char *old_target = mettle_strdup(br->text);
-        if (!old_target) {
-          return 0;
-        }
-        if (shared_count < RE_PROMOTE_MAX_EXITS &&
-            strlen(old_target) < sizeof(shared_target[0])) {
-          snprintf(shared_target[shared_count], sizeof(shared_target[0]), "%s",
-                   old_target);
-          snprintf(shared_tail[shared_count], sizeof(shared_tail[0]), "%s",
-                   tail_name);
-          shared_count++;
-        }
-        mettle_free_string(br->text);
-        br->text = mettle_strdup(tail_name);
-        if (!br->text) {
-          free(old_target);
-          return 0;
-        }
-
-        IRInstruction tail_label = {0};
-        IRInstruction tail_jump = {0};
-        tail_label.op = IR_OP_LABEL;
-        tail_label.text = mettle_strdup(tail_name);
-        tail_jump.op = IR_OP_JUMP;
-        tail_jump.text = old_target;
-        size_t end = re_promote_exit_block_position(function, old_target,
-                                                    exits[k].at);
-        if (!tail_label.text ||
-            !ir_function_insert_instruction(function, end, &tail_label) ||
-            !re_promote_insert_exit_store(function, end + 1,
-                                          region.is_address_of, region_name,
-                                          region.offset, local_name, size,
-                                          promoted_class, where, counter - 1,
-                                          k, &inserted_here) ||
-            !ir_function_insert_instruction(function, end + 1 + inserted_here,
-                                            &tail_jump)) {
-          failed = 1;
-        }
-        ir_instruction_destroy_storage(&tail_label);
-        ir_instruction_destroy_storage(&tail_jump);
-        if (failed) {
-          return 0;
-        }
-        for (size_t m = 0; m < exit_count; m++) {
-          if (exits[m].at >= end) {
-            exits[m].at += inserted_here + 2;
-          }
-        }
-        if (latch >= end) {
-          latch += inserted_here + 2;
-        }
-      }
-
-      if (changed) {
-        *changed = 1;
-      }
-      return 1;
     }
   }
   return 0;
