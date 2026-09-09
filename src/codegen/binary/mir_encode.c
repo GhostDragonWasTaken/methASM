@@ -1717,11 +1717,23 @@ static int mir_home_memory_param(MirFunction *fn, const MirParam *p,
   return 1;
 }
 
-static int mir_home_eightbyte_param(MirFunction *fn, const MirParam *p,
-                                    const BinaryArgLocation *locs,
-                                    const BinaryAbi *abi) {
+static int mir_home_eightbyte_address(MirFunction *fn, const MirParam *p) {
   BinaryCodeBuffer *code = &fn->context->code;
   MirOperand dst = mir_op_vreg(p->vreg);
+  int storage = spill_off(&fn->vregs[p->sysv_storage]);
+
+  if (!binary_emit_lea_reg_mem(code, SCRATCH_A, frame_base(fn),
+                               frame_disp(fn, -storage)) ||
+      !store_from(fn, &dst, SCRATCH_A)) {
+    return enc_err(fn, "out of memory homing an aggregate parameter");
+  }
+  return 1;
+}
+
+static int mir_home_eightbyte_stores(MirFunction *fn, const MirParam *p,
+                                     const BinaryArgLocation *locs,
+                                     const BinaryAbi *abi) {
+  BinaryCodeBuffer *code = &fn->context->code;
   int storage = spill_off(&fn->vregs[p->sysv_storage]);
 
   for (int e = 0; e < p->sysv_eightbytes; e++) {
@@ -1743,11 +1755,6 @@ static int mir_home_eightbyte_param(MirFunction *fn, const MirParam *p,
     if (!ok) {
       return enc_err(fn, "out of memory rebuilding an aggregate parameter");
     }
-  }
-  if (!binary_emit_lea_reg_mem(code, SCRATCH_A, frame_base(fn),
-                               frame_disp(fn, -storage)) ||
-      !store_from(fn, &dst, SCRATCH_A)) {
-    return enc_err(fn, "out of memory homing an aggregate parameter");
   }
   return 1;
 }
@@ -1952,13 +1959,16 @@ static int mir_home_parameters(MirFunction *fn) {
   MirGpMove gm[MIR_MAX_PARAMS];
   const MirParam *fstack[MIR_MAX_PARAMS];
   int fstack_off[MIR_MAX_PARAMS];
-  const MirParam *gstack[MIR_MAX_PARAMS];
-  const BinaryArgLocation *gstack_loc[MIR_MAX_PARAMS];
+  const MirParam *eb[MIR_MAX_PARAMS];
+  const BinaryArgLocation *eb_loc[MIR_MAX_PARAMS];
+  const MirParam *late[MIR_MAX_PARAMS];
+  const BinaryArgLocation *late_loc[MIR_MAX_PARAMS];
+  int late_kind[MIR_MAX_PARAMS];
   int nxm = 0;
   int ngm = 0;
   int nfstack = 0;
-  int ngstack = 0;
-  int only_scalar_params = 1;
+  int neb = 0;
+  int nlate = 0;
 
   if (!mir_home_indirect_return(fn, abi)) {
     return 0;
@@ -1971,34 +1981,43 @@ static int mir_home_parameters(MirFunction *fn) {
   }
   for (size_t i = 0; i < fn->param_count; i++) {
     const MirParam *p = &fn->params[i];
-    if (p->sysv_in_memory || p->sysv_eightbytes > 0 || p->sysv_direct_sse) {
-      only_scalar_params = 0;
-      break;
-    }
-  }
-  for (size_t i = 0; i < fn->param_count; i++) {
-    const MirParam *p = &fn->params[i];
     const BinaryArgLocation *loc = &locs[first_slot[i]];
-    int ok;
+    int ok = 1;
 
     if (!fn->vregs[p->vreg].assigned) {
       continue;
     }
     if (p->sysv_in_memory) {
-      ok = mir_home_memory_param(fn, p, loc, abi);
+      late[nlate] = p;
+      late_loc[nlate] = loc;
+      late_kind[nlate] = 0;
+      nlate++;
+      continue;
     } else if (p->sysv_eightbytes > 0) {
-      ok = mir_home_eightbyte_param(fn, p, loc, abi);
+      eb[neb] = p;
+      eb_loc[neb] = loc;
+      neb++;
+      late[nlate] = p;
+      late_loc[nlate] = loc;
+      late_kind[nlate] = 1;
+      nlate++;
+      continue;
     } else if (p->sysv_direct_sse && loc->kind == BINARY_ARG_IN_XMM_REGISTER) {
-      ok = mir_home_direct_sse_param(fn, p, loc);
+      late[nlate] = p;
+      late_loc[nlate] = loc;
+      late_kind[nlate] = 2;
+      nlate++;
+      continue;
     } else if (!p->is_float) {
-      if (only_scalar_params && loc->kind == BINARY_ARG_IN_GP_REGISTER) {
+      if (loc->kind == BINARY_ARG_IN_GP_REGISTER) {
         mir_record_gp_move(fn, p, loc->gp_register, gm, &ngm);
         continue;
       }
-      if (only_scalar_params && loc->kind == BINARY_ARG_ON_STACK) {
-        gstack[ngstack] = p;
-        gstack_loc[ngstack] = loc;
-        ngstack++;
+      if (loc->kind == BINARY_ARG_ON_STACK) {
+        late[nlate] = p;
+        late_loc[nlate] = loc;
+        late_kind[nlate] = 3;
+        nlate++;
         continue;
       }
       ok = mir_home_integer_param(fn, p, loc, abi);
@@ -2017,16 +2036,36 @@ static int mir_home_parameters(MirFunction *fn) {
       return 0;
     }
   }
+  for (int i = 0; i < neb; i++) {
+    if (!mir_home_eightbyte_stores(fn, eb[i], eb_loc[i], abi)) {
+      return 0;
+    }
+  }
   if (!mir_home_gp_params(fn, gm, ngm)) {
     return 0;
   }
-  if (!mir_home_float_params(fn, xm, nxm)) {
-    return 0;
-  }
-  for (int i = 0; i < ngstack; i++) {
-    if (!mir_home_integer_param(fn, gstack[i], gstack_loc[i], abi)) {
+  for (int i = 0; i < nlate; i++) {
+    int ok;
+    switch (late_kind[i]) {
+    case 0:
+      ok = mir_home_memory_param(fn, late[i], late_loc[i], abi);
+      break;
+    case 1:
+      ok = mir_home_eightbyte_address(fn, late[i]);
+      break;
+    case 2:
+      ok = mir_home_direct_sse_param(fn, late[i], late_loc[i]);
+      break;
+    default:
+      ok = mir_home_integer_param(fn, late[i], late_loc[i], abi);
+      break;
+    }
+    if (!ok) {
       return 0;
     }
+  }
+  if (!mir_home_float_params(fn, xm, nxm)) {
+    return 0;
   }
   for (int i = 0; i < nfstack; i++) {
     if (!mir_home_float_stack_param(fn, fstack[i], fstack_off[i])) {
