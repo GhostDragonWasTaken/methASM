@@ -1469,300 +1469,395 @@ static void mir_color_spill_costs(const MirFunction *fn,
   }
 }
 
-static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool,
-                           size_t gp_leaf_n,
-                           const BinaryGpRegister *gp_cross_pool,
-                           size_t gp_cross_n, int *next_spill, int allow_rbp) {
-  size_t N = fn->vreg_count;
-  if (N == 0) {
-    return 1;
-  }
-  size_t words = (N + 63) / 64;
-  uint64_t *inter = (uint64_t *)calloc(N * words, sizeof(uint64_t));
-  uint32_t *mask = (uint32_t *)calloc(N, sizeof(uint32_t));
-  int *degree = (int *)calloc(N, sizeof(int));
-  int *cost = (int *)calloc(N, sizeof(int));
-  int *colorable = (int *)calloc(N, sizeof(int));
-  int *removed = (int *)calloc(N, sizeof(int));
-  int *reg_count = (int *)calloc(N, sizeof(int));
-  long long *metric = (long long *)calloc(N, sizeof(long long));
-  MirVregId *stack = (MirVregId *)malloc(N * sizeof(MirVregId));
-  MirVregId *narrow_src = mir_build_narrowing_extend_map(fn);
-  if (!inter || !mask || !degree || !cost || !colorable || !removed ||
-      !reg_count || !metric || !stack) {
-    free(inter); free(mask); free(degree); free(cost); free(colorable);
-    free(removed); free(reg_count); free(metric); free(stack);
-    free(narrow_src);
-    return 0;
-  }
-#define MIR_METRIC(v) ((long long)cost[v] * 1000 / (degree[v] + 1))
-#define MIR_INTER_SET(a, b)                                                    \
-  (inter[(size_t)(a) * words + ((size_t)(b) >> 6)] |= (uint64_t)1                \
-                                                       << ((size_t)(b) & 63))
-#define MIR_INTER_GET(a, b)                                                    \
-  ((inter[(size_t)(a) * words + ((size_t)(b) >> 6)] >>                          \
-    ((size_t)(b) & 63)) & 1u)
-#define MIR_INTER_ADD(a, b)                                                     \
-  do {                                                                          \
-    if ((a) != (b) && !MIR_INTER_GET((a), (b))) {                               \
-      MIR_INTER_SET((a), (b));                                                  \
-      MIR_INTER_SET((b), (a));                                                  \
-      degree[(a)]++;                                                            \
-      degree[(b)]++;                                                            \
-    }                                                                           \
-  } while (0)
-#define MIR_INTER_FOR_EACH(a, bvar)                                            \
-  for (size_t w_ = 0; w_ < words; w_++)                                        \
-    for (uint64_t bits_ = inter[(size_t)(a) * words + w_], bvar;               \
-         bits_ && ((bvar = w_ * 64 + (size_t)__builtin_ctzll(bits_)), 1);       \
+typedef struct {
+  MirFunction *fn;
+  size_t count;
+  size_t words;
+  uint64_t *inter;
+  uint32_t *mask;
+  int *degree;
+  int *cost;
+  int *colorable;
+  int *removed;
+  int *reg_count;
+  long long *metric;
+  MirVregId *stack;
+  MirVregId *narrow_src;
+  unsigned char *use_depth;
+} MirColorState;
+
+#define MIR_INTER_FOR_EACH(st, a, bvar)                                        \
+  for (size_t w_ = 0; w_ < (st)->words; w_++)                                  \
+    for (uint64_t bits_ = (st)->inter[(size_t)(a) * (st)->words + w_], bvar;   \
+         bits_ && ((bvar = w_ * 64 + (size_t)__builtin_ctzll(bits_)), 1);      \
          bits_ &= bits_ - 1)
 
-  for (size_t v = 0; v < N; v++) {
-    MirVreg *vr = &fn->vregs[v];
+static long long mir_color_metric(const MirColorState *st, size_t v) {
+  return (long long)st->cost[v] * 1000 / (st->degree[v] + 1);
+}
+
+static int mir_inter_get(const MirColorState *st, size_t a, size_t b) {
+  return (int)((st->inter[a * st->words + (b >> 6)] >> (b & 63)) & 1u);
+}
+
+static void mir_inter_add(MirColorState *st, size_t a, size_t b) {
+  if (a == b || mir_inter_get(st, a, b)) {
+    return;
+  }
+  st->inter[a * st->words + (b >> 6)] |= (uint64_t)1 << (b & 63);
+  st->inter[b * st->words + (a >> 6)] |= (uint64_t)1 << (a & 63);
+  st->degree[a]++;
+  st->degree[b]++;
+}
+
+static void mir_color_state_free(MirColorState *st) {
+  free(st->inter);
+  free(st->mask);
+  free(st->degree);
+  free(st->cost);
+  free(st->colorable);
+  free(st->removed);
+  free(st->reg_count);
+  free(st->metric);
+  free(st->stack);
+  free(st->narrow_src);
+  free(st->use_depth);
+}
+
+static int mir_color_state_init(MirColorState *st, MirFunction *fn,
+                                const BinaryGpRegister *gp_leaf_pool,
+                                size_t gp_leaf_n,
+                                const BinaryGpRegister *gp_cross_pool,
+                                size_t gp_cross_n, int allow_rbp) {
+  size_t n = fn->vreg_count;
+
+  memset(st, 0, sizeof(*st));
+  st->fn = fn;
+  st->count = n;
+  st->words = (n + 63) / 64;
+  st->inter = (uint64_t *)calloc(n * st->words, sizeof(uint64_t));
+  st->mask = (uint32_t *)calloc(n, sizeof(uint32_t));
+  st->degree = (int *)calloc(n, sizeof(int));
+  st->cost = (int *)calloc(n, sizeof(int));
+  st->colorable = (int *)calloc(n, sizeof(int));
+  st->removed = (int *)calloc(n, sizeof(int));
+  st->reg_count = (int *)calloc(n, sizeof(int));
+  st->metric = (long long *)calloc(n, sizeof(long long));
+  st->stack = (MirVregId *)malloc(n * sizeof(MirVregId));
+  st->use_depth = (unsigned char *)calloc(n, sizeof(unsigned char));
+  st->narrow_src = mir_build_narrowing_extend_map(fn);
+  if (!st->inter || !st->mask || !st->degree || !st->cost || !st->colorable ||
+      !st->removed || !st->reg_count || !st->metric || !st->stack ||
+      !st->use_depth) {
+    mir_color_state_free(st);
+    return 0;
+  }
+  for (size_t v = 0; v < n; v++) {
+    const MirVreg *vr = &fn->vregs[v];
     if (vr->live_start == MIR_LIVE_NONE || vr->address_taken) {
       continue;
     }
-    colorable[v] = 1;
-    mask[v] = mir_color_reg_mask(fn, (MirVregId)v, gp_leaf_pool, gp_leaf_n,
-                                 gp_cross_pool, gp_cross_n, allow_rbp);
-    reg_count[v] = __builtin_popcount(mask[v]);
-    cost[v] = 1;
+    st->colorable[v] = 1;
+    st->mask[v] = mir_color_reg_mask(fn, (MirVregId)v, gp_leaf_pool, gp_leaf_n,
+                                     gp_cross_pool, gp_cross_n, allow_rbp);
+    st->reg_count[v] = __builtin_popcount(st->mask[v]);
+    st->cost[v] = 1;
   }
-  unsigned char *use_depth = (unsigned char *)calloc(N, sizeof(*use_depth));
-  if (!use_depth) {
-    free(inter); free(mask); free(degree); free(cost); free(colorable);
-    free(removed); free(reg_count); free(metric); free(stack);
-    free(narrow_src);
-    return 0;
+  mir_color_spill_costs(fn, st->colorable, st->cost, st->use_depth, n);
+  return 1;
+}
+
+static int mir_color_same_class(const MirColorState *st, size_t a, size_t b) {
+  return st->fn->vregs[a].rclass == st->fn->vregs[b].rclass;
+}
+
+static void mir_color_add_live_edges(MirColorState *st, size_t d,
+                                     const unsigned long long *live) {
+  for (size_t w = 0; w < st->words; w++) {
+    uint64_t bits = live[w];
+    while (bits) {
+      size_t v = w * 64 + (size_t)__builtin_ctzll(bits);
+      bits &= bits - 1;
+      if (v < st->count && st->colorable[v] && mir_color_same_class(st, d, v)) {
+        mir_inter_add(st, d, v);
+      }
+    }
   }
-  mir_color_spill_costs(fn, colorable, cost, use_depth, N);
+}
 
-  {
-    MirLiveCfg cfg;
-    size_t branch_count = 0;
-    for (size_t i = 0; i < fn->insn_count; i++) {
-      if (mir_inst_ends_block(&fn->insns[i])) {
-        branch_count++;
-      }
-    }
-    static int interval_only = -1;
-    if (interval_only < 0) {
-      interval_only = getenv("METTLE_INTERVAL_INTERFERENCE") ? 1 : 0;
-    }
-    int use_cfg = !interval_only && fn->insn_count >= 8 && branch_count >= 1 &&
-                  (unsigned long long)fn->insn_count *
-                          (unsigned long long)words <=
-                      MIR_LIVE_CFG_MAX_WORK;
-    if (mir_env_regalloc_trace()) {
-      fprintf(stderr, "RA\t%s\tvregs=%zu\tinsns=%zu\tblocks=%zu\tcfg=%d\n",
-              mir_ra_trace_name(), N, fn->insn_count, branch_count, use_cfg);
-    }
-    int have_cfg = use_cfg && mir_live_cfg_build(fn, &cfg, 1);
-    unsigned long long *live =
-        have_cfg ? (unsigned long long *)malloc(words * sizeof(*live)) : NULL;
-    int exact_graph = have_cfg && live;
-    if (exact_graph) {
-      for (size_t block = 0; block < cfg.block_count; block++) {
-        size_t lo = (size_t)cfg.block_start[block];
-        size_t hi = block + 1 < cfg.block_count
-                        ? (size_t)cfg.block_start[block + 1]
-                        : fn->insn_count;
-        memcpy(live, cfg.live_out + block * words,
-               words * sizeof(*live));
-        for (size_t at = hi; at-- > lo;) {
-          const MirInst *in = &fn->insns[at];
-          if (in->dst.kind == MIR_OPK_VREG) {
-            MirVregId d = in->dst.vreg;
-            if (d >= 0 && (size_t)d < N) {
-              if (colorable[d]) {
-                for (size_t w = 0; w < words; w++) {
-                  uint64_t bits = live[w];
-                  while (bits) {
-                    size_t v = w * 64 + (size_t)__builtin_ctzll(bits);
-                    bits &= bits - 1;
-                    if (v < N && colorable[v] &&
-                        fn->vregs[d].rclass == fn->vregs[v].rclass) {
-                      MIR_INTER_ADD((size_t)d, v);
-                    }
-                  }
-                }
-              }
-              live[(size_t)d >> 6] &= ~(1ull << ((size_t)d & 63));
-            }
-          }
-          mir_live_add_operand(fn, &in->dst, live, 1);
-          mir_live_add_operand(fn, &in->a, live, 0);
-          mir_live_add_operand(fn, &in->b, live, 0);
-        }
-      }
+static void mir_color_add_block_edges(MirColorState *st, const MirLiveCfg *cfg,
+                                      unsigned long long *live) {
+  MirFunction *fn = st->fn;
 
-      for (size_t a = 0; a < N; a++) {
-        if (!colorable[a] || !mir_live_bit_get(cfg.live_in, a)) {
-          continue;
-        }
-        for (size_t b = a + 1; b < N; b++) {
-          if (colorable[b] && mir_live_bit_get(cfg.live_in, b) &&
-              fn->vregs[a].rclass == fn->vregs[b].rclass) {
-            MIR_INTER_ADD(a, b);
+  for (size_t block = 0; block < cfg->block_count; block++) {
+    size_t lo = (size_t)cfg->block_start[block];
+    size_t hi = block + 1 < cfg->block_count
+                    ? (size_t)cfg->block_start[block + 1]
+                    : fn->insn_count;
+    memcpy(live, cfg->live_out + block * st->words, st->words * sizeof(*live));
+    for (size_t at = hi; at-- > lo;) {
+      const MirInst *in = &fn->insns[at];
+      if (in->dst.kind == MIR_OPK_VREG) {
+        MirVregId d = in->dst.vreg;
+        if (d >= 0 && (size_t)d < st->count) {
+          if (st->colorable[d]) {
+            mir_color_add_live_edges(st, (size_t)d, live);
           }
+          live[(size_t)d >> 6] &= ~(1ull << ((size_t)d & 63));
         }
       }
-    } else {
-      for (size_t a = 0; a < N; a++) {
-        if (!colorable[a]) {
-          continue;
-        }
-        for (size_t b = a + 1; b < N; b++) {
-          if (colorable[b] &&
-              mir_color_interferes(&fn->vregs[a], &fn->vregs[b])) {
-            MIR_INTER_ADD(a, b);
-          }
-        }
+      mir_live_add_operand(fn, &in->dst, live, 1);
+      mir_live_add_operand(fn, &in->a, live, 0);
+      mir_live_add_operand(fn, &in->b, live, 0);
+    }
+  }
+}
+
+static void mir_color_add_entry_edges(MirColorState *st,
+                                      const MirLiveCfg *cfg) {
+  for (size_t a = 0; a < st->count; a++) {
+    if (!st->colorable[a] || !mir_live_bit_get(cfg->live_in, a)) {
+      continue;
+    }
+    for (size_t b = a + 1; b < st->count; b++) {
+      if (st->colorable[b] && mir_live_bit_get(cfg->live_in, b) &&
+          mir_color_same_class(st, a, b)) {
+        mir_inter_add(st, a, b);
       }
     }
-    int exact_pressure = 0;
-    int interval_pressure = 0;
-    if (exact_graph) {
-      uint64_t *interval_inter =
-          (uint64_t *)calloc(N * words, sizeof(*interval_inter));
-      int *interval_degree = (int *)calloc(N, sizeof(*interval_degree));
-      for (size_t a = 0; a < N; a++) {
-        if (!colorable[a]) {
-          continue;
-        }
-        if (degree[a] >= reg_count[a]) {
-          exact_pressure++;
-        }
-        if (interval_inter && interval_degree) {
-          for (size_t b = a + 1; b < N; b++) {
-            if (colorable[b] &&
-                mir_color_interferes(&fn->vregs[a], &fn->vregs[b])) {
-              interval_inter[a * words + (b >> 6)] |= 1ull << (b & 63);
-              interval_inter[b * words + (a >> 6)] |= 1ull << (a & 63);
-              interval_degree[a]++;
-              interval_degree[b]++;
-            }
-          }
-        }
-      }
-      if (interval_inter && interval_degree) {
-        for (size_t a = 0; a < N; a++) {
-          if (colorable[a] && interval_degree[a] >= reg_count[a]) {
-            interval_pressure++;
-          }
-        }
-        if (mir_env_regalloc_trace()) {
-          fprintf(stderr, "RA-PRESSURE\t%s\tinterval=%d\texact=%d\n",
-                  mir_ra_trace_name(), interval_pressure, exact_pressure);
-        }
-        if (interval_pressure - exact_pressure <
-            (int)MIR_GP_LEAF_POOL_MAX) {
-          free(inter);
-          free(degree);
-          inter = interval_inter;
-          degree = interval_degree;
-          interval_inter = NULL;
-          interval_degree = NULL;
-        }
-      }
-      free(interval_inter);
-      free(interval_degree);
+  }
+}
+
+static void mir_color_add_interval_edges(MirColorState *st) {
+  for (size_t a = 0; a < st->count; a++) {
+    if (!st->colorable[a]) {
+      continue;
     }
-    free(live);
+    for (size_t b = a + 1; b < st->count; b++) {
+      if (st->colorable[b] &&
+          mir_color_interferes(&st->fn->vregs[a], &st->fn->vregs[b])) {
+        mir_inter_add(st, a, b);
+      }
+    }
+  }
+}
+
+static int mir_color_pressure(const MirColorState *st) {
+  int over = 0;
+
+  for (size_t v = 0; v < st->count; v++) {
+    if (st->colorable[v] && st->degree[v] >= st->reg_count[v]) {
+      over++;
+    }
+  }
+  return over;
+}
+
+static void mir_color_prefer_interval_graph(MirColorState *st) {
+  MirColorState probe = *st;
+  int exact_pressure;
+  int interval_pressure;
+
+  probe.inter = (uint64_t *)calloc(st->count * st->words, sizeof(uint64_t));
+  probe.degree = (int *)calloc(st->count, sizeof(int));
+  if (!probe.inter || !probe.degree) {
+    free(probe.inter);
+    free(probe.degree);
+    return;
+  }
+  mir_color_add_interval_edges(&probe);
+  exact_pressure = mir_color_pressure(st);
+  interval_pressure = mir_color_pressure(&probe);
+  if (mir_env_regalloc_trace()) {
+    fprintf(stderr, "RA-PRESSURE\t%s\tinterval=%d\texact=%d\n",
+            mir_ra_trace_name(), interval_pressure, exact_pressure);
+  }
+  if (interval_pressure - exact_pressure < (int)MIR_GP_LEAF_POOL_MAX) {
+    free(st->inter);
+    free(st->degree);
+    st->inter = probe.inter;
+    st->degree = probe.degree;
+    return;
+  }
+  free(probe.inter);
+  free(probe.degree);
+}
+
+static int mir_color_want_cfg(const MirColorState *st, size_t branch_count) {
+  static int interval_only = -1;
+
+  if (interval_only < 0) {
+    interval_only = getenv("METTLE_INTERVAL_INTERFERENCE") ? 1 : 0;
+  }
+  return !interval_only && st->fn->insn_count >= 8 && branch_count >= 1 &&
+         (unsigned long long)st->fn->insn_count *
+                 (unsigned long long)st->words <= MIR_LIVE_CFG_MAX_WORK;
+}
+
+static void mir_color_build_interference(MirColorState *st) {
+  MirFunction *fn = st->fn;
+  MirLiveCfg cfg;
+  size_t branch_count = 0;
+  int use_cfg;
+  int have_cfg;
+  unsigned long long *live;
+
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    if (mir_inst_ends_block(&fn->insns[i])) {
+      branch_count++;
+    }
+  }
+  use_cfg = mir_color_want_cfg(st, branch_count);
+  if (mir_env_regalloc_trace()) {
+    fprintf(stderr, "RA\t%s\tvregs=%zu\tinsns=%zu\tblocks=%zu\tcfg=%d\n",
+            mir_ra_trace_name(), st->count, fn->insn_count, branch_count,
+            use_cfg);
+  }
+  have_cfg = use_cfg && mir_live_cfg_build(fn, &cfg, 1);
+  live = have_cfg ? (unsigned long long *)malloc(st->words * sizeof(*live))
+                  : NULL;
+  if (!live) {
     if (have_cfg) {
       mir_live_cfg_free(&cfg);
     }
+    mir_color_add_interval_edges(st);
+    return;
   }
+  mir_color_add_block_edges(st, &cfg, live);
+  mir_color_add_entry_edges(st, &cfg);
+  free(live);
+  mir_live_cfg_free(&cfg);
+  mir_color_prefer_interval_graph(st);
+}
 
-  if (narrow_src) {
-    for (size_t v = 0; v < N; v++) {
-      MirVregId s = narrow_src[v];
-      if (!colorable[v] || s == MIR_VREG_NONE || (size_t)s >= N ||
-          !colorable[s] || (size_t)s == v || MIR_INTER_GET(v, s)) {
-        continue;
-      }
-      MIR_INTER_SET(v, s);
-      MIR_INTER_SET(s, v);
-      degree[v]++;
-      degree[s]++;
+static void mir_color_add_narrowing_edges(MirColorState *st) {
+  if (!st->narrow_src) {
+    return;
+  }
+  for (size_t v = 0; v < st->count; v++) {
+    MirVregId s = st->narrow_src[v];
+    if (!st->colorable[v] || s == MIR_VREG_NONE || (size_t)s >= st->count ||
+        !st->colorable[s]) {
+      continue;
+    }
+    mir_inter_add(st, v, (size_t)s);
+  }
+}
+
+static MirVregId mir_color_pick(const MirColorState *st, int low_degree_only) {
+  MirVregId pick = MIR_VREG_NONE;
+  long long best = -1;
+  int best_rank = MIR_MAX_WEIGHTED_DEPTH + 1;
+
+  for (size_t v = 0; v < st->count; v++) {
+    int rank;
+    int better;
+
+    if (!st->colorable[v] || st->removed[v]) {
+      continue;
+    }
+    if (low_degree_only && st->degree[v] >= st->reg_count[v]) {
+      continue;
+    }
+    rank = mir_spill_rank(st->fn, st->use_depth, (MirVregId)v);
+    if (pick == MIR_VREG_NONE) {
+      better = 1;
+    } else if (rank != best_rank) {
+      better = (rank < best_rank);
+    } else {
+      better = (st->metric[v] < best);
+    }
+    if (better) {
+      best = st->metric[v];
+      best_rank = rank;
+      pick = (MirVregId)v;
     }
   }
+  return pick;
+}
 
+static size_t mir_color_order_vregs(MirColorState *st) {
   size_t sp = 0;
   size_t remaining = 0;
-  for (size_t v = 0; v < N; v++) {
-    if (colorable[v]) {
+
+  for (size_t v = 0; v < st->count; v++) {
+    if (st->colorable[v]) {
       remaining++;
-      metric[v] = MIR_METRIC(v);
+      st->metric[v] = mir_color_metric(st, v);
     }
   }
   while (remaining > 0) {
-    MirVregId pick = MIR_VREG_NONE;
-    long long best_simplify = -1;
-    int best_simplify_rank = MIR_MAX_WEIGHTED_DEPTH + 1;
-    for (size_t v = 0; v < N; v++) {
-      if (colorable[v] && !removed[v] && degree[v] < reg_count[v]) {
-        int rank = mir_spill_rank(fn, use_depth, (MirVregId)v);
-        int better;
-        if (pick == MIR_VREG_NONE) {
-          better = 1;
-        } else if (rank != best_simplify_rank) {
-          better = (rank < best_simplify_rank);
-        } else {
-          better = (metric[v] < best_simplify);
-        }
-        if (better) {
-          best_simplify = metric[v];
-          best_simplify_rank = rank;
-          pick = (MirVregId)v;
-        }
-      }
+    MirVregId pick = mir_color_pick(st, 1);
+
+    if (pick == MIR_VREG_NONE) {
+      pick = mir_color_pick(st, 0);
     }
     if (pick == MIR_VREG_NONE) {
-      long long best = -1;
-      int best_rank = MIR_MAX_WEIGHTED_DEPTH + 1;
-      for (size_t v = 0; v < N; v++) {
-        int rank;
-        int better;
-        if (!colorable[v] || removed[v]) {
-          continue;
-        }
-        rank = mir_spill_rank(fn, use_depth, (MirVregId)v);
-        if (pick == MIR_VREG_NONE) {
-          better = 1;
-        } else if (rank != best_rank) {
-          better = (rank < best_rank);
-        } else {
-          better = (metric[v] < best);
-        }
-        if (better) {
-          best = metric[v];
-          best_rank = rank;
-          pick = (MirVregId)v;
-        }
-      }
+      break;
     }
-    removed[pick] = 1;
-    stack[sp++] = pick;
+    st->removed[pick] = 1;
+    st->stack[sp++] = pick;
     remaining--;
-    MIR_INTER_FOR_EACH(pick, b) {
-      if (!removed[b]) {
-        degree[b]--;
-        metric[b] = MIR_METRIC(b);
+    MIR_INTER_FOR_EACH(st, pick, b) {
+      if (!st->removed[b]) {
+        st->degree[b]--;
+        st->metric[b] = mir_color_metric(st, b);
       }
     }
   }
+  return sp;
+}
 
-  while (sp > 0) {
-    MirVregId v = stack[--sp];
-    MirVreg *vr = &fn->vregs[v];
-    uint32_t used = 0;
-    MIR_INTER_FOR_EACH(v, b) {
-      if (fn->vregs[b].in_register) {
-        used |= 1u << fn->vregs[b].phys;
+static uint32_t mir_color_neighbour_mask(const MirColorState *st, size_t v) {
+  uint32_t used = 0;
+
+  MIR_INTER_FOR_EACH(st, v, b) {
+    if (st->fn->vregs[b].in_register) {
+      used |= 1u << st->fn->vregs[b].phys;
+    }
+  }
+  return used;
+}
+
+static int mir_color_reg_is_saved(const MirVreg *vr, int r) {
+  if (vr->rclass == MIR_RC_XMM) {
+    return r >= 8;
+  }
+  return mir_gp_is_nonvolatile((BinaryGpRegister)r) || r == BINARY_GP_RBP;
+}
+
+static int mir_color_choose_reg(const MirColorState *st, MirVregId v,
+                                uint32_t avail) {
+  const MirVreg *vr = &st->fn->vregs[v];
+  uint32_t preferred = avail;
+  int avoid = mir_narrowing_avoid_reg(st->fn, st->narrow_src, v);
+
+  if (avoid >= 0 && (preferred & ~(1u << (unsigned)avoid)) != 0) {
+    preferred &= ~(1u << (unsigned)avoid);
+  }
+  if (vr->coalesce_hint != MIR_VREG_NONE) {
+    const MirVreg *hv = &st->fn->vregs[vr->coalesce_hint];
+    if (hv->in_register && (preferred & (1u << hv->phys))) {
+      return hv->phys;
+    }
+  }
+  for (int saved = 0; saved < 2; saved++) {
+    for (int r = 0; r < 16; r++) {
+      if ((preferred & (1u << r)) &&
+          mir_color_reg_is_saved(vr, r) == saved) {
+        return r;
       }
     }
-    uint32_t avail = mask[v] & ~used;
+  }
+  return -1;
+}
+
+static void mir_color_assign(MirColorState *st, size_t sp, int *next_spill) {
+  while (sp > 0) {
+    MirVregId v = st->stack[--sp];
+    MirVreg *vr = &st->fn->vregs[v];
+    uint32_t avail = st->mask[v] & ~mir_color_neighbour_mask(st, (size_t)v);
+
     if (avail == 0) {
       *next_spill += vr->width > 8 ? 16 : 8;
       vr->assigned = 1;
@@ -1770,89 +1865,87 @@ static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool
       vr->spill_offset = *next_spill;
       continue;
     }
-    uint32_t preferred = avail;
-    int avoid = mir_narrowing_avoid_reg(fn, narrow_src, v);
-    if (avoid >= 0 && (preferred & ~(1u << (unsigned)avoid)) != 0) {
-      preferred &= ~(1u << (unsigned)avoid);
-    }
-    int chosen = -1;
-    if (vr->coalesce_hint != MIR_VREG_NONE) {
-      MirVreg *hv = &fn->vregs[vr->coalesce_hint];
-      if (hv->in_register && (preferred & (1u << hv->phys))) {
-        chosen = hv->phys;
-      }
-    }
-    /* A callee-saved register costs a store in the prologue and a load at
-       every exit, paid on each call. A value that outlives no call has no
-       need of one, so take a volatile register while any is free and
-       leave the saved set empty. Scanning by encoding number alone
-       reaches RBX, encoding 3, before RSI, RDI, R8 and R9. */
-    for (int pass = 0; pass < 2 && chosen < 0; pass++) {
-      for (int r = 0; r < 16; r++) {
-        if (!(preferred & (1u << r))) {
-          continue;
-        }
-        int nonvol = vr->rclass == MIR_RC_XMM
-                         ? r >= 8
-                         : (mir_gp_is_nonvolatile((BinaryGpRegister)r) ||
-                            r == BINARY_GP_RBP);
-        if (nonvol == pass) {
-          chosen = r;
-          break;
-        }
-      }
-    }
     vr->assigned = 1;
     vr->in_register = 1;
-    vr->phys = chosen;
+    vr->phys = mir_color_choose_reg(st, v, avail);
   }
+}
 
+static int mir_color_move_is_coalescable(const MirColorState *st,
+                                         const MirInst *in, size_t at,
+                                         MirVregId *out_d, MirVregId *out_s) {
+  MirVregId d;
+  MirVregId s;
+  const MirVreg *dv;
+  const MirVreg *sv;
+
+  if (in->op != MIR_MOV || in->dst.kind != MIR_OPK_VREG ||
+      in->a.kind != MIR_OPK_VREG) {
+    return 0;
+  }
+  d = in->dst.vreg;
+  s = in->a.vreg;
+  if (d < 0 || s < 0 || (size_t)d >= st->count || (size_t)s >= st->count ||
+      d == s || !st->colorable[d] || !st->colorable[s]) {
+    return 0;
+  }
+  dv = &st->fn->vregs[d];
+  sv = &st->fn->vregs[s];
+  if (!dv->in_register || !sv->in_register || dv->rclass != sv->rclass ||
+      dv->phys == sv->phys || sv->live_end != (int)at ||
+      mir_inter_get(st, (size_t)d, (size_t)s) ||
+      !(st->mask[d] & (1u << sv->phys))) {
+    return 0;
+  }
+  if (mir_color_neighbour_mask(st, (size_t)d) & (1u << sv->phys)) {
+    return 0;
+  }
+  *out_d = d;
+  *out_s = s;
+  return 1;
+}
+
+static void mir_color_coalesce_moves(MirColorState *st) {
   int coalesced = 1;
-  int coalesce_rounds = 0;
-  while (coalesced && coalesce_rounds++ < 16) {
+  int rounds = 0;
+
+  while (coalesced && rounds++ < 16) {
     coalesced = 0;
-    for (size_t i = 0; i < fn->insn_count; i++) {
-      const MirInst *in = &fn->insns[i];
-      if (in->op != MIR_MOV || in->dst.kind != MIR_OPK_VREG ||
-          in->a.kind != MIR_OPK_VREG) {
+    for (size_t i = 0; i < st->fn->insn_count; i++) {
+      MirVregId d;
+      MirVregId s;
+
+      if (!mir_color_move_is_coalescable(st, &st->fn->insns[i], i, &d, &s)) {
         continue;
       }
-      MirVregId d = in->dst.vreg;
-      MirVregId s = in->a.vreg;
-      if (d < 0 || s < 0 || (size_t)d >= N || (size_t)s >= N || d == s ||
-          !colorable[d] || !colorable[s]) {
-        continue;
-      }
-      MirVreg *dv = &fn->vregs[d];
-      MirVreg *sv = &fn->vregs[s];
-      if (!dv->in_register || !sv->in_register || dv->rclass != sv->rclass ||
-          dv->phys == sv->phys || sv->live_end != (int)i ||
-          MIR_INTER_GET(d, s) || !(mask[d] & (1u << sv->phys))) {
-        continue;
-      }
-      uint32_t used = 0;
-      MIR_INTER_FOR_EACH(d, b) {
-        if (fn->vregs[b].in_register) {
-          used |= 1u << fn->vregs[b].phys;
-        }
-      }
-      if (used & (1u << sv->phys)) {
-        continue;
-      }
-      dv->phys = sv->phys;
+      st->fn->vregs[d].phys = st->fn->vregs[s].phys;
       coalesced = 1;
     }
   }
+}
 
-#undef MIR_METRIC
-#undef MIR_INTER_SET
-#undef MIR_INTER_GET
-#undef MIR_INTER_ADD
-  free(inter); free(mask); free(degree); free(cost); free(colorable);
-  free(removed); free(reg_count); free(metric); free(stack);
-  free(narrow_src); free(use_depth);
+static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool,
+                           size_t gp_leaf_n,
+                           const BinaryGpRegister *gp_cross_pool,
+                           size_t gp_cross_n, int *next_spill, int allow_rbp) {
+  MirColorState st;
+
+  if (fn->vreg_count == 0) {
+    return 1;
+  }
+  if (!mir_color_state_init(&st, fn, gp_leaf_pool, gp_leaf_n, gp_cross_pool,
+                            gp_cross_n, allow_rbp)) {
+    return 0;
+  }
+  mir_color_build_interference(&st);
+  mir_color_add_narrowing_edges(&st);
+  mir_color_assign(&st, mir_color_order_vregs(&st), next_spill);
+  mir_color_coalesce_moves(&st);
+  mir_color_state_free(&st);
   return 1;
 }
+
+#undef MIR_INTER_FOR_EACH
 
 static int mir_regalloc_report_saved(MirFunction *fn) {
   if (!fn->context) {

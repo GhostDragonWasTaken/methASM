@@ -1,6 +1,29 @@
 #include "ir_optimize_internal.h"
 #include "ir_loop_shape.h"
 
+static int ir_simd_element_size_ok(long long size) {
+  return size == 1 || size == 2 || size == 4 || size == 8;
+}
+
+static int ir_simd_collect_body(const IRFunction *function, size_t lo,
+                                size_t hi, const IRInstruction **body,
+                                size_t capacity, size_t *out_count) {
+  size_t count = 0;
+
+  for (size_t i = lo; i < hi; i++) {
+    const IRInstruction *ins = &function->instructions[i];
+    if (ins->op == IR_OP_NOP) {
+      continue;
+    }
+    if (count >= capacity) {
+      return 0;
+    }
+    body[count++] = ins;
+  }
+  *out_count = count;
+  return 1;
+}
+
 static int ir_fill_value_operand(const IRFunction *function, size_t begin,
                                  size_t end, const IROperand *value,
                                  long long size, IROperand *out) {
@@ -422,6 +445,270 @@ static int ir_fill_dest_is_store_address(const IRInstruction *const *body,
   return 0;
 }
 
+typedef struct {
+  const IRInstruction *offset_producer_seen;
+  const IRInstruction *idx_add;
+  const IRInstruction *shl;
+  const IRInstruction *addr;
+  const IRInstruction *store;
+  const IRInstruction *increment;
+} IRFillIndexedShape;
+
+static int ir_fill_is_int_add(const IRInstruction *ins) {
+  return ins->op == IR_OP_BINARY && ins->text && !ins->is_float &&
+         strcmp(ins->text, "+") == 0;
+}
+
+static int ir_fill_reads_iv(const IRInstruction *ins, const char *iv) {
+  return ir_operand_is_symbol_named(&ins->lhs, iv) ||
+         ir_operand_is_symbol_named(&ins->rhs, iv);
+}
+
+static int ir_fill_role_is_index_add(const IRFillIndexedShape *shape,
+                                    const IRInstruction *ins, const char *iv,
+                                    const IRInstruction *const *body,
+                                    size_t body_count) {
+  return ir_fill_is_int_add(ins) && !shape->idx_add && !shape->shl &&
+         !shape->addr && ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+         !ir_fill_dest_is_store_address(body, body_count, ins) &&
+         ir_fill_reads_iv(ins, iv);
+}
+
+static int ir_fill_role_is_index_shift(const IRFillIndexedShape *shape,
+                                       const IRInstruction *ins,
+                                       const char *iv) {
+  return ins->op == IR_OP_BINARY && ins->text &&
+         strcmp(ins->text, "<<") == 0 && !ins->is_float && !shape->shl &&
+         (ir_operand_is_symbol_named(&ins->lhs, iv) ||
+          (shape->idx_add &&
+           ir_operand_is_temp_named(&ins->lhs, shape->idx_add->dest.name))) &&
+         ins->rhs.kind == IR_OPERAND_INT && ins->dest.kind == IR_OPERAND_TEMP;
+}
+
+static int ir_fill_role_is_address_add(const IRFillIndexedShape *shape,
+                                       const IRInstruction *ins,
+                                       const char *iv) {
+  return ir_fill_is_int_add(ins) && !shape->addr &&
+         ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+         ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
+         ((shape->shl &&
+           ir_operand_is_temp_named(&ins->rhs, shape->shl->dest.name)) ||
+          (!shape->shl && ir_operand_is_symbol_named(&ins->rhs, iv)) ||
+          (!shape->shl && shape->idx_add &&
+           ir_operand_is_temp_named(&ins->rhs, shape->idx_add->dest.name)));
+}
+
+static int ir_fill_role_is_store(const IRFillIndexedShape *shape,
+                                 const IRInstruction *ins) {
+  return ins->op == IR_OP_STORE && !shape->store && shape->addr &&
+         ir_operand_is_temp_named(&ins->dest, shape->addr->dest.name) &&
+         ins->rhs.kind == IR_OPERAND_INT;
+}
+
+static int ir_fill_role_is_increment(const IRFillIndexedShape *shape,
+                                     const IRInstruction *ins,
+                                     const char *iv) {
+  return ir_fill_is_int_add(ins) && !shape->increment &&
+         ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+         strcmp(ins->dest.name, iv) == 0 &&
+         ir_operand_is_symbol_named(&ins->lhs, iv) &&
+         ins->rhs.kind == IR_OPERAND_INT && ins->rhs.int_value == 1;
+}
+
+static int ir_fill_role_is_offset_producer(const IRInstruction *ins,
+                                           size_t position) {
+  return ins->op == IR_OP_BINARY && !ins->is_float && position == 0 &&
+         ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name;
+}
+
+static int ir_fill_classify_body(const IRInstruction *const *body,
+                                 size_t body_count, const char *iv,
+                                 IRFillIndexedShape *shape) {
+  memset(shape, 0, sizeof(*shape));
+  for (size_t k = 0; k < body_count; k++) {
+    const IRInstruction *ins = body[k];
+    if (ir_fill_role_is_index_add(shape, ins, iv, body, body_count)) {
+      shape->idx_add = ins;
+    } else if (ir_fill_role_is_index_shift(shape, ins, iv)) {
+      shape->shl = ins;
+    } else if (ir_fill_role_is_address_add(shape, ins, iv)) {
+      shape->addr = ins;
+    } else if (ir_fill_role_is_store(shape, ins)) {
+      shape->store = ins;
+    } else if (ir_fill_role_is_increment(shape, ins, iv)) {
+      shape->increment = ins;
+    } else if (ir_fill_role_is_offset_producer(ins, k)) {
+      shape->offset_producer_seen = ins;
+    } else {
+      return 0;
+    }
+  }
+  if (!shape->store || !shape->addr || !shape->increment) {
+    return 0;
+  }
+  if (shape->idx_add) {
+    const IROperand *consumer =
+        shape->shl ? &shape->shl->lhs : &shape->addr->rhs;
+    if (!ir_operand_is_temp_named(consumer, shape->idx_add->dest.name)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int ir_fill_count_operand(const IRFunction *function, size_t lo,
+                                 size_t hi, const IRInstruction *compare,
+                                 int inclusive, IROperand *storage,
+                                 const IROperand **out) {
+  *out = &compare->rhs;
+  if (inclusive) {
+    if (compare->rhs.kind != IR_OPERAND_INT) {
+      return 0;
+    }
+    *storage = ir_operand_int(compare->rhs.int_value + 1);
+    *out = storage;
+  }
+  if (compare->rhs.kind != IR_OPERAND_SYMBOL &&
+      compare->rhs.kind != IR_OPERAND_INT) {
+    return 0;
+  }
+  if (compare->rhs.kind == IR_OPERAND_SYMBOL &&
+      !ir_fill_symbol_is_invariant(function, lo, hi, compare->rhs.name)) {
+    return 0;
+  }
+  return 1;
+}
+
+static long long ir_fill_index_width(const IRFunction *function,
+                                     const char *iv) {
+  if (ir_fill_local_has_type(function, iv, "int32")) {
+    return 32;
+  }
+  if (ir_fill_local_has_type(function, iv, "int64")) {
+    return 64;
+  }
+  return 0;
+}
+
+static int ir_fill_temp_defined_before(const IRFunction *function,
+                                       size_t header_index, const char *name) {
+  for (size_t i = 0; i < header_index; i++) {
+    const IRInstruction *ins = &function->instructions[i];
+    if (ir_instruction_writes_destination(ins) &&
+        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+        strcmp(ins->dest.name, name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int ir_fill_producer_sides_are_invariant(const IRFunction *function,
+                                                size_t lo, size_t hi,
+                                                const IRInstruction *prod,
+                                                const char *iv) {
+  const IROperand *sides[2] = {&prod->lhs, &prod->rhs};
+
+  for (int s = 0; s < 2; s++) {
+    if (sides[s]->kind == IR_OPERAND_SYMBOL) {
+      if (strcmp(sides[s]->name, iv) == 0 ||
+          !ir_fill_symbol_is_invariant(function, lo, hi, sides[s]->name)) {
+        return 0;
+      }
+    } else if (sides[s]->kind != IR_OPERAND_INT) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int ir_fill_resolve_offset(const IRFunction *function,
+                                  size_t header_index, size_t lo, size_t hi,
+                                  const char *iv,
+                                  const IRFillIndexedShape *shape,
+                                  const IROperand **out_offset,
+                                  const IRInstruction **out_producer) {
+  const IROperand *other;
+
+  *out_offset = NULL;
+  *out_producer = NULL;
+  if (!shape->idx_add) {
+    return shape->offset_producer_seen ? 0 : 1;
+  }
+  other = ir_operand_is_symbol_named(&shape->idx_add->lhs, iv)
+              ? &shape->idx_add->rhs
+              : &shape->idx_add->lhs;
+  if (other->kind == IR_OPERAND_INT) {
+    *out_offset = other;
+    return 1;
+  }
+  if (other->kind == IR_OPERAND_SYMBOL) {
+    if (strcmp(other->name, iv) == 0 ||
+        !ir_fill_symbol_is_invariant(function, lo, hi, other->name)) {
+      return 0;
+    }
+    *out_offset = other;
+    return 1;
+  }
+  if (other->kind != IR_OPERAND_TEMP || !other->name) {
+    return 0;
+  }
+  if (shape->offset_producer_seen &&
+      ir_operand_is_temp_named(other,
+                               shape->offset_producer_seen->dest.name)) {
+    if (!ir_fill_producer_sides_are_invariant(
+            function, lo, hi, shape->offset_producer_seen, iv)) {
+      return 0;
+    }
+    *out_offset = other;
+    *out_producer = shape->offset_producer_seen;
+    return 1;
+  }
+  if (!ir_fill_temp_defined_before(function, header_index, other->name)) {
+    return 0;
+  }
+  *out_offset = other;
+  return 1;
+}
+
+static int ir_fill_element_size(const IRFillIndexedShape *shape,
+                               long long *out_size) {
+  long long size = shape->store->rhs.int_value;
+
+  if (!ir_simd_element_size_ok(size)) {
+    return 0;
+  }
+  if (shape->shl) {
+    if ((1LL << shape->shl->rhs.int_value) != size) {
+      return 0;
+    }
+  } else if (size != 1) {
+    return 0;
+  }
+  *out_size = size;
+  return 1;
+}
+
+static void ir_fill_retag_fused(IRFunction *function, size_t header_index,
+                                const IRInstruction *offset_producer,
+                                char *iv_name, long long index_width) {
+  IRInstruction *fused =
+      &function->instructions[header_index + (offset_producer ? 1 : 0)];
+
+  if (iv_name) {
+    ir_operand_destroy(&fused->dest);
+    fused->dest = ir_operand_symbol(iv_name);
+  }
+  if (index_width == 64) {
+    IROperand *grown = realloc(fused->arguments, 6 * sizeof(IROperand));
+    if (grown) {
+      fused->arguments = grown;
+      fused->arguments[5] = ir_operand_int(64);
+      fused->argument_count = 6;
+    }
+  }
+}
+
 static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
                                size_t branch_index, size_t jump_index,
                                const IRInstruction *compare,
@@ -429,185 +716,58 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
                                size_t body_count, int inclusive,
                                int *changed) {
   const char *iv = compare->lhs.name;
+  size_t lo = branch_index + 1;
   IROperand count = {0};
-  const IROperand *count_op = &compare->rhs;
-  if (inclusive) {
-    if (compare->rhs.kind != IR_OPERAND_INT) {
-      return FILL_NO_MATCH;
-    }
-    count = ir_operand_int(compare->rhs.int_value + 1);
-    count_op = &count;
-  }
-  if (compare->rhs.kind != IR_OPERAND_SYMBOL &&
-      compare->rhs.kind != IR_OPERAND_INT) {
-    return FILL_NO_MATCH;
-  }
-  if (compare->rhs.kind == IR_OPERAND_SYMBOL &&
-      !ir_fill_symbol_is_invariant(function, branch_index + 1, jump_index,
-                                   compare->rhs.name)) {
-    return FILL_NO_MATCH;
-  }
-  int iv_from_zero = ir_iv_zero_at_header(function, header_index, iv);
-
-  const IRInstruction *offset_producer_seen = NULL;
-  const IRInstruction *idx_add = NULL;
-  const IRInstruction *shl = NULL;
-  const IRInstruction *addr = NULL;
-  const IRInstruction *store = NULL;
-  const IRInstruction *increment = NULL;
-  for (size_t k = 0; k < body_count; k++) {
-    const IRInstruction *ins = body[k];
-    if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
-        !ins->is_float && !idx_add && !shl && !addr &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
-        !ir_fill_dest_is_store_address(body, body_count, ins) &&
-        (ir_operand_is_symbol_named(&ins->lhs, iv) ||
-         ir_operand_is_symbol_named(&ins->rhs, iv))) {
-      idx_add = ins;
-    } else if (ins->op == IR_OP_BINARY && ins->text &&
-               strcmp(ins->text, "<<") == 0 && !ins->is_float && !shl &&
-               (ir_operand_is_symbol_named(&ins->lhs, iv) ||
-                (idx_add && ir_operand_is_temp_named(&ins->lhs,
-                                                     idx_add->dest.name))) &&
-               ins->rhs.kind == IR_OPERAND_INT &&
-               ins->dest.kind == IR_OPERAND_TEMP) {
-      shl = ins;
-    } else if (ins->op == IR_OP_BINARY && ins->text &&
-               strcmp(ins->text, "+") == 0 && !ins->is_float && !addr &&
-               ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
-               ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
-               ((shl && ir_operand_is_temp_named(&ins->rhs, shl->dest.name)) ||
-                (!shl && ir_operand_is_symbol_named(&ins->rhs, iv)) ||
-                (!shl && idx_add &&
-                 ir_operand_is_temp_named(&ins->rhs, idx_add->dest.name)))) {
-      addr = ins;
-    } else if (ins->op == IR_OP_STORE && !store && addr &&
-               ir_operand_is_temp_named(&ins->dest, addr->dest.name) &&
-               ins->rhs.kind == IR_OPERAND_INT) {
-      store = ins;
-    } else if (ins->op == IR_OP_BINARY && ins->text &&
-               strcmp(ins->text, "+") == 0 && !ins->is_float && !increment &&
-               ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
-               strcmp(ins->dest.name, iv) == 0 &&
-               ir_operand_is_symbol_named(&ins->lhs, iv) &&
-               ins->rhs.kind == IR_OPERAND_INT && ins->rhs.int_value == 1) {
-      increment = ins;
-    } else if (ins->op == IR_OP_BINARY && !ins->is_float && k == 0 &&
-               ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name) {
-      offset_producer_seen = ins;
-    } else {
-      return FILL_NO_MATCH;
-    }
-  }
-  if (!store || !addr || !increment) {
-    return FILL_NO_MATCH;
-  }
-
-  if (idx_add) {
-    const IROperand *consumer = shl ? &shl->lhs : &addr->rhs;
-    if (!ir_operand_is_temp_named(consumer, idx_add->dest.name)) {
-      return FILL_NO_MATCH;
-    }
-  }
-
+  const IROperand *count_op = NULL;
+  IRFillIndexedShape shape;
   const IROperand *offset_op = NULL;
   const IRInstruction *offset_producer = NULL;
-  if (idx_add) {
-    const IROperand *other = ir_operand_is_symbol_named(&idx_add->lhs, iv)
-                                 ? &idx_add->rhs
-                                 : &idx_add->lhs;
-    if (other->kind == IR_OPERAND_INT) {
-      offset_op = other;
-    } else if (other->kind == IR_OPERAND_SYMBOL) {
-      if (strcmp(other->name, iv) == 0 ||
-          !ir_fill_symbol_is_invariant(function, branch_index + 1, jump_index,
-                                       other->name)) {
-        return FILL_NO_MATCH;
-      }
-      offset_op = other;
-    } else if (other->kind == IR_OPERAND_TEMP && other->name &&
-               offset_producer_seen &&
-               ir_operand_is_temp_named(other, offset_producer_seen->dest.name)) {
-      const IRInstruction *prod = offset_producer_seen;
-      const IROperand *sides[2] = {&prod->lhs, &prod->rhs};
-      for (int s = 0; s < 2; s++) {
-        if (sides[s]->kind == IR_OPERAND_SYMBOL) {
-          if (strcmp(sides[s]->name, iv) == 0 ||
-              !ir_fill_symbol_is_invariant(function, branch_index + 1,
-                                           jump_index, sides[s]->name)) {
-            return FILL_NO_MATCH;
-          }
-        } else if (sides[s]->kind != IR_OPERAND_INT) {
-          return FILL_NO_MATCH;
-        }
-      }
-      offset_op = other;
-      offset_producer = prod;
-    } else if (other->kind == IR_OPERAND_TEMP && other->name) {
-      int defined_before = 0;
-      for (size_t i = 0; i < header_index; i++) {
-        const IRInstruction *ins = &function->instructions[i];
-        if (ir_instruction_writes_destination(ins) &&
-            ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
-            strcmp(ins->dest.name, other->name) == 0) {
-          defined_before = 1;
-          break;
-        }
-      }
-      if (!defined_before) {
-        return FILL_NO_MATCH;
-      }
-      offset_op = other;
-    } else {
-      return FILL_NO_MATCH;
-    }
-  } else if (offset_producer_seen) {
-    return FILL_NO_MATCH;
-  }
-
+  int iv_from_zero;
+  int iv_live_after;
   long long index_width = 0;
-  if (!iv_from_zero || idx_add) {
-    if (ir_fill_local_has_type(function, iv, "int32")) {
-      index_width = 32;
-    } else if (ir_fill_local_has_type(function, iv, "int64")) {
-      index_width = 64;
-    } else {
-      return FILL_NO_MATCH;
-    }
-  }
-
-  long long size = store->rhs.int_value;
-  if (size != 1 && size != 2 && size != 4 && size != 8) {
-    return FILL_NO_MATCH;
-  }
-  if (shl) {
-    if ((1LL << shl->rhs.int_value) != size) {
-      return FILL_NO_MATCH;
-    }
-  } else if (size != 1) {
-    return FILL_NO_MATCH;
-  }
-  if (!ir_fill_symbol_is_invariant(function, branch_index + 1, jump_index,
-                                   addr->lhs.name)) {
-    return FILL_NO_MATCH;
-  }
-  int iv_live_after = ir_symbol_live_after_loop(function, jump_index + 1, iv);
-  if (iv_live_after && index_width == 0) {
-    if (ir_fill_local_has_type(function, iv, "int32")) {
-      index_width = 32;
-    } else if (ir_fill_local_has_type(function, iv, "int64")) {
-      index_width = 64;
-    } else {
-      return FILL_NO_MATCH;
-    }
-  }
+  long long size = 0;
   IROperand value = {0};
-  if (!ir_fill_value_operand(function, branch_index + 1, jump_index,
-                             &store->lhs, size, &value)) {
-    return FILL_NO_MATCH;
-  }
   IROperand start = {0};
   const IROperand *start_op = NULL;
+  char *iv_name;
+  int ok;
+
+  if (!ir_fill_count_operand(function, lo, jump_index, compare, inclusive,
+                             &count, &count_op)) {
+    return FILL_NO_MATCH;
+  }
+  if (!ir_fill_classify_body(body, body_count, iv, &shape)) {
+    return FILL_NO_MATCH;
+  }
+  if (!ir_fill_resolve_offset(function, header_index, lo, jump_index, iv,
+                              &shape, &offset_op, &offset_producer)) {
+    return FILL_NO_MATCH;
+  }
+  if (!ir_fill_element_size(&shape, &size)) {
+    return FILL_NO_MATCH;
+  }
+  iv_from_zero = ir_iv_zero_at_header(function, header_index, iv);
+  if (!iv_from_zero || shape.idx_add) {
+    index_width = ir_fill_index_width(function, iv);
+    if (index_width == 0) {
+      return FILL_NO_MATCH;
+    }
+  }
+  if (!ir_fill_symbol_is_invariant(function, lo, jump_index,
+                                   shape.addr->lhs.name)) {
+    return FILL_NO_MATCH;
+  }
+  iv_live_after = ir_symbol_live_after_loop(function, jump_index + 1, iv);
+  if (iv_live_after && index_width == 0) {
+    index_width = ir_fill_index_width(function, iv);
+    if (index_width == 0) {
+      return FILL_NO_MATCH;
+    }
+  }
+  if (!ir_fill_value_operand(function, lo, jump_index, &shape.store->lhs, size,
+                             &value)) {
+    return FILL_NO_MATCH;
+  }
   if (!iv_from_zero) {
     start = ir_operand_symbol(iv);
     if (!start.name) {
@@ -616,7 +776,7 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
     }
     start_op = &start;
   }
-  char *iv_name = iv_live_after ? mettle_strdup(iv) : NULL;
+  iv_name = iv_live_after ? mettle_strdup(iv) : NULL;
   if (iv_live_after && !iv_name) {
     ir_operand_destroy(&value);
     ir_operand_destroy(&start);
@@ -624,34 +784,23 @@ static int ir_fill_try_indexed(IRFunction *function, size_t header_index,
   }
   if (count_op->kind != IR_OPERAND_INT && !iv_live_after &&
       index_width != 64 && !offset_producer) {
-    int okv = ir_fill_install_versioned(
-        function, header_index, branch_index, size, &addr->lhs, count_op,
-        &value, start_op, offset_op, NULL, NULL, NULL, changed);
+    ok = ir_fill_install_versioned(function, header_index, branch_index, size,
+                                   &shape.addr->lhs, count_op, &value,
+                                   start_op, offset_op, NULL, NULL, NULL,
+                                   changed);
     ir_operand_destroy(&value);
     ir_operand_destroy(&start);
     mettle_free_string(iv_name);
-    return okv;
+    return ok;
   }
-  int ok = ir_fill_install(function, header_index, jump_index, 0,
-                           size, &addr->lhs, count_op, &value, start_op,
-                           offset_op, offset_producer, NULL, NULL, changed);
-  if (ok && iv_name) {
-    IRInstruction *fused =
-        &function->instructions[header_index + (offset_producer ? 1 : 0)];
-    ir_operand_destroy(&fused->dest);
-    fused->dest = ir_operand_symbol(iv_name);
+  ok = ir_fill_install(function, header_index, jump_index, 0, size,
+                       &shape.addr->lhs, count_op, &value, start_op, offset_op,
+                       offset_producer, NULL, NULL, changed);
+  if (ok) {
+    ir_fill_retag_fused(function, header_index, offset_producer, iv_name,
+                        index_width);
   }
   mettle_free_string(iv_name);
-  if (ok && index_width == 64) {
-    IRInstruction *fused =
-        &function->instructions[header_index + (offset_producer ? 1 : 0)];
-    IROperand *grown = realloc(fused->arguments, 6 * sizeof(IROperand));
-    if (grown) {
-      fused->arguments = grown;
-      fused->arguments[5] = ir_operand_int(64);
-      fused->argument_count = 6;
-    }
-  }
   ir_operand_destroy(&value);
   ir_operand_destroy(&start);
   return ok;
@@ -804,17 +953,9 @@ static int ir_try_vectorize_fill_at(IRFunction *function, size_t header_index,
 
   const IRInstruction *body[6];
   size_t body_count = 0;
-  for (size_t i = branch_index + 1; i < jump_index; i++) {
-    const IRInstruction *ins = &function->instructions[i];
-    if (ins->op == IR_OP_NOP) {
-      continue;
-    }
-    if (body_count >= 6) {
-      return 1;
-    }
-    body[body_count++] = ins;
-  }
-  if (body_count < 2) {
+  if (!ir_simd_collect_body(function, branch_index + 1, jump_index, body,
+                            sizeof(body) / sizeof(body[0]), &body_count) ||
+      body_count < 2) {
     return 1;
   }
 
@@ -1087,24 +1228,125 @@ static int ir_copy_install(IRFunction *function, size_t header_index,
   return 1;
 }
 
-static int ir_try_vectorize_copy_walk(IRFunction *function, size_t header_index,
+typedef struct {
+  const IRInstruction *load;
+  const IRInstruction *store;
+  const IRInstruction *src_step;
+  const IRInstruction *dst_step;
+  const char *dst_p;
+  int have_dead_counter;
+} IRCopyWalkShape;
+
+static int ir_copy_bases_are_invariant_pointers(const IRFunction *function,
+                                                size_t lo, size_t hi,
+                                                const char *src_base,
+                                                const char *dst_base) {
+  return src_base && dst_base && strcmp(src_base, dst_base) != 0 &&
+         ir_copy_symbol_is_pointer(function, src_base) &&
+         ir_copy_symbol_is_pointer(function, dst_base) &&
+         ir_fill_symbol_is_invariant(function, lo, hi, src_base) &&
+         ir_fill_symbol_is_invariant(function, lo, hi, dst_base);
+}
+
+static int ir_copy_walk_is_load(const IRCopyWalkShape *shape,
+                                const IRInstruction *ins, const char *src_p) {
+  return ins->op == IR_OP_LOAD && !shape->load && !ins->is_float &&
+         !ins->is_volatile && ins->rhs.kind == IR_OPERAND_INT &&
+         ir_operand_is_symbol_named(&ins->lhs, src_p) &&
+         ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name;
+}
+
+static int ir_copy_walk_is_store(const IRCopyWalkShape *shape,
+                                 const IRInstruction *ins) {
+  return ins->op == IR_OP_STORE && !shape->store && !ins->is_float &&
+         !ins->is_volatile && ins->rhs.kind == IR_OPERAND_INT && shape->load &&
+         ir_operand_is_temp_named(&ins->lhs, shape->load->dest.name) &&
+         ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name;
+}
+
+static int ir_copy_walk_is_self_step(const IRInstruction *ins) {
+  return ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
+         !ins->is_float && ins->dest.kind == IR_OPERAND_SYMBOL &&
+         ins->dest.name && ins->rhs.kind == IR_OPERAND_INT &&
+         ir_operand_is_symbol_named(&ins->lhs, ins->dest.name);
+}
+
+static int ir_copy_walk_take_step(const IRFunction *function, size_t after,
+                                  IRCopyWalkShape *shape,
+                                  const IRInstruction *ins,
+                                  const char *src_p) {
+  if (!shape->src_step && strcmp(ins->dest.name, src_p) == 0) {
+    shape->src_step = ins;
+    return 1;
+  }
+  if (!shape->dst_step && shape->dst_p &&
+      strcmp(ins->dest.name, shape->dst_p) == 0) {
+    shape->dst_step = ins;
+    return 1;
+  }
+  if (!shape->have_dead_counter &&
+      !ir_symbol_live_after_loop(function, after, ins->dest.name)) {
+    shape->have_dead_counter = 1;
+    return 1;
+  }
+  return 0;
+}
+
+static int ir_copy_walk_classify_body(const IRFunction *function,
+                                      size_t jump_index,
+                                      const IRInstruction *const *body,
+                                      size_t body_count, const char *src_p,
+                                      IRCopyWalkShape *shape) {
+  memset(shape, 0, sizeof(*shape));
+  for (size_t k = 0; k < body_count; k++) {
+    const IRInstruction *ins = body[k];
+    if (ir_copy_walk_is_load(shape, ins, src_p)) {
+      shape->load = ins;
+      continue;
+    }
+    if (ir_copy_walk_is_store(shape, ins)) {
+      shape->store = ins;
+      shape->dst_p = ins->dest.name;
+      continue;
+    }
+    if (ir_copy_walk_is_self_step(ins) &&
+        ir_copy_walk_take_step(function, jump_index + 1, shape, ins, src_p)) {
+      continue;
+    }
+    return 0;
+  }
+  return shape->load && shape->store && shape->src_step && shape->dst_step &&
+         shape->dst_p && strcmp(src_p, shape->dst_p) != 0;
+}
+
+static int ir_copy_walk_steps_match(const IRCopyWalkShape *shape,
+                                    long long *out_size) {
+  long long size = shape->load->rhs.int_value;
+
+  if (size != shape->store->rhs.int_value ||
+      size != shape->src_step->rhs.int_value ||
+      size != shape->dst_step->rhs.int_value ||
+      !ir_simd_element_size_ok(size)) {
+    return 0;
+  }
+  *out_size = size;
+  return 1;
+}
+
+static int ir_try_vectorize_copy_walk(IRFunction *function,
+                                      size_t header_index,
                                       size_t branch_index, size_t jump_index,
                                       const IRInstruction *compare,
                                       const IRInstruction *const *body,
                                       size_t body_count, int *changed) {
-  const char *src_p = NULL;
-  const char *end_p = NULL;
-  const char *dst_p = NULL;
-  const char *src_base = NULL;
-  const char *dst_base = NULL;
-  const IRInstruction *load = NULL;
-  const IRInstruction *store = NULL;
-  const IRInstruction *src_step = NULL;
-  const IRInstruction *dst_step = NULL;
-  const char *dead_counter = NULL;
+  const char *src_p;
+  const char *end_p;
+  const char *src_base;
+  const char *dst_base;
+  IRCopyWalkShape shape;
   IROperand len = {0};
   long long size = 0;
-  (void)dead_counter;
+  int ok;
 
   if (compare->lhs.kind != IR_OPERAND_SYMBOL || !compare->lhs.name ||
       compare->rhs.kind != IR_OPERAND_SYMBOL || !compare->rhs.name) {
@@ -1112,84 +1354,35 @@ static int ir_try_vectorize_copy_walk(IRFunction *function, size_t header_index,
   }
   src_p = compare->lhs.name;
   end_p = compare->rhs.name;
-
-  for (size_t k = 0; k < body_count; k++) {
-    const IRInstruction *ins = body[k];
-    if (ins->op == IR_OP_LOAD && !load && !ins->is_float && !ins->is_volatile &&
-        ins->rhs.kind == IR_OPERAND_INT &&
-        ir_operand_is_symbol_named(&ins->lhs, src_p) &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name) {
-      load = ins;
-      continue;
-    }
-    if (ins->op == IR_OP_STORE && !store && !ins->is_float &&
-        !ins->is_volatile && ins->rhs.kind == IR_OPERAND_INT && load &&
-        ir_operand_is_temp_named(&ins->lhs, load->dest.name) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name) {
-      store = ins;
-      dst_p = ins->dest.name;
-      continue;
-    }
-    if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
-        !ins->is_float && ins->dest.kind == IR_OPERAND_SYMBOL &&
-        ins->dest.name && ins->rhs.kind == IR_OPERAND_INT &&
-        ir_operand_is_symbol_named(&ins->lhs, ins->dest.name)) {
-      if (!src_step && strcmp(ins->dest.name, src_p) == 0) {
-        src_step = ins;
-        continue;
-      }
-      if (!dst_step && dst_p && strcmp(ins->dest.name, dst_p) == 0) {
-        dst_step = ins;
-        continue;
-      }
-      if (!dead_counter &&
-          !ir_symbol_live_after_loop(function, jump_index + 1,
-                                     ins->dest.name)) {
-        dead_counter = ins->dest.name;
-        continue;
-      }
-    }
+  if (!ir_copy_walk_classify_body(function, jump_index, body, body_count,
+                                  src_p, &shape)) {
     return 1;
   }
-
-  if (!load || !store || !src_step || !dst_step || !dst_p ||
-      strcmp(src_p, dst_p) == 0) {
-    return 1;
-  }
-  size = load->rhs.int_value;
-  if (size != store->rhs.int_value || size != src_step->rhs.int_value ||
-      size != dst_step->rhs.int_value ||
-      (size != 1 && size != 2 && size != 4 && size != 8)) {
+  if (!ir_copy_walk_steps_match(&shape, &size)) {
     return 1;
   }
   if (ir_copy_temp_reads(function, branch_index + 1, jump_index,
-                         load->dest.name) != 1) {
+                         shape.load->dest.name) != 1) {
     return 1;
   }
   if (ir_symbol_live_after_loop(function, jump_index + 1, src_p) ||
-      ir_symbol_live_after_loop(function, jump_index + 1, dst_p)) {
+      ir_symbol_live_after_loop(function, jump_index + 1, shape.dst_p)) {
     return 1;
   }
-
   src_base = ir_find_ptr_init_base(function, header_index, src_p);
-  dst_base = ir_find_ptr_init_base(function, header_index, dst_p);
-  if (!src_base || !dst_base || strcmp(src_base, dst_base) == 0 ||
-      !ir_copy_symbol_is_pointer(function, src_base) ||
-      !ir_copy_symbol_is_pointer(function, dst_base) ||
-      !ir_fill_symbol_is_invariant(function, branch_index + 1, jump_index,
-                                   src_base) ||
-      !ir_fill_symbol_is_invariant(function, branch_index + 1, jump_index,
-                                   dst_base)) {
+  dst_base = ir_find_ptr_init_base(function, header_index, shape.dst_p);
+  if (!ir_copy_bases_are_invariant_pointers(function, branch_index + 1,
+                                            jump_index, src_base, dst_base)) {
     return 1;
   }
   if (!ir_find_ptr_loop_len_operand(function, header_index, end_p, src_base,
                                     &len)) {
     return 1;
   }
-
-  return ir_copy_install(function, header_index, branch_index, &len,
-                         dst_base, src_base, size, changed);
-  return 1;
+  ok = ir_copy_install(function, header_index, branch_index, &len, dst_base,
+                       src_base, size, changed);
+  ir_operand_destroy(&len);
+  return ok;
 }
 
 static int ir_copy_already_versioned(const IRFunction *function,
@@ -1205,21 +1398,103 @@ static int ir_copy_already_versioned(const IRFunction *function,
   return 0;
 }
 
+typedef struct {
+  const IRInstruction *load;
+  const IRInstruction *store;
+  const IRInstruction *increment;
+} IRCopyIndexShape;
+
+static int ir_copy_index_take_load(IRCopyIndexShape *shape,
+                                   const IRInstruction *ins) {
+  if (shape->load || ins->is_float || ins->is_volatile ||
+      ins->rhs.kind != IR_OPERAND_INT || ins->dest.kind != IR_OPERAND_TEMP ||
+      !ins->dest.name) {
+    return 0;
+  }
+  shape->load = ins;
+  return 1;
+}
+
+static int ir_copy_index_take_store(IRCopyIndexShape *shape,
+                                    const IRInstruction *ins) {
+  if (shape->store || ins->is_float || ins->is_volatile ||
+      ins->rhs.kind != IR_OPERAND_INT) {
+    return 0;
+  }
+  shape->store = ins;
+  return 1;
+}
+
+static int ir_copy_index_take_binary(IRCopyIndexShape *shape,
+                                     const IRInstruction *ins,
+                                     const char *iv) {
+  if (!ins->text || strcmp(ins->text, "+") != 0 ||
+      ins->dest.kind != IR_OPERAND_SYMBOL || !ins->dest.name ||
+      strcmp(ins->dest.name, iv) != 0) {
+    return ins->dest.kind == IR_OPERAND_TEMP;
+  }
+  if (shape->increment || !ir_operand_is_symbol_named(&ins->lhs, iv) ||
+      ins->rhs.kind != IR_OPERAND_INT || ins->rhs.int_value != 1) {
+    return 0;
+  }
+  shape->increment = ins;
+  return 1;
+}
+
+static int ir_copy_index_classify_body(const IRInstruction *const *body,
+                                       size_t body_count, const char *iv,
+                                       IRCopyIndexShape *shape) {
+  memset(shape, 0, sizeof(*shape));
+  for (size_t k = 0; k < body_count; k++) {
+    const IRInstruction *ins = body[k];
+    int taken;
+    switch (ins->op) {
+    case IR_OP_LOAD:
+      taken = ir_copy_index_take_load(shape, ins);
+      break;
+    case IR_OP_STORE:
+      taken = ir_copy_index_take_store(shape, ins);
+      break;
+    case IR_OP_BINARY:
+      taken = ir_copy_index_take_binary(shape, ins, iv);
+      break;
+    default:
+      taken = 0;
+      break;
+    }
+    if (!taken) {
+      return 0;
+    }
+  }
+  return shape->load && shape->store && shape->increment;
+}
+
+static int ir_copy_count_operand(const IRInstruction *compare, int inclusive,
+                                 IROperand *out_count) {
+  if (inclusive) {
+    *out_count = ir_operand_int(compare->rhs.int_value + 1);
+    return 1;
+  }
+  return ir_operand_clone(&compare->rhs, out_count);
+}
+
 static int ir_try_vectorize_copy_at(IRFunction *function, size_t header_index,
                                     int *changed) {
-  size_t compare_index = 0, branch_index = 0, jump_index = 0;
+  size_t compare_index = 0;
+  size_t branch_index = 0;
+  size_t jump_index = 0;
   int matched = 0;
   int inclusive = 0;
   const IRInstruction *body[8];
   size_t body_count = 0;
-  const IRInstruction *load = NULL;
-  const IRInstruction *store = NULL;
-  const IRInstruction *increment = NULL;
-  const IRInstruction *compare = NULL;
-  const char *iv = NULL;
-  const char *src_base = NULL;
-  const char *dst_base = NULL;
-  long long size = 0;
+  const IRInstruction *compare;
+  IRCopyIndexShape shape;
+  const char *iv;
+  const char *src_base;
+  const char *dst_base;
+  long long size;
+  IROperand count = {0};
+  int ok;
 
   if (ir_copy_already_versioned(function, header_index)) {
     return 1;
@@ -1240,98 +1515,41 @@ static int ir_try_vectorize_copy_at(IRFunction *function, size_t header_index,
   if (!iv) {
     return 1;
   }
-
-  for (size_t i = branch_index + 1; i < jump_index; i++) {
-    const IRInstruction *ins = &function->instructions[i];
-    if (ins->op == IR_OP_NOP) {
-      continue;
-    }
-    if (body_count >= 8) {
-      return 1;
-    }
-    body[body_count++] = ins;
-  }
-  if (body_count < 3) {
+  if (!ir_simd_collect_body(function, branch_index + 1, jump_index, body,
+                            sizeof(body) / sizeof(body[0]), &body_count) ||
+      body_count < 3) {
     return 1;
   }
-
   if (compare->rhs.kind == IR_OPERAND_SYMBOL && !inclusive &&
       ir_copy_symbol_is_pointer(function, iv)) {
     return ir_try_vectorize_copy_walk(function, header_index, branch_index,
                                       jump_index, compare, body, body_count,
                                       changed);
   }
-
   if (!ir_iv_zero_at_header(function, header_index, iv) ||
       ir_symbol_live_after_loop(function, jump_index + 1, iv)) {
     return 1;
   }
-
-  for (size_t k = 0; k < body_count; k++) {
-    const IRInstruction *ins = body[k];
-    switch (ins->op) {
-    case IR_OP_LOAD:
-      if (load || ins->is_float || ins->is_volatile ||
-          ins->rhs.kind != IR_OPERAND_INT ||
-          ins->dest.kind != IR_OPERAND_TEMP || !ins->dest.name) {
-        return 1;
-      }
-      load = ins;
-      break;
-    case IR_OP_STORE:
-      if (store || ins->is_float || ins->is_volatile ||
-          ins->rhs.kind != IR_OPERAND_INT) {
-        return 1;
-      }
-      store = ins;
-      break;
-    case IR_OP_BINARY:
-      if (ins->text && strcmp(ins->text, "+") == 0 &&
-          ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
-          strcmp(ins->dest.name, iv) == 0) {
-        if (increment || !ir_operand_is_symbol_named(&ins->lhs, iv) ||
-            ins->rhs.kind != IR_OPERAND_INT || ins->rhs.int_value != 1) {
-          return 1;
-        }
-        increment = ins;
-        break;
-      }
-      if (ins->dest.kind != IR_OPERAND_TEMP) {
-        return 1;
-      }
-      break;
-    default:
-      return 1;
-    }
-  }
-  if (!load || !store || !increment) {
+  if (!ir_copy_index_classify_body(body, body_count, iv, &shape)) {
     return 1;
   }
-
-  size = load->rhs.int_value;
-  if (size != store->rhs.int_value ||
-      (size != 1 && size != 2 && size != 4 && size != 8)) {
+  size = shape.load->rhs.int_value;
+  if (size != shape.store->rhs.int_value || !ir_simd_element_size_ok(size)) {
     return 1;
   }
-  if (!ir_operand_is_temp_named(&store->lhs, load->dest.name)) {
+  if (!ir_operand_is_temp_named(&shape.store->lhs, shape.load->dest.name)) {
     return 1;
   }
   if (ir_copy_temp_reads(function, branch_index + 1, jump_index,
-                         load->dest.name) != 1) {
+                         shape.load->dest.name) != 1) {
     return 1;
   }
-
-  src_base = ir_copy_address_base(body, body_count, &load->lhs, iv, size);
-  dst_base = ir_copy_address_base(body, body_count, &store->dest, iv, size);
-  if (!src_base || !dst_base || strcmp(src_base, dst_base) == 0) {
-    return 1;
-  }
-  if (!ir_fill_symbol_is_invariant(function, branch_index + 1, jump_index,
-                                   src_base) ||
-      !ir_fill_symbol_is_invariant(function, branch_index + 1, jump_index,
-                                   dst_base) ||
-      !ir_copy_symbol_is_pointer(function, src_base) ||
-      !ir_copy_symbol_is_pointer(function, dst_base)) {
+  src_base =
+      ir_copy_address_base(body, body_count, &shape.load->lhs, iv, size);
+  dst_base =
+      ir_copy_address_base(body, body_count, &shape.store->dest, iv, size);
+  if (!ir_copy_bases_are_invariant_pointers(function, branch_index + 1,
+                                            jump_index, src_base, dst_base)) {
     return 1;
   }
   if (compare->rhs.kind == IR_OPERAND_SYMBOL &&
@@ -1339,20 +1557,13 @@ static int ir_try_vectorize_copy_at(IRFunction *function, size_t header_index,
                                    compare->rhs.name)) {
     return 1;
   }
-
-  {
-    IROperand count = {0};
-    int ok;
-    if (inclusive) {
-      count = ir_operand_int(compare->rhs.int_value + 1);
-    } else if (!ir_operand_clone(&compare->rhs, &count)) {
-      return 0;
-    }
-    ok = ir_copy_install(function, header_index, branch_index, &count,
-                         dst_base, src_base, size, changed);
-    ir_operand_destroy(&count);
-    return ok;
+  if (!ir_copy_count_operand(compare, inclusive, &count)) {
+    return 0;
   }
+  ok = ir_copy_install(function, header_index, branch_index, &count, dst_base,
+                       src_base, size, changed);
+  ir_operand_destroy(&count);
+  return ok;
 }
 
 int ir_simd_copy_pass(IRFunction *function, int *changed) {

@@ -378,14 +378,11 @@ static size_t ir_par_next_loop_header(const IRFunction *function,
   return function->instruction_count;
 }
 
-static int ir_par_find_loop(IRParLoop *loop) {
+static int ir_par_locate_header(IRParLoop *loop) {
   IRFunction *function = loop->function;
   const char *wanted = function->instructions[loop->marker].text +
                        strlen(IR_PARALLEL_MARKER_PREFIX);
   size_t i;
-  size_t back_edges = 0;
-  const IRInstruction *compare;
-  const IRInstruction *branch;
 
   while (*wanted && *wanted != ':') {
     wanted++;
@@ -403,6 +400,13 @@ static int ir_par_find_loop(IRParLoop *loop) {
   loop->start_label = function->instructions[i].text;
   loop->compare = i + 1u;
   loop->branch = i + 2u;
+  return 1;
+}
+
+static int ir_par_read_header_test(IRParLoop *loop) {
+  IRFunction *function = loop->function;
+  const IRInstruction *compare;
+  const IRInstruction *branch;
 
   compare = &function->instructions[loop->compare];
   branch = &function->instructions[loop->branch];
@@ -443,6 +447,13 @@ static int ir_par_find_loop(IRParLoop *loop) {
     ir_par_reject(loop, "the loop body does not end at its back edge", NULL);
     return 0;
   }
+  return 1;
+}
+
+static int ir_par_scan_body(IRParLoop *loop) {
+  IRFunction *function = loop->function;
+  size_t i;
+  size_t back_edges = 0;
 
   for (i = loop->branch + 1u; i <= loop->latch; i++) {
     const IRInstruction *in = &function->instructions[i];
@@ -486,6 +497,11 @@ static int ir_par_find_loop(IRParLoop *loop) {
     return 0;
   }
   return 1;
+}
+
+static int ir_par_find_loop(IRParLoop *loop) {
+  return ir_par_locate_header(loop) && ir_par_read_header_test(loop) &&
+         ir_par_scan_body(loop);
 }
 
 static int ir_par_step_is_increment(const IRFunction *function, size_t at,
