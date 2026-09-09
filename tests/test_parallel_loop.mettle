@@ -51,6 +51,15 @@ fn shift_rows(out: int64*, src: int64*, width: int32, height: int32,
   }
 }
 
+fn scale(out: float64*, src: float64*, n: int32, gain: float64,
+         bias: float64) {
+  var i: int32 = 0;
+  @parallel while (i < n) {
+    out[i] = src[i] * gain + bias;
+    i += 1;
+  }
+}
+
 fn main() -> int32 {
   var a: int64* = (int64*)malloc(8 * (int64)N);
   var b: int64* = (int64*)malloc(8 * (int64)N);
@@ -112,6 +121,15 @@ fn main() -> int32 {
     i += 1;
   }
 
+  var fa: float64* = (float64*)malloc(8 * 4096);
+  var fb: float64* = (float64*)malloc(8 * 4096);
+  i = 0;
+  while (i < 4096) { fa[i] = (float64)i * 0.5; i += 1; }
+  scale(fb, fa, 4096, 3.25, 1.5);
+  var scaled: float64 = 0.0;
+  i = 0;
+  while (i < 4096) { scaled = scaled + fb[i]; i += 1; }
+
   println("mixed = {mixed}");
   println("striped = {striped}");
   if (mixed != 392376813670142450) {
@@ -135,6 +153,11 @@ fn main() -> int32 {
   println("ranged = {ranged}");
   if (ranged != 100614144) {
     println("FAIL: the parallel range-for loop did not reproduce the serial answer");
+    return 1;
+  }
+  println("scaled = {scaled}");
+  if (scaled != 13634304.0) {
+    println("FAIL: the float values did not survive the context");
     return 1;
   }
   println("ok");
