@@ -60,6 +60,23 @@ fn scale(out: float64*, src: float64*, n: int32, gain: float64,
   }
 }
 
+@noinline fn tally(src: int64*, n: int32) -> int64 {
+  var sum: int64 = 0;
+  var count: int64 = 0;
+  var bits: uint64 = 0;
+  var i: int32 = 0;
+  @parallel while (i < n) {
+    var v: int64 = src[i];
+    var k: int32 = 0;
+    while (k < 8) { v = v * 31 + 7; k += 1; }
+    sum = sum + (v >> 9);
+    bits = bits ^ (uint64)v;
+    if (v < 0) { count = count + 1; }
+    i += 1;
+  }
+  return sum + count * 3 + (int64)bits;
+}
+
 fn main() -> int32 {
   var a: int64* = (int64*)malloc(8 * (int64)N);
   var b: int64* = (int64*)malloc(8 * (int64)N);
@@ -130,6 +147,8 @@ fn main() -> int32 {
   i = 0;
   while (i < 4096) { scaled = scaled + fb[i]; i += 1; }
 
+  var tallied: int64 = tally(wide, 4096);
+
   println("mixed = {mixed}");
   println("striped = {striped}");
   if (mixed != 392376813670142450) {
@@ -158,6 +177,11 @@ fn main() -> int32 {
   println("scaled = {scaled}");
   if (scaled != 13634304.0) {
     println("FAIL: the float values did not survive the context");
+    return 1;
+  }
+  println("tallied = {tallied}");
+  if (tallied != -1362689809609858153) {
+    println("FAIL: the reductions did not reproduce the serial answer");
     return 1;
   }
   println("ok");

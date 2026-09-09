@@ -6,7 +6,9 @@
 #include <string.h>
 
 #define IR_PARALLEL_WORK_TARGET 4096
+#define IR_PARALLEL_MAX_SLOTS 16u
 #define IR_PARALLEL_RANGE_SYMBOL "mettle_parallel_range"
+#define IR_PARALLEL_SLOTS_SYMBOL "mettle_parallel_range_slots"
 
 typedef struct {
   char **names;
@@ -31,6 +33,12 @@ typedef struct {
 } IRParCapture;
 
 typedef struct {
+  const char *name;
+  const char *op;
+  IRParCapture shape;
+} IRParReduction;
+
+typedef struct {
   IRProgram *program;
   IRFunction *function;
   size_t marker;
@@ -48,6 +56,8 @@ typedef struct {
   IRParNames names;
   IRParCapture *captures;
   size_t capture_count;
+  IRParReduction *reductions;
+  size_t reduction_count;
   SourceLocation location;
 } IRParLoop;
 
@@ -680,6 +690,159 @@ static int ir_par_classify(IRParLoop *loop) {
   return 1;
 }
 
+static const char *ir_par_reduction_operator(const char *text) {
+  static const char *kOps[] = {"+", "^", "|", "&", "*"};
+  if (!text) {
+    return NULL;
+  }
+  for (size_t i = 0; i < sizeof(kOps) / sizeof(kOps[0]); i++) {
+    if (strcmp(text, kOps[i]) == 0) {
+      return kOps[i];
+    }
+  }
+  return NULL;
+}
+
+static long long ir_par_reduction_identity(const char *op) {
+  if (strcmp(op, "*") == 0) {
+    return 1;
+  }
+  if (strcmp(op, "&") == 0) {
+    return -1;
+  }
+  return 0;
+}
+
+static size_t ir_par_single_use(const IRFunction *function, size_t lo,
+                                size_t hi, const char *name);
+
+static int ir_par_combine_site(const IRParLoop *loop, size_t at,
+                               size_t *combine) {
+  const IRFunction *function = loop->function;
+  const IRInstruction *in = &function->instructions[at];
+  if (in->op == IR_OP_BINARY) {
+    *combine = at;
+    return 1;
+  }
+  if (in->op == IR_OP_ASSIGN && in->lhs.kind == IR_OPERAND_TEMP &&
+      in->lhs.name) {
+    size_t k = at;
+    if (ir_par_single_use(function, loop->header, loop->latch, in->lhs.name) !=
+        1u) {
+      return 0;
+    }
+    while (k > loop->header) {
+      const IROperand *def;
+      k--;
+      def = ir_par_definition(&function->instructions[k]);
+      if (def && def->name && strcmp(def->name, in->lhs.name) == 0) {
+        if (function->instructions[k].op != IR_OP_BINARY) {
+          return 0;
+        }
+        *combine = k;
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+typedef struct {
+  const char *name;
+  size_t count;
+} IRParUseCounter;
+
+static void ir_par_count_use(void *state, const IROperand *operand) {
+  IRParUseCounter *counter = (IRParUseCounter *)state;
+  if (ir_par_operand_is_value(operand) &&
+      strcmp(operand->name, counter->name) == 0) {
+    counter->count++;
+  }
+}
+
+static size_t ir_par_single_use(const IRFunction *function, size_t lo,
+                                size_t hi, const char *name) {
+  IRParUseCounter counter;
+  counter.name = name;
+  counter.count = 0;
+  for (size_t i = lo; i <= hi; i++) {
+    ir_par_visit_uses(&function->instructions[i], &counter, ir_par_count_use);
+  }
+  return counter.count;
+}
+
+static int ir_par_recognize_reduction(IRParLoop *loop, const char *name,
+                                      const char *type_name,
+                                      IRParReduction *out) {
+  IRFunction *function = loop->function;
+  size_t sites[32];
+  size_t site_count = 0;
+  const char *op = NULL;
+  IRParCapture shape;
+
+  memset(&shape, 0, sizeof(shape));
+  if (!ir_par_type_shape(type_name, &shape) || shape.is_float) {
+    return 0;
+  }
+  for (size_t i = loop->branch + 1u; i <= loop->latch; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    const IROperand *def = ir_par_definition(in);
+    const IRInstruction *combine;
+    const char *found;
+    size_t at = 0;
+    int uses_lhs;
+    int uses_rhs;
+    if (!def || def->kind != IR_OPERAND_SYMBOL ||
+        strcmp(def->name, name) != 0) {
+      continue;
+    }
+    if (site_count >= sizeof(sites) / sizeof(sites[0]) ||
+        !ir_par_combine_site(loop, i, &at)) {
+      return 0;
+    }
+    combine = &function->instructions[at];
+    found = ir_par_reduction_operator(combine->text);
+    if (!found || combine->is_float) {
+      return 0;
+    }
+    if (op && strcmp(op, found) != 0) {
+      return 0;
+    }
+    op = found;
+    uses_lhs = combine->lhs.kind == IR_OPERAND_SYMBOL && combine->lhs.name &&
+               strcmp(combine->lhs.name, name) == 0;
+    uses_rhs = combine->rhs.kind == IR_OPERAND_SYMBOL && combine->rhs.name &&
+               strcmp(combine->rhs.name, name) == 0;
+    if (uses_lhs == uses_rhs) {
+      return 0;
+    }
+    sites[site_count++] = at;
+  }
+  if (!site_count || !op) {
+    return 0;
+  }
+  if (ir_par_single_use(function, loop->header, loop->latch, name) !=
+      site_count) {
+    return 0;
+  }
+  out->name = name;
+  out->op = op;
+  out->shape = shape;
+  out->shape.type_name = type_name;
+  return 1;
+}
+
+static int ir_par_reduction_add(IRParLoop *loop, const IRParReduction *found) {
+  IRParReduction *grown = realloc(
+      loop->reductions, (loop->reduction_count + 1u) * sizeof(*grown));
+  if (!grown) {
+    return 0;
+  }
+  loop->reductions = grown;
+  loop->reductions[loop->reduction_count++] = *found;
+  return 1;
+}
+
 static int ir_par_capture_add(IRParLoop *loop, const char *name,
                               const IRParCapture *shape, int take_address,
                               int is_temp) {
@@ -739,12 +902,21 @@ static int ir_par_build_captures(IRParLoop *loop) {
     if (strcmp(name, loop->iv) == 0) {
       continue;
     }
+    type_name = ir_par_name_type(function, name, &is_local);
     if (loop->names.defined[i]) {
+      IRParReduction found;
+      memset(&found, 0, sizeof(found));
+      if (is_local && type_name &&
+          ir_par_recognize_reduction(loop, name, type_name, &found)) {
+        if (!ir_par_reduction_add(loop, &found)) {
+          return 0;
+        }
+        continue;
+      }
       ir_par_reject(loop, "a value carries from one iteration to the next",
                     name);
       return 0;
     }
-    type_name = ir_par_name_type(function, name, &is_local);
     if (!type_name) {
       if (ir_program_lookup_symbol(loop->program, name)) {
         continue;
@@ -792,12 +964,22 @@ static int ir_par_build_captures(IRParLoop *loop) {
   return 1;
 }
 
+static int ir_par_is_reduction(const IRParLoop *loop, const char *name) {
+  for (size_t i = 0; i < loop->reduction_count; i++) {
+    if (strcmp(loop->reductions[i].name, name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int ir_par_check_escapes(IRParLoop *loop) {
   for (size_t i = 0; i < loop->names.count; i++) {
     if (!loop->names.defined[i] || !loop->names.other_use[i]) {
       continue;
     }
-    if (strcmp(loop->names.names[i], loop->iv) == 0) {
+    if (strcmp(loop->names.names[i], loop->iv) == 0 ||
+        ir_par_is_reduction(loop, loop->names.names[i])) {
       continue;
     }
     ir_par_reject(loop, "a value written in the loop is read after it",
@@ -899,8 +1081,9 @@ static IRFunction *ir_par_build_worker(IRParLoop *loop, size_t id) {
   IRFunction *function = loop->function;
   IRFunction *worker;
   char name[192];
-  const char *parameter_names[3] = {"__par_ctx", "__par_lo", "__par_hi"};
-  const char *parameter_types[3] = {"rawptr", "int64", "int64"};
+  const char *parameter_names[4] = {"__par_ctx", "__par_lo", "__par_hi",
+                                    "__par_slot"};
+  const char *parameter_types[4] = {"rawptr", "int64", "int64", "int64"};
   char slot[64];
   char address[64];
   IRInstruction cast = {0};
@@ -914,7 +1097,7 @@ static IRFunction *ir_par_build_worker(IRParLoop *loop, size_t id) {
     return NULL;
   }
   if (!ir_function_set_parameters(worker, parameter_names, parameter_types,
-                                  3u)) {
+                                  loop->reduction_count ? 4u : 3u)) {
     ir_function_destroy(worker);
     return NULL;
   }
@@ -963,6 +1146,27 @@ static IRFunction *ir_par_build_worker(IRParLoop *loop, size_t id) {
       continue;
     }
     if (!ir_par_emit(worker, declaration)) {
+      ir_function_destroy(worker);
+      return NULL;
+    }
+  }
+
+  for (size_t i = 0; i < loop->reduction_count; i++) {
+    const IRParReduction *reduction = &loop->reductions[i];
+    IRInstruction seed = {0};
+    int ok;
+    if (!ir_par_emit_declare(loop, worker, reduction->name,
+                             reduction->shape.type_name)) {
+      ir_function_destroy(worker);
+      return NULL;
+    }
+    seed.op = IR_OP_ASSIGN;
+    seed.location = loop->location;
+    seed.dest = ir_operand_symbol(reduction->name);
+    seed.lhs = ir_operand_int(ir_par_reduction_identity(reduction->op));
+    ok = seed.dest.name && ir_par_emit(worker, &seed);
+    ir_operand_destroy(&seed.dest);
+    if (!ok) {
       ir_function_destroy(worker);
       return NULL;
     }
@@ -1074,6 +1278,49 @@ static IRFunction *ir_par_build_worker(IRParLoop *loop, size_t id) {
     }
   }
 
+  if (loop->reduction_count) {
+    IROperand slot = ir_operand_symbol("__par_slot");
+    IROperand stride = ir_operand_int((long long)(loop->reduction_count * 8u));
+    IROperand base = ir_operand_symbol("__par_ctx");
+    IROperand offset = ir_operand_temp(".__par_out_off");
+    int ok = slot.name && base.name && offset.name;
+    if (ok) {
+      ok = ir_par_emit_binary(loop, worker, ".__par_out_off", "*", &slot,
+                              &stride);
+    }
+    if (ok) {
+      ok = ir_par_emit_binary(loop, worker, ".__par_out_base", "+", &base,
+                              &offset);
+    }
+    ir_operand_destroy(&slot);
+    ir_operand_destroy(&base);
+    ir_operand_destroy(&offset);
+    if (!ok) {
+      ir_function_destroy(worker);
+      return NULL;
+    }
+    for (size_t i = 0; i < loop->reduction_count; i++) {
+      const IRParReduction *reduction = &loop->reductions[i];
+      IROperand out_base = ir_operand_temp(".__par_out_base");
+      IROperand fixed = ir_operand_int(
+          (long long)((loop->capture_count + i) * 8u));
+      IROperand value = ir_operand_symbol(reduction->name);
+      char address[64];
+      snprintf(address, sizeof(address), ".__par_out%zu", i);
+      if (!out_base.name || !value.name ||
+          !ir_par_emit_binary(loop, worker, address, "+", &out_base, &fixed) ||
+          !ir_par_emit_store(loop, worker, address, &value,
+                             &reduction->shape)) {
+        ir_operand_destroy(&out_base);
+        ir_operand_destroy(&value);
+        ir_function_destroy(worker);
+        return NULL;
+      }
+      ir_operand_destroy(&out_base);
+      ir_operand_destroy(&value);
+    }
+  }
+
   ret.op = IR_OP_RETURN;
   ret.location = loop->location;
   ret.lhs = ir_operand_int(0);
@@ -1109,13 +1356,17 @@ static int ir_par_emit_dispatch(IRParLoop *loop, IRFunction *out,
   snprintf(hi_name, sizeof(hi_name), ".__par_hi_%zu", id);
   snprintf(stop_name, sizeof(stop_name), ".__par_stop_%zu", id);
   snprintf(pointer_name, sizeof(pointer_name), ".__par_fn_%zu", id);
-  snprintf(array_type, sizeof(array_type), "int64[%zu]",
-           loop->capture_count ? loop->capture_count : 1u);
-
-  if (!ir_program_int64_array_type(
-          loop->program, loop->capture_count ? loop->capture_count : 1u) ||
-      !ir_par_emit_declare(loop, out, context_name, array_type)) {
-    return 0;
+  {
+    size_t slots = loop->capture_count +
+                   loop->reduction_count * IR_PARALLEL_MAX_SLOTS;
+    if (!slots) {
+      slots = 1u;
+    }
+    snprintf(array_type, sizeof(array_type), "int64[%zu]", slots);
+    if (!ir_program_int64_array_type(loop->program, slots) ||
+        !ir_par_emit_declare(loop, out, context_name, array_type)) {
+      return 0;
+    }
   }
 
   in.op = IR_OP_ADDRESS_OF;
@@ -1174,6 +1425,25 @@ static int ir_par_emit_dispatch(IRParLoop *loop, IRFunction *out,
     if (!ok) {
       ir_operand_destroy(&base);
       return 0;
+    }
+  }
+
+  for (size_t k = 0; k < IR_PARALLEL_MAX_SLOTS; k++) {
+    for (size_t r = 0; r < loop->reduction_count; r++) {
+      const IRParReduction *reduction = &loop->reductions[r];
+      IROperand offset = ir_operand_int((long long)(
+          (loop->capture_count + k * loop->reduction_count + r) * 8u));
+      IROperand identity =
+          ir_operand_int(ir_par_reduction_identity(reduction->op));
+      char seed_name[96];
+      snprintf(seed_name, sizeof(seed_name), ".__par_seed%zu_%zu_%zu", id, k,
+               r);
+      if (!ir_par_emit_binary(loop, out, seed_name, "+", &base, &offset) ||
+          !ir_par_emit_store(loop, out, seed_name, &identity,
+                             &reduction->shape)) {
+        ir_operand_destroy(&base);
+        return 0;
+      }
     }
   }
 
@@ -1243,7 +1513,8 @@ static int ir_par_emit_dispatch(IRParLoop *loop, IRFunction *out,
   call_args[4] = ir_operand_int(min_chunk);
   in.op = IR_OP_CALL;
   in.location = loop->location;
-  in.text = (char *)IR_PARALLEL_RANGE_SYMBOL;
+  in.text = (char *)(loop->reduction_count ? IR_PARALLEL_SLOTS_SYMBOL
+                                           : IR_PARALLEL_RANGE_SYMBOL);
   in.arguments = call_args;
   in.argument_count = 5u;
   if (!call_args[0].name || !call_args[1].name || !call_args[2].name ||
@@ -1329,6 +1600,53 @@ static int ir_par_emit_dispatch(IRParLoop *loop, IRFunction *out,
       return 0;
     }
   }
+
+  for (size_t k = 0; k < IR_PARALLEL_MAX_SLOTS; k++) {
+    for (size_t r = 0; r < loop->reduction_count; r++) {
+      const IRParReduction *reduction = &loop->reductions[r];
+      IROperand ctx_base = ir_operand_temp(base_name);
+      IROperand offset = ir_operand_int((long long)(
+          (loop->capture_count + k * loop->reduction_count + r) * 8u));
+      IROperand loaded;
+      IROperand accumulator;
+      IRInstruction merge = {0};
+      char address[96];
+      char value_name[96];
+      int ok;
+      snprintf(address, sizeof(address), ".__par_get%zu_%zu_%zu", id, k, r);
+      snprintf(value_name, sizeof(value_name), ".__par_val%zu_%zu_%zu", id, k,
+               r);
+      if (!ctx_base.name ||
+          !ir_par_emit_binary(loop, out, address, "+", &ctx_base, &offset)) {
+        ir_operand_destroy(&ctx_base);
+        return 0;
+      }
+      ir_operand_destroy(&ctx_base);
+      loaded = ir_operand_temp(value_name);
+      if (!loaded.name ||
+          !ir_par_emit_load(loop, out, &loaded, address, &reduction->shape)) {
+        ir_operand_destroy(&loaded);
+        return 0;
+      }
+      ir_operand_destroy(&loaded);
+      accumulator = ir_operand_symbol(reduction->name);
+      merge.op = IR_OP_BINARY;
+      merge.location = loop->location;
+      merge.dest = ir_operand_symbol(reduction->name);
+      merge.lhs = accumulator;
+      merge.rhs = ir_operand_temp(value_name);
+      merge.text = (char *)reduction->op;
+      merge.is_unsigned = reduction->shape.is_unsigned;
+      ok = merge.dest.name && merge.lhs.name && merge.rhs.name &&
+           ir_par_emit(out, &merge);
+      ir_operand_destroy(&merge.dest);
+      ir_operand_destroy(&merge.lhs);
+      ir_operand_destroy(&merge.rhs);
+      if (!ok) {
+        return 0;
+      }
+    }
+  }
   return 1;
 }
 
@@ -1351,6 +1669,9 @@ static void ir_par_free_captures(IRParLoop *loop) {
   free(loop->captures);
   loop->captures = NULL;
   loop->capture_count = 0;
+  free(loop->reductions);
+  loop->reductions = NULL;
+  loop->reduction_count = 0;
 }
 
 static int ir_par_rewrite(IRParLoop *loop, const char *worker_name,

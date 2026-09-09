@@ -13131,11 +13131,14 @@ try {
   $out = & $CompilerPath --build --release tests/test_parallel_loop.mettle -o $parExe 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) { throw "the parallel build failed: $out" }
   $ir = Get-Content $parIr -Raw
-  if ([regex]::Matches($ir, '(?m)^function __mtl_par_').Count -lt 7) {
+  if ([regex]::Matches($ir, '(?m)^function __mtl_par_').Count -lt 8) {
     throw "the marked loops were not all outlined"
   }
   if ($ir -notmatch "mettle_parallel_range") {
     throw "the outlined loops are not dispatched to the parallel runtime"
+  }
+  if ($ir -notmatch "mettle_parallel_range_slots") {
+    throw "the reduction loop does not take its per-chunk slots"
   }
   $run = & $parExe 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0 -or $run -notmatch "ok") {

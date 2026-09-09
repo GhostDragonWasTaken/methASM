@@ -317,12 +317,26 @@ counter's range.
 }
 ```
 
+An accumulator is allowed, and expected. A local combined into itself with
+`+`, `^`, `|`, `&` or `*` and read nowhere else in the body becomes one private
+accumulator per thread, seeded with that operator's identity and folded back
+into yours after the threads join. Integer accumulators only: floating addition
+is not associative, so a threaded sum would not match the serial one.
+
+```mettle
+@parallel for i in 0..n {
+  var v: int64 = rows[i] * weight + offset;
+  total = total + v;
+  seen = seen ^ (uint64)v;
+}
+```
+
 It is a contract, and the build fails with the reason and the name when the
-compiler cannot deliver it: a value that carries from one iteration to the next,
-a `return` or a `break` out of the loop, a counter that steps by anything but
-one, a value written in the loop and read after it, a call in the body, or work
-the outliner will not move. Reads of the surrounding scope are free; writes must
-land in memory the loop reaches through a pointer.
+compiler cannot deliver it: a value that carries from one iteration to the next
+in any other shape, a `return` or a `break` out of the loop, a counter that steps
+by anything but one, a value written in the loop and read after it, a call in the
+body, or work the outliner will not move. Reads of the surrounding scope are
+free; writes must land in memory the loop reaches through a pointer.
 
 The message names the callee when a call is what stopped it, which is how a
 loop that looks call-free is refused under `--safe`: the bounds checks are

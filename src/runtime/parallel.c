@@ -6,9 +6,12 @@ extern char *getenv(const char *name);
 #define METTLE_PARALLEL_MAX_THREADS 16u
 
 typedef void (*MettleParallelBody)(void *ctx, long long lo, long long hi);
+typedef void (*MettleParallelSlotBody)(void *ctx, long long lo, long long hi,
+                                       long long slot);
 
 typedef struct {
   MettleParallelBody body;
+  MettleParallelSlotBody slot_body;
   void *ctx;
   long long lo;
   long long hi;
@@ -183,7 +186,12 @@ static void mettle_parallel_run_chunk(unsigned slot) {
   if (end > g_job.hi) {
     end = g_job.hi;
   }
-  if (start < end) {
+  if (start >= end) {
+    return;
+  }
+  if (g_job.slot_body) {
+    g_job.slot_body(g_job.ctx, start, end, (long long)slot);
+  } else {
     g_job.body(g_job.ctx, start, end);
   }
 }
@@ -270,13 +278,15 @@ static int mettle_parallel_pool_ready(unsigned wanted) {
   return (int)(g_pool_workers + 1u >= wanted);
 }
 
-void mettle_parallel_range(MettleParallelBody body, void *ctx, long long lo,
-                           long long hi, long long min_chunk) {
+static void mettle_parallel_dispatch(MettleParallelBody body,
+                                     MettleParallelSlotBody slot_body,
+                                     void *ctx, long long lo, long long hi,
+                                     long long min_chunk) {
   long long total = hi - lo;
   unsigned wanted;
   int expected = 0;
 
-  if (!body || total <= 0) {
+  if ((!body && !slot_body) || total <= 0) {
     return;
   }
   if (min_chunk < 1) {
@@ -287,12 +297,20 @@ void mettle_parallel_range(MettleParallelBody body, void *ctx, long long lo,
     wanted = (unsigned)(total / min_chunk);
   }
   if (wanted < 2u) {
-    body(ctx, lo, hi);
+    if (slot_body) {
+      slot_body(ctx, lo, hi, 0);
+    } else {
+      body(ctx, lo, hi);
+    }
     return;
   }
   if (!__atomic_compare_exchange_n(&g_reentered, &expected, 1, 0,
                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-    body(ctx, lo, hi);
+    if (slot_body) {
+      slot_body(ctx, lo, hi, 0);
+    } else {
+      body(ctx, lo, hi);
+    }
     return;
   }
   if (!mettle_parallel_pool_ready(wanted)) {
@@ -301,12 +319,17 @@ void mettle_parallel_range(MettleParallelBody body, void *ctx, long long lo,
     }
     if (wanted < 2u) {
       __atomic_store_n(&g_reentered, 0, __ATOMIC_RELEASE);
-      body(ctx, lo, hi);
+      if (slot_body) {
+        slot_body(ctx, lo, hi, 0);
+      } else {
+        body(ctx, lo, hi);
+      }
       return;
     }
   }
 
   g_job.body = body;
+  g_job.slot_body = slot_body;
   g_job.ctx = ctx;
   g_job.lo = lo;
   g_job.hi = hi;
@@ -325,6 +348,17 @@ void mettle_parallel_range(MettleParallelBody body, void *ctx, long long lo,
     }
   }
   __atomic_store_n(&g_reentered, 0, __ATOMIC_RELEASE);
+}
+
+void mettle_parallel_range(MettleParallelBody body, void *ctx, long long lo,
+                           long long hi, long long min_chunk) {
+  mettle_parallel_dispatch(body, NULL, ctx, lo, hi, min_chunk);
+}
+
+void mettle_parallel_range_slots(MettleParallelSlotBody body, void *ctx,
+                                 long long lo, long long hi,
+                                 long long min_chunk) {
+  mettle_parallel_dispatch(NULL, body, ctx, lo, hi, min_chunk);
 }
 
 typedef struct {

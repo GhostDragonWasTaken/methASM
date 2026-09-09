@@ -1,10 +1,10 @@
 import "std/io";
 
 fn main() -> int32 {
-  var total: int64 = 0;
+  var total: int64 = 1;
   var i: int32 = 0;
   @parallel while (i < 100) {
-    total = total + (int64)i;
+    total = total * 3 + (int64)i;
     i += 1;
   }
   println("total = {total}");
