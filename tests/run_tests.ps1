@@ -4622,7 +4622,7 @@ try {
 
   $broken = Join-Path $tmpDir "variants_broken.mettle"
   $source = Get-Content "examples/abstractions/variants.mettle" -Raw
-  $source = $source -replace "(?m)^  Stopped,`$", "  Stopped,`n  Failed,"
+  $source = $source -replace "(?m)^  Stopped,\r?`$", "  Stopped,`n  Failed,"
   Set-Content -Path $broken -Value $source -Encoding UTF8
   $out = & $CompilerPath --build $broken -o (Join-Path $tmpDir "variants_broken.exe") 2>&1 | Out-String
   if ($LASTEXITCODE -eq 0) { throw "a variant with no arm to decide it built" }
@@ -4693,6 +4693,13 @@ try {
 
   Set-Content -Path (Join-Path $convDir "manifest.txt") -Value "plain 42`nreversed 42`nnarrow 42" -Encoding ASCII
   $wsl = Get-Command wsl -ErrorAction SilentlyContinue
+  if ($wsl) {
+    & wsl -e true 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "[SKIP] arm64 convention execution (no WSL distribution; the descriptions were checked and the code differs)"
+      $wsl = $null
+    }
+  }
   if ($wsl -and $convDir -match '^[A-Za-z]:\\') {
     $toWsl = {
       param($p)
@@ -5536,7 +5543,7 @@ try {
   # A run that leaks, caught by the rule that read it.
   $leaky = Join-Path $tmpDir "trace_leaky.mettle"
   $source = Get-Content "tests/test_trace_recorded.mettle" -Raw
-  Set-Content -Path $leaky -Value ($source -replace "(?m)^  free\(scratch\);`$", "") -Encoding UTF8
+  Set-Content -Path $leaky -Value ($source -replace "(?m)^  free\(scratch\);\r?`$", "") -Encoding UTF8
   $leakyExe = Join-Path $tmpDir "trace_leaky.exe"
   $leakyTrace = Join-Path $tmpDir "leaky.txt"
   $out = & $CompilerPath --build $leaky -o $leakyExe --record-trace 2>&1 | Out-String
