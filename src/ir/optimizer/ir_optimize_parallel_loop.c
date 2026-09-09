@@ -126,6 +126,12 @@ static int ir_par_operand_is_value(const IROperand *operand) {
           operand->kind == IR_OPERAND_SYMBOL);
 }
 
+static int ir_par_is_trap_call(const IRInstruction *in) {
+  return in->op == IR_OP_CALL && in->text &&
+         strncmp(in->text, "mettle_crash_trap", 17) == 0 &&
+         !ir_par_operand_is_value(&in->dest);
+}
+
 static int ir_par_opcode_supported(IROpcode op) {
   switch (op) {
   case IR_OP_NOP:
@@ -188,6 +194,11 @@ static void ir_par_visit_uses(const IRInstruction *in, void *state,
   case IR_OP_STORE:
     visit(state, &in->dest);
     visit(state, &in->lhs);
+    break;
+  case IR_OP_CALL:
+    for (size_t i = 0; i < in->argument_count; i++) {
+      visit(state, &in->arguments[i]);
+    }
     break;
   case IR_OP_SELECT:
     visit(state, &in->lhs);
@@ -445,9 +456,10 @@ static int ir_par_find_loop(IRParLoop *loop) {
                     NULL);
       return 0;
     }
-    if (!ir_par_opcode_supported(in->op)) {
+    if (!ir_par_opcode_supported(in->op) && !ir_par_is_trap_call(in)) {
       ir_par_reject(loop, "the body contains work this pass will not move",
-                    ir_opcode_name(in->op));
+                    in->op == IR_OP_CALL && in->text ? in->text
+                                                     : ir_opcode_name(in->op));
       return 0;
     }
     if (target && strcmp(target, loop->start_label) != 0) {
@@ -1464,8 +1476,8 @@ static int ir_par_run_one(IRProgram *program, IRFunction *function,
     ir_par_names_free(&loop.names);
     return 0;
   }
-  if (!ir_par_check_globals(&loop) || !ir_par_check_escapes(&loop) ||
-      !ir_par_build_captures(&loop)) {
+  if (!ir_par_check_globals(&loop) || !ir_par_build_captures(&loop) ||
+      !ir_par_check_escapes(&loop)) {
     ir_par_free_captures(&loop);
     ir_par_names_free(&loop.names);
     return 0;

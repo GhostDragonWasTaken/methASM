@@ -323,6 +323,10 @@ one, a value written in the loop and read after it, a call in the body, or work
 the outliner will not move. Reads of the surrounding scope are free; writes must
 land in memory the loop reaches through a pointer.
 
+The message names the callee when a call is what stopped it, which is how a
+loop that looks call-free is refused under `--safe`: the bounds checks are
+calls into the safety runtime, so the two flags do not yet combine.
+
 What the compiler does not check is memory. Two iterations writing the same
 bytes is a race, and the decorator is your promise that they do not. Say it only
 where the iterations are genuinely independent.
