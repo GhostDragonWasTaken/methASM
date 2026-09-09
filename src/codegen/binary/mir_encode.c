@@ -2389,6 +2389,28 @@ static int mir_emit_epilogue(MirFunction *fn) {
   return 1;
 }
 
+static int mir_epilogue_is_shareable(MirFunction *fn) {
+  BinaryFunctionContext *ctx = fn->context;
+  if (fn->ir_function && fn->ir_function->is_interrupt) {
+    return 0;
+  }
+  if (fn->used_inline_vector) {
+    return 0;
+  }
+  return ctx->saved_register_count + ctx->saved_xmm_count >= 3;
+}
+
+static int mir_ret_is_last(MirFunction *fn, size_t index) {
+  for (size_t i = index + 1; i < fn->insn_count; i++) {
+    MirOpcode op = fn->insns[i].op;
+    if (op == MIR_LABEL) {
+      continue;
+    }
+    return 0;
+  }
+  return 1;
+}
+
 static int mir_encode_inline_asm(MirFunction *fn, const MirInst *in) {
   const MirAsmAux *aux = (const MirAsmAux *)in->aux;
   BinaryFunctionContext *ctx = fn->context;
@@ -2715,9 +2737,40 @@ typedef struct {
   size_t prev_cmpbr;
   MirPendingTable pending_tables[MIR_MAX_JUMP_TABLES];
   size_t pending_table_count;
+  char epilogue_label[64];
+  int epilogue_defined;
+  int epilogue_referenced;
 } MirEncodeState;
 
 typedef int (*MirEncodeHandler)(MirEncodeState *st, const MirInst *in);
+
+/* Every return but the last jumps forward into the final copy, so the shared
+   epilogue is a taken forward branch and never a backward one. */
+static int mir_encode_return(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  (void)in;
+
+  if (!st->epilogue_label[0] || !mir_epilogue_is_shareable(fn)) {
+    return mir_emit_epilogue(fn);
+  }
+  if (!mir_ret_is_last(fn, st->index)) {
+    size_t off = 0;
+    if (!binary_emit_jmp_placeholder(&ctx->code, &off) ||
+        !binary_label_fixup_table_add(&ctx->label_fixups, st->epilogue_label,
+                                      off)) {
+      return enc_err(fn, "out of memory in shared epilogue jump");
+    }
+    st->epilogue_referenced = 1;
+    return 1;
+  }
+  if (!binary_label_table_define(&ctx->labels, st->epilogue_label,
+                                 ctx->code.size)) {
+    return enc_err(fn, "duplicate shared epilogue label");
+  }
+  st->epilogue_defined = 1;
+  return mir_emit_epilogue(fn);
+}
 
 static int mir_encode_scalar(MirEncodeState *st, const MirInst *in) {
   MirFunction *fn = st->fn;
@@ -3839,7 +3892,7 @@ static int mir_encode_jump_table(MirEncodeState *st, const MirInst *in) {
       break;
     }
     case MIR_RET:
-      ok = mir_emit_epilogue(fn);
+      ok = mir_encode_return(st, in);
       break;
     case MIR_INLINE_ASM:
       ok = mir_encode_inline_asm(fn, in);
@@ -4071,6 +4124,8 @@ int mir_encode(MirFunction *fn) {
   st.fused_byte_load = (size_t)-1;
   st.fused_mask_test = (size_t)-1;
   st.prev_cmpbr = (size_t)-1;
+  snprintf(st.epilogue_label, sizeof(st.epilogue_label), ".Lmtlc.epi.%p",
+           (void *)fn);
 
   home_fwd_clear();
   if (!mir_layout_frame(fn) || !mir_emit_prologue(fn)) {
@@ -4106,6 +4161,14 @@ int mir_encode(MirFunction *fn) {
     }
   }
   free(align_label);
+  /* A referenced-but-undefined label means the last return was unreachable in
+     layout order; land the shared copy here so no jump dangles. */
+  if (ok && st.epilogue_label[0] && !st.epilogue_defined &&
+      st.epilogue_referenced) {
+    ok = binary_label_table_define(&ctx->labels, st.epilogue_label,
+                                   ctx->code.size) &&
+         mir_emit_epilogue(fn);
+  }
   if (!ok || !mir_encode_jump_tables(&st)) {
     return 0;
   }
