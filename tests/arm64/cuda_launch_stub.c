@@ -1,6 +1,8 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static int launch_calls;
 
@@ -151,4 +153,26 @@ MettleStringView mettle_string_from_int(int64_t value) {
   view.chars = out;
   view.length = written > 0 ? (uint64_t)written : 0u;
   return view;
+}
+
+MettleStringView mettle_string_concat(MettleStringView a, MettleStringView b) {
+  MettleStringView view;
+  uint64_t total = a.length + b.length;
+  char *out = (char *)malloc((size_t)total + 1u);
+  if (!out) {
+    view.chars = "";
+    view.length = 0u;
+    return view;
+  }
+  memcpy(out, a.chars, (size_t)a.length);
+  memcpy(out + a.length, b.chars, (size_t)b.length);
+  out[total] = '\0';
+  view.chars = out;
+  view.length = total;
+  return view;
+}
+
+int32_t mettle_string_free(MettleStringView s) {
+  (void)s;
+  return 0;
 }
