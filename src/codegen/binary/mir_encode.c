@@ -4007,6 +4007,55 @@ static int mir_cmpbr_wide_compare(MirEncodeState *st, const MirInst *in,
   return 1;
 }
 
+static int mir_encode_compare_only(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryGpRegister areg;
+  int rok = 1;
+  int ok;
+
+  areg = value_reg(fn, &in->a, SCRATCH_A, &rok);
+  if (!rok) {
+    return 0;
+  }
+  ok = (in->width == 4) ? mir_cmpbr_narrow_compare(st, in, areg)
+                        : mir_cmpbr_wide_compare(st, in, areg);
+  st->prev_cmpbr = (size_t)-1;
+  return ok;
+}
+
+static int mir_encode_conditional_move(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  BinaryGpRegister D;
+  BinaryGpRegister target;
+  BinaryGpRegister src;
+  int dst_in_reg = dst_is_reg(fn, &in->dst, &D);
+  int rok = 1;
+
+  if (in->cc < 0x80 || in->cc > 0x8F) {
+    return enc_err(fn, "conditional move without a condition");
+  }
+  target = dst_in_reg ? D : SCRATCH_A;
+  if (!dst_in_reg) {
+    if (in->dst.kind != MIR_OPK_VREG ||
+        !gp_home_load(fn, &fn->vregs[in->dst.vreg], SCRATCH_A)) {
+      return enc_err(fn, "out of memory loading conditional move destination");
+    }
+  }
+  src = value_reg(fn, &in->a, SCRATCH_B, &rok);
+  if (!rok) {
+    return 0;
+  }
+  if (!binary_emit_cmovcc_reg_reg(&ctx->code, (unsigned char)(in->cc - 0x40),
+                                  target, src)) {
+    return enc_err(fn, "out of memory in conditional move");
+  }
+  if (!dst_in_reg) {
+    return store_from(fn, &in->dst, target);
+  }
+  return 1;
+}
+
 static int mir_encode_compare_branch(MirEncodeState *st, const MirInst *in) {
   MirFunction *fn = st->fn;
   size_t i = st->index;
@@ -4176,6 +4225,8 @@ static const MirEncodeHandler MIR_ENCODERS[MIR_OPCODE_COUNT] = {
     [MIR_LEA_STRLIT] = mir_encode_literal_address,
     [MIR_TRAP] = mir_encode_trap,
     [MIR_CMPBR] = mir_encode_compare_branch,
+    [MIR_CMP] = mir_encode_compare_only,
+    [MIR_CMOVCC] = mir_encode_conditional_move,
     [MIR_BT] = mir_encode_compare_branch,
     [MIR_JMP_TABLE] = mir_encode_jump_table,
     [MIR_RET] = mir_encode_jump_table,

@@ -1,0 +1,524 @@
+import "std/io";
+
+@noinline fn opaque64(v: int64) -> int64 {
+  return v;
+}
+
+fn sel_i32_lt(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a < b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i32_lt(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a < b) {
+    r = (int32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i32_le(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a <= b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i32_le(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a <= b) {
+    r = (int32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i32_gt(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a > b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i32_gt(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a > b) {
+    r = (int32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i32_ge(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a >= b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i32_ge(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a >= b) {
+    r = (int32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i32_eq(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a == b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i32_eq(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a == b) {
+    r = (int32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i32_ne(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a != b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i32_ne(a: int32, b: int32) -> int32 {
+  var r: int32 = a;
+  if (a != b) {
+    r = (int32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i64_lt(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a < b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i64_lt(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a < b) {
+    r = (int64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i64_le(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a <= b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i64_le(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a <= b) {
+    r = (int64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i64_gt(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a > b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i64_gt(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a > b) {
+    r = (int64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i64_ge(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a >= b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i64_ge(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a >= b) {
+    r = (int64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i64_eq(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a == b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i64_eq(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a == b) {
+    r = (int64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_i64_ne(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a != b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_i64_ne(a: int64, b: int64) -> int64 {
+  var r: int64 = a;
+  if (a != b) {
+    r = (int64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u32_lt(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a < b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u32_lt(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a < b) {
+    r = (uint32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u32_le(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a <= b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u32_le(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a <= b) {
+    r = (uint32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u32_gt(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a > b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u32_gt(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a > b) {
+    r = (uint32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u32_ge(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a >= b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u32_ge(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a >= b) {
+    r = (uint32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u32_eq(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a == b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u32_eq(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a == b) {
+    r = (uint32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u32_ne(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a != b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u32_ne(a: uint32, b: uint32) -> uint32 {
+  var r: uint32 = a;
+  if (a != b) {
+    r = (uint32)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u64_lt(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a < b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u64_lt(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a < b) {
+    r = (uint64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u64_le(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a <= b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u64_le(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a <= b) {
+    r = (uint64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u64_gt(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a > b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u64_gt(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a > b) {
+    r = (uint64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u64_ge(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a >= b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u64_ge(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a >= b) {
+    r = (uint64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u64_eq(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a == b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u64_eq(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a == b) {
+    r = (uint64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn sel_u64_ne(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a != b) {
+    r = b;
+  }
+  return r;
+}
+
+@noinline fn ref_u64_ne(a: uint64, b: uint64) -> uint64 {
+  var r: uint64 = a;
+  if (a != b) {
+    r = (uint64)opaque64((int64)b);
+  }
+  return r;
+}
+
+fn main() -> int32 {
+  var bad: int32 = 0;
+  var vals: int64[13];
+  vals[0] = 0;
+  vals[1] = 1;
+  vals[2] = -1;
+  vals[3] = 2;
+  vals[4] = -2;
+  vals[5] = 127;
+  vals[6] = -128;
+  vals[7] = 255;
+  vals[8] = 32767;
+  vals[9] = -32768;
+  vals[10] = 2147483647;
+  vals[11] = -2147483648;
+  vals[12] = 4294967296;
+  var i: int32 = 0;
+  while (i < 13) {
+    var j: int32 = 0;
+    while (j < 13) {
+      var a_i32: int32 = (int32)vals[i];
+      var b_i32: int32 = (int32)vals[j];
+      var a_i64: int64 = (int64)vals[i];
+      var b_i64: int64 = (int64)vals[j];
+      var a_u32: uint32 = (uint32)vals[i];
+      var b_u32: uint32 = (uint32)vals[j];
+      var a_u64: uint64 = (uint64)vals[i];
+      var b_u64: uint64 = (uint64)vals[j];
+      if (sel_i32_lt(a_i32, b_i32) != ref_i32_lt(a_i32, b_i32)) {
+        println("i32_lt i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i32_le(a_i32, b_i32) != ref_i32_le(a_i32, b_i32)) {
+        println("i32_le i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i32_gt(a_i32, b_i32) != ref_i32_gt(a_i32, b_i32)) {
+        println("i32_gt i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i32_ge(a_i32, b_i32) != ref_i32_ge(a_i32, b_i32)) {
+        println("i32_ge i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i32_eq(a_i32, b_i32) != ref_i32_eq(a_i32, b_i32)) {
+        println("i32_eq i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i32_ne(a_i32, b_i32) != ref_i32_ne(a_i32, b_i32)) {
+        println("i32_ne i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i64_lt(a_i64, b_i64) != ref_i64_lt(a_i64, b_i64)) {
+        println("i64_lt i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i64_le(a_i64, b_i64) != ref_i64_le(a_i64, b_i64)) {
+        println("i64_le i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i64_gt(a_i64, b_i64) != ref_i64_gt(a_i64, b_i64)) {
+        println("i64_gt i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i64_ge(a_i64, b_i64) != ref_i64_ge(a_i64, b_i64)) {
+        println("i64_ge i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i64_eq(a_i64, b_i64) != ref_i64_eq(a_i64, b_i64)) {
+        println("i64_eq i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_i64_ne(a_i64, b_i64) != ref_i64_ne(a_i64, b_i64)) {
+        println("i64_ne i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u32_lt(a_u32, b_u32) != ref_u32_lt(a_u32, b_u32)) {
+        println("u32_lt i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u32_le(a_u32, b_u32) != ref_u32_le(a_u32, b_u32)) {
+        println("u32_le i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u32_gt(a_u32, b_u32) != ref_u32_gt(a_u32, b_u32)) {
+        println("u32_gt i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u32_ge(a_u32, b_u32) != ref_u32_ge(a_u32, b_u32)) {
+        println("u32_ge i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u32_eq(a_u32, b_u32) != ref_u32_eq(a_u32, b_u32)) {
+        println("u32_eq i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u32_ne(a_u32, b_u32) != ref_u32_ne(a_u32, b_u32)) {
+        println("u32_ne i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u64_lt(a_u64, b_u64) != ref_u64_lt(a_u64, b_u64)) {
+        println("u64_lt i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u64_le(a_u64, b_u64) != ref_u64_le(a_u64, b_u64)) {
+        println("u64_le i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u64_gt(a_u64, b_u64) != ref_u64_gt(a_u64, b_u64)) {
+        println("u64_gt i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u64_ge(a_u64, b_u64) != ref_u64_ge(a_u64, b_u64)) {
+        println("u64_ge i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u64_eq(a_u64, b_u64) != ref_u64_eq(a_u64, b_u64)) {
+        println("u64_eq i={i} j={j}");
+        bad = bad + 1;
+      }
+      if (sel_u64_ne(a_u64, b_u64) != ref_u64_ne(a_u64, b_u64)) {
+        println("u64_ne i={i} j={j}");
+        bad = bad + 1;
+      }
+      j = j + 1;
+    }
+    i = i + 1;
+  }
+  if (bad != 0) {
+    return 1;
+  }
+  println("FUSED SELECT: ALL OK");
+  return 0;
+}

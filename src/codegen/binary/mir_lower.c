@@ -3794,6 +3794,9 @@ static int mir_operand_is_temp(const IROperand *operand, const char *name) {
          operand->name[0] == name[0] && strcmp(operand->name, name) == 0;
 }
 
+static long mir_select_condition_compare(const IRFunction *f,
+                                         const IRInstruction *sel);
+
 static int mir_temp_use_count(const IRFunction *function, const char *name) {
   int count = 0;
 
@@ -4776,9 +4779,35 @@ static int mir_lower_select(MirFunction *fn, CodeGenerator *g,
     MirVregId cond_r = mir_new_vreg(fn, MIR_RC_GP, 8);
     MirVregId then_r = mir_new_vreg(fn, MIR_RC_GP, 8);
     MirVregId res_r = mir_new_vreg(fn, MIR_RC_GP, 8);
+    long cmp_at =
+        fn->ir_function ? mir_select_condition_compare(fn->ir_function, in)
+                        : -1;
     if (cond_r == MIR_VREG_NONE || then_r == MIR_VREG_NONE ||
         res_r == MIR_VREG_NONE) {
       return 0;
+    }
+    if (cmp_at >= 0) {
+      const IRInstruction *cmp = &fn->ir_function->instructions[cmp_at];
+      int uns = cmp->is_unsigned || mir_operand_is_unsigned(g, ctx, &cmp->lhs) ||
+                mir_operand_is_unsigned(g, ctx, &cmp->rhs);
+      unsigned char false_cc = 0;
+      if (mir_false_jcc(cmp->text, uns, &false_cc)) {
+        MirOperand ca = mir_value_operand(fn, g, ctx, map, &cmp->lhs);
+        MirOperand cb = mir_value_operand(fn, g, ctx, map, &cmp->rhs);
+        int w = mir_int_compare_width(g, ctx, cmp->text, &cmp->lhs, &cmp->rhs);
+        unsigned char true_cc = (unsigned char)(false_cc ^ 1u);
+        if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(then_r), then_v, mir_op_none(),
+                       8, 0, 0) ||
+            !mir_emit1(fn, MIR_MOV, mir_op_vreg(res_r), else_v, mir_op_none(),
+                       8, 0, 0) ||
+            !mir_emit1(fn, MIR_CMP, mir_op_none(), ca, cb, w, uns, 0) ||
+            !mir_emit1(fn, MIR_CMOVCC, mir_op_vreg(res_r), mir_op_vreg(then_r),
+                       mir_op_none(), 8, 0, true_cc)) {
+          return 0;
+        }
+        return mir_emit1(fn, MIR_MOV, dest, mir_op_vreg(res_r), mir_op_none(),
+                         8, 0, 0);
+      }
     }
     if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(cond_r), cond, mir_op_none(), 8, 0,
                    0) ||
@@ -7309,6 +7338,58 @@ static void mir_compute_const_compare_skips(CodeGenerator *g,
       continue;
     }
     long def = mir_temp_def_index(uses, cmp->rhs.name);
+    if (def >= 0) {
+      skip[def] = 1;
+    }
+  }
+}
+
+static long mir_temp_single_def(const IRFunction *f, const char *name) {
+  long found = -1;
+  size_t i;
+  for (i = 0; i < f->instruction_count; i++) {
+    const IRInstruction *in = &f->instructions[i];
+    if (in->op == IR_OP_NOP || in->op == IR_OP_STORE) {
+      continue;
+    }
+    if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+        strcmp(in->dest.name, name) == 0) {
+      if (found >= 0) {
+        return -1;
+      }
+      found = (long)i;
+    }
+  }
+  return found;
+}
+
+static long mir_select_condition_compare(const IRFunction *f,
+                                         const IRInstruction *sel) {
+  long def;
+  const IRInstruction *cmp;
+  if (sel->op != IR_OP_SELECT || sel->lhs.kind != IR_OPERAND_TEMP ||
+      !sel->lhs.name || sel->is_float) {
+    return -1;
+  }
+  if (mir_temp_use_count(f, sel->lhs.name) != 1) {
+    return -1;
+  }
+  def = mir_temp_single_def(f, sel->lhs.name);
+  if (def < 0) {
+    return -1;
+  }
+  cmp = &f->instructions[def];
+  if (cmp->op != IR_OP_BINARY || cmp->is_float || !cmp->text ||
+      !mir_is_comparison(cmp->text)) {
+    return -1;
+  }
+  return def;
+}
+
+static void mir_compute_select_compare_skips(const IRFunction *f, char *skip) {
+  size_t i;
+  for (i = 0; i < f->instruction_count; i++) {
+    long def = mir_select_condition_compare(f, &f->instructions[i]);
     if (def >= 0) {
       skip[def] = 1;
     }
@@ -11410,6 +11491,7 @@ int code_generator_binary_emit_function_via_mir(
     mir_compute_address_folds(ir_function, &uses, fold_skip, folds);
     mir_compute_const_compare_skips(generator, context, ir_function, &uses,
                                     fold_skip);
+    mir_compute_select_compare_skips(ir_function, fold_skip);
     mir_temp_use_destroy(&uses);
   }
 

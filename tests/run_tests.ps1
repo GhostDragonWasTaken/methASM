@@ -6475,6 +6475,12 @@ $simdRuntimeCases = @(
     IrMustMatch     = @("chase_ref")
   },
   @{
+    Name            = "fused_select"
+    Path            = "tests/fused_select_check.mettle"
+    OutputMustMatch = "FUSED SELECT: ALL OK"
+    IrMustMatch     = @("opaque64")
+  },
+  @{
     Name            = "local_address_root"
     Path            = "tests/local_address_root_check.mettle"
     OutputMustMatch = "LOCAL ADDRESS ROOT: ALL OK"
