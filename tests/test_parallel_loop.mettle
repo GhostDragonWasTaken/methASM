@@ -101,6 +101,17 @@ fn main() -> int32 {
     i += 1;
   }
 
+  var counted: int64* = (int64*)malloc(8 * 4096);
+  @parallel for k in 0..4096 {
+    counted[k] = (int64)k * SCALE - table[k & 7];
+  }
+  var ranged: int64 = 0;
+  i = 0;
+  while (i < 4096) {
+    ranged = ranged ^ counted[i];
+    i += 1;
+  }
+
   println("mixed = {mixed}");
   println("striped = {striped}");
   if (mixed != 392376813670142450) {
@@ -119,6 +130,11 @@ fn main() -> int32 {
   println("shifted = {shifted}");
   if (shifted != -228173824) {
     println("FAIL: the inlined marked loop did not reproduce the serial answer");
+    return 1;
+  }
+  println("ranged = {ranged}");
+  if (ranged != 100614144) {
+    println("FAIL: the parallel range-for loop did not reproduce the serial answer");
     return 1;
   }
   println("ok");

@@ -13131,7 +13131,7 @@ try {
   $out = & $CompilerPath --build --release tests/test_parallel_loop.mettle -o $parExe 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) { throw "the parallel build failed: $out" }
   $ir = Get-Content $parIr -Raw
-  if ([regex]::Matches($ir, '(?m)^function __mtl_par_').Count -lt 4) {
+  if ([regex]::Matches($ir, '(?m)^function __mtl_par_').Count -lt 5) {
     throw "the marked loops were not all outlined"
   }
   if ($ir -notmatch "mettle_parallel_range") {
