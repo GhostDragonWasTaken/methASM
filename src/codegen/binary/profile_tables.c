@@ -32,7 +32,7 @@ static int dbg_type_display_name(MtlcType *type, char *buffer, size_t cap) {
   }
 }
 
-static MtlcType *dbg_underlying_struct(MtlcType *type) {
+static const MtlcType *dbg_underlying_struct(const MtlcType *type) {
   int guard = 0;
   while (type && guard++ < 8 &&
          (type->kind == MTLC_TYPE_POINTER || type->kind == MTLC_TYPE_ARRAY)) {
@@ -41,9 +41,10 @@ static MtlcType *dbg_underlying_struct(MtlcType *type) {
   return (type && type->kind == MTLC_TYPE_STRUCT && type->name) ? type : NULL;
 }
 
-static void dbg_collect_structs(MtlcType *type, MtlcType **list, size_t *count,
+static void dbg_collect_structs(const MtlcType *type, const MtlcType **list,
+                                size_t *count,
                                 size_t cap) {
-  MtlcType *s = dbg_underlying_struct(type);
+  const MtlcType *s = dbg_underlying_struct(type);
   if (!s) {
     return;
   }
@@ -267,7 +268,8 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
     const char **local_types = calloc(emit_locals, sizeof(const char *));
     char **scratch_a = calloc(emit_locals, sizeof(char *));
     char **scratch_b = calloc(emit_locals, sizeof(char *));
-    MtlcType **structs = calloc(DBG_MAX_STRUCTS, sizeof(MtlcType *));
+    const MtlcType **structs =
+        calloc(DBG_MAX_STRUCTS, sizeof(const MtlcType *));
     size_t struct_count = 0;
     int ok = local_names && local_types && scratch_a && scratch_b && structs;
 
@@ -328,7 +330,7 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
       field_names[0] = "";
       size_t cursor = 0;
       for (size_t s = 0; s < struct_count && ok; s++) {
-        MtlcType *st = structs[s];
+        const MtlcType *st = structs[s];
         struct_names[s] = st->name;
         struct_sizes[s] = (uint64_t)st->size;
         field_starts[s] = (uint64_t)cursor;

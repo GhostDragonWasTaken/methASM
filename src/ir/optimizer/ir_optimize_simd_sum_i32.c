@@ -161,7 +161,7 @@ int ir_range_has_safety_call(const IRFunction *function, size_t start,
   return 0;
 }
 
-int ir_loop_body_is_unclaimable(IRFunction *function, size_t start,
+int ir_loop_body_is_unclaimable(const IRFunction *function, size_t start,
                                        size_t end) {
   if (!function) {
     return 0;

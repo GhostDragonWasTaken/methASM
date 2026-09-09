@@ -173,7 +173,7 @@ typedef struct {
 
 typedef struct {
   IRWhileLoopBounds bounds;
-  IRFunction *function;
+  const IRFunction *function;
   size_t header_index;
   const char *iv;
   IROperand bound;
@@ -188,7 +188,7 @@ typedef struct {
   signed char c_unclaimable;
 } IRAffineLoop;
 
-int ir_affine_model_loop(IRFunction *function, size_t header_index,
+int ir_affine_model_loop(const IRFunction *function, size_t header_index,
                          IRAffineLoop *out);
 int ir_affine_unit_step(IRAffineLoop *loop);
 int ir_affine_starts_at_zero(IRAffineLoop *loop);
@@ -495,7 +495,7 @@ const char *ir_find_ptr_step_with_suffix(const IRFunction *function,
 const IRInstruction *ir_find_temp_producer_before(const IRFunction *function,
                                                   size_t before_index,
                                                   const char *temp_name);
-int ir_find_while_loop_bounds(IRFunction *function, size_t header_index,
+int ir_find_while_loop_bounds(const IRFunction *function, size_t header_index,
                                      IRWhileLoopBounds *out);
 int ir_fold_popcount_byte_loop_pass(IRFunction *function, int *changed);
 int ir_fold_kernighan_popcount_pass(IRFunction *function, int *changed);
@@ -569,7 +569,7 @@ int ir_label_value_map_merge_incoming(IRLabelValueMap *map,
                                              const char *label,
                                              const IRTempValueMap *incoming,
                                              int *changed);
-int ir_loop_body_is_unclaimable(IRFunction *function, size_t start,
+int ir_loop_body_is_unclaimable(const IRFunction *function, size_t start,
                                        size_t end);
 
 int ir_range_has_safety_call(const IRFunction *function, size_t start,

@@ -487,7 +487,7 @@ int code_generator_binary_emit_rep_movsq(
 
 int code_generator_binary_emit_global_symbol_load(
     CodeGenerator *generator, BinaryFunctionContext *context,
-    const char *symbol_name, MtlcType *type, int declare_external,
+    const char *symbol_name, const MtlcType *type, int declare_external,
     BinaryGpRegister target_register) {
   size_t displacement_offset = 0;
   int size = code_generator_binary_resolved_type_scalar_size(type);
@@ -557,7 +557,7 @@ int code_generator_binary_emit_global_symbol_load(
 
 int code_generator_binary_emit_global_symbol_store(
     CodeGenerator *generator, BinaryFunctionContext *context,
-    const char *symbol_name, MtlcType *type, int declare_external,
+    const char *symbol_name, const MtlcType *type, int declare_external,
     BinaryGpRegister source_register) {
   size_t displacement_offset = 0;
   int size = code_generator_binary_resolved_type_scalar_size(type);
@@ -685,7 +685,7 @@ int code_generator_binary_instruction_result_is_float64(
     CodeGenerator *generator, BinaryFunctionContext *context,
     const IRInstruction *instruction) {
   const CgSym *symbol = NULL;
-  MtlcType *function_type = NULL;
+  const MtlcType *function_type = NULL;
   const char *op = NULL;
 
   if (!context || !instruction) {
@@ -740,7 +740,7 @@ int code_generator_binary_instruction_result_float_bits(
     CodeGenerator *generator, BinaryFunctionContext *context,
     const IRInstruction *instruction) {
   const CgSym *symbol = NULL;
-  MtlcType *function_type = NULL;
+  const MtlcType *function_type = NULL;
 
   if (!context || !instruction) {
     return 0;
@@ -1140,7 +1140,7 @@ static int code_generator_binary_emit_global_string_store(
 }
 
 static int binary_canonicalize_narrow_reg_for_type(
-    BinaryFunctionContext *context, MtlcType *type, BinaryGpRegister reg);
+    BinaryFunctionContext *context, const MtlcType *type, BinaryGpRegister reg);
 
 int code_generator_binary_emit_destination_store(
     CodeGenerator *generator, BinaryFunctionContext *context,
@@ -1733,7 +1733,7 @@ int code_generator_binary_emit_float_to_unsigned_int(
                                              context->code.size);
 }
 
-MtlcType *code_generator_binary_indirect_callee_type(
+const MtlcType *code_generator_binary_indirect_callee_type(
     CodeGenerator *generator, BinaryFunctionContext *context,
     const IRInstruction *instruction) {
   const CgSym *symbol = NULL;
@@ -1748,7 +1748,7 @@ MtlcType *code_generator_binary_indirect_callee_type(
       const IRInstruction *in = &irf->instructions[i];
       if (in->op == IR_OP_DECLARE_LOCAL && in->dest.name && in->text &&
           strcmp(in->dest.name, instruction->lhs.name) == 0) {
-        MtlcType *t =
+        const MtlcType *t =
             code_generator_binary_get_resolved_type(generator, in->text, 0);
         if (t && t->kind == MTLC_TYPE_FUNCTION_POINTER) {
           return t;
@@ -1768,7 +1768,8 @@ MtlcType *code_generator_binary_indirect_callee_type(
 }
 
 static int binary_canonicalize_narrow_reg_for_type(
-    BinaryFunctionContext *context, MtlcType *type, BinaryGpRegister reg) {
+    BinaryFunctionContext *context, const MtlcType *type,
+    BinaryGpRegister reg) {
   if (!context || !type || code_generator_type_is_aggregate(type) ||
       code_generator_binary_resolved_type_float_bits(type) != 0) {
     return 1;

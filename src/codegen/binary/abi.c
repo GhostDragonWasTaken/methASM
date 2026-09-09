@@ -132,7 +132,7 @@ int code_generator_binary_resolved_type_float_bits(const MtlcType *type) {
   return 0;
 }
 
-int code_generator_binary_resolved_type_is_abi_supported(MtlcType *type,
+int code_generator_binary_resolved_type_is_abi_supported(const MtlcType *type,
                                                                 int allow_void) {
   if (!type) {
     return 0;
@@ -149,7 +149,7 @@ int code_generator_binary_resolved_type_is_abi_supported(MtlcType *type,
   return code_generator_binary_resolved_type_is_supported(type, allow_void);
 }
 
-MtlcType *code_generator_binary_get_resolved_type(CodeGenerator *generator,
+const MtlcType *code_generator_binary_get_resolved_type(CodeGenerator *generator,
                                                      const char *type_name,
                                                      int allow_void) {
   const char *resolved_name = NULL;
@@ -355,8 +355,8 @@ int code_generator_binary_collect_symbol_aliases(
     const char *target = NULL;
     const CgSym *symbol = NULL;
     const CgSym *target_symbol = NULL;
-    MtlcType *symbol_type = NULL;
-    MtlcType *target_type = NULL;
+    const MtlcType *symbol_type = NULL;
+    const MtlcType *target_type = NULL;
 
     if (!instruction || instruction->op != IR_OP_ASSIGN ||
         instruction->dest.kind != IR_OPERAND_SYMBOL ||
@@ -669,7 +669,8 @@ int code_generator_binary_function_has_calls(const IRFunction *function) {
 }
 
 int code_generator_binary_function_can_promote_rsi_rdi(
-    CodeGenerator *generator, IRFunction *function, MtlcType *return_type) {
+    CodeGenerator *generator, IRFunction *function,
+    const MtlcType *return_type) {
   if (!generator || !function) {
     return 0;
   }
@@ -702,7 +703,7 @@ int code_generator_binary_function_can_promote_rsi_rdi(
                          ? code_generator_lookup_symbol(generator,
                                                instruction->text)
                          : NULL;
-    MtlcType *callee_return = NULL;
+    const MtlcType *callee_return = NULL;
     if (callee && callee->kind == CG_SYM_FUNCTION) {
       callee_return = callee->data.function.return_type
                           ? callee->data.function.return_type
@@ -964,7 +965,7 @@ static int binary_promote_pointer_steps(CodeGenerator *generator,
     operands[2] = &insn->rhs;
     for (size_t op_i = 0; op_i < 3 && *promoted_count < max_promoted; op_i++) {
       const char *name = operands[op_i]->name;
-      MtlcType *type = NULL;
+      const MtlcType *type = NULL;
       if (operands[op_i]->kind != IR_OPERAND_SYMBOL ||
           !binary_symbol_is_claimable(context, name)) {
         continue;
@@ -1010,7 +1011,7 @@ static void binary_score_parameters(CodeGenerator *generator,
                                     BinaryPromotionPick *best) {
   for (size_t i = 0; i < ir_function->parameter_count; i++) {
     const char *name = ir_function->parameter_names[i];
-    MtlcType *type;
+    const MtlcType *type;
     if (!binary_symbol_is_claimable(context, name)) {
       continue;
     }
@@ -1033,7 +1034,7 @@ static void binary_score_locals(CodeGenerator *generator,
   for (size_t i = 0; i < ir_function->instruction_count; i++) {
     const IRInstruction *instruction = &ir_function->instructions[i];
     const char *name;
-    MtlcType *type;
+    const MtlcType *type;
     if (!instruction || instruction->op != IR_OP_DECLARE_LOCAL ||
         instruction->dest.kind != IR_OPERAND_SYMBOL ||
         !instruction->dest.name) {
@@ -1120,7 +1121,7 @@ static int binary_claim_register(CodeGenerator *generator,
 int code_generator_binary_promote_hot_symbols(
     CodeGenerator *generator, BinaryFunctionContext *context,
     IRFunction *ir_function) {
-  MtlcType *return_type;
+  const MtlcType *return_type;
   size_t max_promoted;
   size_t promoted_count = 0;
   size_t *loop_weights;
@@ -1238,7 +1239,7 @@ int code_generator_binary_resolved_type_scalar_size(const MtlcType *type) {
   return 8;
 }
 
-int code_generator_binary_resolved_type_is_supported(MtlcType *type,
+int code_generator_binary_resolved_type_is_supported(const MtlcType *type,
                                                             int allow_void) {
   if (!type) {
     return 0;
@@ -1277,7 +1278,7 @@ int code_generator_binary_type_is_abi_supported(CodeGenerator *generator,
     return 1;
   }
 
-  MtlcType *type =
+  const MtlcType *type =
       code_generator_binary_get_resolved_type(generator, type_name, allow_void);
   if (!type) {
     return 0;
@@ -1286,7 +1287,7 @@ int code_generator_binary_type_is_abi_supported(CodeGenerator *generator,
   return code_generator_binary_resolved_type_is_abi_supported(type, allow_void);
 }
 
-int code_generator_binary_type_is_cstring(MtlcType *type) {
+int code_generator_binary_type_is_cstring(const MtlcType *type) {
   if (!type || type->kind != MTLC_TYPE_POINTER) {
     return 0;
   }
@@ -1301,7 +1302,7 @@ int code_generator_binary_type_is_string(MtlcType *type) {
   return type && type->kind == MTLC_TYPE_STRING;
 }
 
-MtlcType *code_generator_binary_get_operand_type(CodeGenerator *generator,
+const MtlcType *code_generator_binary_get_operand_type(CodeGenerator *generator,
                                                     const IROperand *operand) {
   const CgSym *symbol = NULL;
 
@@ -1436,10 +1437,10 @@ void binary_operand_type_index_destroy(BinaryOperandTypeIndex *ix) {
   memset(ix, 0, sizeof(*ix));
 }
 
-MtlcType *code_generator_binary_get_operand_type_in_context(
+const MtlcType *code_generator_binary_get_operand_type_in_context(
     CodeGenerator *generator, BinaryFunctionContext *context,
     const IROperand *operand) {
-  MtlcType *type = code_generator_binary_get_operand_type(generator, operand);
+  const MtlcType *type = code_generator_binary_get_operand_type(generator, operand);
   IRFunction *ir_function = NULL;
   const BinaryOperandTypeEntry *entry = NULL;
 
@@ -1502,7 +1503,7 @@ int code_generator_binary_validate_signature(CodeGenerator *generator,
     return 0;
   }
 
-  MtlcType *return_type = NULL;
+  const MtlcType *return_type = NULL;
   const CgSym *function_symbol =
       generator->ir_program && ir_function->name
           ? code_generator_lookup_symbol(generator, ir_function->name)
@@ -1633,7 +1634,7 @@ int code_generator_binary_prepare_function_context(
     }
   }
 
-  MtlcType *fn_return_type =
+  const MtlcType *fn_return_type =
       ir_function->return_type_name
           ? code_generator_binary_get_resolved_type(
                 generator, ir_function->return_type_name, 1)
@@ -1682,7 +1683,7 @@ int code_generator_binary_prepare_function_context(
     }
 
     {
-      MtlcType *param_type =
+      const MtlcType *param_type =
           ir_function->parameter_types
               ? code_generator_binary_get_resolved_type(
                     generator, ir_function->parameter_types[i], 0)
@@ -1723,7 +1724,7 @@ int code_generator_binary_prepare_function_context(
   int local_storage_size_total = 0;
   for (size_t i = 0; i < ir_function->instruction_count; i++) {
     const IRInstruction *instruction = &ir_function->instructions[i];
-    MtlcType *local_type = NULL;
+    const MtlcType *local_type = NULL;
     int local_alignment = 0;
     int local_storage_size = 0;
     int scalar_local = 0;
@@ -2027,7 +2028,7 @@ int code_generator_binary_prepare_function_context(
     if (pp_insn->op != IR_OP_CALL || !pp_insn->text) continue;
     const CgSym *callee =
         code_generator_lookup_symbol(generator, pp_insn->text);
-    MtlcType *ret_t = NULL;
+    const MtlcType *ret_t = NULL;
     if (callee && callee->kind == CG_SYM_FUNCTION) {
       ret_t = callee->data.function.return_type
                   ? callee->data.function.return_type
@@ -2095,7 +2096,7 @@ int code_generator_binary_prepare_function_context(
                                                    ir_function->name)) {
     for (size_t i = 0; i < ir_function->parameter_count; i++) {
       BinarySysvAggregate agg;
-      MtlcType *pt = code_generator_binary_get_resolved_type(
+      const MtlcType *pt = code_generator_binary_get_resolved_type(
           generator,
           ir_function->parameter_types ? ir_function->parameter_types[i] : NULL,
           0);
@@ -2136,7 +2137,7 @@ int code_generator_binary_prepare_function_context(
 
 int code_generator_binary_emit_reg_reg_move(
     BinaryCodeBuffer *buffer, BinaryGpRegister destination,
-    BinaryGpRegister source, MtlcType *type) {
+    BinaryGpRegister source, const MtlcType *type) {
   int width = 8;
   int is_signed = 0;
   int is_integer = 0;
@@ -2173,7 +2174,7 @@ int code_generator_binary_emit_reg_reg_move(
 
 int code_generator_binary_emit_temp_stack_load(
     CodeGenerator *generator, BinaryFunctionContext *context, int stack_offset,
-    BinaryGpRegister target_register, MtlcType *type) {
+    BinaryGpRegister target_register, const MtlcType *type) {
   int width = code_generator_binary_type_scalar_width(type);
   if (type && (type->kind == MTLC_TYPE_FLOAT16 || type->kind == MTLC_TYPE_BFLOAT16)) {
     width = 4;
@@ -2201,8 +2202,9 @@ int code_generator_binary_emit_temp_stack_load(
 }
 
 int code_generator_binary_emit_symbol_stack_load(
-    CodeGenerator *generator, BinaryFunctionContext *context, MtlcType *type,
-    int stack_offset, BinaryGpRegister target_register) {
+    CodeGenerator *generator, BinaryFunctionContext *context,
+    const MtlcType *type, int stack_offset,
+    BinaryGpRegister target_register) {
   int size = 8;
   int is_signed = 0;
 
@@ -2259,8 +2261,9 @@ int code_generator_binary_emit_symbol_stack_load(
 }
 
 int code_generator_binary_emit_symbol_stack_store(
-    CodeGenerator *generator, BinaryFunctionContext *context, MtlcType *type,
-    int stack_offset, BinaryGpRegister source_register) {
+    CodeGenerator *generator, BinaryFunctionContext *context,
+    const MtlcType *type, int stack_offset,
+    BinaryGpRegister source_register) {
   int size = 8;
 
   if (!generator || !context || stack_offset <= 0) {
@@ -2290,7 +2293,7 @@ int code_generator_binary_emit_symbol_stack_store(
   }
 }
 
-int code_generator_binary_type_scalar_width(MtlcType *type) {
+int code_generator_binary_type_scalar_width(const MtlcType *type) {
   if (!type) {
     return 8;
   }

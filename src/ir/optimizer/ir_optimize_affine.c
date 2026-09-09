@@ -15,7 +15,7 @@ int ir_affine_symbol_written_in(const IRFunction *function, size_t start,
   return 0;
 }
 
-int ir_affine_model_loop(IRFunction *function, size_t header_index,
+int ir_affine_model_loop(const IRFunction *function, size_t header_index,
                          IRAffineLoop *out) {
   if (!function || !out) {
     return 0;

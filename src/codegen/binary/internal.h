@@ -311,7 +311,7 @@ void code_generator_binary_describe_abi(const BinaryGpRegister *int_regs,
                                         BinaryGpRegister indirect_return,
                                         int separate_classes);
 
-int code_generator_binary_classify_sysv_aggregate(MtlcType *type,
+int code_generator_binary_classify_sysv_aggregate(const MtlcType *type,
                                                   BinarySysvAggregate *out);
 
 int code_generator_binary_function_is_abi_public(CodeGenerator *generator,
@@ -348,9 +348,9 @@ extern BinaryIRFunctionIndex g_binary_ir_function_index;
 
 BinaryLabelEntry *binary_label_table_get(BinaryLabelTable *table, const char *name);
 size_t *code_generator_binary_build_loop_weights( const IRFunction *function);
-MtlcType *code_generator_binary_get_operand_type(CodeGenerator *generator, const IROperand *operand);
-MtlcType *code_generator_binary_get_operand_type_in_context( CodeGenerator *generator, BinaryFunctionContext *context, const IROperand *operand);
-MtlcType *code_generator_binary_get_resolved_type(CodeGenerator *generator, const char *type_name, int allow_void);
+const MtlcType *code_generator_binary_get_operand_type(CodeGenerator *generator, const IROperand *operand);
+const MtlcType *code_generator_binary_get_operand_type_in_context( CodeGenerator *generator, BinaryFunctionContext *context, const IROperand *operand);
+const MtlcType *code_generator_binary_get_resolved_type(CodeGenerator *generator, const char *type_name, int allow_void);
 IRFunction *code_generator_find_ir_function_binary(CodeGenerator *generator, const char *name);
 int binary_align_up_int(int value, int alignment, int *result_out);
 int binary_call_relocation_table_add(BinaryCallRelocationTable *table, const char *symbol_name, size_t displacement_offset);
@@ -536,8 +536,8 @@ int code_generator_binary_emit_count_word_starts( CodeGenerator *generator, Bina
 int code_generator_binary_emit_cstring_literal_address( CodeGenerator *generator, BinaryFunctionContext *context, const char *value, BinaryGpRegister target_register);
 int code_generator_binary_emit_destination_store( CodeGenerator *generator, BinaryFunctionContext *context, const IROperand *destination, BinaryGpRegister source_register);
 int code_generator_binary_emit_global_string_variable( CodeGenerator *generator, const char *link_name, const char *value, size_t value_length);
-int code_generator_binary_emit_global_symbol_load( CodeGenerator *generator, BinaryFunctionContext *context, const char *symbol_name, MtlcType *type, int declare_external, BinaryGpRegister target_register);
-int code_generator_binary_emit_global_symbol_store( CodeGenerator *generator, BinaryFunctionContext *context, const char *symbol_name, MtlcType *type, int declare_external, BinaryGpRegister source_register);
+int code_generator_binary_emit_global_symbol_load( CodeGenerator *generator, BinaryFunctionContext *context, const char *symbol_name, const MtlcType *type, int declare_external, BinaryGpRegister target_register);
+int code_generator_binary_emit_global_symbol_store( CodeGenerator *generator, BinaryFunctionContext *context, const char *symbol_name, const MtlcType *type, int declare_external, BinaryGpRegister source_register);
 int code_generator_binary_emit_load_from_address( CodeGenerator *generator, BinaryFunctionContext *context, BinaryGpRegister address_register, int size, BinaryGpRegister target_register);
 int code_generator_binary_emit_local_string_store( CodeGenerator *generator, BinaryFunctionContext *context, int offset, BinaryGpRegister source_register);
 int code_generator_binary_emit_simd_copy(CodeGenerator *generator, BinaryFunctionContext *context, const IRInstruction *instruction);
@@ -613,7 +613,7 @@ int code_generator_binary_emit_store_to_address( CodeGenerator *generator, Binar
 int code_generator_binary_emit_string_literal_value_address( CodeGenerator *generator, BinaryFunctionContext *context, const char *value, size_t value_length, BinaryGpRegister target_register);
 int code_generator_binary_emit_string_symbol_load( CodeGenerator *generator, BinaryFunctionContext *context, const char *symbol_name, const CgSym *symbol, BinaryGpRegister target_register);
 int code_generator_binary_emit_symbol_address( CodeGenerator *generator, BinaryFunctionContext *context, const char *symbol_name, int declare_external, BinaryGpRegister target_register);
-int code_generator_binary_function_can_promote_rsi_rdi( CodeGenerator *generator, IRFunction *function, MtlcType *return_type);
+int code_generator_binary_function_can_promote_rsi_rdi( CodeGenerator *generator, IRFunction *function, const MtlcType *return_type);
 int code_generator_binary_function_has_calls(const IRFunction *function);
 size_t code_generator_binary_function_symbol_score( const BinaryFunctionContext *context, const IRFunction *function, const char *name, const size_t *loop_weights);
 int code_generator_binary_get_access_size(CodeGenerator *generator, BinaryFunctionContext *context, const IROperand *size_operand);
@@ -657,27 +657,27 @@ void binary_operand_type_index_destroy(BinaryOperandTypeIndex *ix);
 int code_generator_binary_promote_hot_symbols( CodeGenerator *generator, BinaryFunctionContext *context, IRFunction *ir_function);
 int code_generator_binary_resolve_fixups(CodeGenerator *generator, BinaryFunctionContext *context, size_t return_offset);
 int code_generator_binary_resolved_type_float_bits(const MtlcType *type);
-int code_generator_binary_resolved_type_is_abi_supported(MtlcType *type, int allow_void);
+int code_generator_binary_resolved_type_is_abi_supported(const MtlcType *type, int allow_void);
 int code_generator_binary_resolved_type_is_float64(const MtlcType *type);
 int code_generator_binary_resolved_type_is_signed_integer(const MtlcType *type);
 int code_generator_binary_resolved_type_is_stack_scalar(const MtlcType *type);
-int code_generator_binary_resolved_type_is_supported(MtlcType *type, int allow_void);
+int code_generator_binary_resolved_type_is_supported(const MtlcType *type, int allow_void);
 int code_generator_binary_resolved_type_scalar_size(const MtlcType *type);
 int code_generator_binary_symbol_already_promoted( BinaryFunctionContext *context, const char *name);
 int code_generator_binary_symbol_assigned_register( CodeGenerator *generator, BinaryFunctionContext *context, const char *name, BinaryGpRegister *register_out);
 int code_generator_binary_symbol_is_scalar_accessible( CodeGenerator *generator, const char *name);
-int code_generator_binary_type_scalar_width(MtlcType *type);
-int code_generator_binary_emit_temp_stack_load( CodeGenerator *generator, BinaryFunctionContext *context, int stack_offset, BinaryGpRegister target_register, MtlcType *type);
-int code_generator_binary_emit_reg_reg_move( BinaryCodeBuffer *buffer, BinaryGpRegister destination, BinaryGpRegister source, MtlcType *type);
-int code_generator_binary_emit_symbol_stack_load( CodeGenerator *generator, BinaryFunctionContext *context, MtlcType *type, int stack_offset, BinaryGpRegister target_register);
-int code_generator_binary_emit_symbol_stack_store( CodeGenerator *generator, BinaryFunctionContext *context, MtlcType *type, int stack_offset, BinaryGpRegister source_register);
+int code_generator_binary_type_scalar_width(const MtlcType *type);
+int code_generator_binary_emit_temp_stack_load( CodeGenerator *generator, BinaryFunctionContext *context, int stack_offset, BinaryGpRegister target_register, const MtlcType *type);
+int code_generator_binary_emit_reg_reg_move( BinaryCodeBuffer *buffer, BinaryGpRegister destination, BinaryGpRegister source, const MtlcType *type);
+int code_generator_binary_emit_symbol_stack_load( CodeGenerator *generator, BinaryFunctionContext *context, const MtlcType *type, int stack_offset, BinaryGpRegister target_register);
+int code_generator_binary_emit_symbol_stack_store( CodeGenerator *generator, BinaryFunctionContext *context, const MtlcType *type, int stack_offset, BinaryGpRegister source_register);
 size_t code_generator_binary_symbol_write_count( const IRFunction *function, const char *name);
 int code_generator_binary_type_is_abi_supported(CodeGenerator *generator, const char *type_name, int allow_void);
-int code_generator_binary_type_is_cstring(MtlcType *type);
+int code_generator_binary_type_is_cstring(const MtlcType *type);
 int code_generator_binary_type_is_direct_aggregate(const MtlcType *type);
 int code_generator_binary_type_is_gp_promotable(const MtlcType *type);
 int code_generator_binary_type_is_string(MtlcType *type);
-MtlcType *code_generator_binary_indirect_callee_type( CodeGenerator *generator, BinaryFunctionContext *context, const IRInstruction *instruction);
+const MtlcType *code_generator_binary_indirect_callee_type( CodeGenerator *generator, BinaryFunctionContext *context, const IRInstruction *instruction);
 int code_generator_binary_validate_signature(CodeGenerator *generator, IRFunction *ir_function);
 int code_generator_declare_binary_externs(CodeGenerator *generator);
 int code_generator_emit_binary_function(CodeGenerator *generator,

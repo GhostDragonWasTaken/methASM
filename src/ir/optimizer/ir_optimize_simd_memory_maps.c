@@ -1,6 +1,6 @@
 #include "ir_optimize_internal.h"
 
-int ir_find_while_loop_bounds(IRFunction *function, size_t header_index,
+int ir_find_while_loop_bounds(const IRFunction *function, size_t header_index,
                                      IRWhileLoopBounds *out) {
   size_t compare_index = 0;
   size_t branch_index = 0;

@@ -80,7 +80,7 @@ static int binary_asm_resolve_binding(void *binding_context, const char *name,
 
   offset = code_generator_binary_get_symbol_offset(context, name);
   if (offset > 0) {
-    MtlcType *type = NULL;
+    const MtlcType *type = NULL;
     IROperand probe;
     memset(&probe, 0, sizeof(probe));
     probe.kind = IR_OPERAND_SYMBOL;

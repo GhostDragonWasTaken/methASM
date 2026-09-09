@@ -4967,7 +4967,7 @@ static void compile_publish_optimizer_costs(void) {
 }
 
 static int compile_optimize_ir(IRProgram *ir_program, ASTNode *ast_program,
-                               CompilerOptions *options) {
+                               const CompilerOptions *options) {
   IROptimizeOptions ir_optimize_options = {0};
   compile_publish_optimizer_costs();
   int target_neutral = options->emit_arm64 || options->emit_ptx ||

@@ -123,7 +123,7 @@ static BinaryEightbyteClass binary_merge_eightbyte(BinaryEightbyteClass a,
   return BINARY_EIGHTBYTE_INTEGER;
 }
 
-static void binary_classify_fields(MtlcType *type, size_t base,
+static void binary_classify_fields(const MtlcType *type, size_t base,
                                    BinaryEightbyteClass *classes,
                                    size_t eightbyte_count) {
   size_t i = 0;
@@ -165,7 +165,7 @@ static void binary_classify_fields(MtlcType *type, size_t base,
   }
 }
 
-int code_generator_binary_classify_sysv_aggregate(MtlcType *type,
+int code_generator_binary_classify_sysv_aggregate(const MtlcType *type,
                                                   BinarySysvAggregate *out) {
   size_t size = 0;
   size_t i = 0;
