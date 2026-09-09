@@ -14,6 +14,7 @@
 
 #define IR_SIMD_MARKER_PREFIX "@@simd:"
 #define IR_UNROLL_MARKER_PREFIX "@@unroll:"
+#define IR_PARALLEL_MARKER_PREFIX "@@parallel:"
 
 #define IR_SYSCALL_CALL_NAME "__mtl_syscall"
 
@@ -446,6 +447,7 @@ enum {
 int ir_function_set_effects(IRFunction *function, int clause,
                             const char *const *names, size_t count);
 int ir_program_register_scalar_pointer_types(IRProgram *program);
+MtlcType *ir_program_int64_array_type(IRProgram *program, size_t count);
 void *ir_value_range_oracle_create(const IRFunction *function);
 void ir_value_range_oracle_destroy(void *oracle);
 int ir_value_range_result_is_narrow(void *oracle, size_t at, int bits,

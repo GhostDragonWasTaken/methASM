@@ -675,6 +675,7 @@ typedef struct {
   int unroll_factor;
   int uniform_mode;
   int conflict_free_mode;
+  int parallel_mode;
 } ParsedDecorators;
 
 static int parser_parse_one_decorator(Parser *parser,
@@ -787,6 +788,13 @@ static int parser_parse_one_decorator(Parser *parser,
       out->simd_mode = SIMD_ATTR_CONTRACT;
       parser_advance(parser);
     }
+  } else if (strcmp(name, "parallel") == 0) {
+    if (out->parallel_mode) {
+      parser_set_error(parser, "Duplicate '@parallel' decorator");
+      return 0;
+    }
+    parser_advance(parser);
+    out->parallel_mode = 1;
   } else if (strcmp(name, "unroll") == 0) {
     if (out->unroll_factor) {
       parser_set_error(parser, "Duplicate '@unroll' decorator");
@@ -817,8 +825,8 @@ static int parser_parse_one_decorator(Parser *parser,
     parser_set_error(parser,
                      "Unknown decorator after '@' (expected 'inline', "
                      "'noinline', 'pure', 'noalloc', 'test', 'rule', "
-                     "'naked', 'interrupt', 'swappable', 'simd', or "
-                     "'unroll')");
+                     "'naked', 'interrupt', 'swappable', 'simd', "
+                     "'parallel', or 'unroll')");
     return 0;
   }
   return 1;
@@ -839,6 +847,7 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
   out->unroll_factor = 0;
   out->uniform_mode = 0;
   out->conflict_free_mode = 0;
+  out->parallel_mode = 0;
 
   while (parser->current_token.type == TOKEN_AT) {
     if (!parser_parse_one_decorator(parser, out)) {
@@ -2261,10 +2270,11 @@ static ASTNode *parser_parse_decorated_statement(Parser *parser) {
     return NULL;
   }
   if (decos.simd_mode == SIMD_ATTR_NONE && !decos.unroll_factor &&
-      !decos.uniform_mode && !decos.conflict_free_mode) {
+      !decos.uniform_mode && !decos.conflict_free_mode &&
+      !decos.parallel_mode) {
     parser_set_error(parser,
-                     "Expected a '@simd', '@unroll', '@uniform' or "
-                     "'@conflict_free' decorator before this statement");
+                     "Expected a '@simd', '@unroll', '@parallel', '@uniform' "
+                     "or '@conflict_free' decorator before this statement");
     return NULL;
   }
 
@@ -2279,6 +2289,12 @@ static ASTNode *parser_parse_decorated_statement(Parser *parser) {
     }
   }
   if (loop->type == AST_IF_STATEMENT) {
+    if (decos.parallel_mode) {
+      parser_set_error(parser,
+                       "'@parallel' applies to a 'for' or 'while' loop");
+      ast_destroy_node(loop);
+      return NULL;
+    }
     if (decos.simd_mode != SIMD_ATTR_NONE || decos.unroll_factor) {
       parser_set_error(
           parser, "'@simd' / '@unroll' must be applied to a 'for' or "
@@ -2291,10 +2307,12 @@ static ASTNode *parser_parse_decorated_statement(Parser *parser) {
     ((ForStatement *)loop->data)->simd_mode = decos.simd_mode;
     ((ForStatement *)loop->data)->unroll_factor = decos.unroll_factor;
     ((ForStatement *)loop->data)->uniform_mode = decos.uniform_mode;
+    ((ForStatement *)loop->data)->parallel_mode = decos.parallel_mode;
   } else if (loop->type == AST_WHILE_STATEMENT) {
     ((WhileStatement *)loop->data)->simd_mode = decos.simd_mode;
     ((WhileStatement *)loop->data)->unroll_factor = decos.unroll_factor;
     ((WhileStatement *)loop->data)->uniform_mode = decos.uniform_mode;
+    ((WhileStatement *)loop->data)->parallel_mode = decos.parallel_mode;
   } else {
     parser_set_error(parser,
                      "'@simd' and '@unroll' apply to a 'for' or 'while' "
@@ -7119,6 +7137,7 @@ ASTNode *parser_parse_while_statement(Parser *parser) {
   while_data->simd_mode = SIMD_ATTR_NONE;
   while_data->unroll_factor = 0;
   while_data->uniform_mode = 0;
+  while_data->parallel_mode = 0;
   while_node->data = while_data;
 
   ast_add_child(while_node, condition);

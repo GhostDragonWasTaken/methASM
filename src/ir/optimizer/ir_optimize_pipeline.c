@@ -898,6 +898,23 @@ int ir_optimize_program_pipeline(IRProgram *program,
     ir_pass_time_end("layout_factor [program]", t0);
   }
 
+  {
+    int parallel_changed = 0;
+    mettle_compiler_ctx_set_pass_name("parallelize_marked_loops");
+    mettle_compiler_ctx_set_fixpoint_iteration(0);
+    double t0 = ir_pass_time_begin();
+    if (!ir_parallelize_marked_loops_pass(program, &parallel_changed)) {
+      mettle_compiler_ice("IR loop parallelization pass failed");
+    }
+    ir_pass_time_end("parallelize_marked_loops [program]", t0);
+    if (ir_optimize_had_user_error()) {
+      ir_explain_flush();
+      ir_verify_end_program();
+      ir_function_index_reset();
+      return 0;
+    }
+  }
+
   if (!ir_pass_name_is_skipped("alias_facts")) {
     double t0 = ir_pass_time_begin();
     ir_alias_facts_build(program);

@@ -485,6 +485,18 @@ int ir_emit_unroll_marker(IRLoweringContext *context, IRFunction *function,
   return ir_emit(context, function, &instruction);
 }
 
+int ir_emit_parallel_marker(IRLoweringContext *context, IRFunction *function,
+                            SourceLocation location) {
+  if (!context || !function) {
+    return 0;
+  }
+  IRInstruction instruction = {0};
+  instruction.op = IR_OP_NOP;
+  instruction.location = location;
+  instruction.text = (char *)IR_PARALLEL_MARKER_PREFIX "1";
+  return ir_emit(context, function, &instruction);
+}
+
 int ir_make_temp_operand(IRLoweringContext *context,
                                 IROperand *out_temp) {
   char buffer[32];

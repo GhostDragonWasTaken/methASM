@@ -443,6 +443,7 @@ typedef struct {
   int simd_mode;
   int unroll_factor;
   int uniform_mode;
+  int parallel_mode;
 } WhileStatement;
 
 typedef struct {
@@ -454,6 +455,7 @@ typedef struct {
   int simd_mode;
   int unroll_factor;
   int uniform_mode;
+  int parallel_mode;
 } ForStatement;
 
 typedef struct {

@@ -997,6 +997,15 @@ static int ir_lower_for_statement(IRLoweringContext *context, IRFunction *functi
     return 0;
   }
 
+  if (for_data->parallel_mode &&
+      !ir_emit_parallel_marker(context, function, statement->location)) {
+    ir_local_scope_leave(context);
+    free(condition_label);
+    free(step_label);
+    free(end_label);
+    return 0;
+  }
+
   if (for_data->unroll_factor > 1 &&
       !ir_emit_unroll_marker(context, function, for_data->unroll_factor,
                              statement->location)) {
@@ -1133,6 +1142,13 @@ static int ir_lower_while_statement(IRLoweringContext *context, IRFunction *func
       free(loop_end);
       return 0;
     }
+  }
+
+  if (while_data->parallel_mode &&
+      !ir_emit_parallel_marker(context, function, statement->location)) {
+    free(loop_start);
+    free(loop_end);
+    return 0;
   }
 
   if (while_data->unroll_factor > 1 &&

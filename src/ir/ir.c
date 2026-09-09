@@ -3280,7 +3280,7 @@ static const char *ir_gpu_launch_type_name(const MtlcType *type) {
   return NULL;
 }
 
-static MtlcType *ir_gpu_launch_params_type(IRProgram *program, size_t count) {
+MtlcType *ir_program_int64_array_type(IRProgram *program, size_t count) {
   char name[40];
   MtlcType *existing;
   MtlcType *base;
@@ -3468,7 +3468,7 @@ static int ir_gpu_launch_append_expansion(IRProgram *program, IRFunction *out,
     IRInstruction params_decl = {0};
     IRInstruction params_base = {0};
     snprintf(params_type, sizeof(params_type), "int64[%zu]", nargs);
-    params_array_type = ir_gpu_launch_params_type(program, nargs);
+    params_array_type = ir_program_int64_array_type(program, nargs);
     if (!params_array_type) {
       return 0;
     }

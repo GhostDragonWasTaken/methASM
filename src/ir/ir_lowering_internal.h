@@ -99,6 +99,8 @@ int ir_emit_simd_marker(IRLoweringContext *context, IRFunction *function,
                                char which, int id, int mode,
                                SourceLocation location);
 
+int ir_emit_parallel_marker(IRLoweringContext *context,
+                            IRFunction *function, SourceLocation location);
 int ir_emit_unroll_marker(IRLoweringContext *context, IRFunction *function,
                           int factor, SourceLocation location);
 

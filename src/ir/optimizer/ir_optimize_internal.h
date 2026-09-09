@@ -538,6 +538,7 @@ int ir_alias_bases_distinct(const IRFunction *function, const char *base_a,
 int ir_alias_classes_distinct(unsigned a, unsigned b);
 void ir_instruction_clear_arguments(IRInstruction *instruction);
 void ir_instruction_destroy_storage(IRInstruction *instruction);
+int ir_parallelize_marked_loops_pass(IRProgram *program, int *changed);
 int ir_instruction_has_side_effect(const IRInstruction *instruction);
 int ir_instruction_insert_move(IRFunction *function, size_t index,
                                       IRInstruction *instruction);
