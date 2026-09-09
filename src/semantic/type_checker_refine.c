@@ -1,6 +1,5 @@
 #include "type_checker_internal.h"
 #include "../ir/ir_explain_ledger.h"
-#include <float.h>
 #include <string.h>
 
 struct TypeCheckerGuard {
@@ -146,15 +145,62 @@ static double frange_step(double value, int up) {
   return value;
 }
 
-static double frange_outward(long double exact, int up) {
-  double landed = (double)exact;
-#if defined(LDBL_MANT_DIG) && defined(DBL_MANT_DIG) &&                        \
-    LDBL_MANT_DIG > DBL_MANT_DIG
-  if ((long double)landed == exact) {
-    return landed;
+typedef struct {
+  double value;
+  int inexact;
+} FExact;
+
+static FExact frange_exact_add(double a, double b) {
+  FExact out;
+  double sum = a + b;
+  double split = sum - a;
+  double err = (a - (sum - split)) + (b - split);
+  out.value = sum;
+  out.inexact = !(err == 0.0);
+  return out;
+}
+
+static FExact frange_exact_mul(double a, double b) {
+  FExact out;
+  double product = a * b;
+  double scale_a = 134217729.0 * a;
+  double a_hi = scale_a - (scale_a - a);
+  double a_lo = a - a_hi;
+  double scale_b = 134217729.0 * b;
+  double b_hi = scale_b - (scale_b - b);
+  double b_lo = b - b_hi;
+  double err =
+      ((a_hi * b_hi - product) + a_hi * b_lo + a_lo * b_hi) + a_lo * b_lo;
+  out.value = product;
+  out.inexact = !(err == 0.0);
+  return out;
+}
+
+static FExact frange_exact_scaled_sum(double base, long long trips,
+                                      double step, int apply) {
+  FExact scaled;
+  FExact total;
+  if (!apply) {
+    total.value = base;
+    total.inexact = 0;
+    return total;
   }
-#endif
-  return frange_step(landed, up);
+  scaled = frange_exact_mul((double)trips, step);
+  if (trips > 9007199254740992LL || trips < -9007199254740992LL) {
+    scaled.inexact = 1;
+  }
+  total = frange_exact_add(base, scaled.value);
+  if (scaled.inexact) {
+    total.inexact = 1;
+  }
+  return total;
+}
+
+static double frange_outward(FExact landed, int up) {
+  if (!landed.inexact) {
+    return landed.value;
+  }
+  return frange_step(landed.value, up);
 }
 
 static int frange_same_sign(const FRange *a, const FRange *b) {
@@ -1376,33 +1422,33 @@ static int frange_of_binary(TypeChecker *checker, ASTNode *expr, FRange *out,
     if (strcmp(op, "+") == 0) {
       out->has_min = 1;
       out->has_max = 1;
-      out->min = frange_outward((long double)l.min + (long double)r.min, 0);
-      out->max = frange_outward((long double)l.max + (long double)r.max, 1);
+      out->min = frange_outward(frange_exact_add(l.min, r.min), 0);
+      out->max = frange_outward(frange_exact_add(l.max, r.max), 1);
       out->err = frange_same_sign(&l, &r) ? l.err + r.err + eps
                                           : FRANGE_NO_BOUND;
       return 1;
     } else if (strcmp(op, "-") == 0) {
       out->has_min = 1;
       out->has_max = 1;
-      out->min = frange_outward((long double)l.min - (long double)r.max, 0);
-      out->max = frange_outward((long double)l.max - (long double)r.min, 1);
+      out->min = frange_outward(frange_exact_add(l.min, -r.max), 0);
+      out->max = frange_outward(frange_exact_add(l.max, -r.min), 1);
       out->err = FRANGE_NO_BOUND;
       return 1;
     } else if (strcmp(op, "*") == 0) {
-      long double p[4];
-      long double lo;
-      long double hi;
-      p[0] = (long double)l.min * (long double)r.min;
-      p[1] = (long double)l.min * (long double)r.max;
-      p[2] = (long double)l.max * (long double)r.min;
-      p[3] = (long double)l.max * (long double)r.max;
+      FExact p[4];
+      FExact lo;
+      FExact hi;
+      p[0] = frange_exact_mul(l.min, r.min);
+      p[1] = frange_exact_mul(l.min, r.max);
+      p[2] = frange_exact_mul(l.max, r.min);
+      p[3] = frange_exact_mul(l.max, r.max);
       lo = p[0];
       hi = p[0];
       for (int i = 1; i < 4; i++) {
-        if (p[i] < lo) {
+        if (p[i].value < lo.value) {
           lo = p[i];
         }
-        if (p[i] > hi) {
+        if (p[i].value > hi.value) {
           hi = p[i];
         }
       }
@@ -1547,14 +1593,10 @@ static void fnarrow_by_accumulator(TypeChecker *checker, const char *name,
   widened.has_min = 1;
   widened.has_max = 1;
   widened.min = frange_outward(
-      (long double)initial.min +
-          (step.min < 0.0 ? (long double)trips * (long double)step.min : 0.0L),
-      0);
+      frange_exact_scaled_sum(initial.min, trips, step.min, step.min < 0.0), 0);
   widened.max = frange_outward(
-      (long double)initial.max +
-          (step.max > 0.0 ? (long double)trips * (long double)step.max : 0.0L),
-      1);
-  widened.err = initial.err + (double)trips * (step.err + frange_eps(NULL));
+      frange_exact_scaled_sum(initial.max, trips, step.max, step.max > 0.0), 1);
+  widened.err = initial.err + trips * (step.err + frange_eps(NULL));
   if (widened.err >= FRANGE_NO_BOUND) {
     widened.err = FRANGE_NO_BOUND;
   }
