@@ -1,0 +1,86 @@
+import "std/io";
+import "std/parallel";
+import "std/mem";
+
+extern fn exit2(code: int32) -> int32 = "exit";
+
+struct Work { src: int64*; dst: int64*; rounds: int64; }
+
+@noinline fn square_body(ctx: rawptr, lo: int64, hi: int64) -> int32 {
+  var w: Work* = (Work*)ctx;
+  var i: int64 = lo;
+  while (i < hi) {
+    var acc: int64 = w->src[i];
+    var r: int64 = 0;
+    while (r < w->rounds) { acc = acc * 3 + 1; r += 1; }
+    w->dst[i] = acc;
+    i += 1;
+  }
+  return 0;
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+  var n: int64 = 20000;
+  var src: int64* = (int64*)malloc(n * 8);
+  var want: int64* = (int64*)malloc(n * 8);
+  var got: int64* = (int64*)malloc(n * 8);
+  var w: Work* = (Work*)malloc(32);
+
+  if (src == (int64*)0 || want == (int64*)0 || got == (int64*)0 ||
+      w == (Work*)0) {
+    println("malloc failed");
+    return 1;
+  }
+
+  var i: int64 = 0;
+  while (i < n) { src[i] = i - 5000; i += 1; }
+
+  w->src = src;
+  w->dst = want;
+  w->rounds = 7;
+  square_body((rawptr)w, 0, n);
+
+  i = 0;
+  while (i < n) { got[i] = 0; i += 1; }
+  w->dst = got;
+  parallel_range(&square_body, (rawptr)w, 0, n, 64);
+
+  var bad: int64 = 0;
+  i = 0;
+  while (i < n) { if (got[i] != want[i]) { bad += 1; } i += 1; }
+  if (bad != 0) { fails |= 1; }
+
+  i = 0;
+  while (i < n) { got[i] = 0; i += 1; }
+  parallel_range(&square_body, (rawptr)w, 0, n, 1000000);
+  bad = 0;
+  i = 0;
+  while (i < n) { if (got[i] != want[i]) { bad += 1; } i += 1; }
+  if (bad != 0) { fails |= 2; }
+
+  i = 0;
+  while (i < n) { got[i] = 0; i += 1; }
+  parallel_range(&square_body, (rawptr)w, 0, 0, 64);
+  if (got[0] != 0) { fails |= 4; }
+
+  parallel_range(&square_body, (rawptr)w, 7, 8, 1);
+  if (got[7] != want[7]) { fails |= 8; }
+
+  i = 0;
+  while (i < n) { got[i] = 0; i += 1; }
+  parallel_range(&square_body, (rawptr)w, 100, 900, 16);
+  bad = 0;
+  i = 100;
+  while (i < 900) { if (got[i] != want[i]) { bad += 1; } i += 1; }
+  if (bad != 0) { fails |= 16; }
+  if (got[99] != 0 || got[900] != 0) { fails |= 32; }
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("FAIL mask {fails}");
+  exit2(fails);
+  return fails;
+}
