@@ -486,14 +486,17 @@ int ir_emit_unroll_marker(IRLoweringContext *context, IRFunction *function,
 }
 
 int ir_emit_parallel_marker(IRLoweringContext *context, IRFunction *function,
-                            SourceLocation location) {
-  if (!context || !function) {
+                            const char *loop_label, SourceLocation location) {
+  char buffer[256];
+  if (!context || !function || !loop_label) {
     return 0;
   }
+  snprintf(buffer, sizeof(buffer), IR_PARALLEL_MARKER_PREFIX "1:%s",
+           loop_label);
   IRInstruction instruction = {0};
   instruction.op = IR_OP_NOP;
   instruction.location = location;
-  instruction.text = (char *)IR_PARALLEL_MARKER_PREFIX "1";
+  instruction.text = buffer;
   return ir_emit(context, function, &instruction);
 }
 

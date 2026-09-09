@@ -381,6 +381,11 @@ The context must be heap-allocated. Handing a stack address to the body is a
 compile error, because the body outlives the frame as far as the compiler can
 see, even though `parallel_range` joins before it returns.
 
+Marking a loop `@parallel` writes all of this for you: the compiler outlines the
+body, builds the context and calls `parallel_range` itself. Reach for these
+functions directly when the work does not fit a counted loop.
+[Declarations](declarations.md) covers the decorator.
+
 `min_chunk` is the smallest range worth a thread. Below `min_chunk * 2` the
 body runs once on the calling thread, so a short range costs one call and no
 thread. The caller always runs the last chunk itself.

@@ -271,6 +271,7 @@ A decorator sits before a declaration and asks the compiler for something.
 | `@pure` | A contract: the build fails if the function writes anything |
 | `@simd` | Report whether this loop vectorized |
 | `@unroll(n)` | Unroll this loop n times |
+| `@parallel` | Run this loop's iterations across the machine's cores |
 | `@test` | A compile-time test, run by `mettle test` |
 | `@rule` | A property the program requires of itself, checked on every build; see [Rules](rules.md) |
 | `@naked` | No prologue, no frame, no epilogue; the body is `asm` only |
@@ -296,6 +297,44 @@ defeated it. Vectorization contracts are only checked when optimization is on:
 ```text
 note: 1 `@simd` loop present but not verified; vectorization contracts are
 only checked with -O/--release
+```
+
+`@parallel` goes on a `for` or `while` loop. The compiler finds the counter,
+moves the body into a function of its own, lifts everything the body only reads
+into a context beside it, and replaces the loop with one call to the parallel
+runtime, which hands each thread a slice of the counter's range.
+
+```mettle
+@parallel while (row < height) {
+  var y: int32 = row * width;
+  var x: int32 = 0;
+  while (x < width) {
+    out[y + x] = shade(scene, x, row);
+    x += 1;
+  }
+  row += 1;
+}
+```
+
+It is a contract, and the build fails with the reason and the name when the
+compiler cannot deliver it: a value that carries from one iteration to the next,
+a `return` or a `break` out of the loop, a counter that steps by anything but
+one, a value written in the loop and read after it, a call in the body, or work
+the outliner will not move. Reads of the surrounding scope are free; writes must
+land in memory the loop reaches through a pointer.
+
+What the compiler does not check is memory. Two iterations writing the same
+bytes is a race, and the decorator is your promise that they do not. Say it only
+where the iterations are genuinely independent.
+
+Threads cost something to hand work to, so the runtime runs the whole range on
+the calling thread when it is short. `METTLE_PARALLEL_THREADS` caps the thread
+count at run time. Like the vectorization contracts, the outliner runs only with
+optimization on:
+
+```text
+note: 1 `@parallel` loop left running on one thread; the outliner only runs
+with -O/--release
 ```
 
 `@rule` is the open end of the contract set. A `@rule fn` takes the checked

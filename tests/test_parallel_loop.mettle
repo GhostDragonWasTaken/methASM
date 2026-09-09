@@ -2,6 +2,8 @@ import "std/io";
 import "std/mem";
 
 const N: int32 = 20000;
+const SCALE: int64 = 1000003;
+var table: int64[8];
 
 @noinline fn transform(dst: int64*, src: int64*, n: int32, salt: int64) {
   var i: int32 = 0;
@@ -61,6 +63,21 @@ fn main() -> int32 {
     i += 1;
   }
 
+  var wide: int64* = (int64*)malloc(8 * 4096);
+  i = 0;
+  while (i < 8) { table[i] = (int64)i * 7 - 3; i += 1; }
+  i = 0;
+  @parallel while (i < 4096) {
+    wide[i] = (int64)i * SCALE + table[i & 7];
+    i += 1;
+  }
+  var reused: int64 = (int64)i;
+  i = 0;
+  while (i < 4096) {
+    reused = reused + wide[i];
+    i += 1;
+  }
+
   println("mixed = {mixed}");
   println("striped = {striped}");
   if (mixed != 392376813670142450) {
@@ -69,6 +86,11 @@ fn main() -> int32 {
   }
   if (striped != 43490275508224000) {
     println("FAIL: the parallel for loop did not reproduce the serial answer");
+    return 1;
+  }
+  println("reused = {reused}");
+  if (reused != 8386585251840) {
+    println("FAIL: the counter or the globals did not survive the loop");
     return 1;
   }
   println("ok");

@@ -27,6 +27,7 @@ typedef struct {
   int float_bits;
   int is_unsigned;
   int take_address;
+  int is_temp;
 } IRParCapture;
 
 typedef struct {
@@ -326,21 +327,27 @@ static int ir_par_label_index(const IRFunction *function, const char *label,
   return 0;
 }
 
+static int ir_par_label_index(const IRFunction *function, const char *label,
+                              size_t *out);
+
 static int ir_par_find_loop(IRParLoop *loop) {
   IRFunction *function = loop->function;
-  size_t i = loop->marker + 1u;
+  const char *wanted = function->instructions[loop->marker].text +
+                       strlen(IR_PARALLEL_MARKER_PREFIX);
+  size_t i;
   size_t back_edges = 0;
   const IRInstruction *compare;
   const IRInstruction *branch;
 
-  while (i < function->instruction_count &&
-         function->instructions[i].op == IR_OP_NOP) {
-    i++;
+  while (*wanted && *wanted != ':') {
+    wanted++;
   }
-  if (i + 2u >= function->instruction_count ||
-      function->instructions[i].op != IR_OP_LABEL ||
-      !function->instructions[i].text) {
-    ir_par_reject(loop, "the loop header is not where it was expected", NULL);
+  if (*wanted != ':' || !ir_par_label_index(function, wanted + 1, &i)) {
+    ir_par_reject(loop, "the loop this marks is no longer here", NULL);
+    return 0;
+  }
+  if (i <= loop->marker || i + 2u >= function->instruction_count) {
+    ir_par_reject(loop, "the loop this marks is no longer here", NULL);
     return 0;
   }
   loop->header = i;
@@ -400,6 +407,14 @@ static int ir_par_find_loop(IRParLoop *loop) {
     }
     if (in->op == IR_OP_RETURN) {
       ir_par_reject(loop, "the body returns out of the loop", NULL);
+      return 0;
+    }
+    if (in->op == IR_OP_NOP && in->text &&
+        strncmp(in->text, IR_PARALLEL_MARKER_PREFIX,
+                strlen(IR_PARALLEL_MARKER_PREFIX)) == 0) {
+      ir_par_reject(loop, "a loop inside this one is marked as well, and the "
+                          "threads are already spread across the outer one",
+                    NULL);
       return 0;
     }
     if (!ir_par_opcode_supported(in->op)) {
@@ -626,7 +641,8 @@ static int ir_par_classify(IRParLoop *loop) {
 }
 
 static int ir_par_capture_add(IRParLoop *loop, const char *name,
-                              const IRParCapture *shape, int take_address) {
+                              const IRParCapture *shape, int take_address,
+                              int is_temp) {
   IRParCapture *grown =
       realloc(loop->captures, (loop->capture_count + 1u) * sizeof(*grown));
   if (!grown) {
@@ -636,8 +652,23 @@ static int ir_par_capture_add(IRParLoop *loop, const char *name,
   loop->captures[loop->capture_count] = *shape;
   loop->captures[loop->capture_count].name = name;
   loop->captures[loop->capture_count].take_address = take_address;
+  loop->captures[loop->capture_count].is_temp = is_temp;
   loop->capture_count++;
   return 1;
+}
+
+static int ir_par_temp_holds_address(const IRFunction *function, size_t before,
+                                     const char *name) {
+  size_t k = before;
+  while (k > 0u) {
+    const IROperand *def;
+    k--;
+    def = ir_par_definition(&function->instructions[k]);
+    if (def && def->name && strcmp(def->name, name) == 0) {
+      return function->instructions[k].op == IR_OP_ADDRESS_OF;
+    }
+  }
+  return 0;
 }
 
 static char *ir_par_pointer_type_name(const char *array_type) {
@@ -675,7 +706,21 @@ static int ir_par_build_captures(IRParLoop *loop) {
     }
     type_name = ir_par_name_type(function, name, &is_local);
     if (!type_name) {
-      ir_par_reject(loop, "a value enters the loop with no declared type",
+      if (ir_program_lookup_symbol(loop->program, name)) {
+        continue;
+      }
+      if (ir_par_temp_holds_address(function, loop->header, name)) {
+        memset(&shape, 0, sizeof(shape));
+        shape.type_name = "rawptr";
+        shape.bytes = 8;
+        if (!ir_par_capture_add(loop, name, &shape, 0, 1)) {
+          return 0;
+        }
+        continue;
+      }
+      ir_par_reject(loop,
+                    "a value the optimizer hoisted out of the loop cannot be "
+                    "carried into it",
                     name);
       return 0;
     }
@@ -687,7 +732,7 @@ static int ir_par_build_captures(IRParLoop *loop) {
       memset(&shape, 0, sizeof(shape));
       shape.type_name = pointer;
       shape.bytes = 8;
-      if (!ir_par_capture_add(loop, name, &shape, 1)) {
+      if (!ir_par_capture_add(loop, name, &shape, 1, 0)) {
         free(pointer);
         return 0;
       }
@@ -700,7 +745,7 @@ static int ir_par_build_captures(IRParLoop *loop) {
                     name);
       return 0;
     }
-    if (!ir_par_capture_add(loop, name, &shape, 0)) {
+    if (!ir_par_capture_add(loop, name, &shape, 0, 0)) {
       return 0;
     }
   }
@@ -712,6 +757,9 @@ static int ir_par_check_escapes(IRParLoop *loop) {
     if (!loop->names.defined[i] || !loop->names.other_use[i]) {
       continue;
     }
+    if (strcmp(loop->names.names[i], loop->iv) == 0) {
+      continue;
+    }
     ir_par_reject(loop, "a value written in the loop is read after it",
                   loop->names.names[i]);
     return 0;
@@ -719,7 +767,7 @@ static int ir_par_check_escapes(IRParLoop *loop) {
   return 1;
 }
 
-static int ir_par_emit(IRFunction *out, IRInstruction *in) {
+static int ir_par_emit(IRFunction *out, const IRInstruction *in) {
   return ir_function_append_instruction(out, in);
 }
 
@@ -836,14 +884,17 @@ static IRFunction *ir_par_build_worker(IRParLoop *loop, size_t id) {
 
   for (size_t i = 0; i < loop->capture_count; i++) {
     const IRParCapture *capture = &loop->captures[i];
-    IROperand destination = ir_operand_symbol(capture->name);
+    IROperand destination = capture->is_temp
+                                ? ir_operand_temp(capture->name)
+                                : ir_operand_symbol(capture->name);
     IROperand base = ir_operand_symbol("__par_ctx");
     IROperand offset = ir_operand_int((long long)(i * 8u));
     int ok;
     snprintf(slot, sizeof(slot), ".__par_slot%zu", i);
     if (!destination.name || !base.name ||
-        !ir_par_emit_declare(loop, worker, capture->name,
-                             capture->type_name) ||
+        (!capture->is_temp &&
+         !ir_par_emit_declare(loop, worker, capture->name,
+                              capture->type_name)) ||
         !ir_par_emit_binary(loop, worker, slot, "+", &base, &offset)) {
       ir_operand_destroy(&destination);
       ir_operand_destroy(&base);
@@ -1069,6 +1120,8 @@ static int ir_par_emit_dispatch(IRParLoop *loop, IRFunction *out,
       ir_operand_destroy(&take.dest);
       ir_operand_destroy(&take.lhs);
       value = ir_operand_temp(address_name);
+    } else if (capture->is_temp) {
+      value = ir_operand_temp(capture->name);
     } else {
       value = ir_operand_symbol(capture->name);
     }
@@ -1165,6 +1218,77 @@ static int ir_par_emit_dispatch(IRParLoop *loop, IRFunction *out,
     ir_operand_destroy(&call_args[i]);
   }
   ir_operand_destroy(&base);
+
+  {
+    const char *stop = loop->bound_inclusive ? stop_name : hi_name;
+    char done_label[96];
+    char guard_name[96];
+    char settle_name[96];
+    IROperand lo_value = ir_operand_temp(lo_name);
+    IROperand stop_value = ir_operand_temp(stop);
+    IRInstruction step = {0};
+    int ok;
+    snprintf(done_label, sizeof(done_label), "__par_done_%zu", id);
+    snprintf(guard_name, sizeof(guard_name), ".__par_ran_%zu", id);
+    snprintf(settle_name, sizeof(settle_name), ".__par_end_%zu", id);
+    if (!lo_value.name || !stop_value.name) {
+      ir_operand_destroy(&lo_value);
+      ir_operand_destroy(&stop_value);
+      return 0;
+    }
+    ok = ir_par_emit_binary(loop, out, guard_name, "<", &lo_value,
+                            &stop_value);
+    ir_operand_destroy(&lo_value);
+    ir_operand_destroy(&stop_value);
+    if (!ok) {
+      return 0;
+    }
+
+    step.op = IR_OP_BRANCH_ZERO;
+    step.location = loop->location;
+    step.lhs = ir_operand_temp(guard_name);
+    step.text = done_label;
+    if (!step.lhs.name || !ir_par_emit(out, &step)) {
+      ir_operand_destroy(&step.lhs);
+      return 0;
+    }
+    ir_operand_destroy(&step.lhs);
+
+    memset(&step, 0, sizeof(step));
+    step.op = IR_OP_CAST;
+    step.location = loop->location;
+    step.dest = ir_operand_temp(settle_name);
+    step.lhs = ir_operand_temp(stop);
+    step.text = (char *)loop->iv_type;
+    if (!step.dest.name || !step.lhs.name || !ir_par_emit(out, &step)) {
+      ir_operand_destroy(&step.dest);
+      ir_operand_destroy(&step.lhs);
+      return 0;
+    }
+    ir_operand_destroy(&step.dest);
+    ir_operand_destroy(&step.lhs);
+
+    memset(&step, 0, sizeof(step));
+    step.op = IR_OP_ASSIGN;
+    step.location = loop->location;
+    step.dest = ir_operand_symbol(loop->iv);
+    step.lhs = ir_operand_temp(settle_name);
+    if (!step.dest.name || !step.lhs.name || !ir_par_emit(out, &step)) {
+      ir_operand_destroy(&step.dest);
+      ir_operand_destroy(&step.lhs);
+      return 0;
+    }
+    ir_operand_destroy(&step.dest);
+    ir_operand_destroy(&step.lhs);
+
+    memset(&step, 0, sizeof(step));
+    step.op = IR_OP_LABEL;
+    step.location = loop->location;
+    step.text = done_label;
+    if (!ir_par_emit(out, &step)) {
+      return 0;
+    }
+  }
   return 1;
 }
 
@@ -1195,6 +1319,9 @@ static int ir_par_rewrite(IRParLoop *loop, const char *worker_name,
   IRFunction rebuilt = {0};
   for (size_t i = 0; i < function->instruction_count; i++) {
     if (i == loop->marker) {
+      continue;
+    }
+    if (i == loop->header) {
       if (!ir_par_emit_dispatch(loop, &rebuilt, worker_name, id)) {
         ir_par_free_instructions(&rebuilt);
         return 0;

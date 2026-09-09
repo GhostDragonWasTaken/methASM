@@ -88,7 +88,6 @@ extern int pthread_detach(unsigned long thread);
 extern int sched_yield(void);
 extern int nanosleep(const struct mettle_parallel_timespec *request,
                      struct mettle_parallel_timespec *remaining);
-extern long sysconf(int name);
 
 static void *mettle_parallel_entry(void *argument) {
   mettle_parallel_worker((long)(size_t)argument);
@@ -96,11 +95,31 @@ static void *mettle_parallel_entry(void *argument) {
 }
 
 static unsigned mettle_parallel_hardware_threads(void) {
-  long count = sysconf(84);
-  if (count < 1) {
-    return 1u;
+#if defined(__x86_64__)
+  unsigned long long mask[16];
+  long result;
+  unsigned count = 0;
+  for (unsigned i = 0; i < 16u; i++) {
+    mask[i] = 0;
   }
-  return (unsigned)count;
+  __asm__ __volatile__("syscall"
+                       : "=a"(result)
+                       : "a"(204L), "D"(0L), "S"((long)sizeof(mask)),
+                         "d"((long)(size_t)mask)
+                       : "rcx", "r11", "memory");
+  if (result > 0) {
+    for (unsigned i = 0; i < (unsigned)result / 8u && i < 16u; i++) {
+      unsigned long long word = mask[i];
+      while (word) {
+        word &= word - 1ull;
+        count++;
+      }
+    }
+  }
+  return count ? count : 1u;
+#else
+  return 4u;
+#endif
 }
 
 static int mettle_parallel_spawn(long index) {
