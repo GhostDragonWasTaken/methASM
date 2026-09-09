@@ -243,6 +243,7 @@ call :cc src\runtime\safety.c obj\runtime\safety.o "%RUNTIME_CFLAGS%"
 call :cc src\runtime\trace.c obj\runtime\trace.o "%RUNTIME_CFLAGS%"
 call :cc src\runtime\atomics.c obj\runtime\atomics.o "%RUNTIME_CFLAGS% -DMETTLE_ATOMICS_IN_FREESTANDING"
 call :cc src\runtime\profile.c obj\runtime\profile.o "%RUNTIME_CFLAGS%"
+call :cc src\runtime\parallel.c obj\runtime\parallel.o "%RUNTIME_CFLAGS%"
 call :cc src\runtime\debug.c obj\runtime\debug.o "%RUNTIME_CFLAGS%"
 call :cc stdlib\tracy_helpers.c obj\runtime\tracy_helpers.o "%RUNTIME_CFLAGS%"
 
@@ -452,6 +453,8 @@ copy /Y obj\runtime\atomics.o bin\runtime\atomics.o >nul
 copy /Y obj\runtime\atomics.o bin\runtime\atomics.obj >nul
 copy /Y obj\runtime\profile.o bin\runtime\profile.o >nul
 copy /Y obj\runtime\profile.o bin\runtime\profile.obj >nul
+copy /Y obj\runtime\parallel.o bin\runtime\parallel.o >nul
+copy /Y obj\runtime\parallel.o bin\runtime\parallel.obj >nul
 copy /Y obj\runtime\debug.o bin\runtime\debug.o >nul
 copy /Y obj\runtime\debug.o bin\runtime\debug.obj >nul
 copy /Y obj\runtime\tracy_helpers.o bin\runtime\tracy_helpers.o >nul

@@ -905,6 +905,10 @@ static int object_needs_atomics(const char *object_path) {
   return object_needs_runtime_object(object_path, "mettle_atomic_");
 }
 
+static int object_needs_parallel_runtime(const char *object_path) {
+  return object_needs_runtime_object(object_path, "mettle_parallel_");
+}
+
 static int object_needs_profile_runtime(const char *object_path) {
   return object_needs_runtime_object(object_path, "mettle_profile_");
 }
@@ -1266,6 +1270,7 @@ static int elf_collect_on_demand_objects(const char *runtime_directory,
       {"trace.o", "trace.o", object_needs_trace_runtime},
       {"debug.o", "debug.o", object_needs_debug_runtime},
       {"atomics.o", "atomics.o", object_needs_atomics},
+      {"parallel.o", "parallel.o", object_needs_parallel_runtime},
   };
   size_t i = 0u;
 
@@ -2161,6 +2166,7 @@ typedef enum {
   RUNTIME_OBJECT_SWAP,
   RUNTIME_OBJECT_STRING,
   RUNTIME_OBJECT_TRACY_HELPERS,
+  RUNTIME_OBJECT_PARALLEL,
   RUNTIME_OBJECT_COUNT
 } RuntimeObjectKind;
 
@@ -2182,6 +2188,8 @@ static const RuntimeObjectSpec RUNTIME_OBJECT_SPECS[RUNTIME_OBJECT_COUNT] = {
     [RUNTIME_OBJECT_TRACE] = {"trace", "trace", object_needs_trace_runtime},
     [RUNTIME_OBJECT_SWAP] = {"swap", "swap", object_needs_swap_runtime},
     [RUNTIME_OBJECT_STRING] = {"string", "string", object_needs_string_runtime},
+    [RUNTIME_OBJECT_PARALLEL] = {"parallel", "parallel",
+                                 object_needs_parallel_runtime},
     [RUNTIME_OBJECT_TRACY_HELPERS] = {"tracy_helpers", "Tracy helpers",
                                       object_needs_tracy_helpers},
 };
@@ -2230,6 +2238,7 @@ static const LinkObjectRequest LINK_INTERNAL_REQUESTS[] = {
     {RUNTIME_OBJECT_SWAP, 0, LINK_OBJECT_ANY},
     {RUNTIME_OBJECT_STRING, 0, LINK_OBJECT_ANY},
     {RUNTIME_OBJECT_TRACY_HELPERS, 0, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_PARALLEL, 0, LINK_OBJECT_ANY},
 };
 
 static const LinkObjectRequest LINK_GCC_REQUESTS[] = {
@@ -2242,6 +2251,7 @@ static const LinkObjectRequest LINK_GCC_REQUESTS[] = {
     {RUNTIME_OBJECT_SAFETY, 1, LINK_OBJECT_REQUIRED},
     {RUNTIME_OBJECT_DEBUG, 1, LINK_OBJECT_REQUIRED},
     {RUNTIME_OBJECT_TRACY_HELPERS, 0, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_PARALLEL, 0, LINK_OBJECT_ANY},
 };
 
 static const LinkObjectRequest LINK_MSVC_REQUESTS[] = {
@@ -2255,6 +2265,7 @@ static const LinkObjectRequest LINK_MSVC_REQUESTS[] = {
     {RUNTIME_OBJECT_SAFETY, 0, LINK_OBJECT_REQUIRED},
     {RUNTIME_OBJECT_DEBUG, 0, LINK_OBJECT_REQUIRED},
     {RUNTIME_OBJECT_TRACY_HELPERS, 0, LINK_OBJECT_ANY},
+    {RUNTIME_OBJECT_PARALLEL, 0, LINK_OBJECT_ANY},
 };
 
 static const char *link_plan_pick(const LinkPlan *plan,
