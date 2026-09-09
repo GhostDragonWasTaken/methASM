@@ -1,0 +1,145 @@
+import "std/io";
+
+struct Cursor {
+  pos: int32;
+  len: int32;
+  tag: uint8;
+  small: int8;
+  wide: int64;
+}
+
+@noinline fn store_then_load(c: Cursor*, v: int32) -> int32 {
+  c->pos = v;
+  return c->pos;
+}
+
+@noinline fn narrow_unsigned(c: Cursor*, v: int32) -> int32 {
+  c->tag = (uint8)v;
+  var r: int32 = (int32)c->tag;
+  return r;
+}
+
+@noinline fn narrow_signed(c: Cursor*, v: int32) -> int32 {
+  c->small = (int8)v;
+  var r: int32 = (int32)c->small;
+  return r;
+}
+
+@noinline fn through_alias(c: Cursor*, p: int32*) -> int32 {
+  c->pos = 1;
+  *p = 2;
+  return c->pos;
+}
+
+@noinline fn bump(c: Cursor*) {
+  c->pos = c->pos + 1;
+}
+
+@noinline fn across_call(c: Cursor*) -> int32 {
+  c->pos = 5;
+  bump(c);
+  return c->pos;
+}
+
+@noinline fn scan_to(c: Cursor*, data: uint8*, stop: uint8) -> int32 {
+  while (c->pos < c->len) {
+    if (data[c->pos] == stop) {
+      break;
+    }
+    c->pos = c->pos + 1;
+  }
+  var after: int32 = c->pos;
+  c->len = c->len + 0;
+  return after * 1000 + c->pos;
+}
+
+@noinline fn two_loads(c: Cursor*) -> int32 {
+  var x: int32 = c->pos;
+  c->len = 9;
+  var y: int32 = c->pos;
+  return x * 100 + y + c->len;
+}
+
+@noinline fn width_mismatch(c: Cursor*) -> int32 {
+  c->wide = 4294967297;
+  var lo: int32 = *((int32*)(&c->wide));
+  return lo;
+}
+
+@noinline fn constant_store(c: Cursor*) -> int32 {
+  c->pos = 1234;
+  c->small = (int8)200;
+  return c->pos + (int32)c->small;
+}
+
+fn main() -> int32 {
+  var bad: int32 = 0;
+  var c: Cursor;
+  c.pos = 0;
+  c.len = 0;
+  c.tag = 0;
+  c.small = 0;
+  c.wide = 0;
+
+  if (store_then_load(&c, 41) != 41) {
+    println("store_then_load wrong");
+    bad = bad + 1;
+  }
+  if (narrow_unsigned(&c, 300) != 44) {
+    println("narrow_unsigned = {narrow_unsigned(&c, 300)}, wanted 44");
+    bad = bad + 1;
+  }
+  if (narrow_signed(&c, 200) != 0 - 56) {
+    println("narrow_signed = {narrow_signed(&c, 200)}, wanted -56");
+    bad = bad + 1;
+  }
+  if (through_alias(&c, &c.pos) != 2) {
+    println("through_alias = {through_alias(&c, &c.pos)}, wanted 2");
+    bad = bad + 1;
+  }
+  if (across_call(&c) != 6) {
+    println("across_call = {across_call(&c)}, wanted 6");
+    bad = bad + 1;
+  }
+
+  var buf: uint8[16];
+  var i: int32 = 0;
+  while (i < 16) {
+    buf[i] = (uint8)(65 + i);
+    i = i + 1;
+  }
+  c.pos = 2;
+  c.len = 16;
+  if (scan_to(&c, &buf[0], 70) != 5005) {
+    println("scan_to break exit = {scan_to(&c, &buf[0], 70)}, wanted 5005");
+    bad = bad + 1;
+  }
+  c.pos = 3;
+  c.len = 7;
+  if (scan_to(&c, &buf[0], 0) != 7007) {
+    println("scan_to bound exit = {scan_to(&c, &buf[0], 0)}, wanted 7007");
+    bad = bad + 1;
+  }
+
+  c.pos = 8;
+  c.len = 1;
+  if (two_loads(&c) != 817) {
+    println("two_loads = {two_loads(&c)}, wanted 817");
+    bad = bad + 1;
+  }
+  if (width_mismatch(&c) != 1) {
+    println("width_mismatch = {width_mismatch(&c)}, wanted 1");
+    bad = bad + 1;
+  }
+  if (constant_store(&c) != 1178) {
+    println("constant_store = {constant_store(&c)}, wanted 1178");
+    bad = bad + 1;
+  }
+
+  if (bad != 0) {
+    println("forward stored values mismatches = {bad}");
+    return 1;
+  }
+  println("FORWARD STORED VALUES: ALL OK");
+  return 0;
+}

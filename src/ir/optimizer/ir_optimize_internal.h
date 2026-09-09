@@ -429,6 +429,7 @@ int ir_widen_byte_pack_pass(IRFunction *function, int *changed);
 int ir_widen_subword_load_cast_pass(IRFunction *function, int *changed);
 int ir_hoist_invariant_loads_pass(IRFunction *function, int *changed);
 int ir_promote_loop_memory_pass(IRFunction *function, int *changed);
+int ir_forward_stored_values_pass(IRFunction *function, int *changed);
 int ir_merge_adjacent_const_stores_pass(IRFunction *function, int *changed);
 int ir_unify_param_copy_spelling_pass(IRFunction *function, int *changed);
 int ir_find_label_index(const IRFunction *function, const char *label,

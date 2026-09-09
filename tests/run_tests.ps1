@@ -6469,6 +6469,12 @@ $simdRuntimeCases = @(
     IrMustMatch     = @("__prom_")
   },
   @{
+    Name            = "forward_stored_values"
+    Path            = "tests/forward_stored_values_check.mettle"
+    OutputMustMatch = "FORWARD STORED VALUES: ALL OK"
+    IrMustMatch     = @("store_then_load")
+  },
+  @{
     # MIR-level pass, so no IR pattern exists; the runtime check is the guard
     # (the reference lane-shape must stay scalar and agree bit for bit).
     Name            = "slp_pair_f64"

@@ -125,6 +125,8 @@ static const IROptNamedPass g_ir_lowering_cleanup[] = {
      {IR_OPT_FEATURE_LOAD | IR_OPT_FEATURE_LABEL, IR_OPT_REQUIRE_NONE}},
     {"hoist_invariant_arith", ir_hoist_invariant_arith_pass,
      {IR_OPT_FEATURE_LABEL, IR_OPT_REQUIRE_NONE}},
+    {"forward_stored_values", ir_forward_stored_values_pass,
+     {IR_OPT_FEATURE_LOAD, IR_OPT_REQUIRE_NONE}},
     {"widen_subword_cast", ir_widen_subword_load_cast_pass,
      {IR_OPT_FEATURE_LOAD, IR_OPT_REQUIRE_NONE}},
     {"widen_byte_pack", ir_widen_byte_pack_pass,
@@ -825,6 +827,9 @@ int ir_optimize_program_pipeline(IRProgram *program,
       return 0;
     }
     ir_pass_time_end("pre_inline [stage]", t0);
+    if (getenv("METTLE_DUMP_PRE_INLINE")) {
+      ir_program_dump(program, stderr);
+    }
   }
 
   if (!ir_pass_name_is_skipped("hoist_pure_calls")) {

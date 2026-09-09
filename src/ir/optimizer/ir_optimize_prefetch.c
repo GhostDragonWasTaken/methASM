@@ -34,6 +34,7 @@ static long long ir_prefetch_distance_for_loop(const IRFunction *function,
 
 typedef struct {
   size_t indices[IR_PREFETCH_MAX_SLICE];
+  size_t interior_load_index;
   size_t count;
   size_t interior_loads;
 } IRPrefetchSlice;
@@ -78,6 +79,7 @@ static int ir_prefetch_collect_slice(const IRFunction *function,
   }
   if (producer->op == IR_OP_LOAD) {
     slice->interior_loads++;
+    slice->interior_load_index = prod_index;
   }
 
   const IROperand *sources[2] = {&producer->lhs, NULL};
@@ -126,6 +128,25 @@ static int ir_prefetch_slice_uses_iv(const IRFunction *function,
     }
   }
   return 0;
+}
+
+static int ir_prefetch_interior_load_uses_iv(const IRFunction *function,
+                                             size_t body_start,
+                                             size_t body_end,
+                                             const IRPrefetchSlice *slice,
+                                             const char *iv_symbol) {
+  const IRInstruction *load = &function->instructions[slice->interior_load_index];
+  IRPrefetchSlice inner;
+  if (load->lhs.kind != IR_OPERAND_TEMP || !load->lhs.name) {
+    return 0;
+  }
+  memset(&inner, 0, sizeof(inner));
+  if (!ir_prefetch_collect_slice(function, body_start, body_end,
+                                 slice->interior_load_index, load->lhs.name,
+                                 iv_symbol, &inner)) {
+    return 0;
+  }
+  return ir_prefetch_slice_uses_iv(function, &inner, iv_symbol);
 }
 
 static char *ir_prefetch_temp_name(void) {
@@ -218,7 +239,9 @@ static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
       continue;
     }
     if (slice.interior_loads == 1 &&
-        ir_prefetch_slice_uses_iv(function, &slice, iv_symbol)) {
+        ir_prefetch_slice_uses_iv(function, &slice, iv_symbol) &&
+        ir_prefetch_interior_load_uses_iv(function, body_start, body_end,
+                                          &slice, iv_symbol)) {
       target_load = i;
       break;
     }

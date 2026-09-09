@@ -849,6 +849,9 @@ static void mir_compute_liveness(MirFunction *fn) {
   }
   for (size_t i = 0; i < fn->insn_count; i++) {
     const MirInst *in = &fn->insns[i];
+    if (in->op == MIR_NOP) {
+      continue;
+    }
     mir_note_operand_liveness(fn, &in->dst, (int)i);
     mir_note_operand_liveness(fn, &in->a, (int)i);
     mir_note_operand_liveness(fn, &in->b, (int)i);
@@ -1789,8 +1792,10 @@ static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool
         if (!(preferred & (1u << r))) {
           continue;
         }
-        int nonvol = mir_gp_is_nonvolatile((BinaryGpRegister)r) ||
-                     r == BINARY_GP_RBP;
+        int nonvol = vr->rclass == MIR_RC_XMM
+                         ? r >= 8
+                         : (mir_gp_is_nonvolatile((BinaryGpRegister)r) ||
+                            r == BINARY_GP_RBP);
         if (nonvol == pass) {
           chosen = r;
           break;

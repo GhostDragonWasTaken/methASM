@@ -313,6 +313,8 @@ static const char *vr_negate_relation(const char *op) {
   return NULL;
 }
 
+#define VR_LABEL_TRANSPARENT ((size_t)-2)
+
 static size_t vr_label_entry_branch(IRValueRangeCtx *ctx, size_t label_index) {
   const IRFunction *fn = ctx->function;
   const char *label = fn->instructions[label_index].text;
@@ -322,10 +324,17 @@ static size_t vr_label_entry_branch(IRValueRangeCtx *ctx, size_t label_index) {
 
   const IROperand *memo = ir_temp_value_map_lookup(&ctx->label_guard, label);
   if (memo && memo->kind == IR_OPERAND_INT) {
-    return memo->int_value == 0 ? (size_t)-1 : (size_t)(memo->int_value - 1);
+    if (memo->int_value == 0) {
+      return (size_t)-1;
+    }
+    if (memo->int_value < 0) {
+      return VR_LABEL_TRANSPARENT;
+    }
+    return (size_t)(memo->int_value - 1);
   }
 
   size_t result = (size_t)-1;
+  int transparent = 0;
   int fallthrough_reaches = 1;
   for (size_t i = label_index; i > 0;) {
     i--;
@@ -335,6 +344,18 @@ static size_t vr_label_entry_branch(IRValueRangeCtx *ctx, size_t label_index) {
     }
     fallthrough_reaches = !(prev->op == IR_OP_JUMP || prev->op == IR_OP_RETURN);
     break;
+  }
+
+  if (fallthrough_reaches) {
+    transparent = 1;
+    for (size_t i = 0; i < fn->instruction_count && transparent; i++) {
+      const IRInstruction *in = &fn->instructions[i];
+      if (in->text && (in->op == IR_OP_JUMP || in->op == IR_OP_BRANCH_ZERO ||
+                       in->op == IR_OP_BRANCH_EQ) &&
+          strcmp(in->text, label) == 0) {
+        transparent = 0;
+      }
+    }
   }
 
   if (!fallthrough_reaches) {
@@ -358,10 +379,10 @@ static size_t vr_label_entry_branch(IRValueRangeCtx *ctx, size_t label_index) {
     }
   }
 
-  IROperand value =
-      ir_operand_int(result == (size_t)-1 ? 0 : (long long)result + 1);
+  IROperand value = ir_operand_int(
+      transparent ? -1 : (result == (size_t)-1 ? 0 : (long long)result + 1));
   ir_temp_value_map_set(&ctx->label_guard, label, &value);
-  return result;
+  return transparent ? VR_LABEL_TRANSPARENT : result;
 }
 
 static void vr_apply_branch_fact(IRValueRangeCtx *ctx, size_t branch_index,
@@ -431,6 +452,9 @@ static void vr_apply_guards(IRValueRangeCtx *ctx, size_t at, const char *symbol,
     scanned++;
     if (in->op == IR_OP_LABEL) {
       size_t entry = vr_label_entry_branch(ctx, i);
+      if (entry == VR_LABEL_TRANSPARENT) {
+        continue;
+      }
       if (entry == (size_t)-1) {
         return;
       }

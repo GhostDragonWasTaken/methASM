@@ -2588,6 +2588,89 @@ static void re_promote_collect_sites(const IRFunction *function,
   out->promoted_class = promoted_class;
 }
 
+static int re_promote_insert_exit_store(IRFunction *function, size_t at,
+                                        int is_address_of,
+                                        const char *region_name,
+                                        long long region_offset,
+                                        const char *local_name, long long size,
+                                        unsigned char promoted_class,
+                                        SourceLocation location, int counter,
+                                        size_t exit_index,
+                                        size_t *inserted_out) {
+  char addr_name[64];
+  char root_name[64];
+  IRInstruction pieces[3];
+  size_t inserted = 0;
+  int failed = 0;
+  snprintf(addr_name, sizeof(addr_name), "__proma_%d_x%zu", counter,
+           exit_index);
+  snprintf(root_name, sizeof(root_name), "__proma_%d_x%zu_r", counter,
+           exit_index);
+  memset(pieces, 0, sizeof(pieces));
+  if (is_address_of) {
+    pieces[0].op = IR_OP_ADDRESS_OF;
+    pieces[0].dest = ir_operand_temp(root_name);
+    pieces[0].lhs = ir_operand_symbol(region_name);
+    pieces[1].op = IR_OP_BINARY;
+    pieces[1].text = mettle_strdup("+");
+    pieces[1].dest = ir_operand_temp(addr_name);
+    pieces[1].lhs = ir_operand_temp(root_name);
+    pieces[1].rhs = ir_operand_int(region_offset);
+  } else {
+    pieces[0].op = IR_OP_NOP;
+    pieces[1].op = IR_OP_BINARY;
+    pieces[1].text = mettle_strdup("+");
+    pieces[1].dest = ir_operand_temp(addr_name);
+    pieces[1].lhs = ir_operand_symbol(region_name);
+    pieces[1].rhs = ir_operand_int(region_offset);
+  }
+  pieces[2].op = IR_OP_STORE;
+  pieces[2].dest = ir_operand_temp(addr_name);
+  pieces[2].lhs = ir_operand_symbol(local_name);
+  pieces[2].rhs = ir_operand_int(size);
+  pieces[2].alias_class = promoted_class;
+  for (int k = 0; k < 3; k++) {
+    pieces[k].location = location;
+  }
+  for (int k = 0; k < 3; k++) {
+    if (pieces[k].op != IR_OP_NOP && !failed &&
+        !ir_function_insert_instruction(function, at + inserted, &pieces[k])) {
+      failed = 1;
+    }
+    if (pieces[k].op != IR_OP_NOP && !failed) {
+      inserted++;
+    }
+    ir_instruction_destroy_storage(&pieces[k]);
+  }
+  *inserted_out = inserted;
+  return !failed;
+}
+
+static size_t re_promote_exit_block_position(const IRFunction *function,
+                                             const char *target,
+                                             size_t after) {
+  size_t end = function->instruction_count;
+  for (size_t i = after + 1; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op != IR_OP_LABEL || !in->text || strcmp(in->text, target) != 0) {
+      continue;
+    }
+    size_t p = i;
+    while (p > 0 && function->instructions[p - 1].op == IR_OP_NOP) {
+      p--;
+    }
+    if (p == 0) {
+      return end;
+    }
+    const IRInstruction *prev = &function->instructions[p - 1];
+    if (prev->op == IR_OP_JUMP || prev->op == IR_OP_RETURN) {
+      return i;
+    }
+    return end;
+  }
+  return end;
+}
+
 static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
                               const IRTempValueMap *addr_taken, int *changed) {
   const REDefs defs = *defs_in;
@@ -2634,9 +2717,12 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
       }
       long long size = seed->rhs.int_value;
       char region_base[RE_NAME_MAX + 1];
+      char region_name[RE_NAME_MAX + 1];
       if (snprintf(region_base, sizeof(region_base), "%c%s",
                    region.is_address_of ? '&' : 's',
-                   region.name) >= (int)sizeof(region_base)) {
+                   region.name) >= (int)sizeof(region_base) ||
+          snprintf(region_name, sizeof(region_name), "%s", region.name) >=
+              (int)sizeof(region_name)) {
         continue;
       }
 
@@ -2834,28 +2920,23 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
       }
 
       for (size_t k = 0; k < exit_count; k++) {
-        IRInstruction st = {0};
-        st.op = IR_OP_STORE;
-        st.dest = ir_operand_temp(addr_name);
-        st.lhs = ir_operand_symbol(local_name);
-        st.rhs = ir_operand_int(size);
-        st.location = function->instructions[exits[k].at].location;
-        st.alias_class = promoted_class;
+        SourceLocation where = function->instructions[exits[k].at].location;
+        size_t inserted_here = 0;
 
         if (exits[k].is_return) {
-          if (!ir_function_insert_instruction(function, exits[k].at, &st)) {
-            failed = 1;
-          }
-          ir_instruction_destroy_storage(&st);
-          if (failed) {
+          if (!re_promote_insert_exit_store(function, exits[k].at,
+                                            region.is_address_of, region_name,
+                                            region.offset, local_name, size,
+                                            promoted_class, where, counter - 1,
+                                            k, &inserted_here)) {
             return 0;
           }
           for (size_t m = 0; m < exit_count; m++) {
             if (exits[m].at >= exits[k].at) {
-              exits[m].at++;
+              exits[m].at += inserted_here;
             }
           }
-          latch++;
+          latch += inserted_here;
           continue;
         }
 
@@ -2865,14 +2946,12 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
                  k);
         char *old_target = mettle_strdup(br->text);
         if (!old_target) {
-          ir_instruction_destroy_storage(&st);
           return 0;
         }
         mettle_free_string(br->text);
         br->text = mettle_strdup(tail_name);
         if (!br->text) {
           free(old_target);
-          ir_instruction_destroy_storage(&st);
           return 0;
         }
 
@@ -2882,18 +2961,31 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
         tail_label.text = mettle_strdup(tail_name);
         tail_jump.op = IR_OP_JUMP;
         tail_jump.text = old_target;
-        size_t end = function->instruction_count;
+        size_t end = re_promote_exit_block_position(function, old_target,
+                                                    exits[k].at);
         if (!tail_label.text ||
             !ir_function_insert_instruction(function, end, &tail_label) ||
-            !ir_function_insert_instruction(function, end + 1, &st) ||
-            !ir_function_insert_instruction(function, end + 2, &tail_jump)) {
+            !re_promote_insert_exit_store(function, end + 1,
+                                          region.is_address_of, region_name,
+                                          region.offset, local_name, size,
+                                          promoted_class, where, counter - 1,
+                                          k, &inserted_here) ||
+            !ir_function_insert_instruction(function, end + 1 + inserted_here,
+                                            &tail_jump)) {
           failed = 1;
         }
         ir_instruction_destroy_storage(&tail_label);
-        ir_instruction_destroy_storage(&st);
         ir_instruction_destroy_storage(&tail_jump);
         if (failed) {
           return 0;
+        }
+        for (size_t m = 0; m < exit_count; m++) {
+          if (exits[m].at >= end) {
+            exits[m].at += inserted_here + 2;
+          }
+        }
+        if (latch >= end) {
+          latch += inserted_here + 2;
         }
       }
 
@@ -3950,6 +4042,594 @@ int ir_merge_adjacent_const_stores_pass(IRFunction *function, int *changed) {
       }
     }
   }
+  re_map_destroy(&defs.defs);
+  re_map_destroy(&defs.def_at);
+  ir_temp_value_map_destroy(&addr_taken);
+  return 1;
+}
+
+typedef struct {
+  char *base;
+  long long off;
+  long long size;
+  unsigned char alias_class;
+  unsigned char from_load;
+  unsigned char is_unsigned;
+  unsigned char is_float;
+  int float_bits;
+  IROperand value;
+} FwdFact;
+
+typedef struct {
+  FwdFact *items;
+  size_t count;
+  size_t capacity;
+  int top;
+} FwdSet;
+
+typedef struct {
+  IRFunction *function;
+  const REDefs *defs;
+  const IRTempValueMap *addr_taken;
+  int *changed;
+} FwdCtx;
+
+static void fwd_fact_release(FwdFact *fact) {
+  free(fact->base);
+  fact->base = NULL;
+  ir_operand_destroy(&fact->value);
+}
+
+static void fwd_set_clear(FwdSet *set) {
+  for (size_t i = 0; i < set->count; i++) {
+    fwd_fact_release(&set->items[i]);
+  }
+  set->count = 0;
+}
+
+static void fwd_set_destroy(FwdSet *set) {
+  fwd_set_clear(set);
+  free(set->items);
+  set->items = NULL;
+  set->capacity = 0;
+}
+
+static int fwd_fact_equal(const FwdFact *a, const FwdFact *b) {
+  return a->off == b->off && a->size == b->size &&
+         a->from_load == b->from_load && a->is_unsigned == b->is_unsigned &&
+         a->is_float == b->is_float && a->float_bits == b->float_bits &&
+         a->alias_class == b->alias_class && strcmp(a->base, b->base) == 0 &&
+         ir_operand_same(&a->value, &b->value);
+}
+
+static int fwd_set_contains(const FwdSet *set, const FwdFact *fact) {
+  for (size_t i = 0; i < set->count; i++) {
+    if (fwd_fact_equal(&set->items[i], fact)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static const FwdFact *fwd_set_find(const FwdSet *set, const char *base,
+                                   long long off, long long size) {
+  for (size_t i = set->count; i-- > 0;) {
+    const FwdFact *fact = &set->items[i];
+    if (fact->off == off && fact->size == size &&
+        strcmp(fact->base, base) == 0) {
+      return fact;
+    }
+  }
+  return NULL;
+}
+
+static int fwd_set_add(FwdSet *set, const FwdFact *fact) {
+  if (set->count == set->capacity) {
+    size_t capacity = set->capacity ? set->capacity * 2 : 16;
+    FwdFact *grown = realloc(set->items, capacity * sizeof(FwdFact));
+    if (!grown) {
+      return 0;
+    }
+    set->items = grown;
+    set->capacity = capacity;
+  }
+  FwdFact *slot = &set->items[set->count];
+  memset(slot, 0, sizeof(*slot));
+  slot->base = mettle_strdup(fact->base);
+  if (!slot->base || !ir_operand_clone(&fact->value, &slot->value)) {
+    fwd_fact_release(slot);
+    return 0;
+  }
+  slot->off = fact->off;
+  slot->size = fact->size;
+  slot->alias_class = fact->alias_class;
+  slot->from_load = fact->from_load;
+  slot->is_unsigned = fact->is_unsigned;
+  slot->is_float = fact->is_float;
+  slot->float_bits = fact->float_bits;
+  set->count++;
+  return 1;
+}
+
+static int fwd_set_copy(FwdSet *dst, const FwdSet *src) {
+  fwd_set_clear(dst);
+  dst->top = src->top;
+  for (size_t i = 0; i < src->count; i++) {
+    if (!fwd_set_add(dst, &src->items[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int fwd_set_meet(FwdSet *dst, const FwdSet *src) {
+  if (src->top) {
+    return 1;
+  }
+  if (dst->top) {
+    return fwd_set_copy(dst, src);
+  }
+  size_t write = 0;
+  for (size_t read = 0; read < dst->count; read++) {
+    if (!fwd_set_contains(src, &dst->items[read])) {
+      fwd_fact_release(&dst->items[read]);
+      continue;
+    }
+    if (write != read) {
+      dst->items[write] = dst->items[read];
+    }
+    write++;
+  }
+  dst->count = write;
+  return 1;
+}
+
+static int fwd_set_equal(const FwdSet *a, const FwdSet *b) {
+  if (a->top != b->top) {
+    return 0;
+  }
+  if (a->top) {
+    return 1;
+  }
+  if (a->count != b->count) {
+    return 0;
+  }
+  for (size_t i = 0; i < a->count; i++) {
+    if (!fwd_set_contains(b, &a->items[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void fwd_kill_region(FwdSet *set, const IRFunction *function,
+                            const char *base, long long off, long long size,
+                            unsigned alias_class) {
+  REMemRegion region;
+  region.base = (char *)base;
+  region.off = off;
+  region.size = size;
+  region.alias_class = (unsigned char)alias_class;
+  size_t write = 0;
+  for (size_t read = 0; read < set->count; read++) {
+    FwdFact *fact = &set->items[read];
+    if (re_kill_hits(function, &region, fact->base, fact->off, fact->size,
+                     fact->alias_class)) {
+      fwd_fact_release(fact);
+      continue;
+    }
+    if (write != read) {
+      set->items[write] = *fact;
+    }
+    write++;
+  }
+  set->count = write;
+}
+
+static void fwd_kill_name(FwdSet *set, IROperandKind kind, const char *name) {
+  char prefix = kind == IR_OPERAND_SYMBOL ? 's' : 't';
+  if (!name || (kind != IR_OPERAND_SYMBOL && kind != IR_OPERAND_TEMP)) {
+    return;
+  }
+  size_t write = 0;
+  for (size_t read = 0; read < set->count; read++) {
+    FwdFact *fact = &set->items[read];
+    int names_base = fact->base[0] == prefix && strcmp(fact->base + 1, name) == 0;
+    int names_value = fact->value.kind == kind && fact->value.name &&
+                      strcmp(fact->value.name, name) == 0;
+    if (names_base || names_value) {
+      fwd_fact_release(fact);
+      continue;
+    }
+    if (write != read) {
+      set->items[write] = *fact;
+    }
+    write++;
+  }
+  set->count = write;
+}
+
+static int fwd_addr_base(const REAddr *addr, char *out, size_t size) {
+  return snprintf(out, size, "%c%s",
+                  addr->is_address_of
+                      ? '&'
+                      : (addr->kind == IR_OPERAND_SYMBOL ? 's' : 't'),
+                  addr->name) < (int)size;
+}
+
+static int fwd_value_is_trackable(const FwdCtx *ctx, const IROperand *value) {
+  if (value->float_bits != 0) {
+    return 0;
+  }
+  if (value->kind == IR_OPERAND_INT) {
+    return 1;
+  }
+  if (value->kind == IR_OPERAND_TEMP) {
+    return value->name != NULL;
+  }
+  if (value->kind == IR_OPERAND_SYMBOL) {
+    return value->name && !re_symbol_is_aliasable(ctx->defs, value->name);
+  }
+  return 0;
+}
+
+static const char *fwd_cast_name(long long size, int is_unsigned) {
+  switch (size) {
+  case 1:
+    return is_unsigned ? "uint8" : "int8";
+  case 2:
+    return is_unsigned ? "uint16" : "int16";
+  case 4:
+    return is_unsigned ? "uint32" : "int32";
+  default:
+    return NULL;
+  }
+}
+
+static long long fwd_truncate(long long value, long long size, int is_unsigned) {
+  if (size >= 8) {
+    return value;
+  }
+  int bits = (int)size * 8;
+  unsigned long long mask = (1ull << bits) - 1ull;
+  unsigned long long low = (unsigned long long)value & mask;
+  if (is_unsigned || !(low & (1ull << (bits - 1)))) {
+    return (long long)low;
+  }
+  return (long long)(low | ~mask);
+}
+
+static int fwd_load_can_use(const IRInstruction *load, long long size,
+                            const FwdFact *fact) {
+  if (fact->from_load) {
+    return fact->is_unsigned == load->is_unsigned &&
+           fact->is_float == load->is_float &&
+           fact->float_bits == load->float_bits;
+  }
+  if (load->is_float) {
+    return 0;
+  }
+  return size == 8 || fwd_cast_name(size, load->is_unsigned) != NULL;
+}
+
+static int fwd_rewrite_load(FwdCtx *ctx, IRInstruction *ins, long long size,
+                            const FwdFact *fact) {
+  int keep_unsigned = ins->is_unsigned;
+  int keep_float = ins->is_float;
+  int keep_bits = ins->float_bits;
+  MtlcType *keep_type = ins->value_type;
+
+  if (fact->value.kind == IR_OPERAND_INT) {
+    long long value = fact->from_load
+                          ? fact->value.int_value
+                          : fwd_truncate(fact->value.int_value, size,
+                                         ins->is_unsigned);
+    if (!ir_rewrite_to_assign_int(ins, value, ctx->changed)) {
+      return 0;
+    }
+    ins->is_unsigned = keep_unsigned;
+    ins->is_float = keep_float;
+    ins->float_bits = keep_bits;
+    ins->value_type = keep_type;
+    return 1;
+  }
+
+  int self_copy = fact->value.kind == ins->dest.kind && ins->dest.name &&
+                  fact->value.name &&
+                  strcmp(fact->value.name, ins->dest.name) == 0;
+  if (fact->from_load || size == 8) {
+    if (self_copy) {
+      ir_instruction_destroy_storage(ins);
+      memset(ins, 0, sizeof(*ins));
+      ins->op = IR_OP_NOP;
+      if (ctx->changed) {
+        *ctx->changed = 1;
+      }
+      return 1;
+    }
+    if (!ir_rewrite_to_assign_operand(ins, &fact->value, ctx->changed)) {
+      return 0;
+    }
+    ins->is_unsigned = keep_unsigned;
+    ins->is_float = keep_float;
+    ins->float_bits = keep_bits;
+    ins->value_type = keep_type;
+    return 1;
+  }
+
+  const char *cast_name = fwd_cast_name(size, ins->is_unsigned);
+  IROperand source = ir_operand_none();
+  char *text = cast_name ? mettle_strdup(cast_name) : NULL;
+  if (!text || !ir_operand_clone(&fact->value, &source)) {
+    if (text) {
+      mettle_free_string(text);
+    }
+    return 0;
+  }
+  ir_operand_destroy(&ins->lhs);
+  ir_operand_destroy(&ins->rhs);
+  ir_instruction_clear_arguments(ins);
+  if (ins->text) {
+    mettle_free_string(ins->text);
+  }
+  ins->op = IR_OP_CAST;
+  ins->lhs = source;
+  ins->rhs = ir_operand_none();
+  ins->text = text;
+  ins->is_float = 0;
+  ins->float_bits = 0;
+  ins->is_unsigned = keep_unsigned;
+  ins->value_type = keep_type;
+  ins->ast_ref = NULL;
+  if (ctx->changed) {
+    *ctx->changed = 1;
+  }
+  return 1;
+}
+
+static int fwd_transfer(FwdCtx *ctx, const IRBasicBlock *block, FwdSet *set,
+                        int rewrite) {
+  for (size_t i = 0; i < block->instruction_count; i++) {
+    IRInstruction *ins = &block->instructions[i];
+    char wbase[RE_NAME_MAX + 1];
+    long long woff = 0;
+    long long wsize = RE_MEM_WHOLE;
+    unsigned wtype = IR_ALIAS_CLASS_NONE;
+    if (ins->op == IR_OP_NOP) {
+      continue;
+    }
+
+    if (ins->op == IR_OP_STORE) {
+      re_instruction_write_region(ctx->function, ctx->defs, ctx->addr_taken,
+                                  ins, wbase, sizeof(wbase), &woff, &wsize,
+                                  &wtype);
+      fwd_kill_region(set, ctx->function, wbase[0] ? wbase : NULL, woff, wsize,
+                      wtype);
+      if (!ins->is_volatile && !ins->is_float && wbase[0] &&
+          ins->rhs.kind == IR_OPERAND_INT && ins->rhs.int_value > 0 &&
+          ins->rhs.int_value <= 8 &&
+          fwd_value_is_trackable(ctx, &ins->lhs)) {
+        FwdFact fact;
+        memset(&fact, 0, sizeof(fact));
+        fact.base = wbase;
+        fact.off = woff;
+        fact.size = wsize;
+        fact.alias_class = ins->alias_class;
+        fact.value = ins->lhs;
+        if (!fwd_set_add(set, &fact)) {
+          return 0;
+        }
+      }
+      continue;
+    }
+
+    if (ins->op == IR_OP_LOAD) {
+      REAddr addr;
+      char base[RE_NAME_MAX + 1];
+      int have = 0;
+      int hit = 0;
+      long long size =
+          ins->rhs.kind == IR_OPERAND_INT ? ins->rhs.int_value : 0;
+      memset(&addr, 0, sizeof(addr));
+      if (!ins->is_volatile && size > 0 && size <= 8 && ins->dest.name &&
+          (ins->dest.kind == IR_OPERAND_TEMP ||
+           ins->dest.kind == IR_OPERAND_SYMBOL)) {
+        re_resolve_addr(ctx->function, ctx->defs, &ins->lhs, &addr, 0);
+        have = addr.valid && addr.name && fwd_addr_base(&addr, base, sizeof(base));
+      }
+      if (have) {
+        const FwdFact *fact = fwd_set_find(set, base, addr.offset, size);
+        if (fact && fwd_load_can_use(ins, size, fact)) {
+          hit = 1;
+          if (rewrite && !fwd_rewrite_load(ctx, ins, size, fact)) {
+            return 0;
+          }
+        }
+      }
+      if (ins->op == IR_OP_NOP) {
+        continue;
+      }
+      if (re_instruction_write_region(ctx->function, ctx->defs,
+                                      ctx->addr_taken, ins, wbase,
+                                      sizeof(wbase), &woff, &wsize, &wtype)) {
+        fwd_kill_region(set, ctx->function, wbase[0] ? wbase : NULL, woff,
+                        wsize, wtype);
+      }
+      fwd_kill_name(set, ins->dest.kind, ins->dest.name);
+      if (have && !hit && fwd_value_is_trackable(ctx, &ins->dest)) {
+        FwdFact fact;
+        memset(&fact, 0, sizeof(fact));
+        fact.base = base;
+        fact.off = addr.offset;
+        fact.size = size;
+        fact.alias_class = ins->alias_class;
+        fact.from_load = 1;
+        fact.is_unsigned = (unsigned char)(ins->is_unsigned != 0);
+        fact.is_float = (unsigned char)(ins->is_float != 0);
+        fact.float_bits = ins->float_bits;
+        fact.value = ins->dest;
+        if (!fwd_set_add(set, &fact)) {
+          return 0;
+        }
+      }
+      continue;
+    }
+
+    if (re_instruction_write_region(ctx->function, ctx->defs, ctx->addr_taken,
+                                    ins, wbase, sizeof(wbase), &woff, &wsize,
+                                    &wtype)) {
+      fwd_kill_region(set, ctx->function, wbase[0] ? wbase : NULL, woff, wsize,
+                      wtype);
+    }
+    if (!re_opcode_is_scalar(ins->op)) {
+      fwd_set_clear(set);
+      continue;
+    }
+    if (ir_instruction_writes_destination(ins) && ins->dest.name) {
+      fwd_kill_name(set, ins->dest.kind, ins->dest.name);
+    }
+  }
+  return 1;
+}
+
+static int fwd_block_input(FwdCtx *ctx, const IRBasicBlock *blocks,
+                           size_t block, const FwdSet *out, FwdSet *in) {
+  fwd_set_clear(in);
+  in->top = block != ctx->function->entry_block;
+  for (size_t p = 0; p < blocks[block].predecessor_count; p++) {
+    size_t pred = blocks[block].predecessors[p];
+    if (pred >= ctx->function->block_count) {
+      continue;
+    }
+    if (!fwd_set_meet(in, &out[pred])) {
+      return 0;
+    }
+  }
+  if (in->top) {
+    in->top = 0;
+    fwd_set_clear(in);
+  }
+  return 1;
+}
+
+static size_t fwd_reverse_postorder(const IRBasicBlock *blocks,
+                                    size_t block_count, size_t entry,
+                                    size_t *order) {
+  size_t *stack = malloc(block_count * sizeof(size_t));
+  size_t *next_succ = malloc(block_count * sizeof(size_t));
+  unsigned char *seen = calloc(block_count, 1);
+  size_t post_count = 0;
+  if (!stack || !next_succ || !seen) {
+    free(stack);
+    free(next_succ);
+    free(seen);
+    return 0;
+  }
+  size_t depth = 1;
+  stack[0] = entry;
+  next_succ[0] = 0;
+  seen[entry] = 1;
+  while (depth > 0) {
+    size_t block = stack[depth - 1];
+    if (next_succ[depth - 1] < blocks[block].successor_count) {
+      size_t successor = blocks[block].successors[next_succ[depth - 1]++];
+      if (successor < block_count && !seen[successor]) {
+        seen[successor] = 1;
+        stack[depth] = successor;
+        next_succ[depth] = 0;
+        depth++;
+      }
+      continue;
+    }
+    order[post_count++] = block;
+    depth--;
+  }
+  for (size_t i = 0; i < post_count / 2; i++) {
+    size_t tmp = order[i];
+    order[i] = order[post_count - 1 - i];
+    order[post_count - 1 - i] = tmp;
+  }
+  free(stack);
+  free(next_succ);
+  free(seen);
+  return post_count;
+}
+
+#define FWD_MAX_ITERATIONS 48
+
+int ir_forward_stored_values_pass(IRFunction *function, int *changed) {
+  if (!function || function->instruction_count == 0) {
+    return 1;
+  }
+  ir_function_clear_cfg(function);
+  size_t block_count = 0;
+  const IRBasicBlock *blocks = ir_function_blocks(function, &block_count);
+  if (!blocks || block_count == 0 || function->entry_block >= block_count) {
+    return 1;
+  }
+
+  REDefs defs = {0};
+  IRTempValueMap addr_taken;
+  if (!ir_temp_value_map_init(&addr_taken)) {
+    return 1;
+  }
+  defs.function = function;
+  defs.addr_taken = &addr_taken;
+  int ok = ir_addr_taken_set_build(function, &addr_taken) &&
+           re_collect_defs(function, &defs);
+
+  FwdSet *out = calloc(block_count, sizeof(FwdSet));
+  size_t *order = malloc(block_count * sizeof(size_t));
+  size_t order_count = 0;
+  FwdSet in = {0};
+  FwdCtx ctx;
+  ctx.function = function;
+  ctx.defs = &defs;
+  ctx.addr_taken = &addr_taken;
+  ctx.changed = changed;
+  if (!out || !order) {
+    ok = 0;
+  }
+  if (ok) {
+    order_count = fwd_reverse_postorder(blocks, block_count,
+                                        function->entry_block, order);
+    ok = order_count > 0;
+  }
+  for (size_t b = 0; ok && b < block_count; b++) {
+    out[b].top = 1;
+  }
+
+  int converged = 0;
+  for (int iteration = 0; ok && !converged && iteration < FWD_MAX_ITERATIONS;
+       iteration++) {
+    converged = 1;
+    for (size_t k = 0; ok && k < order_count; k++) {
+      size_t b = order[k];
+      ok = fwd_block_input(&ctx, blocks, b, out, &in) &&
+           fwd_transfer(&ctx, &blocks[b], &in, 0);
+      if (ok && !fwd_set_equal(&in, &out[b])) {
+        ok = fwd_set_copy(&out[b], &in);
+        converged = 0;
+      }
+    }
+  }
+
+  if (ok && converged) {
+    for (size_t k = 0; ok && k < order_count; k++) {
+      size_t b = order[k];
+      ok = fwd_block_input(&ctx, blocks, b, out, &in) &&
+           fwd_transfer(&ctx, &blocks[b], &in, 1);
+    }
+  }
+
+  fwd_set_destroy(&in);
+  if (out) {
+    for (size_t b = 0; b < block_count; b++) {
+      fwd_set_destroy(&out[b]);
+    }
+  }
+  free(out);
+  free(order);
   re_map_destroy(&defs.defs);
   re_map_destroy(&defs.def_at);
   ir_temp_value_map_destroy(&addr_taken);
