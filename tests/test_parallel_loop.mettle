@@ -1,0 +1,76 @@
+import "std/io";
+import "std/mem";
+
+const N: int32 = 20000;
+
+@noinline fn transform(dst: int64*, src: int64*, n: int32, salt: int64) {
+  var i: int32 = 0;
+  @parallel while (i < n) {
+    var v: int64 = src[i] ^ salt;
+    var acc: int64 = 0;
+    var k: int32 = 0;
+    while (k < 24) {
+      v = v * 6364136223846793005 + 1442695040888963407;
+      if ((v & 1) == 1) {
+        acc = acc ^ (v >> 11);
+      } else {
+        acc = acc + (v >> 7);
+      }
+      k += 1;
+    }
+    dst[i] = acc;
+    i += 1;
+  }
+}
+
+@noinline fn stripe(rows: int64*, width: int32, height: int32) {
+  var y: int32 = 0;
+  @parallel for (y = 0; y < height; y += 1) {
+    var base: int32 = y * width;
+    var x: int32 = 0;
+    while (x < width) {
+      rows[base + x] = (int64)(y * 31 + x) * 2654435761;
+      x += 1;
+    }
+  }
+}
+
+fn main() -> int32 {
+  var a: int64* = (int64*)malloc(8 * (int64)N);
+  var b: int64* = (int64*)malloc(8 * (int64)N);
+  var i: int32 = 0;
+  while (i < N) {
+    a[i] = (int64)i * 1000003;
+    i += 1;
+  }
+
+  transform(b, a, N, 987654321);
+  var mixed: int64 = 0;
+  i = 0;
+  while (i < N) {
+    mixed = mixed ^ (b[i] + (int64)i);
+    i += 1;
+  }
+
+  var grid: int64* = (int64*)malloc(8 * 64 * 128);
+  stripe(grid, 64, 128);
+  var striped: int64 = 0;
+  i = 0;
+  while (i < 64 * 128) {
+    striped = striped + grid[i];
+    i += 1;
+  }
+
+  println("mixed = {mixed}");
+  println("striped = {striped}");
+  if (mixed != 392376813670142450) {
+    println("FAIL: the parallel while loop did not reproduce the serial answer");
+    return 1;
+  }
+  if (striped != 43490275508224000) {
+    println("FAIL: the parallel for loop did not reproduce the serial answer");
+    return 1;
+  }
+  println("ok");
+  return 0;
+}

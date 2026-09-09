@@ -26,6 +26,7 @@ int ir_optimize_program(IRProgram *program,
                         const IROptimizeOptions *options);
 
 int ir_optimize_had_user_error(void);
+void ir_note_parallel_loops_unverified(IRProgram *program);
 
 int ir_explain_enabled(void);
 void ir_explain_backend_function(const char *function_name,

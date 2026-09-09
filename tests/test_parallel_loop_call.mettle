@@ -1,0 +1,14 @@
+import "std/io";
+
+@noinline fn side(x: int32) -> int32 { return x * 3; }
+
+fn main() -> int32 {
+  var sink: int32 = 0;
+  var i: int32 = 0;
+  @parallel while (i < 100) {
+    sink = side(i);
+    i += 1;
+  }
+  println("sink = {sink}");
+  return 0;
+}

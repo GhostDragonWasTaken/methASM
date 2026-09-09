@@ -1369,3 +1369,31 @@ int ir_parallelize_marked_loops_pass(IRProgram *program, int *changed) {
   }
   return 1;
 }
+
+void ir_note_parallel_loops_unverified(IRProgram *program) {
+  int marked = 0;
+  if (!program) {
+    return;
+  }
+  for (size_t f = 0; f < program->function_count; f++) {
+    IRFunction *function = program->functions[f];
+    if (!function) {
+      continue;
+    }
+    for (size_t i = 0; i < function->instruction_count; i++) {
+      IRInstruction *in = &function->instructions[i];
+      if (in->op == IR_OP_NOP && in->text &&
+          strncmp(in->text, IR_PARALLEL_MARKER_PREFIX,
+                  strlen(IR_PARALLEL_MARKER_PREFIX)) == 0) {
+        in->text = NULL;
+        marked++;
+      }
+    }
+  }
+  if (marked > 0) {
+    fprintf(stderr,
+            "note: %d `@parallel` loop%s left running on one thread; the "
+            "outliner only runs with -O/--release\n",
+            marked, marked == 1 ? "" : "s");
+  }
+}

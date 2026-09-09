@@ -6386,6 +6386,7 @@ static int compile_stage_optimize(CompileContext *ctx) {
     }
   } else {
     ir_note_simd_contracts_unverified(ctx->ir_program);
+    ir_note_parallel_loops_unverified(ctx->ir_program);
   }
 
   if (ctx->twin_snapshots) {

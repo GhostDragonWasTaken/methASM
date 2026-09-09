@@ -13111,6 +13111,63 @@ catch {
   $failed++
   Write-CaseResult -Name "pgo_roundtrip" -Passed $false -Reason $_.Exception.Message
 }
+# A loop marked @parallel is outlined into its own function and dispatched
+# across the machine cores. The fixture bakes in the two answers a serial run
+# produces, so a chunking mistake that computes an element twice, or skips
+# one, is caught by the value and not merely by the program finishing. The IR
+# is checked for both outlined bodies as well, because a pass that quietly did
+# nothing would still print the right answers.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $parDir = Join-Path $tmpDir "parallel_loop"
+  New-Item -ItemType Directory -Force -Path $parDir | Out-Null
+  $parExe = Join-Path $parDir "loops.exe"
+  $parObj = Join-Path $parDir "loops.obj"
+  $parIr = "$parObj.ir"
+  $out = & $CompilerPath --release --emit-obj --dump-ir tests/test_parallel_loop.mettle -o $parObj 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the parallel object build failed: $out" }
+  if (-not (Test-Path $parIr)) { throw "no IR sidecar was written next to $parObj" }
+  $out = & $CompilerPath --build --release tests/test_parallel_loop.mettle -o $parExe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the parallel build failed: $out" }
+  $ir = Get-Content $parIr -Raw
+  if ([regex]::Matches($ir, '(?m)^function __mtl_par_').Count -ne 2) {
+    throw "the two marked loops were not both outlined"
+  }
+  if ($ir -notmatch "mettle_parallel_range") {
+    throw "the outlined loops are not dispatched to the parallel runtime"
+  }
+  $run = & $parExe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $run -notmatch "ok") {
+    throw "the parallel run did not reproduce the serial answers: $run"
+  }
+
+  $refusals = @{
+    "tests/test_parallel_loop_carried.mettle" = "a value carries from one iteration to the next";
+    "tests/test_parallel_loop_call.mettle" = "the body contains work this pass will not move"
+  }
+  foreach ($case in $refusals.Keys) {
+    $bad = Join-Path $parDir "refused.exe"
+    $said = & $CompilerPath --build --release $case -o $bad 2>&1 | Out-String
+    $said = ($said -replace '\s+', ' ')
+    if ($LASTEXITCODE -eq 0) { throw "$case built, and it should have been refused" }
+    if ($said -notmatch [regex]::Escape($refusals[$case])) {
+      throw "$case was refused for the wrong reason: $said"
+    }
+  }
+
+  $note = & $CompilerPath --build tests/test_parallel_loop.mettle -o (Join-Path $parDir "plain.exe") 2>&1 | Out-String
+  $note = ($note -replace '\s+', ' ')
+  if ($LASTEXITCODE -ne 0) { throw "the unoptimized build failed: $note" }
+  if ($note -notmatch "left running on one thread") {
+    throw "an unoptimized build said nothing about the loops it left alone"
+  }
+  Write-CaseResult -Name "parallel_loop" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "parallel_loop" -Passed $false -Reason $_.Exception.Message
+}
 # Declarative rewrite engine (ir_optimize_rewrite.c): the Tier-1 algebraic
 # identity table and the Tier-2 constant-reassociation pass must preserve the
 # exact integer result of the arithmetic they rewrite. Exercised across
