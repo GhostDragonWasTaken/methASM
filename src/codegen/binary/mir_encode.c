@@ -2689,7 +2689,8 @@ static int mir_mem_operand_in_registers(const MirFunction *fn,
   return 1;
 }
 
-static int mir_mask_test_fusable(const MirFunction *fn, size_t i) {
+static int mir_mask_test_fusable(const MirFunction *fn, const int *uses,
+                                 size_t i) {
   const MirInst *and_op;
   const MirInst *cmp;
   const MirVreg *masked;
@@ -2714,10 +2715,14 @@ static int mir_mask_test_fusable(const MirFunction *fn, size_t i) {
   if (!masked->in_register || masked->live_end != (int)(i + 1)) {
     return 0;
   }
+  if (!uses || uses[and_op->dst.vreg] != 1) {
+    return 0;
+  }
   return fn->vregs[and_op->a.vreg].in_register;
 }
 
-static int mir_byte_compare_fusable(const MirFunction *fn, size_t i) {
+static int mir_byte_compare_fusable(const MirFunction *fn, const int *uses,
+                                    size_t i) {
   const MirInst *load;
   const MirInst *cmp;
   const MirVreg *loaded;
@@ -2738,6 +2743,9 @@ static int mir_byte_compare_fusable(const MirFunction *fn, size_t i) {
   }
   loaded = &fn->vregs[load->dst.vreg];
   if (!loaded->in_register || loaded->live_end != (int)(i + 1)) {
+    return 0;
+  }
+  if (!uses || uses[load->dst.vreg] != 1) {
     return 0;
   }
   return mir_vreg_is_byte_load(fn, i, cmp->a.vreg);
@@ -2923,7 +2931,7 @@ static int mir_encode_scalar(MirEncodeState *st, const MirInst *in) {
       break;
     case MIR_MOV: {
       int side = 0;
-      if (mir_byte_compare_fusable(fn, i)) {
+      if (mir_byte_compare_fusable(fn, st->vreg_uses, i)) {
         st->fused_byte_load = i;
         break;
       }
@@ -2940,7 +2948,7 @@ static int mir_encode_scalar(MirEncodeState *st, const MirInst *in) {
     case MIR_AND:
     case MIR_OR:
     case MIR_XOR:
-      if (in->op == MIR_AND && mir_mask_test_fusable(fn, i)) {
+      if (in->op == MIR_AND && mir_mask_test_fusable(fn, st->vreg_uses, i)) {
         st->fused_mask_test = i;
         break;
       }
