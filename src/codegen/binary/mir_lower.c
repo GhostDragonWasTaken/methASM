@@ -2825,28 +2825,44 @@ static MirVregId mir_iconst_lookup(MirFunction *fn, int64_t value) {
   return MIR_VREG_NONE;
 }
 
+static int mir_iconst_reserve(MirFunction *fn) {
+  MirIConst *grown;
+  size_t nc;
+
+  if (fn->iconst_count < fn->iconst_capacity) {
+    return 1;
+  }
+  nc = fn->iconst_capacity ? fn->iconst_capacity * 2 : 8;
+  grown = (MirIConst *)realloc(fn->iconsts, nc * sizeof(MirIConst));
+  if (!grown) {
+    return 0;
+  }
+  fn->iconsts = grown;
+  fn->iconst_capacity = nc;
+  return 1;
+}
+
+static void mir_iconst_note(MirFunction *fn, int64_t value, MirVregId vreg) {
+  fn->iconsts[fn->iconst_count].value = value;
+  fn->iconsts[fn->iconst_count].vreg = vreg;
+  fn->iconst_count++;
+}
+
 static int mir_iconst_add(MirFunction *fn, int64_t value) {
+  MirVregId v;
+
   if (mir_iconst_lookup(fn, value) != MIR_VREG_NONE) {
     return 1;
   }
-  if (fn->iconst_count >= fn->iconst_capacity) {
-    size_t nc = fn->iconst_capacity ? fn->iconst_capacity * 2 : 8;
-    MirIConst *grown =
-        (MirIConst *)realloc(fn->iconsts, nc * sizeof(MirIConst));
-    if (!grown) {
-      fn->has_error = 1;
-      return 0;
-    }
-    fn->iconsts = grown;
-    fn->iconst_capacity = nc;
+  if (!mir_iconst_reserve(fn)) {
+    fn->has_error = 1;
+    return 0;
   }
-  MirVregId v = mir_new_vreg(fn, MIR_RC_GP, 8);
+  v = mir_new_vreg(fn, MIR_RC_GP, 8);
   if (v == MIR_VREG_NONE) {
     return 0;
   }
-  fn->iconsts[fn->iconst_count].value = value;
-  fn->iconsts[fn->iconst_count].vreg = v;
-  fn->iconst_count++;
+  mir_iconst_note(fn, value, v);
   return mir_emit1(fn, MIR_MOV, mir_op_vreg(v), mir_op_imm(value),
                    mir_op_none(), 8, 0, 0);
 }
@@ -2865,26 +2881,174 @@ static int mir_divmod_magic(int64_t C, int uns, int64_t *Mout) {
   return 1;
 }
 
+static int mir_divmod_value_in_reg(MirFunction *fn, MirOperand a,
+                                   MirOperand *out) {
+  MirVregId av;
+
+  if (a.kind == MIR_OPK_VREG) {
+    *out = a;
+    return 1;
+  }
+  av = mir_new_vreg(fn, MIR_RC_GP, 8);
+  if (av == MIR_VREG_NONE ||
+      !mir_emit1(fn, MIR_MOV, mir_op_vreg(av), a, mir_op_none(), 8, 0, 0)) {
+    return 0;
+  }
+  *out = mir_op_vreg(av);
+  return 1;
+}
+
+static int mir_divmod_shift_for(uint64_t magnitude) {
+  int k = 0;
+
+  for (uint64_t t = magnitude; t > 1; t >>= 1) {
+    k++;
+  }
+  return k;
+}
+
+static int mir_emit_pow2_quotient_signed(MirFunction *fn, MirOperand Q,
+                                         MirOperand A, int k, int64_t C) {
+  MirVregId t1 = mir_new_vreg(fn, MIR_RC_GP, 8);
+  MirVregId t2 = mir_new_vreg(fn, MIR_RC_GP, 8);
+
+  if (t1 == MIR_VREG_NONE || t2 == MIR_VREG_NONE) {
+    return 0;
+  }
+  if (k == 1) {
+    if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(t2), A, mir_op_imm(63), 8, 1, 0)) {
+      return 0;
+    }
+  } else if (!mir_emit1(fn, MIR_SAR, mir_op_vreg(t1), A, mir_op_imm(63), 8, 0,
+                        0) ||
+             !mir_emit1(fn, MIR_SHR, mir_op_vreg(t2), mir_op_vreg(t1),
+                        mir_op_imm(64 - k), 8, 1, 0)) {
+    return 0;
+  }
+  if (!mir_emit1(fn, MIR_ADD, Q, A, mir_op_vreg(t2), 8, 0, 0) ||
+      !mir_emit1(fn, MIR_SAR, Q, Q, mir_op_imm(k), 8, 0, 0)) {
+    return 0;
+  }
+  return C >= 0 || mir_emit1(fn, MIR_NEG, Q, Q, mir_op_none(), 8, 0, 0);
+}
+
+static int mir_emit_magic_quotient_unsigned(MirFunction *fn, MirOperand Q,
+                                            MirOperand A, uint64_t ad) {
+  uint64_t M;
+  int s;
+  int add;
+  MirVregId tv;
+  MirVregId d1;
+
+  cg_magic_u64(ad, &M, &s, &add);
+  tv = mir_new_vreg(fn, MIR_RC_GP, 8);
+  if (tv == MIR_VREG_NONE ||
+      !mir_emit1(fn, MIR_MULHI, mir_op_vreg(tv), A,
+                 mir_iconst_operand(fn, (int64_t)M), 8, 1, 0)) {
+    return 0;
+  }
+  if (!add) {
+    return mir_emit1(fn, MIR_SHR, Q, mir_op_vreg(tv), mir_op_imm(s), 8, 1, 0);
+  }
+  d1 = mir_new_vreg(fn, MIR_RC_GP, 8);
+  return d1 != MIR_VREG_NONE &&
+         mir_emit1(fn, MIR_SUB, mir_op_vreg(d1), A, mir_op_vreg(tv), 8, 0, 0) &&
+         mir_emit1(fn, MIR_SHR, mir_op_vreg(d1), mir_op_vreg(d1),
+                   mir_op_imm(1), 8, 1, 0) &&
+         mir_emit1(fn, MIR_ADD, mir_op_vreg(d1), mir_op_vreg(d1),
+                   mir_op_vreg(tv), 8, 0, 0) &&
+         mir_emit1(fn, MIR_SHR, Q, mir_op_vreg(d1), mir_op_imm(s - 1), 8, 1,
+                   0);
+}
+
+static int mir_emit_magic_quotient_signed(MirFunction *fn, MirOperand Q,
+                                          MirOperand A, int64_t C) {
+  int64_t M;
+  int s;
+  MirVregId sb;
+
+  cg_magic_s64(C, &M, &s);
+  if (!mir_emit1(fn, MIR_MULHI, Q, A, mir_iconst_operand(fn, M), 8, 0, 0)) {
+    return 0;
+  }
+  if (C > 0 && M < 0) {
+    if (!mir_emit1(fn, MIR_ADD, Q, Q, A, 8, 0, 0)) {
+      return 0;
+    }
+  } else if (C < 0 && M > 0) {
+    if (!mir_emit1(fn, MIR_SUB, Q, Q, A, 8, 0, 0)) {
+      return 0;
+    }
+  }
+  if (s > 0 && !mir_emit1(fn, MIR_SAR, Q, Q, mir_op_imm(s), 8, 0, 0)) {
+    return 0;
+  }
+  sb = mir_new_vreg(fn, MIR_RC_GP, 8);
+  return sb != MIR_VREG_NONE &&
+         mir_emit1(fn, MIR_SHR, mir_op_vreg(sb), Q, mir_op_imm(63), 8, 1, 0) &&
+         mir_emit1(fn, MIR_ADD, Q, Q, mir_op_vreg(sb), 8, 0, 0);
+}
+
+static int mir_emit_times_constant(MirFunction *fn, MirOperand dst,
+                                   MirOperand Q, int64_t C) {
+  MirVregId cv;
+
+  if (C >= INT32_MIN && C <= INT32_MAX) {
+    return mir_emit1(fn, MIR_IMUL, dst, Q, mir_op_imm(C), 8, 0, 0);
+  }
+  cv = mir_new_vreg(fn, MIR_RC_GP, 8);
+  return cv != MIR_VREG_NONE &&
+         mir_emit1(fn, MIR_MOV, mir_op_vreg(cv), mir_op_imm(C), mir_op_none(),
+                   8, 0, 0) &&
+         mir_emit1(fn, MIR_IMUL, dst, Q, mir_op_vreg(cv), 8, 0, 0);
+}
+
+static int mir_emit_remainder(MirFunction *fn, MirOperand dst, MirOperand A,
+                              MirOperand Q, int64_t C) {
+  MirVregId mv = mir_new_vreg(fn, MIR_RC_GP, 8);
+
+  if (mv == MIR_VREG_NONE ||
+      !mir_emit_times_constant(fn, mir_op_vreg(mv), Q, C)) {
+    return 0;
+  }
+  return mir_emit1(fn, MIR_SUB, dst, A, mir_op_vreg(mv), 8, 0, 0);
+}
+
+static int mir_emit_quotient(MirFunction *fn, MirOperand Q, MirOperand A,
+                             int64_t C, int uns) {
+  uint64_t ad = uns ? (uint64_t)C : (uint64_t)(C < 0 ? -C : C);
+  int is_pow2 = (ad & (ad - 1)) == 0;
+
+  if (is_pow2 && uns) {
+    return mir_emit1(fn, MIR_SHR, Q, A, mir_op_imm(mir_divmod_shift_for(ad)), 8,
+                     1, 0);
+  }
+  if (is_pow2) {
+    return mir_emit_pow2_quotient_signed(fn, Q, A,
+                                         mir_divmod_shift_for(ad), C);
+  }
+  if (uns) {
+    return mir_emit_magic_quotient_unsigned(fn, Q, A, ad);
+  }
+  return mir_emit_magic_quotient_signed(fn, Q, A, C);
+}
+
 static int mir_emit_const_divmod(MirFunction *fn, MirOperand dst, MirOperand a,
                                  int64_t C, int uns, int mod) {
+  MirOperand A;
+  MirOperand Q;
+  MirVregId qv;
+  int q_in_dst;
+
   if (C == 0) {
     return 0;
   }
-  MirOperand A;
-  if (a.kind == MIR_OPK_VREG) {
-    A = a;
-  } else {
-    MirVregId av = mir_new_vreg(fn, MIR_RC_GP, 8);
-    if (av == MIR_VREG_NONE ||
-        !mir_emit1(fn, MIR_MOV, mir_op_vreg(av), a, mir_op_none(), 8, 0, 0)) {
-      return 0;
-    }
-    A = mir_op_vreg(av);
+  if (!mir_divmod_value_in_reg(fn, a, &A)) {
+    return 0;
   }
-
   if (C == 1) {
-    return mir_emit1(fn, MIR_MOV, dst, mod ? mir_op_imm(0) : A, mir_op_none(), 8,
-                     0, 0);
+    return mir_emit1(fn, MIR_MOV, dst, mod ? mir_op_imm(0) : A, mir_op_none(),
+                     8, 0, 0);
   }
   if (!uns && C == -1) {
     if (mod) {
@@ -2892,129 +3056,21 @@ static int mir_emit_const_divmod(MirFunction *fn, MirOperand dst, MirOperand a,
     }
     return mir_emit1(fn, MIR_NEG, dst, A, mir_op_none(), 8, 0, 0);
   }
-
-  uint64_t ad = uns ? (uint64_t)C : (uint64_t)(C < 0 ? -C : C);
-  int is_pow2 = (ad & (ad - 1)) == 0;
-  int k = 0;
-  for (uint64_t tt = ad; tt > 1; tt >>= 1) {
-    k++;
-  }
-
-  int q_in_dst = !mod && dst.kind == MIR_OPK_VREG &&
-                 !(A.kind == MIR_OPK_VREG && A.vreg == dst.vreg);
-  MirVregId qv = q_in_dst ? dst.vreg : mir_new_vreg(fn, MIR_RC_GP, 8);
+  q_in_dst = !mod && dst.kind == MIR_OPK_VREG &&
+             !(A.kind == MIR_OPK_VREG && A.vreg == dst.vreg);
+  qv = q_in_dst ? dst.vreg : mir_new_vreg(fn, MIR_RC_GP, 8);
   if (qv == MIR_VREG_NONE) {
     return 0;
   }
-  MirOperand Q = q_in_dst ? dst : mir_op_vreg(qv);
-
-  if (is_pow2) {
-    if (uns) {
-      if (!mir_emit1(fn, MIR_SHR, Q, A, mir_op_imm(k), 8, 1, 0)) {
-        return 0;
-      }
-    } else {
-      MirVregId t1 = mir_new_vreg(fn, MIR_RC_GP, 8);
-      MirVregId t2 = mir_new_vreg(fn, MIR_RC_GP, 8);
-      if (t1 == MIR_VREG_NONE || t2 == MIR_VREG_NONE) {
-        return 0;
-      }
-      if (k == 1) {
-        if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(t2), A, mir_op_imm(63), 8, 1,
-                       0)) {
-          return 0;
-        }
-      } else if (!mir_emit1(fn, MIR_SAR, mir_op_vreg(t1), A, mir_op_imm(63), 8,
-                            0, 0) ||
-                 !mir_emit1(fn, MIR_SHR, mir_op_vreg(t2), mir_op_vreg(t1),
-                            mir_op_imm(64 - k), 8, 1, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_ADD, Q, A, mir_op_vreg(t2), 8, 0, 0) ||
-          !mir_emit1(fn, MIR_SAR, Q, Q, mir_op_imm(k), 8, 0, 0)) {
-        return 0;
-      }
-      if (C < 0 && !mir_emit1(fn, MIR_NEG, Q, Q, mir_op_none(), 8, 0, 0)) {
-        return 0;
-      }
-    }
-  } else if (uns) {
-    uint64_t M;
-    int s, add;
-    cg_magic_u64(ad, &M, &s, &add);
-    MirVregId tv = mir_new_vreg(fn, MIR_RC_GP, 8);
-    if (tv == MIR_VREG_NONE ||
-        !mir_emit1(fn, MIR_MULHI, mir_op_vreg(tv), A,
-                   mir_iconst_operand(fn, (int64_t)M), 8, 1, 0)) {
-      return 0;
-    }
-    if (!add) {
-      if (!mir_emit1(fn, MIR_SHR, Q, mir_op_vreg(tv), mir_op_imm(s), 8, 1, 0)) {
-        return 0;
-      }
-    } else {
-      MirVregId d1 = mir_new_vreg(fn, MIR_RC_GP, 8);
-      if (d1 == MIR_VREG_NONE ||
-          !mir_emit1(fn, MIR_SUB, mir_op_vreg(d1), A, mir_op_vreg(tv), 8, 0,
-                     0) ||
-          !mir_emit1(fn, MIR_SHR, mir_op_vreg(d1), mir_op_vreg(d1),
-                     mir_op_imm(1), 8, 1, 0) ||
-          !mir_emit1(fn, MIR_ADD, mir_op_vreg(d1), mir_op_vreg(d1),
-                     mir_op_vreg(tv), 8, 0, 0) ||
-          !mir_emit1(fn, MIR_SHR, Q, mir_op_vreg(d1), mir_op_imm(s - 1), 8, 1,
-                     0)) {
-        return 0;
-      }
-    }
-  } else {
-    int64_t M;
-    int s;
-    cg_magic_s64(C, &M, &s);
-    if (!mir_emit1(fn, MIR_MULHI, Q, A, mir_iconst_operand(fn, M), 8, 0, 0)) {
-      return 0;
-    }
-    if (C > 0 && M < 0) {
-      if (!mir_emit1(fn, MIR_ADD, Q, Q, A, 8, 0, 0)) {
-        return 0;
-      }
-    } else if (C < 0 && M > 0) {
-      if (!mir_emit1(fn, MIR_SUB, Q, Q, A, 8, 0, 0)) {
-        return 0;
-      }
-    }
-    if (s > 0 && !mir_emit1(fn, MIR_SAR, Q, Q, mir_op_imm(s), 8, 0, 0)) {
-      return 0;
-    }
-    MirVregId sb = mir_new_vreg(fn, MIR_RC_GP, 8);
-    if (sb == MIR_VREG_NONE ||
-        !mir_emit1(fn, MIR_SHR, mir_op_vreg(sb), Q, mir_op_imm(63), 8, 1, 0) ||
-        !mir_emit1(fn, MIR_ADD, Q, Q, mir_op_vreg(sb), 8, 0, 0)) {
-      return 0;
-    }
+  Q = q_in_dst ? dst : mir_op_vreg(qv);
+  if (!mir_emit_quotient(fn, Q, A, C, uns)) {
+    return 0;
   }
-
   if (!mod) {
     return q_in_dst ? 1
                     : mir_emit1(fn, MIR_MOV, dst, Q, mir_op_none(), 8, 0, 0);
   }
-  MirVregId mv = mir_new_vreg(fn, MIR_RC_GP, 8);
-  if (mv == MIR_VREG_NONE) {
-    return 0;
-  }
-  if (C >= INT32_MIN && C <= INT32_MAX) {
-    if (!mir_emit1(fn, MIR_IMUL, mir_op_vreg(mv), Q, mir_op_imm(C), 8, 0, 0)) {
-      return 0;
-    }
-  } else {
-    MirVregId cv = mir_new_vreg(fn, MIR_RC_GP, 8);
-    if (cv == MIR_VREG_NONE ||
-        !mir_emit1(fn, MIR_MOV, mir_op_vreg(cv), mir_op_imm(C), mir_op_none(), 8,
-                   0, 0) ||
-        !mir_emit1(fn, MIR_IMUL, mir_op_vreg(mv), Q, mir_op_vreg(cv), 8, 0, 0)) {
-      return 0;
-    }
-  }
-  return mir_emit1(fn, MIR_SUB, dst, A, mir_op_vreg(mv), 8, 0, 0);
+  return mir_emit_remainder(fn, dst, A, Q, C);
 }
 
 static int mir_emit_global_flush_names(MirFunction *fn, CodeGenerator *g,
@@ -8657,6 +8713,119 @@ static void mir_fuse_extend_then_mov(MirFunction *fn) {
    loop; left as an immediate it is a ten-byte movabs per iteration, which is
    what a character-class test in a scanner pays today. SHL already takes its
    count modulo 64 and so does BT, so the two agree on an out-of-range c. */
+typedef struct {
+  MirInst *shl;
+  MirInst *and_op;
+  MirInst *br;
+  MirVregId count;
+  unsigned char cc;
+} MirBitTest;
+
+static int mir_bit_test_is_one_shift(const MirInst *shl) {
+  return shl->op == MIR_SHL && !shl->is_float && shl->width == 8 &&
+         shl->dst.kind == MIR_OPK_VREG && shl->a.kind == MIR_OPK_IMM &&
+         shl->a.imm == 1 && shl->b.kind == MIR_OPK_VREG;
+}
+
+static int mir_bit_test_is_mask(const MirInst *and_op, MirVregId shifted) {
+  return and_op->op == MIR_AND && !and_op->is_float && and_op->width == 8 &&
+         and_op->dst.kind == MIR_OPK_VREG && and_op->a.kind == MIR_OPK_VREG &&
+         and_op->a.vreg == shifted && and_op->b.kind == MIR_OPK_IMM;
+}
+
+static int mir_bit_test_branch_cc(const MirInst *br, MirVregId masked,
+                                  unsigned char *cc) {
+  if (br->is_float || br->dst.kind != MIR_OPK_LABEL ||
+      br->a.kind != MIR_OPK_VREG || br->a.vreg != masked) {
+    return 0;
+  }
+  if (br->op == MIR_CMPBR) {
+    if (br->b.kind != MIR_OPK_IMM || br->b.imm != 0) {
+      return 0;
+    }
+  } else if (br->op != MIR_JCC) {
+    return 0;
+  }
+  if (br->cc == 0x84) {
+    *cc = 0x83;
+    return 1;
+  }
+  if (br->cc == 0x85) {
+    *cc = 0x82;
+    return 1;
+  }
+  return 0;
+}
+
+static int mir_bit_test_temps_are_private(const MirFunction *fn,
+                                         const int *uses, const int *defs,
+                                         MirVregId shifted, MirVregId masked,
+                                         MirVregId count) {
+  return uses[shifted] == 1 && defs[shifted] == 1 && uses[masked] == 1 &&
+         defs[masked] == 1 && !fn->vregs[shifted].address_taken &&
+         !fn->vregs[masked].address_taken &&
+         fn->vregs[count].rclass == MIR_RC_GP;
+}
+
+static int mir_bit_test_match(MirFunction *fn, const int *uses,
+                              const int *defs, size_t at, MirBitTest *test) {
+  size_t ai;
+  size_t bi;
+  MirVregId shifted;
+  MirVregId masked;
+
+  test->shl = &fn->insns[at];
+  if (!mir_bit_test_is_one_shift(test->shl)) {
+    return 0;
+  }
+  ai = mir_next_real_insn(fn, at);
+  if (ai >= fn->insn_count) {
+    return 0;
+  }
+  test->and_op = &fn->insns[ai];
+  shifted = test->shl->dst.vreg;
+  if (!mir_bit_test_is_mask(test->and_op, shifted)) {
+    return 0;
+  }
+  bi = mir_next_real_insn(fn, ai);
+  if (bi >= fn->insn_count) {
+    return 0;
+  }
+  test->br = &fn->insns[bi];
+  masked = test->and_op->dst.vreg;
+  if (!mir_bit_test_branch_cc(test->br, masked, &test->cc)) {
+    return 0;
+  }
+  test->count = test->shl->b.vreg;
+  return mir_bit_test_temps_are_private(fn, uses, defs, shifted, masked,
+                                        test->count);
+}
+
+static int mir_bit_test_rewrite(MirFunction *fn, MirBitTest *test) {
+  MirVregId mask_vreg = mir_new_vreg(fn, MIR_RC_GP, 8);
+  int64_t mask = test->and_op->b.imm;
+
+  if (mask_vreg == MIR_VREG_NONE) {
+    return 0;
+  }
+  test->shl->op = MIR_MOV;
+  test->shl->dst = mir_op_vreg(mask_vreg);
+  test->shl->a = mir_op_imm(mask);
+  test->shl->b = mir_op_none();
+  test->shl->width = 8;
+  test->shl->is_unsigned = 0;
+  if (mir_iconst_reserve(fn)) {
+    mir_iconst_note(fn, mask, mask_vreg);
+  }
+  test->and_op->op = MIR_NOP;
+  test->br->op = MIR_BT;
+  test->br->a = mir_op_vreg(mask_vreg);
+  test->br->b = mir_op_vreg(test->count);
+  test->br->cc = test->cc;
+  test->br->width = 8;
+  return 1;
+}
+
 static void mir_fuse_bit_test_branch(MirFunction *fn) {
   int *uses = NULL;
   int *defs = NULL;
@@ -8667,102 +8836,16 @@ static void mir_fuse_bit_test_branch(MirFunction *fn) {
   if (!mir_count_vreg_uses_defs(fn, &uses, &defs)) {
     return;
   }
-
   for (size_t i = 0; i < fn->insn_count; i++) {
-    MirInst *shl = &fn->insns[i];
-    size_t ai;
-    size_t bi;
+    MirBitTest test;
 
-    if (shl->op != MIR_SHL || shl->is_float || shl->width != 8 ||
-        shl->dst.kind != MIR_OPK_VREG || shl->a.kind != MIR_OPK_IMM ||
-        shl->a.imm != 1 || shl->b.kind != MIR_OPK_VREG) {
+    if (!mir_bit_test_match(fn, uses, defs, i, &test)) {
       continue;
     }
-    ai = mir_next_real_insn(fn, i);
-    if (ai >= fn->insn_count) {
-      continue;
-    }
-    {
-      MirInst *and_op = &fn->insns[ai];
-      MirInst *br;
-      MirVregId shifted = shl->dst.vreg;
-      MirVregId masked;
-      MirVregId mask_vreg;
-      unsigned char cc;
-
-      if (and_op->op != MIR_AND || and_op->is_float || and_op->width != 8 ||
-          and_op->dst.kind != MIR_OPK_VREG || and_op->a.kind != MIR_OPK_VREG ||
-          and_op->a.vreg != shifted || and_op->b.kind != MIR_OPK_IMM) {
-        continue;
-      }
-      bi = mir_next_real_insn(fn, ai);
-      if (bi >= fn->insn_count) {
-        continue;
-      }
-      br = &fn->insns[bi];
-      masked = and_op->dst.vreg;
-      if (br->is_float || br->dst.kind != MIR_OPK_LABEL ||
-          br->a.kind != MIR_OPK_VREG || br->a.vreg != masked) {
-        continue;
-      }
-      if (br->op == MIR_CMPBR) {
-        if (br->b.kind != MIR_OPK_IMM || br->b.imm != 0) {
-          continue;
-        }
-      } else if (br->op != MIR_JCC) {
-        continue;
-      }
-      if (br->cc == 0x84) {
-        cc = 0x83;
-      } else if (br->cc == 0x85) {
-        cc = 0x82;
-      } else {
-        continue;
-      }
-      if (uses[shifted] != 1 || defs[shifted] != 1 || uses[masked] != 1 ||
-          defs[masked] != 1 || fn->vregs[shifted].address_taken ||
-          fn->vregs[masked].address_taken ||
-          fn->vregs[shl->b.vreg].rclass != MIR_RC_GP) {
-        continue;
-      }
-
-      MirVregId count_vreg = shl->b.vreg;
-      mask_vreg = mir_new_vreg(fn, MIR_RC_GP, 8);
-      if (mask_vreg == MIR_VREG_NONE) {
-        break;
-      }
-      shl->op = MIR_MOV;
-      shl->dst = mir_op_vreg(mask_vreg);
-      shl->a = mir_op_imm(and_op->b.imm);
-      shl->b = mir_op_none();
-      shl->width = 8;
-      shl->is_unsigned = 0;
-
-      if (fn->iconst_count >= fn->iconst_capacity) {
-        size_t nc = fn->iconst_capacity ? fn->iconst_capacity * 2 : 8;
-        MirIConst *grown =
-            (MirIConst *)realloc(fn->iconsts, nc * sizeof(MirIConst));
-        if (grown) {
-          fn->iconsts = grown;
-          fn->iconst_capacity = nc;
-        }
-      }
-      if (fn->iconst_count < fn->iconst_capacity) {
-        fn->iconsts[fn->iconst_count].value = and_op->b.imm;
-        fn->iconsts[fn->iconst_count].vreg = mask_vreg;
-        fn->iconst_count++;
-      }
-
-      and_op->op = MIR_NOP;
-
-      br->op = MIR_BT;
-      br->a = mir_op_vreg(mask_vreg);
-      br->b = mir_op_vreg(count_vreg);
-      br->cc = cc;
-      br->width = 8;
+    if (!mir_bit_test_rewrite(fn, &test)) {
+      break;
     }
   }
-
   free(uses);
   free(defs);
 }
@@ -9122,161 +9205,241 @@ static size_t mir_load_table_intersect(MirAvailableLoad *dst, size_t dst_n,
   return n;
 }
 
-static void mir_cse_loads(MirFunction *fn) {
-  if (!fn || fn->insn_count < 2) {
-    return;
+static int mir_insn_defines_label(const MirInst *in, const char *name) {
+  return in->op == MIR_LABEL && in->dst.kind == MIR_OPK_LABEL && in->dst.sym &&
+         strcmp(in->dst.sym, name) == 0;
+}
+
+typedef struct {
+  int *pred_hi;
+  int *label_ord;
+  MirAvailableLoad *snap;
+  size_t *snap_n;
+  char *snap_seen;
+  size_t label_count;
+} MirCseState;
+
+static int mir_cse_is_branch(MirOpcode op) {
+  return op == MIR_JMP || op == MIR_JCC || op == MIR_CMPBR || op == MIR_BT ||
+         op == MIR_FCMPBR;
+}
+
+static int mir_cse_snapshots_at(MirOpcode op) {
+  return op == MIR_JMP || op == MIR_JCC || op == MIR_CMPBR ||
+         op == MIR_FCMPBR;
+}
+
+static size_t mir_cse_find_label(const MirFunction *fn, size_t from,
+                                 const char *sym) {
+  for (size_t d = from; d < fn->insn_count; d++) {
+    if (mir_insn_defines_label(&fn->insns[d], sym)) {
+      return d;
+    }
   }
-  int *pred_hi = (int *)malloc(fn->insn_count * sizeof(int));
-  int *label_ord = (int *)malloc(fn->insn_count * sizeof(int));
-  if (!pred_hi || !label_ord) {
-    free(pred_hi);
-    free(label_ord);
-    return;
-  }
-  size_t label_count = 0;
+  return fn->insn_count;
+}
+
+static void mir_cse_state_free(MirCseState *state) {
+  free(state->pred_hi);
+  free(state->label_ord);
+  free(state->snap);
+  free(state->snap_n);
+  free(state->snap_seen);
+}
+
+static void mir_cse_state_drop_snapshots(MirCseState *state) {
+  free(state->snap);
+  free(state->snap_n);
+  free(state->snap_seen);
+  state->snap = NULL;
+  state->snap_n = NULL;
+  state->snap_seen = NULL;
+}
+
+static void mir_cse_number_labels(const MirFunction *fn,
+                                  MirCseState *state) {
+  state->label_count = 0;
   for (size_t i = 0; i < fn->insn_count; i++) {
-    pred_hi[i] = -1;
-    label_ord[i] = (fn->insns[i].op == MIR_LABEL) ? (int)label_count++ : -1;
+    state->pred_hi[i] = -1;
+    state->label_ord[i] =
+        (fn->insns[i].op == MIR_LABEL) ? (int)state->label_count++ : -1;
   }
+}
+
+static void mir_cse_note_predecessors(const MirFunction *fn,
+                                      MirCseState *state) {
   for (size_t b = 0; b < fn->insn_count; b++) {
     const MirInst *in = &fn->insns[b];
-    if (in->op != MIR_JMP && in->op != MIR_JCC && in->op != MIR_CMPBR &&
-        in->op != MIR_BT && in->op != MIR_FCMPBR) {
+    size_t target;
+
+    if (!mir_cse_is_branch(in->op) || in->dst.kind != MIR_OPK_LABEL ||
+        !in->dst.sym) {
       continue;
     }
-    if (in->dst.kind != MIR_OPK_LABEL || !in->dst.sym) {
-      continue;
-    }
-    for (size_t d = 0; d < fn->insn_count; d++) {
-      const MirInst *lb = &fn->insns[d];
-      if (lb->op == MIR_LABEL && lb->dst.kind == MIR_OPK_LABEL && lb->dst.sym &&
-          strcmp(lb->dst.sym, in->dst.sym) == 0) {
-        if ((int)b > pred_hi[d]) pred_hi[d] = (int)b;
-        break;
-      }
+    target = mir_cse_find_label(fn, 0, in->dst.sym);
+    if (target < fn->insn_count && (int)b > state->pred_hi[target]) {
+      state->pred_hi[target] = (int)b;
     }
   }
+}
 
-  MirAvailableLoad *snap = NULL;
-  size_t *snap_n = NULL;
-  char *snap_seen = NULL;
-  if (label_count > 0 && label_count <= 1024) {
-    snap = (MirAvailableLoad *)malloc(label_count * MIR_LOAD_TABLE_MAX *
-                                      sizeof(MirAvailableLoad));
-    snap_n = (size_t *)calloc(label_count, sizeof(size_t));
-    snap_seen = (char *)calloc(label_count, 1);
-    if (!snap || !snap_n || !snap_seen) {
-      free(snap);
-      free(snap_n);
-      free(snap_seen);
-      snap = NULL;
-      snap_n = NULL;
-      snap_seen = NULL;
+static int mir_cse_state_init(const MirFunction *fn, MirCseState *state) {
+  memset(state, 0, sizeof(*state));
+  state->pred_hi = (int *)malloc(fn->insn_count * sizeof(int));
+  state->label_ord = (int *)malloc(fn->insn_count * sizeof(int));
+  if (!state->pred_hi || !state->label_ord) {
+    mir_cse_state_free(state);
+    return 0;
+  }
+  mir_cse_number_labels(fn, state);
+  mir_cse_note_predecessors(fn, state);
+  if (state->label_count == 0 || state->label_count > 1024) {
+    return 1;
+  }
+  state->snap = (MirAvailableLoad *)malloc(
+      state->label_count * MIR_LOAD_TABLE_MAX * sizeof(MirAvailableLoad));
+  state->snap_n = (size_t *)calloc(state->label_count, sizeof(size_t));
+  state->snap_seen = (char *)calloc(state->label_count, 1);
+  if (!state->snap || !state->snap_n || !state->snap_seen) {
+    mir_cse_state_drop_snapshots(state);
+  }
+  return 1;
+}
+
+static void mir_cse_snapshot_target(const MirFunction *fn, MirCseState *state,
+                                    size_t at, const MirAvailableLoad *table,
+                                    size_t table_n) {
+  const MirInst *in = &fn->insns[at];
+  size_t target;
+  MirAvailableLoad *slot;
+  int o;
+
+  if (!state->snap || !mir_cse_snapshots_at(in->op) ||
+      in->dst.kind != MIR_OPK_LABEL || !in->dst.sym) {
+    return;
+  }
+  target = mir_cse_find_label(fn, at + 1, in->dst.sym);
+  if (target >= fn->insn_count) {
+    return;
+  }
+  o = state->label_ord[target];
+  slot = state->snap + (size_t)o * MIR_LOAD_TABLE_MAX;
+  if (!state->snap_seen[o]) {
+    memcpy(slot, table, table_n * sizeof(MirAvailableLoad));
+    state->snap_n[o] = table_n;
+    state->snap_seen[o] = 1;
+    return;
+  }
+  state->snap_n[o] =
+      mir_load_table_intersect(slot, state->snap_n[o], table, table_n);
+}
+
+static size_t mir_cse_table_at_label(const MirFunction *fn,
+                                     const MirCseState *state, size_t at,
+                                     MirAvailableLoad *table,
+                                     size_t table_n) {
+  int o = state->label_ord[at];
+  const MirAvailableLoad *slot;
+  size_t prev;
+
+  if (state->pred_hi[at] >= (int)at) {
+    return 0;
+  }
+  if (state->pred_hi[at] < 0) {
+    return table_n;
+  }
+  if (!state->snap || !state->snap_seen[o]) {
+    return 0;
+  }
+  slot = state->snap + (size_t)o * MIR_LOAD_TABLE_MAX;
+  prev = mir_prev_real_insn(fn, at);
+  if (prev < fn->insn_count && fn->insns[prev].op != MIR_JMP &&
+      fn->insns[prev].op != MIR_RET) {
+    return mir_load_table_intersect(table, table_n, slot, state->snap_n[o]);
+  }
+  memcpy(table, slot, state->snap_n[o] * sizeof(MirAvailableLoad));
+  return state->snap_n[o];
+}
+
+static void mir_cse_reuse_load(MirInst *in, const MirAvailableLoad *table,
+                               size_t table_n) {
+  for (size_t e = 0; e < table_n; e++) {
+    if (table[e].width == in->width &&
+        table[e].is_unsigned == in->is_unsigned &&
+        table[e].is_float == in->is_float && table[e].dst != in->dst.vreg &&
+        mir_mem_same(&table[e].mem, &in->a.mem)) {
+      in->a = mir_op_vreg(table[e].dst);
+      in->b = mir_op_none();
+      return;
     }
   }
+}
 
+static size_t mir_cse_drop_entries_using(MirVregId written,
+                                         MirAvailableLoad *table,
+                                         size_t table_n) {
+  size_t keep = 0;
+
+  for (size_t e = 0; e < table_n; e++) {
+    if (table[e].dst != written && table[e].mem.base != written &&
+        table[e].mem.index != written) {
+      table[keep++] = table[e];
+    }
+  }
+  return keep;
+}
+
+static size_t mir_cse_record_load(const MirInst *in, size_t at,
+                                  MirAvailableLoad *table, size_t table_n) {
+  if (table_n >= MIR_LOAD_TABLE_MAX) {
+    return table_n;
+  }
+  table[table_n].def = (int)at;
+  table[table_n].dst = in->dst.vreg;
+  table[table_n].mem = in->a.mem;
+  table[table_n].width = in->width;
+  table[table_n].is_unsigned = in->is_unsigned;
+  table[table_n].is_float = in->is_float;
+  return table_n + 1;
+}
+
+static void mir_cse_loads(MirFunction *fn) {
+  MirCseState state;
   MirAvailableLoad table[MIR_LOAD_TABLE_MAX];
   size_t table_n = 0;
 
+  if (!fn || fn->insn_count < 2) {
+    return;
+  }
+  if (!mir_cse_state_init(fn, &state)) {
+    return;
+  }
   for (size_t i = 0; i < fn->insn_count; i++) {
     MirInst *in = &fn->insns[i];
+
     if (in->op == MIR_NOP) {
       continue;
     }
-
     if (mir_clobbers_memory(in)) {
       table_n = 0;
       continue;
     }
-
-    if (snap && (in->op == MIR_JMP || in->op == MIR_JCC ||
-                 in->op == MIR_CMPBR || in->op == MIR_FCMPBR) &&
-        in->dst.kind == MIR_OPK_LABEL && in->dst.sym) {
-      for (size_t d = i + 1; d < fn->insn_count; d++) {
-        const MirInst *lb = &fn->insns[d];
-        if (lb->op == MIR_LABEL && lb->dst.kind == MIR_OPK_LABEL &&
-            lb->dst.sym && strcmp(lb->dst.sym, in->dst.sym) == 0) {
-          int o = label_ord[d];
-          MirAvailableLoad *slot = snap + (size_t)o * MIR_LOAD_TABLE_MAX;
-          if (!snap_seen[o]) {
-            memcpy(slot, table, table_n * sizeof(MirAvailableLoad));
-            snap_n[o] = table_n;
-            snap_seen[o] = 1;
-          } else {
-            snap_n[o] = mir_load_table_intersect(slot, snap_n[o], table,
-                                                 table_n);
-          }
-          break;
-        }
-      }
-    }
-
+    mir_cse_snapshot_target(fn, &state, i, table, table_n);
     if (in->op == MIR_LABEL) {
-      int o = label_ord[i];
-      if (pred_hi[i] >= (int)i) {
-        table_n = 0;
-      } else if (pred_hi[i] < 0) {
-      } else if (!snap || !snap_seen[o]) {
-        table_n = 0;
-      } else {
-        const MirAvailableLoad *slot = snap + (size_t)o * MIR_LOAD_TABLE_MAX;
-        size_t prev = mir_prev_real_insn(fn, i);
-        int falls_through =
-            prev < fn->insn_count && fn->insns[prev].op != MIR_JMP &&
-            fn->insns[prev].op != MIR_RET;
-        if (falls_through) {
-          table_n = mir_load_table_intersect(table, table_n, slot, snap_n[o]);
-        } else {
-          memcpy(table, slot, snap_n[o] * sizeof(MirAvailableLoad));
-          table_n = snap_n[o];
-        }
-      }
+      table_n = mir_cse_table_at_label(fn, &state, i, table, table_n);
       continue;
     }
-
     if (mir_is_plain_load(in)) {
-      for (size_t e = 0; e < table_n; e++) {
-        if (table[e].width == in->width &&
-            table[e].is_unsigned == in->is_unsigned &&
-            table[e].is_float == in->is_float &&
-            table[e].dst != in->dst.vreg &&
-            mir_mem_same(&table[e].mem, &in->a.mem)) {
-          in->a = mir_op_vreg(table[e].dst);
-          in->b = mir_op_none();
-          break;
-        }
-      }
+      mir_cse_reuse_load(in, table, table_n);
     }
-
     if (in->dst.kind == MIR_OPK_VREG) {
-      MirVregId w = in->dst.vreg;
-      size_t keep = 0;
-      for (size_t e = 0; e < table_n; e++) {
-        if (table[e].dst != w && table[e].mem.base != w &&
-            table[e].mem.index != w) {
-          table[keep++] = table[e];
-        }
-      }
-      table_n = keep;
+      table_n = mir_cse_drop_entries_using(in->dst.vreg, table, table_n);
     }
-
-    if (mir_is_plain_load(in) && in->a.kind == MIR_OPK_MEM &&
-        table_n < MIR_LOAD_TABLE_MAX) {
-      table[table_n].def = (int)i;
-      table[table_n].dst = in->dst.vreg;
-      table[table_n].mem = in->a.mem;
-      table[table_n].width = in->width;
-      table[table_n].is_unsigned = in->is_unsigned;
-      table[table_n].is_float = in->is_float;
-      table_n++;
+    if (mir_is_plain_load(in) && in->a.kind == MIR_OPK_MEM) {
+      table_n = mir_cse_record_load(in, i, table, table_n);
     }
   }
-
-  free(pred_hi);
-  free(label_ord);
-  free(snap);
-  free(snap_n);
-  free(snap_seen);
+  mir_cse_state_free(&state);
 }
 
 #define MIR_SLP_MAX_NODES 24
@@ -10284,8 +10447,119 @@ static int mir_loop_body_marks(const MirRotateCfg *cfg, size_t header,
   return 1;
 }
 
+static int mir_insn_targets_label(const MirInst *in, const char *name) {
+  return in->dst.kind == MIR_OPK_LABEL && in->dst.sym &&
+         strcmp(in->dst.sym, name) == 0;
+}
+
+static int mir_rotate_table_reaches(const MirFunction *fn, const char *hname) {
+  for (size_t k = 0; k < fn->insn_count; k++) {
+    const MirJumpTable *tbl;
+
+    if (fn->insns[k].op != MIR_JMP_TABLE || !fn->insns[k].aux) {
+      continue;
+    }
+    tbl = (const MirJumpTable *)fn->insns[k].aux;
+    for (size_t e = 0; e < tbl->count; e++) {
+      if (tbl->labels[e] && strcmp(tbl->labels[e], hname) == 0) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static int mir_rotate_back_edges(const MirFunction *fn, size_t j,
+                                 const char *hname, size_t *bes,
+                                 size_t *out_count) {
+  size_t nbe = 0;
+
+  for (size_t k = 0; k < fn->insn_count; k++) {
+    if (k == j || !mir_insn_targets_label(&fn->insns[k], hname)) {
+      continue;
+    }
+    if (fn->insns[k].op != MIR_JMP || k <= j + 1) {
+      return 0;
+    }
+    if (nbe >= MIR_ROTATE_MAX_BACK_EDGES) {
+      return 0;
+    }
+    bes[nbe++] = k;
+  }
+  if (nbe == 0 || mir_rotate_table_reaches(fn, hname)) {
+    return 0;
+  }
+  *out_count = nbe;
+  return 1;
+}
+
+static int mir_rotate_test_leaves_loop(MirFunction *fn, MirRotateCfg *cfg,
+                                       size_t j, const char *ename,
+                                       const size_t *bes, size_t nbe,
+                                       int *fatal) {
+  size_t elabel = mir_label_index(fn, ename);
+
+  *fatal = 0;
+  if (elabel == (size_t)-1 || elabel == j) {
+    return 0;
+  }
+  if (cfg->insns != fn->insn_count && !mir_rotate_cfg_build(fn, cfg)) {
+    *fatal = 1;
+    return 0;
+  }
+  return mir_loop_body_marks(cfg, j, bes, nbe) && !cfg->body[elabel];
+}
+
+static int mir_rotate_back_edge_takes_test(MirFunction *fn, size_t be,
+                                           const MirInst *test,
+                                           const char *ename) {
+  int need_exit_jump = be + 1 >= fn->insn_count ||
+                       !mir_insn_defines_label(&fn->insns[be + 1], ename);
+  int ir_index = fn->insns[be].ir_index;
+  MirInst leave;
+
+  fn->insns[be].op = MIR_CMPBR;
+  fn->insns[be].a = test->a;
+  fn->insns[be].b = test->b;
+  fn->insns[be].width = test->width;
+  fn->insns[be].is_unsigned = test->is_unsigned;
+  fn->insns[be].cc = (unsigned char)(test->cc ^ 1u);
+  if (!need_exit_jump) {
+    return 1;
+  }
+  memset(&leave, 0, sizeof(leave));
+  leave.op = MIR_JMP;
+  leave.dst = mir_op_label(ename);
+  leave.width = 8;
+  leave.ir_index = ir_index;
+  return mir_insert_at(fn, be + 1, &leave);
+}
+
+static int mir_rotate_apply(MirFunction *fn, size_t j, const char *ename,
+                            const size_t *bes, size_t nbe) {
+  MirInst test = fn->insns[j + 1];
+  MirInst tmp = fn->insns[j];
+
+  fn->insns[j] = fn->insns[j + 1];
+  fn->insns[j + 1] = tmp;
+  for (size_t e = nbe; e-- > 0;) {
+    if (!mir_rotate_back_edge_takes_test(fn, bes[e], &test, ename)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int mir_rotate_header_at(const MirFunction *fn, size_t j) {
+  return fn->insns[j].op == MIR_LABEL &&
+         fn->insns[j].dst.kind == MIR_OPK_LABEL && fn->insns[j].dst.sym &&
+         fn->insns[j + 1].op == MIR_CMPBR &&
+         fn->insns[j + 1].dst.kind == MIR_OPK_LABEL && fn->insns[j + 1].dst.sym;
+}
+
 static void mir_rotate_loops(MirFunction *fn) {
   MirRotateCfg cfg = {0};
+
   if (!fn || fn->insn_count < 3) {
     return;
   }
@@ -10293,117 +10567,32 @@ static void mir_rotate_loops(MirFunction *fn) {
     return;
   }
   for (size_t j = 0; j + 1 < fn->insn_count; j++) {
-    if (fn->insns[j].op != MIR_LABEL ||
-        fn->insns[j].dst.kind != MIR_OPK_LABEL || !fn->insns[j].dst.sym ||
-        fn->insns[j + 1].op != MIR_CMPBR ||
-        fn->insns[j + 1].dst.kind != MIR_OPK_LABEL ||
-        !fn->insns[j + 1].dst.sym) {
-      continue;
-    }
-    const char *hname = fn->insns[j].dst.sym;
-    const char *ename = fn->insns[j + 1].dst.sym;
-
     size_t bes[MIR_ROTATE_MAX_BACK_EDGES];
     size_t nbe = 0;
-    int other_edge = 0;
-    for (size_t k = 0; k < fn->insn_count; k++) {
-      if (k == j || fn->insns[k].dst.kind != MIR_OPK_LABEL ||
-          !fn->insns[k].dst.sym ||
-          strcmp(fn->insns[k].dst.sym, hname) != 0) {
-        continue;
-      }
-      if (fn->insns[k].op == MIR_JMP && k > j + 1) {
-        if (nbe >= MIR_ROTATE_MAX_BACK_EDGES) {
-          other_edge = 1;
-          break;
-        }
-        bes[nbe++] = k;
-      } else {
-        other_edge = 1;
-      }
-    }
-    for (size_t k = 0; k < fn->insn_count && !other_edge; k++) {
-      const MirJumpTable *tbl;
-      if (fn->insns[k].op != MIR_JMP_TABLE || !fn->insns[k].aux) {
-        continue;
-      }
-      tbl = (const MirJumpTable *)fn->insns[k].aux;
-      for (size_t e = 0; e < tbl->count; e++) {
-        if (tbl->labels[e] && strcmp(tbl->labels[e], hname) == 0) {
-          other_edge = 1;
-          break;
-        }
-      }
-    }
-    if (nbe == 0 || other_edge) {
+    const char *hname;
+    const char *ename;
+    int fatal = 0;
+
+    if (!mir_rotate_header_at(fn, j)) {
       continue;
     }
-    /* The header test has to be the whole loop condition. An or-chain header
-       spends its first test branching to the BODY, and rotating on that one
-       alone drops the other disjunct. A test that leaves the loop names a
-       label outside the loop's span, so require that. */
-    {
-      size_t elabel = mir_label_index(fn, ename);
-      if (elabel == (size_t)-1 || elabel == j) {
-        continue;
-      }
-      if (cfg.insns != fn->insn_count && !mir_rotate_cfg_build(fn, &cfg)) {
+    hname = fn->insns[j].dst.sym;
+    ename = fn->insns[j + 1].dst.sym;
+    if (!mir_rotate_back_edges(fn, j, hname, bes, &nbe)) {
+      continue;
+    }
+    if (!mir_rotate_test_leaves_loop(fn, &cfg, j, ename, bes, nbe, &fatal)) {
+      if (fatal) {
         return;
       }
-      if (!mir_loop_body_marks(&cfg, j, bes, nbe) || cfg.body[elabel]) {
-        continue;
-      }
+      continue;
     }
-    /* Every back edge carries the test the header used to make. Falling out of
-       it has to land on the exit, so where the exit label does not already
-       follow, a jump there costs one instruction taken once per loop exit,
-       against the one instruction and one taken branch every iteration pays
-       for an unrotated header. A loop that runs no iterations still leaves
-       through the guard and never reaches either. Whatever the header test
-       reads is defined on every back edge, since the header ran right after
-       each of them. */
-    MirInst test = fn->insns[j + 1];
-
-    MirInst tmp = fn->insns[j];
-    fn->insns[j] = fn->insns[j + 1];
-    fn->insns[j + 1] = tmp;
-
-    for (size_t e = nbe; e-- > 0;) {
-      size_t be = bes[e];
-      int need_exit_jump = be + 1 >= fn->insn_count ||
-                           fn->insns[be + 1].op != MIR_LABEL ||
-                           fn->insns[be + 1].dst.kind != MIR_OPK_LABEL ||
-                           !fn->insns[be + 1].dst.sym ||
-                           strcmp(fn->insns[be + 1].dst.sym, ename) != 0;
-      int ir_index = fn->insns[be].ir_index;
-
-      fn->insns[be].op = MIR_CMPBR;
-      fn->insns[be].a = test.a;
-      fn->insns[be].b = test.b;
-      fn->insns[be].width = test.width;
-      fn->insns[be].is_unsigned = test.is_unsigned;
-      fn->insns[be].cc = (unsigned char)(test.cc ^ 1u);
-
-      if (need_exit_jump) {
-        MirInst leave;
-        memset(&leave, 0, sizeof(leave));
-        leave.op = MIR_JMP;
-        leave.dst = mir_op_label(ename);
-        leave.width = 8;
-        leave.ir_index = ir_index;
-        if (!mir_insert_at(fn, be + 1, &leave)) {
-          mir_rotate_cfg_destroy(&cfg);
-          return;
-        }
-      }
+    if (!mir_rotate_apply(fn, j, ename, bes, nbe)) {
+      mir_rotate_cfg_destroy(&cfg);
+      return;
     }
   }
   mir_rotate_cfg_destroy(&cfg);
-}
-
-static int mir_insn_defines_label(const MirInst *in, const char *name) {
-  return in->op == MIR_LABEL && in->dst.kind == MIR_OPK_LABEL && in->dst.sym &&
-         strcmp(in->dst.sym, name) == 0;
 }
 
 static size_t mir_label_index_scan(const MirFunction *fn, const char *name) {

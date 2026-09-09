@@ -1326,11 +1326,102 @@ static int elf_append_runtime_helpers(int stack_trace, int profile_runtime,
   return 1;
 }
 
+static size_t elf_cc_fixed_flags(char **argv_list, size_t used,
+                                 const CompilerOptions *options,
+                                 const char *cc) {
+  argv_list[used++] = (char *)cc;
+  argv_list[used++] = (char *)"-nostdlib";
+  argv_list[used++] = (char *)"-nostartfiles";
+  argv_list[used++] = (char *)"-nodefaultlibs";
+  argv_list[used++] = (char *)"-no-pie";
+  argv_list[used++] = (char *)"-Wl,--gc-sections";
+  argv_list[used++] = (char *)"-Wl,-e,_start";
+  if (!mettle_elf_keep_symbols(options)) {
+    argv_list[used++] = (char *)"-s";
+  }
+  if (options && options->static_link) {
+    argv_list[used++] = (char *)"-static";
+  }
+  return used;
+}
+
+static int elf_link_with_cc(const CompilerOptions *options, const char *cc,
+                            const char *startup_object,
+                            const char *freestanding_object,
+                            const char *object_filename,
+                            const char *executable_filename,
+                            char **extra_objects, size_t extra_object_count) {
+  size_t max_args =
+      20u + 8u + 6u + 1u + (options ? options->link_argument_count : 0u);
+  char **argv_list = malloc(sizeof(*argv_list) * max_args);
+  size_t used = 0u;
+  int linked;
+
+  if (!argv_list) {
+    fprintf(stderr, "Error: Failed to allocate ELF link argv\n");
+    return 1;
+  }
+  used = elf_cc_fixed_flags(argv_list, used, options, cc);
+  argv_list[used++] = (char *)startup_object;
+  argv_list[used++] = (char *)freestanding_object;
+  argv_list[used++] = (char *)object_filename;
+  for (size_t i = 0u; i < extra_object_count; i++) {
+    if (extra_objects[i]) {
+      argv_list[used++] = extra_objects[i];
+    }
+  }
+  argv_list[used++] = (char *)"-o";
+  argv_list[used++] = (char *)executable_filename;
+  if (options) {
+    for (size_t i = 0; i < options->link_argument_count; i++) {
+      const char *arg = options->link_arguments[i];
+      if (!arg || arg[0] == '\0') {
+        continue;
+      }
+      argv_list[used++] = (char *)arg;
+    }
+  }
+  argv_list[used] = NULL;
+  linked = mettle_run_process(cc, (const char *const *)argv_list) == 0;
+  if (!linked) {
+    fprintf(stderr, "Error: %s failed to produce an ELF executable\n", cc);
+  }
+  free(argv_list);
+  return linked ? 0 : 1;
+}
+
+static int elf_prepare_runtime_objects(const CompilerOptions *options,
+                                       const char *object_filename,
+                                       const char *runtime_directory,
+                                       int stack_trace, int profile_runtime,
+                                       char **freestanding_object,
+                                       char **crash_handler_object,
+                                       char **profile_object,
+                                       char **extra_objects,
+                                       size_t *extra_object_count,
+                                       size_t *on_demand_object_count) {
+  int needs_safety;
+
+  if (!runtime_directory) {
+    return 1;
+  }
+  *freestanding_object = join_paths(runtime_directory,
+                                    options && options->shared_output
+                                        ? "freestanding_shared.o"
+                                        : "freestanding.o");
+  needs_safety = object_needs_safety_runtime(object_filename);
+  elf_select_runtime_helpers(runtime_directory, object_filename, stack_trace,
+                             profile_runtime, needs_safety,
+                             crash_handler_object, profile_object);
+  return elf_collect_on_demand_objects(
+      runtime_directory, object_filename, options && options->shared_output,
+      extra_objects, extra_object_count, on_demand_object_count);
+}
+
 static int mettle_link_elf_executable(const char *object_filename,
                                       const char *executable_filename,
                                       const CompilerOptions *options,
                                       const char *runtime_directory) {
-  char **argv_list = NULL;
   char *crash_handler_object = NULL;
   char *profile_object = NULL;
   char *freestanding_object = NULL;
@@ -1347,27 +1438,16 @@ static int mettle_link_elf_executable(const char *object_filename,
           ? 1
           : 0;
   int stack_trace = compiler_options_install_crash_handler(options);
-  int needs_safety = 0;
 
   memset(extra_objects, 0, sizeof(extra_objects));
 
-  if (runtime_directory) {
-    freestanding_object = join_paths(runtime_directory,
-                                     options && options->shared_output
-                                         ? "freestanding_shared.o"
-                                         : "freestanding.o");
-
-    needs_safety = object_needs_safety_runtime(object_filename);
-    elf_select_runtime_helpers(runtime_directory, object_filename, stack_trace,
-                               profile_runtime, needs_safety,
-                               &crash_handler_object, &profile_object);
-
-    if (!elf_collect_on_demand_objects(runtime_directory, object_filename,
-                                      options && options->shared_output,
-                                      extra_objects, &extra_object_count,
-                                      &on_demand_object_count)) {
-      goto cleanup;
-    }
+  if (!elf_prepare_runtime_objects(options, object_filename, runtime_directory,
+                                   stack_trace, profile_runtime,
+                                   &freestanding_object, &crash_handler_object,
+                                   &profile_object, extra_objects,
+                                   &extra_object_count,
+                                   &on_demand_object_count)) {
+    goto cleanup;
   }
 
   if (!freestanding_object || access(freestanding_object, F_OK) != 0) {
@@ -1427,56 +1507,11 @@ static int mettle_link_elf_executable(const char *object_filename,
     result = 0;
   }
 
-  if (result != 0) {
-    size_t max_args = 20u + 8u + 6u + 1u +
-                       (options ? options->link_argument_count : 0u);
-    size_t argc_used = 0u;
-
-    argv_list = malloc(sizeof(*argv_list) * max_args);
-    if (!argv_list) {
-      fprintf(stderr, "Error: Failed to allocate ELF link argv\n");
-      goto cleanup;
-    }
-
-    argv_list[argc_used++] = (char *)cc;
-    argv_list[argc_used++] = (char *)"-nostdlib";
-    argv_list[argc_used++] = (char *)"-nostartfiles";
-    argv_list[argc_used++] = (char *)"-nodefaultlibs";
-    argv_list[argc_used++] = (char *)"-no-pie";
-    argv_list[argc_used++] = (char *)"-Wl,--gc-sections";
-    argv_list[argc_used++] = (char *)"-Wl,-e,_start";
-    if (!mettle_elf_keep_symbols(options)) {
-      argv_list[argc_used++] = (char *)"-s";
-    }
-    if (options && options->static_link) {
-      argv_list[argc_used++] = (char *)"-static";
-    }
-    argv_list[argc_used++] = startup_object;
-    argv_list[argc_used++] = freestanding_object;
-    argv_list[argc_used++] = (char *)object_filename;
-    for (extra_index = 0u; extra_index < extra_object_count; extra_index++) {
-      if (extra_objects[extra_index]) {
-        argv_list[argc_used++] = extra_objects[extra_index];
-      }
-    }
-    argv_list[argc_used++] = (char *)"-o";
-    argv_list[argc_used++] = (char *)executable_filename;
-    if (options) {
-      for (size_t i = 0; i < options->link_argument_count; i++) {
-        const char *arg = options->link_arguments[i];
-        if (!arg || arg[0] == '\0') {
-          continue;
-        }
-        argv_list[argc_used++] = (char *)arg;
-      }
-    }
-    argv_list[argc_used] = NULL;
-
-    if (mettle_run_process(cc, (const char *const *)argv_list) == 0) {
-      result = 0;
-    } else {
-      fprintf(stderr, "Error: %s failed to produce an ELF executable\n", cc);
-    }
+  if (result != 0 &&
+      elf_link_with_cc(options, cc, startup_object, freestanding_object,
+                       object_filename, executable_filename, extra_objects,
+                       extra_object_count) == 0) {
+    result = 0;
   }
 
 cleanup:
@@ -1486,7 +1521,6 @@ cleanup:
   for (extra_index = 0u; extra_index < on_demand_object_count; extra_index++) {
     free(extra_objects[extra_index]);
   }
-  free(argv_list);
   free(crash_handler_object);
   free(profile_object);
   free(freestanding_object);

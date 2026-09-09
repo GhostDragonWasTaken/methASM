@@ -210,139 +210,169 @@ typedef struct {
   IRInstructionVector seq;
 } IRPrefetchPlan;
 
-static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
-                                 IRPrefetchPlan *plan) {
+static int ir_pf_append(IRInstructionVector *seq, IRInstruction *in,
+                        int ready) {
+  if (ready && ir_instruction_vector_append_move(seq, in)) {
+    return 1;
+  }
+  ir_instruction_destroy_storage(in);
+  return 0;
+}
+
+static int ir_pf_emit_ahead(IRInstructionVector *seq, SourceLocation loc,
+                            const char *ahead, const char *iv_symbol,
+                            long long distance) {
+  IRInstruction add = {0};
+
+  add.op = IR_OP_BINARY;
+  add.location = loc;
+  add.text = mettle_strdup("+");
+  add.dest = ir_operand_temp(ahead);
+  add.lhs = ir_operand_symbol(iv_symbol);
+  add.rhs = ir_operand_int(distance);
+  return ir_pf_append(seq, &add,
+                      add.text && add.dest.name && add.lhs.name);
+}
+
+static int ir_pf_emit_in_range(IRInstructionVector *seq, SourceLocation loc,
+                               const char *cond, const char *ahead,
+                               const IRInstruction *compare) {
+  IRInstruction cmp = {0};
+
+  cmp.op = IR_OP_BINARY;
+  cmp.location = loc;
+  cmp.text = mettle_strdup("<");
+  cmp.dest = ir_operand_temp(cond);
+  cmp.lhs = ir_operand_temp(ahead);
+  cmp.rhs = compare->rhs.kind == IR_OPERAND_INT
+                ? ir_operand_int(compare->rhs.int_value)
+                : ir_operand_symbol(compare->rhs.name);
+  return ir_pf_append(seq, &cmp,
+                      cmp.text && cmp.dest.name && cmp.lhs.name &&
+                          (cmp.rhs.kind == IR_OPERAND_INT || cmp.rhs.name));
+}
+
+static int ir_pf_emit_skip_branch(IRInstructionVector *seq, SourceLocation loc,
+                                  const char *cond, const char *skip_label) {
+  IRInstruction br = {0};
+
+  br.op = IR_OP_BRANCH_ZERO;
+  br.location = loc;
+  br.lhs = ir_operand_temp(cond);
+  br.text = mettle_strdup(skip_label);
+  return ir_pf_append(seq, &br, br.lhs.name && br.text);
+}
+
+static int ir_pf_emit_prefetch(IRInstructionVector *seq, SourceLocation loc,
+                               const char *addr_name) {
+  IRInstruction pf = {0};
+
+  if (!addr_name) {
+    return 0;
+  }
+  pf.op = IR_OP_PREFETCH;
+  pf.location = loc;
+  pf.lhs = ir_operand_temp(addr_name);
+  return ir_pf_append(seq, &pf, pf.lhs.name != NULL);
+}
+
+static int ir_pf_emit_label(IRInstructionVector *seq, SourceLocation loc,
+                            const char *label) {
+  IRInstruction lbl = {0};
+
+  lbl.op = IR_OP_LABEL;
+  lbl.location = loc;
+  lbl.text = mettle_strdup(label);
+  return ir_pf_append(seq, &lbl, lbl.text != NULL);
+}
+
+static size_t ir_pf_find_target_load(const IRFunction *function,
+                                     size_t body_start, size_t body_end,
+                                     const char *iv_symbol,
+                                     IRPrefetchSlice *slice) {
+  for (size_t i = body_start; i < body_end; i++) {
+    const IRInstruction *ins = &function->instructions[i];
+
+    if (ins->op != IR_OP_LOAD || ins->lhs.kind != IR_OPERAND_TEMP ||
+        !ins->lhs.name) {
+      continue;
+    }
+    memset(slice, 0, sizeof(*slice));
+    if (!ir_prefetch_collect_slice(function, body_start, body_end, i,
+                                   ins->lhs.name, iv_symbol, slice)) {
+      continue;
+    }
+    if (slice->interior_loads == 1 &&
+        ir_prefetch_slice_uses_iv(function, slice, iv_symbol) &&
+        ir_prefetch_interior_load_uses_iv(function, body_start, body_end, slice,
+                                          iv_symbol)) {
+      return i;
+    }
+  }
+  return (size_t)-1;
+}
+
+static int ir_pf_clone_address_slice(IRInstructionVector *seq,
+                                     const IRFunction *function,
+                                     const IRPrefetchSlice *slice,
+                                     IRNameMap *names, const char *iv_symbol,
+                                     const char *ahead) {
+  for (size_t s = 0; s < slice->count; s++) {
+    if (!ir_prefetch_emit_clone(seq, &function->instructions[slice->indices[s]],
+                                names, iv_symbol, ahead)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int ir_prefetch_plan_loop(const IRFunction *function,
+                                 size_t header_index, IRPrefetchPlan *plan) {
   IRAffineLoop loop;
+  IRPrefetchSlice slice;
+  IRNameMap names = {0};
+  IRInstructionVector *seq = &plan->seq;
+  const IRInstruction *compare;
+  SourceLocation loc;
+  size_t target_load;
+  long long distance;
+  char *ahead;
+  char *cond;
+  char skip_label[48];
+  int ok;
+
   if (!ir_affine_model_loop(function, header_index, &loop) ||
       !ir_affine_straight_line_body(&loop) || !ir_affine_unit_step(&loop) ||
       !ir_affine_starts_at_zero(&loop) || !ir_affine_bound_invariant(&loop)) {
     return 0;
   }
-  const IRInstruction *compare =
-      &function->instructions[loop.bounds.compare_index];
-  const char *iv_symbol = loop.iv;
-  size_t body_start = loop.body_start;
-  size_t body_end = loop.body_end;
-  IRWhileLoopBounds bounds = loop.bounds;
-
-  size_t target_load = (size_t)-1;
-  IRPrefetchSlice slice;
-  for (size_t i = body_start; i < body_end; i++) {
-    const IRInstruction *ins = &function->instructions[i];
-    if (ins->op != IR_OP_LOAD || ins->lhs.kind != IR_OPERAND_TEMP ||
-        !ins->lhs.name) {
-      continue;
-    }
-    memset(&slice, 0, sizeof(slice));
-    if (!ir_prefetch_collect_slice(function, body_start, body_end, i,
-                                   ins->lhs.name, iv_symbol, &slice)) {
-      continue;
-    }
-    if (slice.interior_loads == 1 &&
-        ir_prefetch_slice_uses_iv(function, &slice, iv_symbol) &&
-        ir_prefetch_interior_load_uses_iv(function, body_start, body_end,
-                                          &slice, iv_symbol)) {
-      target_load = i;
-      break;
-    }
-  }
+  compare = &function->instructions[loop.bounds.compare_index];
+  target_load = ir_pf_find_target_load(function, loop.body_start, loop.body_end,
+                                       loop.iv, &slice);
   if (target_load == (size_t)-1) {
     return 0;
   }
-
-  IRNameMap names = {0};
-  IRInstructionVector *seq = &plan->seq;
   memset(seq, 0, sizeof(*seq));
-  SourceLocation loc = function->instructions[target_load].location;
+  loc = function->instructions[target_load].location;
   if (ir_prefetch_distance_override() < 0 &&
       !ir_opt_should_prefetch_site(function, loc)) {
     return 0;
   }
-  long long D = ir_prefetch_distance_for_loop(function, loc);
-
-  char *ahead = ir_prefetch_temp_name();
-  char *cond = ir_prefetch_temp_name();
-  char skip_label[48];
+  distance = ir_prefetch_distance_for_loop(function, loc);
+  ahead = ir_prefetch_temp_name();
+  cond = ir_prefetch_temp_name();
   snprintf(skip_label, sizeof(skip_label), "ir_pf_skip_%zu", g_prefetch_id++);
-  int ok = ahead && cond;
-
-  if (ok) {
-    IRInstruction add = {0};
-    add.op = IR_OP_BINARY;
-    add.location = loc;
-    add.text = mettle_strdup("+");
-    add.dest = ir_operand_temp(ahead);
-    add.lhs = ir_operand_symbol(iv_symbol);
-    add.rhs = ir_operand_int(D);
-    ok = add.text && add.dest.name && add.lhs.name &&
-         ir_instruction_vector_append_move(seq, &add);
-    if (!ok) {
-      ir_instruction_destroy_storage(&add);
-    }
-  }
-  if (ok) {
-    IRInstruction cmp = {0};
-    cmp.op = IR_OP_BINARY;
-    cmp.location = loc;
-    cmp.text = mettle_strdup("<");
-    cmp.dest = ir_operand_temp(cond);
-    cmp.lhs = ir_operand_temp(ahead);
-    if (compare->rhs.kind == IR_OPERAND_INT) {
-      cmp.rhs = ir_operand_int(compare->rhs.int_value);
-    } else {
-      cmp.rhs = ir_operand_symbol(compare->rhs.name);
-    }
-    ok = cmp.text && cmp.dest.name && cmp.lhs.name &&
-         (cmp.rhs.kind == IR_OPERAND_INT || cmp.rhs.name) &&
-         ir_instruction_vector_append_move(seq, &cmp);
-    if (!ok) {
-      ir_instruction_destroy_storage(&cmp);
-    }
-  }
-  if (ok) {
-    IRInstruction br = {0};
-    br.op = IR_OP_BRANCH_ZERO;
-    br.location = loc;
-    br.lhs = ir_operand_temp(cond);
-    br.text = mettle_strdup(skip_label);
-    ok = br.lhs.name && br.text && ir_instruction_vector_append_move(seq, &br);
-    if (!ok) {
-      ir_instruction_destroy_storage(&br);
-    }
-  }
-  const char *final_addr = NULL;
-  for (size_t s = 0; ok && s < slice.count; s++) {
-    final_addr = ir_prefetch_emit_clone(
-        seq, &function->instructions[slice.indices[s]], &names, iv_symbol,
-        ahead);
-    ok = final_addr != NULL;
-  }
-  if (ok) {
-    const char *addr_name = ir_name_map_lookup(
-        &names, function->instructions[target_load].lhs.name);
-    ok = addr_name != NULL;
-    if (ok) {
-      IRInstruction pf = {0};
-      pf.op = IR_OP_PREFETCH;
-      pf.location = loc;
-      pf.lhs = ir_operand_temp(addr_name);
-      ok = pf.lhs.name && ir_instruction_vector_append_move(seq, &pf);
-      if (!ok) {
-        ir_instruction_destroy_storage(&pf);
-      }
-    }
-  }
-  if (ok) {
-    IRInstruction lbl = {0};
-    lbl.op = IR_OP_LABEL;
-    lbl.location = loc;
-    lbl.text = mettle_strdup(skip_label);
-    ok = lbl.text && ir_instruction_vector_append_move(seq, &lbl);
-    if (!ok) {
-      ir_instruction_destroy_storage(&lbl);
-    }
-  }
-
+  ok = ahead && cond &&
+       ir_pf_emit_ahead(seq, loc, ahead, loop.iv, distance) &&
+       ir_pf_emit_in_range(seq, loc, cond, ahead, compare) &&
+       ir_pf_emit_skip_branch(seq, loc, cond, skip_label) &&
+       ir_pf_clone_address_slice(seq, function, &slice, &names, loop.iv,
+                                 ahead) &&
+       ir_pf_emit_prefetch(
+           seq, loc,
+           ir_name_map_lookup(&names,
+                              function->instructions[target_load].lhs.name)) &&
+       ir_pf_emit_label(seq, loc, skip_label);
   free(ahead);
   free(cond);
   ir_name_map_destroy(&names);
@@ -350,7 +380,7 @@ static int ir_prefetch_plan_loop(IRFunction *function, size_t header_index,
     ir_instruction_vector_destroy(seq);
     return 0;
   }
-  plan->insert_after = bounds.branch_index;
+  plan->insert_after = loop.bounds.branch_index;
   return 1;
 }
 

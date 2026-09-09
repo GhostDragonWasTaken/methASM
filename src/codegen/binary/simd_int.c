@@ -937,21 +937,102 @@ static int copy_move_element(BinaryCodeBuffer *b, long long size) {
          binary_emit_mov_mem_reg(b, BINARY_GP_RCX, 0, BINARY_GP_RAX);
 }
 
+static int copy_loop_back_to(BinaryCodeBuffer *b, size_t top) {
+  size_t j_back = 0;
+
+  return wcs_jcc(b, 0, &j_back) && wcs_patch_to(b, j_back, top);
+}
+
+static int copy_advance(BinaryCodeBuffer *b, BinaryGpRegister count,
+                        unsigned char bytes, unsigned char decrement) {
+  return wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, bytes) &&
+         wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, bytes) &&
+         wcs_addsub_reg_imm8(b, count, 1, decrement);
+}
+
+static int copy_emit_ymm_loop(BinaryCodeBuffer *b, size_t *j_tail) {
+  size_t top = b->size;
+
+  return wcs_cmp_reg_imm32(b, BINARY_GP_R9, 32) && wcs_jcc(b, 0x82, j_tail) &&
+         wcs_avx_vmovdqu_ymm_mem(b, 0, BINARY_GP_RDX, 0) &&
+         wcs_avx_vmovdqu_mem_ymm(b, BINARY_GP_RCX, 0, 0) &&
+         copy_advance(b, BINARY_GP_R9, 32, 32) && copy_loop_back_to(b, top);
+}
+
+static int copy_emit_byte_tail(BinaryCodeBuffer *b, size_t *j_tail_done) {
+  size_t top = b->size;
+
+  return wcs_cmp_reg_imm32(b, BINARY_GP_R9, 0) &&
+         wcs_jcc(b, 0x8E, j_tail_done) &&
+         binary_emit_movzx_reg_mem8(b, BINARY_GP_RAX, BINARY_GP_RDX, 0) &&
+         binary_emit_mov_mem_reg8(b, BINARY_GP_RCX, 0, BINARY_GP_RAX) &&
+         copy_advance(b, BINARY_GP_R9, 1, 1) && copy_loop_back_to(b, top);
+}
+
+static int copy_emit_element_loop(BinaryCodeBuffer *b, long long size,
+                                  size_t *j_scalar_done) {
+  size_t top = b->size;
+
+  return wcs_cmp_reg_imm32(b, BINARY_GP_R8, 0) &&
+         wcs_jcc(b, 0x8E, j_scalar_done) && copy_move_element(b, size) &&
+         copy_advance(b, BINARY_GP_R8, (unsigned char)size, 1) &&
+         copy_loop_back_to(b, top);
+}
+
+static int copy_emit_wide_path(BinaryCodeBuffer *b, size_t *j_vec_join) {
+  size_t j_tail = 0;
+  size_t j_tail_done = 0;
+
+  return copy_emit_ymm_loop(b, &j_tail) && wcs_patch_here(b, j_tail) &&
+         wcs_avx_vzeroupper(b) && copy_emit_byte_tail(b, &j_tail_done) &&
+         wcs_patch_here(b, j_tail_done) && wcs_jcc(b, 0, j_vec_join);
+}
+
+static int copy_emit_length_guard(BinaryCodeBuffer *b, unsigned char shift,
+                                  size_t *j_empty) {
+  if (!binary_emit_movsxd_reg_reg32(b, BINARY_GP_R8, BINARY_GP_R8) ||
+      !wcs_cmp_reg_imm32(b, BINARY_GP_R8, 0) ||
+      !wcs_jcc(b, 0x8E, j_empty) ||
+      !binary_emit_mov_reg_reg(b, BINARY_GP_R9, BINARY_GP_R8)) {
+    return 0;
+  }
+  return !shift || wcs_shift_reg_imm(b, BINARY_GP_R9, 0, shift);
+}
+
+static int copy_emit_overlap_guard(BinaryCodeBuffer *b, size_t *j_scalar) {
+  return binary_emit_mov_reg_reg(b, BINARY_GP_RAX, BINARY_GP_RCX) &&
+         binary_emit_alu_reg_reg(b, 0x29, BINARY_GP_RAX, BINARY_GP_RDX) &&
+         binary_emit_cmp_reg_reg(b, BINARY_GP_RAX, BINARY_GP_R9) &&
+         wcs_jcc(b, 0x82, j_scalar);
+}
+
+static int copy_load_arguments(CodeGenerator *generator,
+                               BinaryFunctionContext *context,
+                               const IRInstruction *instruction) {
+  return code_generator_binary_emit_operand_load(generator, context,
+                                                 &instruction->dest,
+                                                 BINARY_GP_RCX) &&
+         code_generator_binary_emit_operand_load(generator, context,
+                                                 &instruction->lhs,
+                                                 BINARY_GP_RDX) &&
+         code_generator_binary_emit_operand_load(generator, context,
+                                                 &instruction->rhs,
+                                                 BINARY_GP_R8);
+}
+
+static unsigned char copy_element_shift(long long size) {
+  return size == 1 ? 0 : size == 2 ? 1 : size == 4 ? 2 : 3;
+}
+
 int code_generator_binary_emit_simd_copy(CodeGenerator *generator,
                                          BinaryFunctionContext *context,
                                          const IRInstruction *instruction) {
   BinaryCodeBuffer *b = NULL;
   long long size = 0;
-  unsigned char shift = 0;
   size_t j_empty = 0;
   size_t j_scalar = 0;
-  size_t j_tail = 0;
-  size_t j_tail_done = 0;
   size_t j_scalar_done = 0;
   size_t j_vec_join = 0;
-  size_t vec_top = 0;
-  size_t tail_top = 0;
-  size_t scalar_top = 0;
 
   if (!generator || !context || !instruction ||
       instruction->argument_count < 1 ||
@@ -962,96 +1043,15 @@ int code_generator_binary_emit_simd_copy(CodeGenerator *generator,
   if (size != 1 && size != 2 && size != 4 && size != 8) {
     return 0;
   }
-  shift = size == 1 ? 0 : size == 2 ? 1 : size == 4 ? 2 : 3;
   b = &context->code;
-
-  if (!code_generator_binary_emit_operand_load(generator, context,
-                                               &instruction->dest,
-                                               BINARY_GP_RCX) ||
-      !code_generator_binary_emit_operand_load(generator, context,
-                                               &instruction->lhs,
-                                               BINARY_GP_RDX) ||
-      !code_generator_binary_emit_operand_load(generator, context,
-                                               &instruction->rhs,
-                                               BINARY_GP_R8)) {
+  if (!copy_load_arguments(generator, context, instruction) ||
+      !copy_emit_length_guard(b, copy_element_shift(size), &j_empty) ||
+      !copy_emit_overlap_guard(b, &j_scalar) ||
+      !copy_emit_wide_path(b, &j_vec_join) ||
+      !wcs_patch_here(b, j_scalar) ||
+      !copy_emit_element_loop(b, size, &j_scalar_done)) {
     return 0;
   }
-
-  if (!binary_emit_movsxd_reg_reg32(b, BINARY_GP_R8, BINARY_GP_R8) ||
-      !wcs_cmp_reg_imm32(b, BINARY_GP_R8, 0) ||
-      !wcs_jcc(b, 0x8E, &j_empty) ||
-      !binary_emit_mov_reg_reg(b, BINARY_GP_R9, BINARY_GP_R8)) {
-    return 0;
-  }
-  if (shift && !wcs_shift_reg_imm(b, BINARY_GP_R9, 0, shift)) {
-    return 0;
-  }
-
-  if (!binary_emit_mov_reg_reg(b, BINARY_GP_RAX, BINARY_GP_RCX) ||
-      !binary_emit_alu_reg_reg(b, 0x29, BINARY_GP_RAX, BINARY_GP_RDX) ||
-      !binary_emit_cmp_reg_reg(b, BINARY_GP_RAX, BINARY_GP_R9) ||
-      !wcs_jcc(b, 0x82, &j_scalar)) {
-    return 0;
-  }
-
-  vec_top = b->size;
-  if (!wcs_cmp_reg_imm32(b, BINARY_GP_R9, 32) ||
-      !wcs_jcc(b, 0x82, &j_tail) ||
-      !wcs_avx_vmovdqu_ymm_mem(b, 0, BINARY_GP_RDX, 0) ||
-      !wcs_avx_vmovdqu_mem_ymm(b, BINARY_GP_RCX, 0, 0) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 32) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 32) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_R9, 1, 32)) {
-    return 0;
-  }
-  {
-    size_t j_back = 0;
-    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, vec_top)) {
-      return 0;
-    }
-  }
-
-  if (!wcs_patch_here(b, j_tail) || !wcs_avx_vzeroupper(b)) {
-    return 0;
-  }
-  tail_top = b->size;
-  if (!wcs_cmp_reg_imm32(b, BINARY_GP_R9, 0) ||
-      !wcs_jcc(b, 0x8E, &j_tail_done) ||
-      !binary_emit_movzx_reg_mem8(b, BINARY_GP_RAX, BINARY_GP_RDX, 0) ||
-      !binary_emit_mov_mem_reg8(b, BINARY_GP_RCX, 0, BINARY_GP_RAX) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, 1) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, 1) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_R9, 1, 1)) {
-    return 0;
-  }
-  {
-    size_t j_back = 0;
-    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, tail_top)) {
-      return 0;
-    }
-  }
-  if (!wcs_patch_here(b, j_tail_done) || !wcs_jcc(b, 0, &j_vec_join)) {
-    return 0;
-  }
-
-  if (!wcs_patch_here(b, j_scalar)) {
-    return 0;
-  }
-  scalar_top = b->size;
-  if (!wcs_cmp_reg_imm32(b, BINARY_GP_R8, 0) ||
-      !wcs_jcc(b, 0x8E, &j_scalar_done) || !copy_move_element(b, size) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RDX, 0, (unsigned char)size) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_RCX, 0, (unsigned char)size) ||
-      !wcs_addsub_reg_imm8(b, BINARY_GP_R8, 1, 1)) {
-    return 0;
-  }
-  {
-    size_t j_back = 0;
-    if (!wcs_jcc(b, 0, &j_back) || !wcs_patch_to(b, j_back, scalar_top)) {
-      return 0;
-    }
-  }
-
   return wcs_patch_here(b, j_scalar_done) && wcs_patch_here(b, j_vec_join) &&
          wcs_patch_here(b, j_empty);
 }

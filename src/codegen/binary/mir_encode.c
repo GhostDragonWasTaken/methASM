@@ -1213,300 +1213,341 @@ static int emit_ext_load(BinaryCodeBuffer *code, BinaryGpRegister target,
                                       base, disp);
 }
 
-static int encode_mov(MirFunction *fn, const MirInst *in) {
-  CodeGenerator *g = fn->generator;
+typedef struct {
+  int prefix66;
+  int rexw;
+  unsigned char op;
+} MirStoreForm;
+
+static int mir_width_is_scalar(int width) {
+  return width == 1 || width == 2 || width == 4 || width == 8;
+}
+
+static MirStoreForm mir_store_form(int width) {
+  MirStoreForm form;
+
+  form.prefix66 = width == 2;
+  form.rexw = width == 8;
+  form.op = width == 1 ? 0x88 : 0x89;
+  return form;
+}
+
+static int mir_store_needs_forced_rex(int width, BinaryGpRegister val) {
+  return width == 1 && val >= BINARY_GP_RSP && val <= BINARY_GP_RDI;
+}
+
+static int mir_emit_store_at(BinaryCodeBuffer *code, int width,
+                             BinaryGpRegister val, BinaryGpRegister addr,
+                             int displacement) {
+  MirStoreForm form = mir_store_form(width);
+
+  if (mir_store_needs_forced_rex(width, val)) {
+    return binary_emit_memory_access_ex_forced(code, form.prefix66, form.rexw,
+                                               form.op, 0, 0, val, addr,
+                                               displacement);
+  }
+  return binary_emit_memory_access_ex(code, form.prefix66, form.rexw, form.op,
+                                      0, 0, val, addr, displacement);
+}
+
+static int mir_emit_store_sib(BinaryCodeBuffer *code, int width,
+                              BinaryGpRegister val, BinaryGpRegister base,
+                              BinaryGpRegister index, int scale,
+                              int displacement) {
+  MirStoreForm form = mir_store_form(width);
+
+  if (mir_store_needs_forced_rex(width, val)) {
+    return binary_emit_memory_access_sib_forced(
+        code, form.prefix66, form.rexw, form.op, 0, 0, val, base, index, scale,
+        displacement);
+  }
+  return binary_emit_memory_access_sib(code, form.prefix66, form.rexw, form.op,
+                                       0, 0, val, base, index, scale,
+                                       displacement);
+}
+
+
+static int encode_mov_float(MirFunction *fn, const MirInst *in) {
   BinaryFunctionContext *ctx = fn->context;
 
-  if (in->is_float) {
-    int ok;
-    int w = in->width;
-    unsigned char prefix = (w == 16) ? 0x66 : ((w == 4) ? 0xF3 : 0xF2);
-    if (in->a.kind == MIR_OPK_MEM) {
-      if (in->a.mem.index != MIR_VREG_NONE) {
-        return enc_err(fn, "scaled index in a float load");
-      }
-      int base_disp;
-      BinaryGpRegister addr =
-          mir_mem_base_reg(fn, &in->a.mem, SCRATCH_B, &base_disp, &ok);
-      if (!ok) {
-        return 0;
-      }
-      BinaryXmmRegister target;
-      int direct = dst_is_xmm_reg(fn, &in->dst, &target);
-      if (!direct) {
-        target = FSCRATCH_A;
-      }
-      if (!simd_emit_prefixed_xmm_mem_disp(&ctx->code, prefix, 0x10, target,
-                                           addr, base_disp)) {
-        return enc_err(fn, "out of memory in float load");
-      }
-      return direct ? 1 : xmm_store(fn, &in->dst, FSCRATCH_A, w);
-    }
-    if (in->dst.kind == MIR_OPK_MEM) {
-      if (in->dst.mem.index != MIR_VREG_NONE) {
-        return enc_err(fn, "scaled index in a float store");
-      }
-      int base_disp;
-      BinaryGpRegister addr =
-          mir_mem_base_reg(fn, &in->dst.mem, SCRATCH_B, &base_disp, &ok);
-      if (!ok) {
-        return 0;
-      }
-      BinaryXmmRegister val = xmm_value(fn, &in->a, FSCRATCH_A, w, &ok);
-      if (!ok) {
-        return 0;
-      }
-      if (!simd_emit_prefixed_xmm_mem_disp(&ctx->code, prefix, 0x11, val, addr,
-                                           base_disp)) {
-        return enc_err(fn, "out of memory in float store");
-      }
-      return 1;
-    }
-    if (in->a.kind == MIR_OPK_FIMM) {
-      BinaryXmmRegister target;
-      if (dst_is_xmm_reg(fn, &in->dst, &target)) {
-        return xmm_load_fimm(fn, (uint64_t)in->a.imm, target, w);
-      }
-    }
-    BinaryXmmRegister sval = xmm_value(fn, &in->a, FSCRATCH_A, w, &ok);
-    if (!ok) {
-      return 0;
-    }
-    return xmm_store(fn, &in->dst, sval, w);
-  }
-
+  int ok;
+  int w = in->width;
+  unsigned char prefix = (w == 16) ? 0x66 : ((w == 4) ? 0xF3 : 0xF2);
   if (in->a.kind == MIR_OPK_MEM) {
-    int ok;
-    int is_signed = !in->is_unsigned;
-    BinaryGpRegister D;
-    int dst_in_reg = dst_is_reg(fn, &in->dst, &D);
-    BinaryGpRegister target = dst_in_reg ? D : SCRATCH_A;
     if (in->a.mem.index != MIR_VREG_NONE) {
-      MirOperand iop = mir_op_vreg(in->a.mem.index);
-      BinaryGpRegister taken[4];
-      int base_disp;
-      int tn = 0;
-      mir_note_mem_base(fn, &in->a.mem, taken, &tn);
-      mir_note_fixed_reg(fn, &iop, taken, &tn);
-      BinaryGpRegister vouch[1];
-      int vn = mir_reg_in(target, taken, tn) ? 0 : 1;
-      vouch[0] = target;
-      size_t idx = (size_t)(in - fn->insns);
-      BinaryGpRegister base_scratch, index_scratch;
-      if (!mir_pick_scratch(fn, idx, SCRATCH_B, taken, tn, vouch, vn,
-                            &base_scratch)) {
-        return enc_err(fn, "no free scratch register for a scaled load base");
-      }
-      BinaryGpRegister base_reg =
-          mir_mem_base_reg(fn, &in->a.mem, base_scratch, &base_disp, &ok);
-      if (!ok) {
-        return 0;
-      }
-      taken[tn++] = base_reg;
-      if (!mir_pick_scratch(fn, idx, BINARY_GP_RDX, taken, tn, vouch, vn,
-                            &index_scratch)) {
-        return enc_err(fn, "no free scratch register for a scaled load index");
-      }
-      BinaryGpRegister index_reg = value_reg(fn, &iop, index_scratch, &ok);
-      if (!ok) {
-        return 0;
-      }
-      if (!emit_ext_load(&ctx->code, target, base_reg, 1, index_reg,
-                         in->a.mem.scale, base_disp, in->width,
-                         is_signed)) {
-        return enc_err(fn, "out of memory in scaled load");
-      }
-    } else {
-      int base_disp;
-      BinaryGpRegister base_reg =
-          mir_mem_base_reg(fn, &in->a.mem, SCRATCH_B, &base_disp, &ok);
-      if (!ok) {
-        return 0;
-      }
-      if (!emit_ext_load(&ctx->code, target, base_reg, 0, BINARY_GP_RSP, 1,
-                         base_disp, in->width, is_signed)) {
-        return enc_err(fn, "out of memory in load");
-      }
-    }
-    if (!dst_in_reg) {
-      return store_from(fn, &in->dst, SCRATCH_A);
-    }
-    return 1;
-  }
-
-  if (in->dst.kind == MIR_OPK_MEM) {
-    int ok1, ok2;
-    int scalar_w = (in->width == 1 || in->width == 2 || in->width == 4 ||
-                    in->width == 8);
-    if (in->a.kind == MIR_OPK_IMM && scalar_w) {
-      int has_index = in->dst.mem.index != MIR_VREG_NONE;
-      int base_disp;
-      BinaryGpRegister base_reg =
-          mir_mem_base_reg(fn, &in->dst.mem, SCRATCH_B, &base_disp, &ok1);
-      BinaryGpRegister index_reg = BINARY_GP_RAX;
-      if (!ok1) {
-        return 0;
-      }
-      if (has_index) {
-        MirOperand iop = mir_op_vreg(in->dst.mem.index);
-        index_reg = value_reg(fn, &iop, SCRATCH_A, &ok2);
-        if (!ok2) {
-          return 0;
-        }
-      }
-      if (binary_emit_mov_mem_imm_width(&ctx->code, base_reg, has_index,
-                                        index_reg, in->dst.mem.scale,
-                                        base_disp, in->a.imm,
-                                        in->width)) {
-        return 1;
-      }
-    }
-    if (in->dst.mem.index != MIR_VREG_NONE) {
-      MirOperand iop = mir_op_vreg(in->dst.mem.index);
-      BinaryGpRegister taken[6];
-      int base_disp;
-      int tn = 0;
-      mir_note_mem_base(fn, &in->dst.mem, taken, &tn);
-      mir_note_fixed_reg(fn, &iop, taken, &tn);
-      mir_note_fixed_reg(fn, &in->a, taken, &tn);
-
-      size_t idx = (size_t)(in - fn->insns);
-      BinaryGpRegister base_scratch, index_scratch, val_scratch;
-      if (!mir_pick_scratch(fn, idx, SCRATCH_B, taken, tn, NULL, 0, &base_scratch)) {
-        return enc_err(fn, "no free scratch register for a scaled store base");
-      }
-      BinaryGpRegister base_reg =
-          mir_mem_base_reg(fn, &in->dst.mem, base_scratch, &base_disp, &ok1);
-      if (!ok1) {
-        return 0;
-      }
-      taken[tn++] = base_reg;
-      if (!mir_pick_scratch(fn, idx, BINARY_GP_RDX, taken, tn, NULL, 0, &index_scratch)) {
-        return enc_err(fn, "no free scratch register for a scaled store index");
-      }
-      BinaryGpRegister index_reg = value_reg(fn, &iop, index_scratch, &ok2);
-      if (!ok2) {
-        return 0;
-      }
-      taken[tn++] = index_reg;
-      int scalar_width = (in->width == 1 || in->width == 2 ||
-                          in->width == 4 || in->width == 8);
-      if (!scalar_width) {
-        taken[tn++] = SCRATCH_B;
-      }
-      BinaryGpRegister val;
-      if (mir_env_addr_store() ||
-          !mir_pick_scratch(fn, idx, SCRATCH_A, taken, tn, NULL, 0,
-                            &val_scratch)) {
-        BinaryGpRegister addr = SCRATCH_B;
-        BinaryGpRegister val_stage = SCRATCH_A;
-        BinaryGpRegister val_fixed;
-        if (mir_operand_fixed_reg(fn, &in->a, &val_fixed) &&
-            val_fixed == addr) {
-          addr = SCRATCH_A;
-          val_stage = SCRATCH_B;
-        }
-        if (!binary_emit_lea_reg_base_index_scale_disp(
-                &ctx->code, addr, base_reg, index_reg, in->dst.mem.scale,
-                base_disp)) {
-          return enc_err(fn, "out of memory in scaled store address");
-        }
-        val = value_reg(fn, &in->a, val_stage, &ok1);
-        if (!ok1) {
-          return 0;
-        }
-        if (!scalar_width) {
-          if (!code_generator_binary_emit_store_to_address(g, ctx, addr,
-                                                           in->width, val)) {
-            return enc_err(fn, "out of memory in store");
-          }
-          return 1;
-        }
-        int prefix66 = in->width == 2;
-        int rexw = in->width == 8;
-        unsigned char op = in->width == 1 ? 0x88 : 0x89;
-        int done =
-            (in->width == 1 && val >= BINARY_GP_RSP && val <= BINARY_GP_RDI)
-                ? binary_emit_memory_access_ex_forced(&ctx->code, prefix66,
-                                                      rexw, op, 0, 0, val, addr,
-                                                      0)
-                : binary_emit_memory_access_ex(&ctx->code, prefix66, rexw, op,
-                                               0, 0, val, addr, 0);
-        if (!done) {
-          return enc_err(fn, "out of memory in scaled store");
-        }
-        return 1;
-      }
-      val = value_reg(fn, &in->a, val_scratch, &ok1);
-      if (!ok1) {
-        return 0;
-      }
-      if (scalar_width) {
-        int prefix66 = in->width == 2;
-        int rexw = in->width == 8;
-        unsigned char op = in->width == 1 ? 0x88 : 0x89;
-        int done =
-            (in->width == 1 && val >= BINARY_GP_RSP && val <= BINARY_GP_RDI)
-                ? binary_emit_memory_access_sib_forced(
-                      &ctx->code, prefix66, rexw, op, 0, 0, val, base_reg,
-                      index_reg, in->dst.mem.scale, base_disp)
-                : binary_emit_memory_access_sib(
-                      &ctx->code, prefix66, rexw, op, 0, 0, val, base_reg,
-                      index_reg, in->dst.mem.scale, base_disp);
-        if (!done) {
-          return enc_err(fn, "out of memory in scaled store");
-        }
-        return 1;
-      }
-      if (!binary_emit_lea_reg_base_index_scale_disp(
-              &ctx->code, SCRATCH_B, base_reg, index_reg, in->dst.mem.scale,
-              base_disp)) {
-        return enc_err(fn, "out of memory in scaled store address");
-      }
-      if (!code_generator_binary_emit_store_to_address(g, ctx, SCRATCH_B,
-                                                       in->width, val)) {
-        return enc_err(fn, "out of memory in store");
-      }
-      return 1;
+      return enc_err(fn, "scaled index in a float load");
     }
     int base_disp;
     BinaryGpRegister addr =
+        mir_mem_base_reg(fn, &in->a.mem, SCRATCH_B, &base_disp, &ok);
+    if (!ok) {
+      return 0;
+    }
+    BinaryXmmRegister target;
+    int direct = dst_is_xmm_reg(fn, &in->dst, &target);
+    if (!direct) {
+      target = FSCRATCH_A;
+    }
+    if (!simd_emit_prefixed_xmm_mem_disp(&ctx->code, prefix, 0x10, target,
+                                         addr, base_disp)) {
+      return enc_err(fn, "out of memory in float load");
+    }
+    return direct ? 1 : xmm_store(fn, &in->dst, FSCRATCH_A, w);
+  }
+  if (in->dst.kind == MIR_OPK_MEM) {
+    if (in->dst.mem.index != MIR_VREG_NONE) {
+      return enc_err(fn, "scaled index in a float store");
+    }
+    int base_disp;
+    BinaryGpRegister addr =
+        mir_mem_base_reg(fn, &in->dst.mem, SCRATCH_B, &base_disp, &ok);
+    if (!ok) {
+      return 0;
+    }
+    BinaryXmmRegister val = xmm_value(fn, &in->a, FSCRATCH_A, w, &ok);
+    if (!ok) {
+      return 0;
+    }
+    if (!simd_emit_prefixed_xmm_mem_disp(&ctx->code, prefix, 0x11, val, addr,
+                                         base_disp)) {
+      return enc_err(fn, "out of memory in float store");
+    }
+    return 1;
+  }
+  if (in->a.kind == MIR_OPK_FIMM) {
+    BinaryXmmRegister target;
+    if (dst_is_xmm_reg(fn, &in->dst, &target)) {
+      return xmm_load_fimm(fn, (uint64_t)in->a.imm, target, w);
+    }
+  }
+  BinaryXmmRegister sval = xmm_value(fn, &in->a, FSCRATCH_A, w, &ok);
+  if (!ok) {
+    return 0;
+  }
+  return xmm_store(fn, &in->dst, sval, w);
+}
+
+static int encode_mov_load(MirFunction *fn, const MirInst *in) {
+  BinaryFunctionContext *ctx = fn->context;
+
+  int ok;
+  int is_signed = !in->is_unsigned;
+  BinaryGpRegister D;
+  int dst_in_reg = dst_is_reg(fn, &in->dst, &D);
+  BinaryGpRegister target = dst_in_reg ? D : SCRATCH_A;
+  if (in->a.mem.index != MIR_VREG_NONE) {
+    MirOperand iop = mir_op_vreg(in->a.mem.index);
+    BinaryGpRegister taken[4];
+    int base_disp;
+    int tn = 0;
+    mir_note_mem_base(fn, &in->a.mem, taken, &tn);
+    mir_note_fixed_reg(fn, &iop, taken, &tn);
+    BinaryGpRegister vouch[1];
+    int vn = mir_reg_in(target, taken, tn) ? 0 : 1;
+    vouch[0] = target;
+    size_t idx = (size_t)(in - fn->insns);
+    BinaryGpRegister base_scratch, index_scratch;
+    if (!mir_pick_scratch(fn, idx, SCRATCH_B, taken, tn, vouch, vn,
+                          &base_scratch)) {
+      return enc_err(fn, "no free scratch register for a scaled load base");
+    }
+    BinaryGpRegister base_reg =
+        mir_mem_base_reg(fn, &in->a.mem, base_scratch, &base_disp, &ok);
+    if (!ok) {
+      return 0;
+    }
+    taken[tn++] = base_reg;
+    if (!mir_pick_scratch(fn, idx, BINARY_GP_RDX, taken, tn, vouch, vn,
+                          &index_scratch)) {
+      return enc_err(fn, "no free scratch register for a scaled load index");
+    }
+    BinaryGpRegister index_reg = value_reg(fn, &iop, index_scratch, &ok);
+    if (!ok) {
+      return 0;
+    }
+    if (!emit_ext_load(&ctx->code, target, base_reg, 1, index_reg,
+                       in->a.mem.scale, base_disp, in->width,
+                       is_signed)) {
+      return enc_err(fn, "out of memory in scaled load");
+    }
+  } else {
+    int base_disp;
+    BinaryGpRegister base_reg =
+        mir_mem_base_reg(fn, &in->a.mem, SCRATCH_B, &base_disp, &ok);
+    if (!ok) {
+      return 0;
+    }
+    if (!emit_ext_load(&ctx->code, target, base_reg, 0, BINARY_GP_RSP, 1,
+                       base_disp, in->width, is_signed)) {
+      return enc_err(fn, "out of memory in load");
+    }
+  }
+  if (!dst_in_reg) {
+    return store_from(fn, &in->dst, SCRATCH_A);
+  }
+  return 1;
+}
+
+static int encode_mov_store(MirFunction *fn, const MirInst *in) {
+  CodeGenerator *g = fn->generator;
+  BinaryFunctionContext *ctx = fn->context;
+
+  int ok1, ok2;
+  int scalar_w = mir_width_is_scalar(in->width);
+  if (in->a.kind == MIR_OPK_IMM && scalar_w) {
+    int has_index = in->dst.mem.index != MIR_VREG_NONE;
+    int base_disp;
+    BinaryGpRegister base_reg =
         mir_mem_base_reg(fn, &in->dst.mem, SCRATCH_B, &base_disp, &ok1);
+    BinaryGpRegister index_reg = BINARY_GP_RAX;
     if (!ok1) {
       return 0;
     }
-    BinaryGpRegister val = value_reg(fn, &in->a, SCRATCH_A, &ok2);
+    if (has_index) {
+      MirOperand iop = mir_op_vreg(in->dst.mem.index);
+      index_reg = value_reg(fn, &iop, SCRATCH_A, &ok2);
+      if (!ok2) {
+        return 0;
+      }
+    }
+    if (binary_emit_mov_mem_imm_width(&ctx->code, base_reg, has_index,
+                                      index_reg, in->dst.mem.scale,
+                                      base_disp, in->a.imm,
+                                      in->width)) {
+      return 1;
+    }
+  }
+  if (in->dst.mem.index != MIR_VREG_NONE) {
+    MirOperand iop = mir_op_vreg(in->dst.mem.index);
+    BinaryGpRegister taken[6];
+    int base_disp;
+    int tn = 0;
+    mir_note_mem_base(fn, &in->dst.mem, taken, &tn);
+    mir_note_fixed_reg(fn, &iop, taken, &tn);
+    mir_note_fixed_reg(fn, &in->a, taken, &tn);
+
+    size_t idx = (size_t)(in - fn->insns);
+    BinaryGpRegister base_scratch, index_scratch, val_scratch;
+    if (!mir_pick_scratch(fn, idx, SCRATCH_B, taken, tn, NULL, 0, &base_scratch)) {
+      return enc_err(fn, "no free scratch register for a scaled store base");
+    }
+    BinaryGpRegister base_reg =
+        mir_mem_base_reg(fn, &in->dst.mem, base_scratch, &base_disp, &ok1);
+    if (!ok1) {
+      return 0;
+    }
+    taken[tn++] = base_reg;
+    if (!mir_pick_scratch(fn, idx, BINARY_GP_RDX, taken, tn, NULL, 0, &index_scratch)) {
+      return enc_err(fn, "no free scratch register for a scaled store index");
+    }
+    BinaryGpRegister index_reg = value_reg(fn, &iop, index_scratch, &ok2);
     if (!ok2) {
       return 0;
     }
-    if (in->width == 1 || in->width == 2 || in->width == 4 || in->width == 8) {
-      int prefix66 = in->width == 2;
-      int rexw = in->width == 8;
-      unsigned char op = in->width == 1 ? 0x88 : 0x89;
-      int done =
-          (in->width == 1 && val >= BINARY_GP_RSP && val <= BINARY_GP_RDI)
-              ? binary_emit_memory_access_ex_forced(&ctx->code, prefix66, rexw,
-                                                    op, 0, 0, val, addr,
-                                                    base_disp)
-              : binary_emit_memory_access_ex(&ctx->code, prefix66, rexw, op, 0,
-                                             0, val, addr, base_disp);
+    taken[tn++] = index_reg;
+    int scalar_width = mir_width_is_scalar(in->width);
+    if (!scalar_width) {
+      taken[tn++] = SCRATCH_B;
+    }
+    BinaryGpRegister val;
+    if (mir_env_addr_store() ||
+        !mir_pick_scratch(fn, idx, SCRATCH_A, taken, tn, NULL, 0,
+                          &val_scratch)) {
+      BinaryGpRegister addr = SCRATCH_B;
+      BinaryGpRegister val_stage = SCRATCH_A;
+      BinaryGpRegister val_fixed;
+      if (mir_operand_fixed_reg(fn, &in->a, &val_fixed) &&
+          val_fixed == addr) {
+        addr = SCRATCH_A;
+        val_stage = SCRATCH_B;
+      }
+      if (!binary_emit_lea_reg_base_index_scale_disp(
+              &ctx->code, addr, base_reg, index_reg, in->dst.mem.scale,
+              base_disp)) {
+        return enc_err(fn, "out of memory in scaled store address");
+      }
+      val = value_reg(fn, &in->a, val_stage, &ok1);
+      if (!ok1) {
+        return 0;
+      }
+      if (!scalar_width) {
+        if (!code_generator_binary_emit_store_to_address(g, ctx, addr,
+                                                         in->width, val)) {
+          return enc_err(fn, "out of memory in store");
+        }
+        return 1;
+      }
+      int done = mir_emit_store_at(&ctx->code, in->width, val, addr, 0);
       if (!done) {
-        return enc_err(fn, "out of memory in store");
+        return enc_err(fn, "out of memory in scaled store");
       }
       return 1;
     }
-    if (base_disp != 0) {
-      if (!binary_emit_lea_reg_mem(&ctx->code, SCRATCH_B, addr,
-                                   base_disp)) {
-        return enc_err(fn, "out of memory in store address");
-      }
-      addr = SCRATCH_B;
+    val = value_reg(fn, &in->a, val_scratch, &ok1);
+    if (!ok1) {
+      return 0;
     }
-    if (!code_generator_binary_emit_store_to_address(g, ctx, addr, in->width,
-                                                     val)) {
+    if (scalar_width) {
+      int done = mir_emit_store_sib(&ctx->code, in->width, val, base_reg,
+                                    index_reg, in->dst.mem.scale, base_disp);
+      if (!done) {
+        return enc_err(fn, "out of memory in scaled store");
+      }
+      return 1;
+    }
+    if (!binary_emit_lea_reg_base_index_scale_disp(
+            &ctx->code, SCRATCH_B, base_reg, index_reg, in->dst.mem.scale,
+            base_disp)) {
+      return enc_err(fn, "out of memory in scaled store address");
+    }
+    if (!code_generator_binary_emit_store_to_address(g, ctx, SCRATCH_B,
+                                                     in->width, val)) {
       return enc_err(fn, "out of memory in store");
     }
     return 1;
+  }
+  int base_disp;
+  BinaryGpRegister addr =
+      mir_mem_base_reg(fn, &in->dst.mem, SCRATCH_B, &base_disp, &ok1);
+  if (!ok1) {
+    return 0;
+  }
+  BinaryGpRegister val = value_reg(fn, &in->a, SCRATCH_A, &ok2);
+  if (!ok2) {
+    return 0;
+  }
+  if (mir_width_is_scalar(in->width)) {
+    int done = mir_emit_store_at(&ctx->code, in->width, val, addr, base_disp);
+    if (!done) {
+      return enc_err(fn, "out of memory in store");
+    }
+    return 1;
+  }
+  if (base_disp != 0) {
+    if (!binary_emit_lea_reg_mem(&ctx->code, SCRATCH_B, addr,
+                                 base_disp)) {
+      return enc_err(fn, "out of memory in store address");
+    }
+    addr = SCRATCH_B;
+  }
+  if (!code_generator_binary_emit_store_to_address(g, ctx, addr, in->width,
+                                                   val)) {
+    return enc_err(fn, "out of memory in store");
+  }
+  return 1;
+}
+
+static int encode_mov(MirFunction *fn, const MirInst *in) {
+  BinaryFunctionContext *ctx = fn->context;
+
+  if (in->is_float) {
+    return encode_mov_float(fn, in);
+  }
+  if (in->a.kind == MIR_OPK_MEM) {
+    return encode_mov_load(fn, in);
+  }
+  if (in->dst.kind == MIR_OPK_MEM) {
+    return encode_mov_store(fn, in);
   }
 
   if (in->a.kind == MIR_OPK_IMM) {
