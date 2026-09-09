@@ -13056,6 +13056,61 @@ foreach ($threads in @("1", "4")) {
     Write-CaseResult -Name "parallel_range_$threads" -Passed $false -Reason $_.Exception.Message
   }
 }
+# Measured profile round trip: --pgo-gen counts blocks at run time and
+# --pgo-use reads them back. Both builds number the blocks on the same
+# pre-optimization IR, so the ids line up with no map file; if that numbering
+# ever drifts the counts land on the wrong functions. The fixture calls
+# mix_step exactly 20500 times and hot_loop exactly twice, so the loaded
+# profile is checked against the true counts, not merely for being non-empty.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $pgoDir = Join-Path $tmpDir "pgo_roundtrip"
+  New-Item -ItemType Directory -Force -Path $pgoDir | Out-Null
+  $src = "tests/test_pgo_roundtrip.mettle"
+  $plain = Join-Path $pgoDir "plain.exe"
+  $train = Join-Path $pgoDir "train.exe"
+  $opt = Join-Path $pgoDir "opt.exe"
+  $prof = Join-Path $pgoDir "p.mprof"
+
+  $out = & $CompilerPath --build --release $src -o $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "plain build failed: $out" }
+  $plainRun = & $plain 2>&1 | Out-String
+
+  $out = & $CompilerPath --build --release --pgo-gen $src -o $train 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "instrumented build failed: $out" }
+  $previousOut = $env:METTLE_PROFILE_OUT
+  $env:METTLE_PROFILE_OUT = $prof
+  & $train 2>&1 | Out-Null
+  $env:METTLE_PROFILE_OUT = $previousOut
+  if (-not (Test-Path $prof)) { throw "the instrumented run wrote no profile" }
+  if ((Get-Content $prof -Raw) -notmatch '"blocks"') {
+    throw "the profile carries no block counts"
+  }
+
+  $previousSummary = $env:METTLE_PGO_SUMMARY
+  $env:METTLE_PGO_SUMMARY = "1"
+  $summary = & $CompilerPath --build --release "--pgo-use=$prof" $src -o $opt 2>&1 | Out-String
+  $code = $LASTEXITCODE
+  $env:METTLE_PGO_SUMMARY = $previousSummary
+  if ($code -ne 0) { throw "profile build failed: $summary" }
+  if ($summary -notmatch 'mix_step\s+calls=20500') {
+    throw "the loaded profile did not measure mix_step at its true 20500 calls: $summary"
+  }
+  if ($summary -notmatch 'hot_loop\s+calls=2\b') {
+    throw "the loaded profile did not measure hot_loop at its true 2 calls: $summary"
+  }
+
+  $optRun = & $opt 2>&1 | Out-String
+  if ($optRun -ne $plainRun) {
+    throw "the profile-guided build changed the program answer"
+  }
+  Write-CaseResult -Name "pgo_roundtrip" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "pgo_roundtrip" -Passed $false -Reason $_.Exception.Message
+}
 # Declarative rewrite engine (ir_optimize_rewrite.c): the Tier-1 algebraic
 # identity table and the Tier-2 constant-reassociation pass must preserve the
 # exact integer result of the arithmetic they rewrite. Exercised across

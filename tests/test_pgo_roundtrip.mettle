@@ -1,0 +1,35 @@
+import "std/io";
+
+@noinline fn mix_step(state: int64, salt: int64) -> int64 {
+  var s: int64 = state ^ salt;
+  s = s * 1000003;
+  s = s ^ (s >> 17);
+  return s;
+}
+
+@noinline fn cold_path(state: int64) -> int64 {
+  var s: int64 = state;
+  var i: int64 = 0;
+  while (i < 3) { s = s + 7; i += 1; }
+  return s;
+}
+
+@noinline fn hot_loop(rounds: int64) -> int64 {
+  var state: int64 = 12345;
+  var i: int64 = 0;
+  while (i < rounds) {
+    state = mix_step(state, i);
+    if (state == 0) { state = cold_path(state); }
+    i += 1;
+  }
+  return state;
+}
+
+fn main() -> int32 {
+  var a: int64 = hot_loop(20000);
+  var b: int64 = hot_loop(500);
+  println("a = {a}");
+  println("b = {b}");
+  println("sum = {a + b}");
+  return 0;
+}
