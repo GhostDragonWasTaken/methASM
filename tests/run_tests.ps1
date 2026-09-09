@@ -12999,6 +12999,35 @@ foreach ($threads in @("1", "4")) {
     Write-CaseResult -Name "parallel_runtime_$threads" -Passed $false -Reason $_.Exception.Message
   }
 }
+# Callee parameter homing is a parallel move: a parameter whose home register
+# is still another parameter incoming register must not clobber it. SysV
+# interleaves integer and SSE arguments across two independent register
+# files, so a six-argument alternating signature is the shape that collides.
+# Self-checking: exit code is the failing-check mask.
+foreach ($variant in @("debug", "release")) {
+  $total++
+  try {
+    if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+    $exePath = Join-Path $tmpDir "param_shuffle_$variant.exe"
+    $buildArgs = @("--build")
+    if ($variant -eq "release") { $buildArgs += "--release" }
+    $buildArgs += @("tests/test_param_shuffle.mettle", "-o", $exePath)
+
+      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
+
+    if ($LASTEXITCODE -ne 0) { throw "$variant build failed: $buildOut" }
+    if (-not (Test-Path $exePath)) { throw "$variant build produced no executable" }
+    & $exePath 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "a parameter was clobbered while homing in $variant (mask $LASTEXITCODE)"
+    }
+    Write-CaseResult -Name "param_shuffle_$variant" -Passed $true
+  }
+  catch {
+    $failed++
+    Write-CaseResult -Name "param_shuffle_$variant" -Passed $false -Reason $_.Exception.Message
+  }
+}
 # Declarative rewrite engine (ir_optimize_rewrite.c): the Tier-1 algebraic
 # identity table and the Tier-2 constant-reassociation pass must preserve the
 # exact integer result of the arithmetic they rewrite. Exercised across

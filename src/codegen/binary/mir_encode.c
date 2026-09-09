@@ -1764,6 +1764,136 @@ static int mir_home_direct_sse_param(MirFunction *fn, const MirParam *p,
   return 1;
 }
 
+typedef struct {
+  BinaryGpRegister src;
+  int dst;
+  int width;
+  int is_signed;
+  int is_spill;
+  int done;
+} MirGpMove;
+
+static void mir_record_gp_move(MirFunction *fn, const MirParam *p,
+                               BinaryGpRegister src, MirGpMove *gm,
+                               int *ngm) {
+  const MirVreg *vr = &fn->vregs[p->vreg];
+
+  gm[*ngm].src = src;
+  gm[*ngm].width = p->width;
+  gm[*ngm].is_signed = p->is_signed;
+  gm[*ngm].done = 0;
+  gm[*ngm].is_spill = vr->in_register ? 0 : 1;
+  gm[*ngm].dst = vr->in_register ? vr->phys : vr->spill_offset;
+  (*ngm)++;
+}
+
+static int mir_emit_gp_widen(MirFunction *fn, BinaryGpRegister dst,
+                             BinaryGpRegister src, int width, int is_signed) {
+  BinaryCodeBuffer *code = &fn->context->code;
+  if (width == 8) {
+    return dst == src ? 1 : binary_emit_mov_reg_reg(code, dst, src);
+  }
+  if (width == 4) {
+    return is_signed ? binary_emit_movsxd_reg_reg32(code, dst, src)
+                     : binary_emit_movzx_reg_reg32(code, dst, src);
+  }
+  if (width == 2) {
+    return is_signed ? binary_emit_movsx_reg_reg16(code, dst, src)
+                     : binary_emit_movzx_reg_reg16(code, dst, src);
+  }
+  return is_signed ? binary_emit_movsx_reg_reg8(code, dst, src)
+                   : binary_emit_movzx_reg_reg8(code, dst, src);
+}
+
+static int mir_home_gp_params(MirFunction *fn, MirGpMove *gm, int n) {
+  BinaryCodeBuffer *code = &fn->context->code;
+  int remaining = 0;
+
+  for (int i = 0; i < n; i++) {
+    MirOperand home;
+    if (!gm[i].is_spill) {
+      continue;
+    }
+    if (!mir_emit_gp_widen(fn, SCRATCH_A, gm[i].src, gm[i].width,
+                           gm[i].is_signed)) {
+      return enc_err(fn, "out of memory extending parameter");
+    }
+    home = mir_op_none();
+    if (!binary_emit_mov_mem_reg(code, frame_base(fn),
+                                 frame_disp(fn, -gm[i].dst), SCRATCH_A)) {
+      return enc_err(fn, "out of memory homing parameter");
+    }
+    (void)home;
+    gm[i].done = 1;
+  }
+
+  for (int i = 0; i < n; i++) {
+    if (!gm[i].done && (BinaryGpRegister)gm[i].dst == gm[i].src &&
+        gm[i].width == 8) {
+      gm[i].done = 1;
+    }
+    if (!gm[i].done) {
+      remaining++;
+    }
+  }
+
+  while (remaining > 0) {
+    int progressed = 0;
+    for (int i = 0; i < n; i++) {
+      int dst_is_src = 0;
+      if (gm[i].done) {
+        continue;
+      }
+      for (int j = 0; j < n; j++) {
+        if (!gm[j].done && j != i &&
+            gm[j].src == (BinaryGpRegister)gm[i].dst) {
+          dst_is_src = 1;
+          break;
+        }
+      }
+      if (!dst_is_src) {
+        if (!mir_emit_gp_widen(fn, (BinaryGpRegister)gm[i].dst, gm[i].src,
+                               gm[i].width, gm[i].is_signed)) {
+          return enc_err(fn, "out of memory homing parameter");
+        }
+        gm[i].done = 1;
+        remaining--;
+        progressed = 1;
+      }
+    }
+    if (progressed) {
+      continue;
+    }
+    {
+      int i;
+      for (i = 0; i < n; i++) {
+        if (!gm[i].done) {
+          break;
+        }
+      }
+      if (i == n) {
+        break;
+      }
+      if (!binary_emit_mov_reg_reg(code, SCRATCH_A,
+                                   (BinaryGpRegister)gm[i].dst)) {
+        return enc_err(fn, "out of memory breaking a parameter cycle");
+      }
+      for (int j = 0; j < n; j++) {
+        if (!gm[j].done && gm[j].src == (BinaryGpRegister)gm[i].dst) {
+          gm[j].src = SCRATCH_A;
+        }
+      }
+      if (!mir_emit_gp_widen(fn, (BinaryGpRegister)gm[i].dst, gm[i].src,
+                             gm[i].width, gm[i].is_signed)) {
+        return enc_err(fn, "out of memory homing parameter");
+      }
+      gm[i].done = 1;
+      remaining--;
+    }
+  }
+  return 1;
+}
+
 static int mir_home_integer_param(MirFunction *fn, const MirParam *p,
                                   const BinaryArgLocation *loc,
                                   const BinaryAbi *abi) {
@@ -1819,10 +1949,16 @@ static int mir_home_parameters(MirFunction *fn) {
   size_t first_slot[MIR_MAX_PARAMS];
   size_t nslots = 0;
   MirXmmMove xm[MIR_MAX_PARAMS];
+  MirGpMove gm[MIR_MAX_PARAMS];
   const MirParam *fstack[MIR_MAX_PARAMS];
   int fstack_off[MIR_MAX_PARAMS];
+  const MirParam *gstack[MIR_MAX_PARAMS];
+  const BinaryArgLocation *gstack_loc[MIR_MAX_PARAMS];
   int nxm = 0;
+  int ngm = 0;
   int nfstack = 0;
+  int ngstack = 0;
+  int only_scalar_params = 1;
 
   if (!mir_home_indirect_return(fn, abi)) {
     return 0;
@@ -1832,6 +1968,13 @@ static int mir_home_parameters(MirFunction *fn) {
   }
   if (!mir_param_layout(fn, abi, locs, first_slot, &nslots)) {
     return enc_err(fn, "failed to compute parameter layout");
+  }
+  for (size_t i = 0; i < fn->param_count; i++) {
+    const MirParam *p = &fn->params[i];
+    if (p->sysv_in_memory || p->sysv_eightbytes > 0 || p->sysv_direct_sse) {
+      only_scalar_params = 0;
+      break;
+    }
   }
   for (size_t i = 0; i < fn->param_count; i++) {
     const MirParam *p = &fn->params[i];
@@ -1848,6 +1991,16 @@ static int mir_home_parameters(MirFunction *fn) {
     } else if (p->sysv_direct_sse && loc->kind == BINARY_ARG_IN_XMM_REGISTER) {
       ok = mir_home_direct_sse_param(fn, p, loc);
     } else if (!p->is_float) {
+      if (only_scalar_params && loc->kind == BINARY_ARG_IN_GP_REGISTER) {
+        mir_record_gp_move(fn, p, loc->gp_register, gm, &ngm);
+        continue;
+      }
+      if (only_scalar_params && loc->kind == BINARY_ARG_ON_STACK) {
+        gstack[ngstack] = p;
+        gstack_loc[ngstack] = loc;
+        ngstack++;
+        continue;
+      }
       ok = mir_home_integer_param(fn, p, loc, abi);
     } else if (loc->kind == BINARY_ARG_ON_STACK) {
       fstack[nfstack] = p;
@@ -1864,8 +2017,16 @@ static int mir_home_parameters(MirFunction *fn) {
       return 0;
     }
   }
+  if (!mir_home_gp_params(fn, gm, ngm)) {
+    return 0;
+  }
   if (!mir_home_float_params(fn, xm, nxm)) {
     return 0;
+  }
+  for (int i = 0; i < ngstack; i++) {
+    if (!mir_home_integer_param(fn, gstack[i], gstack_loc[i], abi)) {
+      return 0;
+    }
   }
   for (int i = 0; i < nfstack; i++) {
     if (!mir_home_float_stack_param(fn, fstack[i], fstack_off[i])) {

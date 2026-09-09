@@ -1,0 +1,40 @@
+import "std/io";
+
+extern fn exit2(code: int32) -> int32 = "exit";
+
+@noinline fn ififif(a: int32, b: float32, c: int64, d: float64, e: int32, f: float32) -> float64 {
+  return (float64)a + (float64)b + (float64)c + d + (float64)e + (float64)f;
+}
+@noinline fn six_ints(a: int32, b: int64, c: int32, d: int64, e: int32, f: int64) -> int64 {
+  return (int64)a + b + (int64)c + d + (int64)e + f;
+}
+@noinline fn swapped(a: int64, b: int64, c: int64, d: int64) -> int64 {
+  return a * 1000 + b * 100 + c * 10 + d;
+}
+@noinline fn narrow_mix(a: int8, b: int64, c: int16, d: int32, e: uint8, f: uint16) -> int64 {
+  return (int64)a + b + (int64)c + (int64)d + (int64)e + (int64)f;
+}
+@noinline fn ptr_mix(p: int64*, i: int32, q: int64*, j: int32) -> int64 {
+  return p[i] + q[j];
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+  var arr: int64[8];
+  var i: int32 = 0;
+  while (i < 8) { arr[i] = (int64)i * 10; i += 1; }
+
+  if (ififif(1, 2.0, 3, 4.0, 5, 6.0) != 21.0) { fails |= 1; }
+  if (six_ints(1, 2, 3, 4, 5, 6) != 21) { fails |= 2; }
+  if (swapped(1, 2, 3, 4) != 1234) { fails |= 4; }
+  if (narrow_mix(0 - 1, 100, 0 - 2, 3, 255, 65535) != 100 + 3 - 3 + 255 + 65535) { fails |= 8; }
+  if (ptr_mix(&arr[0], 2, &arr[0], 5) != 70) { fails |= 16; }
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("FAIL mask {fails}");
+  exit2(fails);
+  return fails;
+}
