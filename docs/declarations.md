@@ -334,9 +334,11 @@ is not associative, so a threaded sum would not match the serial one.
 It is a contract, and the build fails with the reason and the name when the
 compiler cannot deliver it: a value that carries from one iteration to the next
 in any other shape, a `return` or a `break` out of the loop, a counter that steps
-by anything but one, a value written in the loop and read after it, a call in the
-body, or work the outliner will not move. Reads of the surrounding scope are
-free; writes must land in memory the loop reaches through a pointer.
+by anything but one, a call in the body, or work the outliner will not move. A
+value written in the loop and read after it is refused too, the counter and the
+accumulators excepted: the counter is left at its bound, as the serial loop
+leaves it. Reads of the surrounding scope are free; writes must land in memory
+the loop reaches through a pointer.
 
 The message names the callee when a call is what stopped it, which is how a
 loop that looks call-free is refused under `--safe`: the bounds checks are
