@@ -1,13 +1,18 @@
+#include "runtime/parallel.h"
 #include <stddef.h>
 #include <stdint.h>
 
 extern char *getenv(const char *name);
 
-#define METTLE_PARALLEL_MAX_THREADS 16u
-
-typedef void (*MettleParallelBody)(void *ctx, long long lo, long long hi);
-typedef void (*MettleParallelSlotBody)(void *ctx, long long lo, long long hi,
-                                       long long slot);
+#define MTP_CACHE_LINE 64u
+#define MTP_VECTOR_BYTES 16u
+#define MTP_CHUNKS_PER_THREAD 4u
+#define MTP_SPIN_ROUNDS 4096u
+#define MTP_YIELD_ROUNDS 2048u
+#define MTP_MEMORY_CHUNK_BYTES 262144ll
+#define MTP_STREAM_THRESHOLD_BYTES (8ll << 20)
+#define MTP_TICKET_COUNT_SHIFT 32u
+#define MTP_TICKET_NEXT_SHIFT 48u
 
 typedef struct {
   MettleParallelBody body;
@@ -16,17 +21,31 @@ typedef struct {
   long long lo;
   long long hi;
   long long span;
-  unsigned wanted;
-} MettleParallelJob;
+} MtpJob;
 
-static MettleParallelJob g_job;
-static volatile unsigned g_generation;
-static volatile int g_remaining;
-static volatile int g_pool_state;
-static volatile int g_reentered;
-static unsigned g_pool_workers;
+typedef struct {
+  MtpJob job __attribute__((aligned(MTP_CACHE_LINE)));
+  uint64_t ticket __attribute__((aligned(MTP_CACHE_LINE)));
+  uint32_t generation __attribute__((aligned(MTP_CACHE_LINE)));
+  uint32_t completed __attribute__((aligned(MTP_CACHE_LINE)));
+  int32_t parked __attribute__((aligned(MTP_CACHE_LINE)));
+  int32_t busy __attribute__((aligned(MTP_CACHE_LINE)));
+  unsigned threads;
+  unsigned workers;
+  int spawned;
+} MtpPool;
 
-static void mettle_parallel_worker(long index);
+static MtpPool g_pool;
+
+static void mtp_worker(unsigned index);
+
+static void mtp_cpu_pause(void) {
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
+  __builtin_ia32_pause();
+#elif defined(__aarch64__)
+  __asm__ __volatile__("yield");
+#endif
+}
 
 #if defined(_WIN32) || defined(_WIN64)
 
@@ -41,9 +60,9 @@ typedef struct {
   unsigned long dwAllocationGranularity;
   unsigned short wProcessorLevel;
   unsigned short wProcessorRevision;
-} MettleSystemInfo;
+} MtpSystemInfo;
 
-__declspec(dllimport) void __stdcall GetSystemInfo(MettleSystemInfo *info);
+__declspec(dllimport) void __stdcall GetSystemInfo(MtpSystemInfo *info);
 __declspec(dllimport) void *__stdcall CreateThread(
     void *attributes, size_t stack_size,
     unsigned long(__stdcall *start)(void *), void *argument,
@@ -51,22 +70,37 @@ __declspec(dllimport) void *__stdcall CreateThread(
 __declspec(dllimport) int __stdcall CloseHandle(void *handle);
 __declspec(dllimport) int __stdcall SwitchToThread(void);
 __declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
+__declspec(dllimport) void *__stdcall CreateSemaphoreW(void *attributes,
+                                                       long initial,
+                                                       long maximum,
+                                                       const unsigned short *name);
+__declspec(dllimport) int __stdcall ReleaseSemaphore(void *semaphore,
+                                                     long count,
+                                                     long *previous);
+__declspec(dllimport) unsigned long __stdcall WaitForSingleObject(
+    void *handle, unsigned long milliseconds);
 
-static unsigned long __stdcall mettle_parallel_entry(void *argument) {
-  mettle_parallel_worker((long)(size_t)argument);
+static void *g_semaphore;
+
+static unsigned long __stdcall mtp_thread_entry(void *argument) {
+  mtp_worker((unsigned)(size_t)argument);
   return 0;
 }
 
-static unsigned mettle_parallel_hardware_threads(void) {
-  MettleSystemInfo info;
+static unsigned mtp_os_hardware_threads(void) {
+  MtpSystemInfo info;
   info.dwNumberOfProcessors = 0;
   GetSystemInfo(&info);
   return info.dwNumberOfProcessors ? (unsigned)info.dwNumberOfProcessors : 1u;
 }
 
-static int mettle_parallel_spawn(long index) {
-  void *handle = CreateThread(NULL, 0, mettle_parallel_entry,
-                              (void *)(size_t)index, 0, NULL);
+static void mtp_os_init(void) {
+  g_semaphore = CreateSemaphoreW(NULL, 0, 0x7fffffff, NULL);
+}
+
+static int mtp_os_spawn(unsigned index) {
+  void *handle =
+      CreateThread(NULL, 0, mtp_thread_entry, (void *)(size_t)index, 0, NULL);
   if (!handle) {
     return 0;
   }
@@ -74,146 +108,139 @@ static int mettle_parallel_spawn(long index) {
   return 1;
 }
 
-static void mettle_parallel_yield(void) { (void)SwitchToThread(); }
+static void mtp_os_yield(void) { (void)SwitchToThread(); }
 
-static void mettle_parallel_nap(void) { Sleep(1); }
+static void mtp_os_wait(uint32_t *word, uint32_t seen) {
+  if (!g_semaphore) {
+    Sleep(1);
+    return;
+  }
+  if (__atomic_load_n(word, __ATOMIC_SEQ_CST) == seen) {
+    (void)WaitForSingleObject(g_semaphore, 0xffffffffu);
+  }
+}
+
+static void mtp_os_wake(uint32_t *word, unsigned count) {
+  (void)word;
+  if (g_semaphore) {
+    (void)ReleaseSemaphore(g_semaphore, (long)count, NULL);
+  }
+}
 
 #else
 
-struct mettle_parallel_timespec {
-  long long seconds;
-  long long nanoseconds;
-};
+#if defined(__x86_64__)
+#define MTP_SYS_SCHED_YIELD 24L
+#define MTP_SYS_FUTEX 202L
+#define MTP_SYS_SCHED_GETAFFINITY 204L
+#elif defined(__aarch64__)
+#define MTP_SYS_SCHED_YIELD 124L
+#define MTP_SYS_FUTEX 98L
+#define MTP_SYS_SCHED_GETAFFINITY 123L
+#endif
+
+#define MTP_FUTEX_WAIT_PRIVATE 128L
+#define MTP_FUTEX_WAKE_PRIVATE 129L
 
 extern int pthread_create(unsigned long *thread, const void *attributes,
                           void *(*start)(void *), void *argument);
 extern int pthread_detach(unsigned long thread);
 
-static long mettle_parallel_syscall(long number, long first, long second,
-                                    long third) {
+static long mtp_syscall(long number, long first, long second, long third,
+                        long fourth) {
 #if defined(__x86_64__)
   long result;
+  register long r10 __asm__("r10") = fourth;
   __asm__ __volatile__("syscall"
                        : "=a"(result)
-                       : "a"(number), "D"(first), "S"(second), "d"(third)
+                       : "a"(number), "D"(first), "S"(second), "d"(third),
+                         "r"(r10)
                        : "rcx", "r11", "memory");
   return result;
+#elif defined(__aarch64__)
+  register long x8 __asm__("x8") = number;
+  register long x0 __asm__("x0") = first;
+  register long x1 __asm__("x1") = second;
+  register long x2 __asm__("x2") = third;
+  register long x3 __asm__("x3") = fourth;
+  __asm__ __volatile__("svc #0"
+                       : "+r"(x0)
+                       : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+                       : "memory", "cc");
+  return x0;
 #else
   (void)number;
   (void)first;
   (void)second;
   (void)third;
+  (void)fourth;
   return -1;
 #endif
 }
 
-static void *mettle_parallel_entry(void *argument) {
-  mettle_parallel_worker((long)(size_t)argument);
+static void *mtp_thread_entry(void *argument) {
+  mtp_worker((unsigned)(size_t)argument);
   return NULL;
 }
 
-static unsigned mettle_parallel_hardware_threads(void) {
-#if defined(__x86_64__)
-  unsigned long long mask[16];
-  long result;
+static unsigned mtp_os_hardware_threads(void) {
+#if defined(MTP_SYS_SCHED_GETAFFINITY)
+  unsigned long long mask[16] = {0};
+  long bytes = mtp_syscall(MTP_SYS_SCHED_GETAFFINITY, 0L, (long)sizeof(mask),
+                           (long)(size_t)mask, 0L);
   unsigned count = 0;
-  for (unsigned i = 0; i < 16u; i++) {
-    mask[i] = 0;
-  }
-  result = mettle_parallel_syscall(204L, 0L, (long)sizeof(mask),
-                                   (long)(size_t)mask);
-  if (result > 0) {
-    for (unsigned i = 0; i < (unsigned)result / 8u && i < 16u; i++) {
-      unsigned long long word = mask[i];
-      while (word) {
-        word &= word - 1ull;
-        count++;
-      }
-    }
+  for (long i = 0; i < bytes / 8 && i < 16; i++) {
+    count += (unsigned)__builtin_popcountll(mask[i]);
   }
   return count ? count : 1u;
 #else
-  return 4u;
+  return 1u;
 #endif
 }
 
-static int mettle_parallel_spawn(long index) {
+static void mtp_os_init(void) {}
+
+static int mtp_os_spawn(unsigned index) {
   unsigned long thread = 0;
-  if (pthread_create(&thread, NULL, mettle_parallel_entry,
-                     (void *)(size_t)index) != 0) {
+  if (pthread_create(&thread, NULL, mtp_thread_entry, (void *)(size_t)index)) {
     return 0;
   }
   (void)pthread_detach(thread);
   return 1;
 }
 
-static void mettle_parallel_yield(void) {
-  (void)mettle_parallel_syscall(24L, 0L, 0L, 0L);
+static void mtp_os_yield(void) {
+#if defined(MTP_SYS_SCHED_YIELD)
+  (void)mtp_syscall(MTP_SYS_SCHED_YIELD, 0L, 0L, 0L, 0L);
+#else
+  mtp_cpu_pause();
+#endif
 }
 
-static void mettle_parallel_nap(void) {
-  struct mettle_parallel_timespec request;
-  request.seconds = 0;
-  request.nanoseconds = 1000000;
-  (void)mettle_parallel_syscall(35L, (long)(size_t)&request, 0L, 0L);
+static void mtp_os_wait(uint32_t *word, uint32_t seen) {
+#if defined(MTP_SYS_FUTEX)
+  (void)mtp_syscall(MTP_SYS_FUTEX, (long)(size_t)word, MTP_FUTEX_WAIT_PRIVATE,
+                    (long)seen, 0L);
+#else
+  (void)word;
+  (void)seen;
+  mtp_os_yield();
+#endif
+}
+
+static void mtp_os_wake(uint32_t *word, unsigned count) {
+#if defined(MTP_SYS_FUTEX)
+  (void)mtp_syscall(MTP_SYS_FUTEX, (long)(size_t)word, MTP_FUTEX_WAKE_PRIVATE,
+                    (long)count, 0L);
+#else
+  (void)word;
+  (void)count;
+#endif
 }
 
 #endif
 
-static void mettle_parallel_pause(void) {
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
-  __builtin_ia32_pause();
-#elif defined(__aarch64__)
-  __asm__ __volatile__("yield");
-#endif
-}
-
-static void mettle_parallel_backoff(unsigned *spins) {
-  unsigned count = *spins;
-  if (count < 4096u) {
-    mettle_parallel_pause();
-  } else if (count < 8192u) {
-    mettle_parallel_yield();
-  } else {
-    mettle_parallel_nap();
-  }
-  *spins = count + 1u;
-}
-
-static void mettle_parallel_run_chunk(unsigned slot) {
-  long long start = g_job.lo + g_job.span * (long long)slot;
-  long long end = start + g_job.span;
-  if (end > g_job.hi) {
-    end = g_job.hi;
-  }
-  if (start >= end) {
-    return;
-  }
-  if (g_job.slot_body) {
-    g_job.slot_body(g_job.ctx, start, end, (long long)slot);
-  } else {
-    g_job.body(g_job.ctx, start, end);
-  }
-}
-
-static void mettle_parallel_worker(long index) {
-  unsigned seen = 0;
-  for (;;) {
-    unsigned spins = 0;
-    unsigned generation;
-    while ((generation = __atomic_load_n(&g_generation, __ATOMIC_ACQUIRE)) ==
-           seen) {
-      mettle_parallel_backoff(&spins);
-    }
-    seen = generation;
-    if ((unsigned)index + 1u < g_job.wanted) {
-      mettle_parallel_run_chunk((unsigned)index);
-    }
-    __atomic_sub_fetch(&g_remaining, 1, __ATOMIC_ACQ_REL);
-  }
-}
-
-static long mettle_parallel_parse_count(const char *text) {
+static long mtp_parse_count(const char *text) {
   long value = 0;
   if (!text) {
     return 0;
@@ -221,237 +248,403 @@ static long mettle_parallel_parse_count(const char *text) {
   while (*text == ' ' || *text == '\t') {
     text++;
   }
-  if (*text < '0' || *text > '9') {
-    return 0;
-  }
-  while (*text >= '0' && *text <= '9') {
+  while (*text >= '0' && *text <= '9' && value <= (long)METTLE_PARALLEL_MAX_THREADS) {
     value = value * 10 + (*text - '0');
-    if (value > 4096) {
-      return 4096;
-    }
     text++;
   }
   return value;
 }
 
-static unsigned mettle_parallel_threads(void) {
-  static int cached = -1;
-  if (cached < 0) {
-    const char *spec = getenv("METTLE_PARALLEL_THREADS");
-    long requested = mettle_parallel_parse_count(spec);
-    if (requested <= 0) {
-      requested = (long)mettle_parallel_hardware_threads();
-    }
+static unsigned mtp_threads(void) {
+  unsigned threads = __atomic_load_n(&g_pool.threads, __ATOMIC_RELAXED);
+  if (!threads) {
+    long requested = mtp_parse_count(getenv("METTLE_PARALLEL_THREADS"));
     if (requested < 1) {
-      requested = 1;
+      requested = (long)mtp_os_hardware_threads();
     }
     if (requested > (long)METTLE_PARALLEL_MAX_THREADS) {
       requested = (long)METTLE_PARALLEL_MAX_THREADS;
     }
-    cached = (int)requested;
+    threads = (unsigned)requested;
+    __atomic_store_n(&g_pool.threads, threads, __ATOMIC_RELAXED);
   }
-  return (unsigned)cached;
+  return threads;
 }
 
-static int mettle_parallel_pool_ready(unsigned wanted) {
-  int state = __atomic_load_n(&g_pool_state, __ATOMIC_ACQUIRE);
-  unsigned index;
-
-  if (state == 2) {
-    return (int)(g_pool_workers + 1u >= wanted);
-  }
-  if (state != 0) {
-    return 0;
-  }
-  if (!__atomic_compare_exchange_n(&g_pool_state, &state, 1, 0,
-                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-    return 0;
-  }
-
-  for (index = 1u; index < mettle_parallel_threads(); index++) {
-    if (!mettle_parallel_spawn((long)(index - 1u))) {
-      break;
-    }
-    g_pool_workers = index;
-  }
-  __atomic_store_n(&g_pool_state, 2, __ATOMIC_RELEASE);
-  return (int)(g_pool_workers + 1u >= wanted);
+static uint64_t mtp_ticket(uint32_t generation, unsigned count) {
+  return (uint64_t)generation | ((uint64_t)count << MTP_TICKET_COUNT_SHIFT);
 }
 
-static void mettle_parallel_dispatch(MettleParallelBody body,
-                                     MettleParallelSlotBody slot_body,
-                                     void *ctx, long long lo, long long hi,
-                                     long long min_chunk) {
-  long long total = hi - lo;
-  unsigned wanted;
-  int expected = 0;
+static unsigned mtp_ticket_count(uint64_t ticket) {
+  return (unsigned)(ticket >> MTP_TICKET_COUNT_SHIFT) & 0xffffu;
+}
 
-  if ((!body && !slot_body) || total <= 0) {
-    return;
+static unsigned mtp_ticket_next(uint64_t ticket) {
+  return (unsigned)(ticket >> MTP_TICKET_NEXT_SHIFT);
+}
+
+static int mtp_claim(unsigned *chunk) {
+  uint64_t ticket = __atomic_load_n(&g_pool.ticket, __ATOMIC_ACQUIRE);
+  while (mtp_ticket_next(ticket) < mtp_ticket_count(ticket)) {
+    uint64_t claimed = ticket + (1ull << MTP_TICKET_NEXT_SHIFT);
+    if (__atomic_compare_exchange_n(&g_pool.ticket, &ticket, claimed, 1,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+      *chunk = mtp_ticket_next(ticket);
+      return 1;
+    }
   }
-  if (min_chunk < 1) {
-    min_chunk = 1;
+  return 0;
+}
+
+static void mtp_run(const MtpJob *job, long long lo, long long hi,
+                    unsigned slot) {
+  if (job->slot_body) {
+    job->slot_body(job->ctx, lo, hi, (long long)slot);
+  } else {
+    job->body(job->ctx, lo, hi);
   }
-  wanted = mettle_parallel_threads();
-  if (wanted > METTLE_PARALLEL_MAX_THREADS) {
-    wanted = METTLE_PARALLEL_MAX_THREADS;
+}
+
+static void mtp_work(unsigned slot) {
+  unsigned chunk;
+  while (mtp_claim(&chunk)) {
+    const MtpJob *job = &g_pool.job;
+    long long start = job->lo + job->span * (long long)chunk;
+    long long end = start + job->span;
+    mtp_run(job, start, end < job->hi ? end : job->hi, slot);
+    __atomic_add_fetch(&g_pool.completed, 1u, __ATOMIC_RELEASE);
   }
-  if ((long long)wanted > total / min_chunk) {
-    wanted = (unsigned)(total / min_chunk);
+}
+
+static void mtp_relax(unsigned *rounds) {
+  if (*rounds < MTP_SPIN_ROUNDS) {
+    mtp_cpu_pause();
+  } else {
+    mtp_os_yield();
   }
-  if (wanted < 2u) {
-    if (slot_body) {
-      slot_body(ctx, lo, hi, 0);
+  *rounds += 1u;
+}
+
+static void mtp_park(uint32_t seen) {
+  __atomic_add_fetch(&g_pool.parked, 1, __ATOMIC_SEQ_CST);
+  mtp_os_wait(&g_pool.generation, seen);
+  __atomic_sub_fetch(&g_pool.parked, 1, __ATOMIC_SEQ_CST);
+}
+
+static uint32_t mtp_await_generation(uint32_t seen) {
+  unsigned rounds = 0;
+  uint32_t generation;
+  while ((generation = __atomic_load_n(&g_pool.generation, __ATOMIC_ACQUIRE)) ==
+         seen) {
+    if (rounds < MTP_SPIN_ROUNDS + MTP_YIELD_ROUNDS) {
+      mtp_relax(&rounds);
     } else {
-      body(ctx, lo, hi);
+      mtp_park(seen);
     }
+  }
+  return generation;
+}
+
+static void mtp_worker(unsigned index) {
+  uint32_t seen = 0;
+  for (;;) {
+    seen = mtp_await_generation(seen);
+    mtp_work(index);
+  }
+}
+
+static int mtp_pool_acquire(void) {
+  int32_t idle = 0;
+  if (!__atomic_compare_exchange_n(&g_pool.busy, &idle, 1, 0, __ATOMIC_ACQ_REL,
+                                   __ATOMIC_ACQUIRE)) {
+    return 0;
+  }
+  if (!g_pool.spawned) {
+    unsigned threads = mtp_threads();
+    g_pool.spawned = 1;
+    mtp_os_init();
+    while (g_pool.workers + 1u < threads && mtp_os_spawn(g_pool.workers)) {
+      g_pool.workers++;
+    }
+  }
+  if (!g_pool.workers) {
+    __atomic_store_n(&g_pool.busy, 0, __ATOMIC_RELEASE);
+    return 0;
+  }
+  return 1;
+}
+
+static void mtp_pool_release(void) {
+  __atomic_store_n(&g_pool.busy, 0, __ATOMIC_RELEASE);
+}
+
+static void mtp_publish(unsigned count) {
+  uint32_t generation =
+      __atomic_load_n(&g_pool.generation, __ATOMIC_RELAXED) + 1u;
+  int32_t parked;
+  __atomic_store_n(&g_pool.completed, 0u, __ATOMIC_RELAXED);
+  __atomic_store_n(&g_pool.ticket, mtp_ticket(generation, count),
+                   __ATOMIC_RELEASE);
+  __atomic_store_n(&g_pool.generation, generation, __ATOMIC_SEQ_CST);
+  parked = __atomic_load_n(&g_pool.parked, __ATOMIC_SEQ_CST);
+  if (parked > 0) {
+    mtp_os_wake(&g_pool.generation, (unsigned)parked);
+  }
+}
+
+static void mtp_join(unsigned count) {
+  unsigned rounds = 0;
+  while (__atomic_load_n(&g_pool.completed, __ATOMIC_ACQUIRE) != count) {
+    mtp_relax(&rounds);
+  }
+}
+
+static unsigned mtp_plan(long long total, long long min_chunk,
+                         long long *span) {
+  long long limit = (long long)mtp_threads() * MTP_CHUNKS_PER_THREAD;
+  long long count = total / (min_chunk < 1 ? 1 : min_chunk);
+  if (count > limit) {
+    count = limit;
+  }
+  if (count < 2) {
+    *span = total;
+    return 1u;
+  }
+  *span = (total + count - 1) / count;
+  return (unsigned)((total + *span - 1) / *span);
+}
+
+static void mtp_dispatch(MtpJob *job, long long min_chunk) {
+  long long total = job->hi - job->lo;
+  unsigned count;
+  if (total <= 0) {
     return;
   }
-  if (!__atomic_compare_exchange_n(&g_reentered, &expected, 1, 0,
-                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-    if (slot_body) {
-      slot_body(ctx, lo, hi, 0);
-    } else {
-      body(ctx, lo, hi);
-    }
+  count = mtp_plan(total, min_chunk, &job->span);
+  if (count < 2u || !mtp_pool_acquire()) {
+    mtp_run(job, job->lo, job->hi, 0);
     return;
   }
-  if (!mettle_parallel_pool_ready(wanted)) {
-    if (g_pool_workers + 1u < wanted) {
-      wanted = g_pool_workers + 1u;
-    }
-    if (wanted < 2u) {
-      __atomic_store_n(&g_reentered, 0, __ATOMIC_RELEASE);
-      if (slot_body) {
-        slot_body(ctx, lo, hi, 0);
-      } else {
-        body(ctx, lo, hi);
-      }
-      return;
-    }
-  }
-
-  g_job.body = body;
-  g_job.slot_body = slot_body;
-  g_job.ctx = ctx;
-  g_job.lo = lo;
-  g_job.hi = hi;
-  g_job.span = (total + (long long)wanted - 1) / (long long)wanted;
-  g_job.wanted = wanted;
-
-  __atomic_store_n(&g_remaining, (int)g_pool_workers, __ATOMIC_RELEASE);
-  __atomic_add_fetch(&g_generation, 1u, __ATOMIC_ACQ_REL);
-
-  mettle_parallel_run_chunk(wanted - 1u);
-
-  {
-    unsigned spins = 0;
-    while (__atomic_load_n(&g_remaining, __ATOMIC_ACQUIRE) != 0) {
-      mettle_parallel_backoff(&spins);
-    }
-  }
-  __atomic_store_n(&g_reentered, 0, __ATOMIC_RELEASE);
+  g_pool.job = *job;
+  mtp_publish(count);
+  mtp_work(g_pool.workers);
+  mtp_join(count);
+  mtp_pool_release();
 }
 
 void mettle_parallel_range(MettleParallelBody body, void *ctx, long long lo,
                            long long hi, long long min_chunk) {
-  mettle_parallel_dispatch(body, NULL, ctx, lo, hi, min_chunk);
+  MtpJob job = {body, NULL, ctx, lo, hi, 0};
+  if (body) {
+    mtp_dispatch(&job, min_chunk);
+  }
 }
 
 void mettle_parallel_range_slots(MettleParallelSlotBody body, void *ctx,
                                  long long lo, long long hi,
                                  long long min_chunk) {
-  mettle_parallel_dispatch(NULL, body, ctx, lo, hi, min_chunk);
+  MtpJob job = {NULL, body, ctx, lo, hi, 0};
+  if (body) {
+    mtp_dispatch(&job, min_chunk);
+  }
 }
+
+long long mettle_parallel_threads(void) { return (long long)mtp_threads(); }
+
+typedef long long MtpVector __attribute__((vector_size(16), may_alias));
+typedef MtpVector MtpUnalignedVector __attribute__((aligned(1)));
 
 typedef struct {
   unsigned char *destination;
   const unsigned char *source;
-  long long value;
-  int element_size;
-} MettleParallelMemArgs;
+  unsigned char pattern[16] __attribute__((aligned(16)));
+  unsigned period;
+  int stream;
+} MtpMemoryJob;
 
-static void mettle_parallel_fill_body(void *ctx, long long lo, long long hi) {
-  MettleParallelMemArgs *args = (MettleParallelMemArgs *)ctx;
-  unsigned char *destination = args->destination;
-  int size = args->element_size;
-  long long value = args->value;
+static MtpVector mtp_load(const unsigned char *at) {
+  return *(const MtpUnalignedVector *)at;
+}
 
-  if (size == 1) {
-    unsigned char byte = (unsigned char)value;
-    for (long long i = lo; i < hi; i++) {
-      destination[i] = byte;
-    }
-    return;
+static void mtp_store(unsigned char *at, MtpVector value) {
+  *(MtpUnalignedVector *)at = value;
+}
+
+static void mtp_stream(unsigned char *at, MtpVector value) {
+#if defined(__x86_64__)
+  __asm__ __volatile__("movntdq %1, %0" : "=m"(*(MtpVector *)at) : "x"(value));
+#else
+  *(MtpVector *)at = value;
+#endif
+}
+
+static void mtp_stream_fence(void) {
+#if defined(__x86_64__)
+  __asm__ __volatile__("sfence" ::: "memory");
+#endif
+}
+
+static long long mtp_bytes_to_alignment(const unsigned char *at) {
+  return (long long)((MTP_VECTOR_BYTES - (uintptr_t)at % MTP_VECTOR_BYTES) %
+                     MTP_VECTOR_BYTES);
+}
+
+static void mtp_fill_span(unsigned char *d, long long n,
+                          const MtpMemoryJob *job) {
+  unsigned mask = job->period - 1u;
+  long long head = mtp_bytes_to_alignment(d);
+  unsigned char block[16] __attribute__((aligned(16)));
+  MtpVector value;
+  long long i;
+  if (head > n) {
+    head = n;
   }
-  if (size == 2) {
-    for (long long i = lo; i < hi; i++) {
-      ((uint16_t *)destination)[i] = (uint16_t)value;
-    }
-    return;
+  for (i = 0; i < head; i++) {
+    d[i] = job->pattern[(unsigned)i & mask];
   }
-  if (size == 4) {
-    for (long long i = lo; i < hi; i++) {
-      ((uint32_t *)destination)[i] = (uint32_t)value;
-    }
-    return;
+  for (i = 0; i < 16; i++) {
+    block[i] = job->pattern[(unsigned)(head + i) & mask];
   }
-  for (long long i = lo; i < hi; i++) {
-    ((uint64_t *)destination)[i] = (uint64_t)value;
+  value = *(const MtpVector *)block;
+  d += head;
+  n -= head;
+  if (job->stream) {
+    for (; n >= 64; d += 64, n -= 64) {
+      mtp_stream(d, value);
+      mtp_stream(d + 16, value);
+      mtp_stream(d + 32, value);
+      mtp_stream(d + 48, value);
+    }
+    for (; n >= 16; d += 16, n -= 16) {
+      mtp_stream(d, value);
+    }
+    mtp_stream_fence();
+  } else {
+    for (; n >= 64; d += 64, n -= 64) {
+      mtp_store(d, value);
+      mtp_store(d + 16, value);
+      mtp_store(d + 32, value);
+      mtp_store(d + 48, value);
+    }
+    for (; n >= 16; d += 16, n -= 16) {
+      mtp_store(d, value);
+    }
+  }
+  for (i = 0; i < n; i++) {
+    d[i] = job->pattern[(unsigned)(head + i) & mask];
   }
 }
 
-static void mettle_parallel_copy_body(void *ctx, long long lo, long long hi) {
-  MettleParallelMemArgs *args = (MettleParallelMemArgs *)ctx;
-  unsigned char *destination = args->destination + lo;
-  const unsigned char *source = args->source + lo;
-  long long count = hi - lo;
-  for (long long i = 0; i < count; i++) {
-    destination[i] = source[i];
+static void mtp_copy_span(unsigned char *d, const unsigned char *s,
+                          long long n, int stream) {
+  long long head = mtp_bytes_to_alignment(d);
+  long long i;
+  if (head > n) {
+    head = n;
   }
+  for (i = 0; i < head; i++) {
+    d[i] = s[i];
+  }
+  d += head;
+  s += head;
+  n -= head;
+  if (stream) {
+    for (; n >= 64; d += 64, s += 64, n -= 64) {
+      mtp_stream(d, mtp_load(s));
+      mtp_stream(d + 16, mtp_load(s + 16));
+      mtp_stream(d + 32, mtp_load(s + 32));
+      mtp_stream(d + 48, mtp_load(s + 48));
+    }
+    for (; n >= 16; d += 16, s += 16, n -= 16) {
+      mtp_stream(d, mtp_load(s));
+    }
+    mtp_stream_fence();
+  } else {
+    for (; n >= 64; d += 64, s += 64, n -= 64) {
+      mtp_store(d, mtp_load(s));
+      mtp_store(d + 16, mtp_load(s + 16));
+      mtp_store(d + 32, mtp_load(s + 32));
+      mtp_store(d + 48, mtp_load(s + 48));
+    }
+    for (; n >= 16; d += 16, s += 16, n -= 16) {
+      mtp_store(d, mtp_load(s));
+    }
+  }
+  for (i = 0; i < n; i++) {
+    d[i] = s[i];
+  }
+}
+
+static void mtp_move_overlapping(unsigned char *d, const unsigned char *s,
+                                 long long n) {
+  long long i;
+  if (d < s) {
+    if (s - d >= 16) {
+      mtp_copy_span(d, s, n, 0);
+      return;
+    }
+    for (i = 0; i < n; i++) {
+      d[i] = s[i];
+    }
+    return;
+  }
+  if (d - s >= 16) {
+    for (; n >= 16; n -= 16) {
+      mtp_store(d + n - 16, mtp_load(s + n - 16));
+    }
+  }
+  for (i = n; i > 0; i--) {
+    d[i - 1] = s[i - 1];
+  }
+}
+
+static void mtp_fill_body(void *ctx, long long lo, long long hi) {
+  const MtpMemoryJob *job = (const MtpMemoryJob *)ctx;
+  long long period = (long long)job->period;
+  mtp_fill_span(job->destination + lo * period, (hi - lo) * period, job);
+}
+
+static void mtp_copy_body(void *ctx, long long lo, long long hi) {
+  const MtpMemoryJob *job = (const MtpMemoryJob *)ctx;
+  mtp_copy_span(job->destination + lo, job->source + lo, hi - lo,
+                job->stream);
 }
 
 void mettle_parallel_fill(void *destination, long long count, long long value,
                           int element_size) {
-  MettleParallelMemArgs args;
+  MtpMemoryJob job;
+  unsigned period = (element_size == 2 || element_size == 4 || element_size == 8)
+                        ? (unsigned)element_size
+                        : 1u;
   if (!destination || count <= 0) {
     return;
   }
-  if (element_size != 1 && element_size != 2 && element_size != 4 &&
-      element_size != 8) {
-    element_size = 1;
+  for (unsigned i = 0; i < 16u; i++) {
+    job.pattern[i] = (unsigned char)(value >> (8u * (i & (period - 1u))));
   }
-  args.destination = (unsigned char *)destination;
-  args.source = NULL;
-  args.value = value;
-  args.element_size = element_size;
-  mettle_parallel_range(mettle_parallel_fill_body, &args, 0, count,
-                        262144 / element_size);
+  job.destination = (unsigned char *)destination;
+  job.source = NULL;
+  job.period = period;
+  job.stream = count * (long long)period >= MTP_STREAM_THRESHOLD_BYTES;
+  mettle_parallel_range(mtp_fill_body, &job, 0, count,
+                        MTP_MEMORY_CHUNK_BYTES / (long long)period);
 }
 
 void mettle_parallel_copy_bytes(void *destination, const void *source,
                                 long long bytes) {
-  MettleParallelMemArgs args;
+  MtpMemoryJob job;
   unsigned char *d = (unsigned char *)destination;
   const unsigned char *s = (const unsigned char *)source;
-  if (!destination || !source || bytes <= 0) {
+  if (!destination || !source || bytes <= 0 || d == s) {
     return;
   }
   if (d < s + bytes && s < d + bytes) {
-    if (d < s) {
-      for (long long i = 0; i < bytes; i++) {
-        d[i] = s[i];
-      }
-    } else if (d > s) {
-      for (long long i = bytes; i > 0; i--) {
-        d[i - 1] = s[i - 1];
-      }
-    }
+    mtp_move_overlapping(d, s, bytes);
     return;
   }
-  args.destination = d;
-  args.source = s;
-  args.value = 0;
-  args.element_size = 1;
-  mettle_parallel_range(mettle_parallel_copy_body, &args, 0, bytes, 262144);
+  job.destination = d;
+  job.source = s;
+  job.period = 1u;
+  job.stream = bytes >= MTP_STREAM_THRESHOLD_BYTES;
+  mettle_parallel_range(mtp_copy_body, &job, 0, bytes, MTP_MEMORY_CHUNK_BYTES);
 }

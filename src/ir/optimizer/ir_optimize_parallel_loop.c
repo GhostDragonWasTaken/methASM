@@ -1,12 +1,13 @@
 #include "../ir.h"
 #include "ir_optimize_internal.h"
 #include "../../common.h"
+#include "../../runtime/parallel.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define IR_PARALLEL_WORK_TARGET 4096
-#define IR_PARALLEL_MAX_SLOTS 16u
+#define IR_PARALLEL_MAX_SLOTS METTLE_PARALLEL_MAX_THREADS
 #define IR_PARALLEL_RANGE_SYMBOL "mettle_parallel_range"
 #define IR_PARALLEL_SLOTS_SYMBOL "mettle_parallel_range_slots"
 
@@ -569,120 +570,153 @@ static void ir_par_coverage_use(void *state, const IROperand *operand) {
   }
 }
 
-static int ir_par_classify(IRParLoop *loop) {
-  IRFunction *function = loop->function;
-  size_t block_count = 0;
-  size_t names = loop->names.count;
-  const IRBasicBlock *blocks;
-  unsigned char *defs = NULL;
-  unsigned char *state = NULL;
-  unsigned char *seed = NULL;
-  unsigned char *live = NULL;
-  unsigned char *inside = NULL;
-  IRParCoverage coverage;
-  int settled = 0;
-  int rounds = 0;
+typedef struct {
+  size_t block_count;
+  size_t names;
+  unsigned char *defs;
+  unsigned char *state;
+  unsigned char *seed;
+  unsigned char *live;
+  unsigned char *inside;
+} IRParDefs;
 
-  if (!ir_function_rebuild_cfg(function)) {
+static void ir_par_defs_free(IRParDefs *defs) {
+  free(defs->defs);
+  free(defs->state);
+  free(defs->seed);
+  free(defs->live);
+  free(defs->inside);
+}
+
+static int ir_par_defs_init(IRParDefs *defs, size_t block_count,
+                            size_t names) {
+  memset(defs, 0, sizeof(*defs));
+  defs->block_count = block_count;
+  defs->names = names;
+  defs->defs = calloc(block_count * names, 1);
+  defs->state = calloc(block_count * names, 1);
+  defs->seed = calloc(names, 1);
+  defs->live = calloc(names, 1);
+  defs->inside = calloc(block_count, 1);
+  if (!defs->defs || !defs->state || !defs->seed || !defs->live ||
+      !defs->inside) {
+    ir_par_defs_free(defs);
     return 0;
   }
-  blocks = ir_function_blocks(function, &block_count);
-  if (!blocks || block_count == 0u || names == 0u) {
-    return 1;
-  }
+  return 1;
+}
 
-  defs = calloc(block_count * names, 1);
-  state = calloc(block_count * names, 1);
-  seed = calloc(names, 1);
-  live = calloc(names, 1);
-  inside = calloc(block_count, 1);
-  if (!defs || !state || !seed || !live || !inside) {
-    free(defs);
-    free(state);
-    free(seed);
-    free(live);
-    free(inside);
-    return 0;
-  }
+static int ir_par_block_is_inside(const IRParLoop *loop,
+                                  const IRBasicBlock *block) {
+  size_t lo = block->first_instruction;
+  size_t hi = lo + block->instruction_count;
 
-  for (size_t b = 0; b < block_count; b++) {
+  return block->instruction_count != 0u && lo >= loop->header &&
+         hi <= loop->latch + 1u;
+}
+
+static void ir_par_mark_loop_blocks(IRParDefs *defs, const IRParLoop *loop,
+                                    const IRBasicBlock *blocks) {
+  const IRFunction *function = loop->function;
+
+  for (size_t b = 0; b < defs->block_count; b++) {
     const IRBasicBlock *block = &blocks[b];
     size_t lo = block->first_instruction;
     size_t hi = lo + block->instruction_count;
-    if (block->instruction_count == 0u || lo < loop->header ||
-        hi > loop->latch + 1u) {
+
+    if (!ir_par_block_is_inside(loop, block)) {
       continue;
     }
-    inside[b] = 1;
+    defs->inside[b] = 1;
     if (lo != loop->header) {
-      memset(state + b * names, 1, names);
+      memset(defs->state + b * defs->names, 1, defs->names);
     }
     for (size_t k = lo; k < hi; k++) {
       const IROperand *def = ir_par_definition(&function->instructions[k]);
       long index = def ? ir_par_names_find(&loop->names, def->name) : -1;
       if (index >= 0) {
-        defs[b * names + (size_t)index] = 1;
+        defs->defs[b * defs->names + (size_t)index] = 1;
       }
     }
   }
+}
 
-  while (!settled && rounds < 32) {
-    settled = 1;
-    rounds++;
-    for (size_t b = 0; b < block_count; b++) {
-      const IRBasicBlock *block = &blocks[b];
-      unsigned char *row = state + b * names;
-      int first = 1;
-      if (!inside[b]) {
-        continue;
-      }
-      memset(seed, 0, names);
-      if (block->first_instruction != loop->header) {
-        for (size_t p = 0; p < block->predecessor_count; p++) {
-          size_t pred = block->predecessors[p];
-          const unsigned char *prow;
-          const unsigned char *pdef;
-          if (pred >= block_count || !inside[pred]) {
-            continue;
-          }
-          prow = state + pred * names;
-          pdef = defs + pred * names;
-          for (size_t n = 0; n < names; n++) {
-            unsigned char out = (unsigned char)(prow[n] || pdef[n]);
-            seed[n] = first ? out : (unsigned char)(seed[n] && out);
-          }
-          first = 0;
-        }
-      }
-      if (first) {
-        memset(seed, 0, names);
-      }
-      for (size_t n = 0; n < names; n++) {
-        if (row[n] != seed[n]) {
-          row[n] = seed[n];
-          settled = 0;
-        }
+static void ir_par_meet_predecessors(IRParDefs *defs,
+                                     const IRBasicBlock *block) {
+  int first = 1;
+
+  memset(defs->seed, 0, defs->names);
+  for (size_t p = 0; p < block->predecessor_count; p++) {
+    size_t pred = block->predecessors[p];
+    const unsigned char *prow;
+    const unsigned char *pdef;
+
+    if (pred >= defs->block_count || !defs->inside[pred]) {
+      continue;
+    }
+    prow = defs->state + pred * defs->names;
+    pdef = defs->defs + pred * defs->names;
+    for (size_t n = 0; n < defs->names; n++) {
+      unsigned char out = (unsigned char)(prow[n] || pdef[n]);
+      defs->seed[n] = first ? out : (unsigned char)(defs->seed[n] && out);
+    }
+    first = 0;
+  }
+  if (first) {
+    memset(defs->seed, 0, defs->names);
+  }
+}
+
+static int ir_par_settle_round(IRParDefs *defs, const IRParLoop *loop,
+                               const IRBasicBlock *blocks) {
+  int settled = 1;
+
+  for (size_t b = 0; b < defs->block_count; b++) {
+    const IRBasicBlock *block = &blocks[b];
+    unsigned char *row = defs->state + b * defs->names;
+
+    if (!defs->inside[b]) {
+      continue;
+    }
+    if (block->first_instruction != loop->header) {
+      ir_par_meet_predecessors(defs, block);
+    } else {
+      memset(defs->seed, 0, defs->names);
+    }
+    for (size_t n = 0; n < defs->names; n++) {
+      if (row[n] != defs->seed[n]) {
+        row[n] = defs->seed[n];
+        settled = 0;
       }
     }
   }
+  return settled;
+}
 
-  for (size_t i = 0; i < names; i++) {
+static void ir_par_scan_coverage(IRParDefs *defs, IRParLoop *loop,
+                                 const IRBasicBlock *blocks) {
+  const IRFunction *function = loop->function;
+  IRParCoverage coverage;
+
+  for (size_t i = 0; i < defs->names; i++) {
     loop->names.private_ok[i] = loop->names.defined[i];
   }
   coverage.set = &loop->names;
-  coverage.live = live;
+  coverage.live = defs->live;
   coverage.failed = 0;
-  for (size_t b = 0; b < block_count; b++) {
+  for (size_t b = 0; b < defs->block_count; b++) {
     const IRBasicBlock *block = &blocks[b];
     size_t lo = block->first_instruction;
     size_t hi = lo + block->instruction_count;
-    if (!inside[b]) {
+
+    if (!defs->inside[b]) {
       continue;
     }
-    memcpy(live, state + b * names, names);
+    memcpy(defs->live, defs->state + b * defs->names, defs->names);
     for (size_t k = lo; k < hi; k++) {
       const IRInstruction *in = &function->instructions[k];
       const IROperand *def;
+
       if (k != loop->compare) {
         ir_par_visit_uses(in, &coverage, ir_par_coverage_use);
       } else if (ir_par_operand_is_value(&in->lhs)) {
@@ -692,17 +726,38 @@ static int ir_par_classify(IRParLoop *loop) {
       if (def) {
         long index = ir_par_names_find(&loop->names, def->name);
         if (index >= 0) {
-          live[index] = 1;
+          defs->live[index] = 1;
         }
       }
     }
   }
+}
 
-  free(defs);
-  free(state);
-  free(seed);
-  free(live);
-  free(inside);
+static int ir_par_classify(IRParLoop *loop) {
+  IRFunction *function = loop->function;
+  IRParDefs defs;
+  size_t block_count = 0;
+  const IRBasicBlock *blocks;
+  int settled = 0;
+  int rounds = 0;
+
+  if (!ir_function_rebuild_cfg(function)) {
+    return 0;
+  }
+  blocks = ir_function_blocks(function, &block_count);
+  if (!blocks || block_count == 0u || loop->names.count == 0u) {
+    return 1;
+  }
+  if (!ir_par_defs_init(&defs, block_count, loop->names.count)) {
+    return 0;
+  }
+  ir_par_mark_loop_blocks(&defs, loop, blocks);
+  while (!settled && rounds < 32) {
+    rounds++;
+    settled = ir_par_settle_round(&defs, loop, blocks);
+  }
+  ir_par_scan_coverage(&defs, loop, blocks);
+  ir_par_defs_free(&defs);
   return 1;
 }
 
@@ -1116,21 +1171,37 @@ static int ir_par_body_size(const IRParLoop *loop) {
   return weight < 1u ? 1 : (int)weight;
 }
 
-static IRFunction *ir_par_build_worker(IRParLoop *loop, size_t id) {
-  IRFunction *function = loop->function;
-  IRFunction *worker;
-  char name[192];
+static int ir_par_operand_ready(const IROperand *operand) {
+  return operand->kind == IR_OPERAND_NONE || operand->kind == IR_OPERAND_INT ||
+         operand->name != NULL;
+}
+
+static int ir_par_emit_pair(IRParLoop *loop, IRFunction *worker, IROpcode op,
+                            IROperand dest, IROperand lhs, const char *text) {
+  IRInstruction in = {0};
+  int ok;
+
+  in.op = op;
+  in.location = loop->location;
+  in.dest = dest;
+  in.lhs = lhs;
+  in.text = (char *)text;
+  ok = ir_par_operand_ready(&dest) && ir_par_operand_ready(&lhs) &&
+       ir_par_emit(worker, &in);
+  ir_operand_destroy(&dest);
+  ir_operand_destroy(&lhs);
+  return ok;
+}
+
+static IRFunction *ir_par_worker_create(IRParLoop *loop, size_t id) {
   const char *parameter_names[4] = {"__par_ctx", "__par_lo", "__par_hi",
                                     "__par_slot"};
   const char *parameter_types[4] = {"rawptr", "int64", "int64", "int64"};
-  char slot[64];
-  char address[64];
-  IRInstruction cast = {0};
-  IRInstruction assign = {0};
-  IRInstruction ret = {0};
+  const char *owner = loop->function->name ? loop->function->name : "fn";
+  IRFunction *worker;
+  char name[192];
 
-  snprintf(name, sizeof(name), "__mtl_par_%s_%zu",
-           function->name ? function->name : "fn", id);
+  snprintf(name, sizeof(name), "__mtl_par_%s_%zu", owner, id);
   worker = ir_function_create(name);
   if (!worker) {
     return NULL;
@@ -1143,37 +1214,41 @@ static IRFunction *ir_par_build_worker(IRParLoop *loop, size_t id) {
   worker->return_type_name = mettle_strdup("int32");
   worker->location = loop->location;
   worker->is_noinline = 1;
+  return worker;
+}
 
+static int ir_par_worker_load_captures(IRParLoop *loop, IRFunction *worker) {
   for (size_t i = 0; i < loop->capture_count; i++) {
     const IRParCapture *capture = &loop->captures[i];
-    IROperand destination = capture->is_temp
-                                ? ir_operand_temp(capture->name)
-                                : ir_operand_symbol(capture->name);
+    IROperand destination = capture->is_temp ? ir_operand_temp(capture->name)
+                                            : ir_operand_symbol(capture->name);
     IROperand base = ir_operand_symbol("__par_ctx");
     IROperand offset = ir_operand_int((long long)(i * 8u));
+    char slot[64];
     int ok;
+
     snprintf(slot, sizeof(slot), ".__par_slot%zu", i);
-    if (!destination.name || !base.name ||
-        (!capture->is_temp &&
-         !ir_par_emit_declare(loop, worker, capture->name,
-                              capture->type_name)) ||
-        !ir_par_emit_binary(loop, worker, slot, "+", &base, &offset)) {
-      ir_operand_destroy(&destination);
-      ir_operand_destroy(&base);
-      ir_function_destroy(worker);
-      return NULL;
-    }
-    ok = ir_par_emit_load(loop, worker, &destination, slot, capture);
+    ok = destination.name && base.name &&
+         (capture->is_temp ||
+          ir_par_emit_declare(loop, worker, capture->name,
+                              capture->type_name)) &&
+         ir_par_emit_binary(loop, worker, slot, "+", &base, &offset) &&
+         ir_par_emit_load(loop, worker, &destination, slot, capture);
     ir_operand_destroy(&destination);
     ir_operand_destroy(&base);
     if (!ok) {
-      ir_function_destroy(worker);
-      return NULL;
+      return 0;
     }
   }
+  return 1;
+}
+
+static int ir_par_worker_declare_locals(IRParLoop *loop, IRFunction *worker) {
+  const IRFunction *function = loop->function;
 
   for (size_t i = 0; i < loop->names.count; i++) {
     const IRInstruction *declaration;
+
     if (!loop->names.used[i] && !loop->names.defined[i]) {
       continue;
     }
@@ -1185,508 +1260,466 @@ static IRFunction *ir_par_build_worker(IRParLoop *loop, size_t id) {
       continue;
     }
     if (!ir_par_emit(worker, declaration)) {
-      ir_function_destroy(worker);
-      return NULL;
+      return 0;
     }
   }
+  return 1;
+}
 
+static int ir_par_worker_seed_reductions(IRParLoop *loop, IRFunction *worker) {
   for (size_t i = 0; i < loop->reduction_count; i++) {
     const IRParReduction *reduction = &loop->reductions[i];
-    IRInstruction seed = {0};
-    int ok;
+
     if (!ir_par_emit_declare(loop, worker, reduction->name,
                              reduction->shape.type_name)) {
-      ir_function_destroy(worker);
-      return NULL;
+      return 0;
     }
-    seed.op = IR_OP_ASSIGN;
-    seed.location = loop->location;
-    seed.dest = ir_operand_symbol(reduction->name);
-    seed.lhs = ir_operand_int(ir_par_reduction_identity(reduction->op));
-    ok = seed.dest.name && ir_par_emit(worker, &seed);
-    ir_operand_destroy(&seed.dest);
-    if (!ok) {
-      ir_function_destroy(worker);
-      return NULL;
+    if (!ir_par_emit_pair(
+            loop, worker, IR_OP_ASSIGN, ir_operand_symbol(reduction->name),
+            ir_operand_int(ir_par_reduction_identity(reduction->op)), NULL)) {
+      return 0;
     }
   }
+  return 1;
+}
 
-  if (!ir_par_emit_declare(loop, worker, "__par_stop", loop->iv_type)) {
-    ir_function_destroy(worker);
-    return NULL;
-  }
+static int ir_par_worker_bounds(IRParLoop *loop, IRFunction *worker) {
+  return ir_par_emit_declare(loop, worker, "__par_stop", loop->iv_type) &&
+         ir_par_emit_pair(loop, worker, IR_OP_CAST,
+                          ir_operand_temp(".__par_lo_cast"),
+                          ir_operand_symbol("__par_lo"), loop->iv_type) &&
+         ir_par_emit_pair(loop, worker, IR_OP_ASSIGN,
+                          ir_operand_symbol(loop->iv),
+                          ir_operand_temp(".__par_lo_cast"), NULL) &&
+         ir_par_emit_pair(loop, worker, IR_OP_CAST,
+                          ir_operand_temp(".__par_hi_cast"),
+                          ir_operand_symbol("__par_hi"), loop->iv_type) &&
+         ir_par_emit_pair(loop, worker, IR_OP_ASSIGN,
+                          ir_operand_symbol("__par_stop"),
+                          ir_operand_temp(".__par_hi_cast"), NULL);
+}
 
-  snprintf(address, sizeof(address), ".__par_lo_cast");
-  cast.op = IR_OP_CAST;
-  cast.location = loop->location;
-  cast.dest = ir_operand_temp(address);
-  cast.lhs = ir_operand_symbol("__par_lo");
-  cast.text = (char *)loop->iv_type;
-  if (!cast.dest.name || !cast.lhs.name || !ir_par_emit(worker, &cast)) {
-    ir_operand_destroy(&cast.dest);
-    ir_operand_destroy(&cast.lhs);
-    ir_function_destroy(worker);
-    return NULL;
-  }
-  ir_operand_destroy(&cast.dest);
-  ir_operand_destroy(&cast.lhs);
+static void ir_par_worker_demote_address_of(IRParLoop *loop,
+                                            IRInstruction *copy) {
+  long index;
 
-  assign.op = IR_OP_ASSIGN;
-  assign.location = loop->location;
-  assign.dest = ir_operand_symbol(loop->iv);
-  assign.lhs = ir_operand_temp(address);
-  if (!assign.dest.name || !assign.lhs.name || !ir_par_emit(worker, &assign)) {
-    ir_operand_destroy(&assign.dest);
-    ir_operand_destroy(&assign.lhs);
-    ir_function_destroy(worker);
-    return NULL;
+  if (copy->op != IR_OP_ADDRESS_OF || copy->lhs.kind != IR_OPERAND_SYMBOL ||
+      !copy->lhs.name) {
+    return;
   }
-  ir_operand_destroy(&assign.dest);
-  ir_operand_destroy(&assign.lhs);
+  index = ir_par_names_find(&loop->names, copy->lhs.name);
+  if (index >= 0 && loop->names.addressed[index] &&
+      !loop->names.private_ok[index]) {
+    copy->op = IR_OP_ASSIGN;
+  }
+}
 
-  memset(&cast, 0, sizeof(cast));
-  cast.op = IR_OP_CAST;
-  cast.location = loop->location;
-  cast.dest = ir_operand_temp(".__par_hi_cast");
-  cast.lhs = ir_operand_symbol("__par_hi");
-  cast.text = (char *)loop->iv_type;
-  if (!cast.dest.name || !cast.lhs.name || !ir_par_emit(worker, &cast)) {
-    ir_operand_destroy(&cast.dest);
-    ir_operand_destroy(&cast.lhs);
-    ir_function_destroy(worker);
-    return NULL;
-  }
-  ir_operand_destroy(&cast.dest);
-  ir_operand_destroy(&cast.lhs);
-
-  memset(&assign, 0, sizeof(assign));
-  assign.op = IR_OP_ASSIGN;
-  assign.location = loop->location;
-  assign.dest = ir_operand_symbol("__par_stop");
-  assign.lhs = ir_operand_temp(".__par_hi_cast");
-  if (!assign.dest.name || !assign.lhs.name || !ir_par_emit(worker, &assign)) {
-    ir_operand_destroy(&assign.dest);
-    ir_operand_destroy(&assign.lhs);
-    ir_function_destroy(worker);
-    return NULL;
-  }
-  ir_operand_destroy(&assign.dest);
-  ir_operand_destroy(&assign.lhs);
+static int ir_par_worker_copy_body(IRParLoop *loop, IRFunction *worker) {
+  const IRFunction *function = loop->function;
 
   for (size_t i = loop->header; i <= loop->latch; i++) {
     IRInstruction copy = function->instructions[i];
     IROperand replacement = {0};
-    int replaced = 0;
     int ok;
+
     if (i == loop->compare) {
       replacement = ir_operand_symbol("__par_stop");
       if (!replacement.name) {
-        ir_function_destroy(worker);
-        return NULL;
+        return 0;
       }
       copy.rhs = replacement;
       copy.text = (char *)"<";
-      replaced = 1;
     }
-    if (copy.op == IR_OP_ADDRESS_OF && copy.lhs.kind == IR_OPERAND_SYMBOL &&
-        copy.lhs.name) {
-      long index = ir_par_names_find(&loop->names, copy.lhs.name);
-      if (index >= 0 && loop->names.addressed[index] &&
-          !loop->names.private_ok[index]) {
-        copy.op = IR_OP_ASSIGN;
-      }
-    }
+    ir_par_worker_demote_address_of(loop, &copy);
     ok = ir_par_emit(worker, &copy);
-    if (replaced) {
-      ir_operand_destroy(&replacement);
-    }
+    ir_operand_destroy(&replacement);
     if (!ok) {
-      ir_function_destroy(worker);
-      return NULL;
+      return 0;
     }
   }
+  return 1;
+}
 
-  {
-    IRInstruction label = {0};
-    label.op = IR_OP_LABEL;
-    label.location = loop->location;
-    label.text = (char *)loop->end_label;
-    if (!ir_par_emit(worker, &label)) {
-      ir_function_destroy(worker);
-      return NULL;
-    }
-  }
+static int ir_par_worker_end_label(IRParLoop *loop, IRFunction *worker) {
+  IRInstruction label = {0};
 
-  if (loop->reduction_count) {
-    IROperand slot = ir_operand_symbol("__par_slot");
-    IROperand stride = ir_operand_int((long long)(loop->reduction_count * 8u));
-    IROperand base = ir_operand_symbol("__par_ctx");
-    IROperand offset = ir_operand_temp(".__par_out_off");
-    int ok = slot.name && base.name && offset.name;
-    if (ok) {
-      ok = ir_par_emit_binary(loop, worker, ".__par_out_off", "*", &slot,
-                              &stride);
-    }
-    if (ok) {
-      ok = ir_par_emit_binary(loop, worker, ".__par_out_base", "+", &base,
+  label.op = IR_OP_LABEL;
+  label.location = loop->location;
+  label.text = (char *)loop->end_label;
+  return ir_par_emit(worker, &label);
+}
+
+static int ir_par_worker_output_base(IRParLoop *loop, IRFunction *worker) {
+  IROperand slot = ir_operand_symbol("__par_slot");
+  IROperand stride = ir_operand_int((long long)(loop->reduction_count * 8u));
+  IROperand base = ir_operand_symbol("__par_ctx");
+  IROperand offset = ir_operand_temp(".__par_out_off");
+  int ok = slot.name && base.name && offset.name &&
+           ir_par_emit_binary(loop, worker, ".__par_out_off", "*", &slot,
+                              &stride) &&
+           ir_par_emit_binary(loop, worker, ".__par_out_base", "+", &base,
                               &offset);
-    }
-    ir_operand_destroy(&slot);
-    ir_operand_destroy(&base);
-    ir_operand_destroy(&offset);
+
+  ir_operand_destroy(&slot);
+  ir_operand_destroy(&base);
+  ir_operand_destroy(&offset);
+  return ok;
+}
+
+static int ir_par_worker_store_reductions(IRParLoop *loop,
+                                          IRFunction *worker) {
+  if (!loop->reduction_count) {
+    return 1;
+  }
+  if (!ir_par_worker_output_base(loop, worker)) {
+    return 0;
+  }
+  for (size_t i = 0; i < loop->reduction_count; i++) {
+    const IRParReduction *reduction = &loop->reductions[i];
+    IROperand out_base = ir_operand_temp(".__par_out_base");
+    IROperand fixed =
+        ir_operand_int((long long)((loop->capture_count + i) * 8u));
+    IROperand value = ir_operand_symbol(reduction->name);
+    char address[64];
+    char previous_name[64];
+    char merged_name[64];
+    IROperand previous;
+    IROperand merged;
+    int ok;
+
+    snprintf(address, sizeof(address), ".__par_out%zu", i);
+    snprintf(previous_name, sizeof(previous_name), ".__par_prev%zu", i);
+    snprintf(merged_name, sizeof(merged_name), ".__par_merged%zu", i);
+    previous = ir_operand_temp(previous_name);
+    merged = ir_operand_temp(merged_name);
+    ok = out_base.name && value.name && previous.name && merged.name &&
+         ir_par_emit_binary(loop, worker, address, "+", &out_base, &fixed) &&
+         ir_par_emit_load(loop, worker, &previous, address,
+                          &reduction->shape) &&
+         ir_par_emit_binary(loop, worker, merged_name, reduction->op,
+                            &previous, &value) &&
+         ir_par_emit_store(loop, worker, address, &merged, &reduction->shape);
+    ir_operand_destroy(&out_base);
+    ir_operand_destroy(&value);
+    ir_operand_destroy(&previous);
+    ir_operand_destroy(&merged);
     if (!ok) {
-      ir_function_destroy(worker);
-      return NULL;
-    }
-    for (size_t i = 0; i < loop->reduction_count; i++) {
-      const IRParReduction *reduction = &loop->reductions[i];
-      IROperand out_base = ir_operand_temp(".__par_out_base");
-      IROperand fixed = ir_operand_int(
-          (long long)((loop->capture_count + i) * 8u));
-      IROperand value = ir_operand_symbol(reduction->name);
-      char address[64];
-      snprintf(address, sizeof(address), ".__par_out%zu", i);
-      if (!out_base.name || !value.name ||
-          !ir_par_emit_binary(loop, worker, address, "+", &out_base, &fixed) ||
-          !ir_par_emit_store(loop, worker, address, &value,
-                             &reduction->shape)) {
-        ir_operand_destroy(&out_base);
-        ir_operand_destroy(&value);
-        ir_function_destroy(worker);
-        return NULL;
-      }
-      ir_operand_destroy(&out_base);
-      ir_operand_destroy(&value);
+      return 0;
     }
   }
+  return 1;
+}
+
+static int ir_par_worker_return(IRParLoop *loop, IRFunction *worker) {
+  IRInstruction ret = {0};
 
   ret.op = IR_OP_RETURN;
   ret.location = loop->location;
   ret.lhs = ir_operand_int(0);
-  if (!ir_par_emit(worker, &ret)) {
-    ir_function_destroy(worker);
-    return NULL;
-  }
-  return worker;
+  return ir_par_emit(worker, &ret);
 }
 
-static int ir_par_emit_dispatch(IRParLoop *loop, IRFunction *out,
-                                const char *worker_name, size_t id) {
-  char context_name[96];
-  char base_name[96];
-  char slot_name[96];
-  char address_name[96];
-  char lo_name[96];
-  char hi_name[96];
-  char stop_name[96];
-  char pointer_name[96];
+static IRFunction *ir_par_build_worker(IRParLoop *loop, size_t id) {
+  IRFunction *worker = ir_par_worker_create(loop, id);
+
+  if (!worker) {
+    return NULL;
+  }
+  if (ir_par_worker_load_captures(loop, worker) &&
+      ir_par_worker_declare_locals(loop, worker) &&
+      ir_par_worker_seed_reductions(loop, worker) &&
+      ir_par_worker_bounds(loop, worker) &&
+      ir_par_worker_copy_body(loop, worker) &&
+      ir_par_worker_end_label(loop, worker) &&
+      ir_par_worker_store_reductions(loop, worker) &&
+      ir_par_worker_return(loop, worker)) {
+    return worker;
+  }
+  ir_function_destroy(worker);
+  return NULL;
+}
+
+typedef struct {
+  char context[96];
+  char base[96];
+  char lo[96];
+  char hi[96];
+  char stop[96];
+  char pointer[96];
+  char done[96];
+} IRParDispatchNames;
+
+static void ir_par_dispatch_names(IRParDispatchNames *names, size_t id) {
+  snprintf(names->context, sizeof(names->context), "__par_ctx_%zu", id);
+  snprintf(names->base, sizeof(names->base), ".__par_base_%zu", id);
+  snprintf(names->lo, sizeof(names->lo), ".__par_lo_%zu", id);
+  snprintf(names->hi, sizeof(names->hi), ".__par_hi_%zu", id);
+  snprintf(names->stop, sizeof(names->stop), ".__par_stop_%zu", id);
+  snprintf(names->pointer, sizeof(names->pointer), ".__par_fn_%zu", id);
+  snprintf(names->done, sizeof(names->done), "__par_done_%zu", id);
+}
+
+static int ir_par_emit_offset(IRParLoop *loop, IRFunction *out,
+                              const char *dest, const char *base_name,
+                              long long offset) {
+  IROperand base = ir_operand_temp(base_name);
+  IROperand off = ir_operand_int(offset);
+  int ok = base.name && ir_par_emit_binary(loop, out, dest, "+", &base, &off);
+
+  ir_operand_destroy(&base);
+  return ok;
+}
+
+static int ir_par_emit_cast_of(IRParLoop *loop, IRFunction *out,
+                               const char *dest, const IROperand *source,
+                               const char *type) {
+  IROperand copy = {0};
+
+  if (!ir_operand_clone(source, &copy)) {
+    return 0;
+  }
+  return ir_par_emit_pair(loop, out, IR_OP_CAST, ir_operand_temp(dest), copy,
+                          type);
+}
+
+static size_t ir_par_slot_offset(const IRParLoop *loop, size_t k, size_t r) {
+  return (loop->capture_count + k * loop->reduction_count + r) * 8u;
+}
+
+static int ir_par_dispatch_context(IRParLoop *loop, IRFunction *out,
+                                   const IRParDispatchNames *names) {
+  size_t slots =
+      loop->capture_count + loop->reduction_count * IR_PARALLEL_MAX_SLOTS;
   char array_type[64];
-  IROperand base;
-  IRInstruction in = {0};
-  IROperand call_args[5] = {0};
-  int min_chunk = IR_PARALLEL_WORK_TARGET / ir_par_body_size(loop);
 
-  if (min_chunk < 1) {
-    min_chunk = 1;
+  if (!slots) {
+    slots = 1u;
   }
-  snprintf(context_name, sizeof(context_name), "__par_ctx_%zu", id);
-  snprintf(base_name, sizeof(base_name), ".__par_base_%zu", id);
-  snprintf(lo_name, sizeof(lo_name), ".__par_lo_%zu", id);
-  snprintf(hi_name, sizeof(hi_name), ".__par_hi_%zu", id);
-  snprintf(stop_name, sizeof(stop_name), ".__par_stop_%zu", id);
-  snprintf(pointer_name, sizeof(pointer_name), ".__par_fn_%zu", id);
-  {
-    size_t slots = loop->capture_count +
-                   loop->reduction_count * IR_PARALLEL_MAX_SLOTS;
-    if (!slots) {
-      slots = 1u;
-    }
-    snprintf(array_type, sizeof(array_type), "int64[%zu]", slots);
-    if (!ir_program_int64_array_type(loop->program, slots) ||
-        !ir_par_emit_declare(loop, out, context_name, array_type)) {
-      return 0;
-    }
-  }
-
-  in.op = IR_OP_ADDRESS_OF;
-  in.location = loop->location;
-  in.dest = ir_operand_temp(base_name);
-  in.lhs = ir_operand_symbol(context_name);
-  if (!in.dest.name || !in.lhs.name || !ir_par_emit(out, &in)) {
-    ir_operand_destroy(&in.dest);
-    ir_operand_destroy(&in.lhs);
+  snprintf(array_type, sizeof(array_type), "int64[%zu]", slots);
+  if (!ir_program_int64_array_type(loop->program, slots) ||
+      !ir_par_emit_declare(loop, out, names->context, array_type)) {
     return 0;
   }
-  ir_operand_destroy(&in.dest);
-  ir_operand_destroy(&in.lhs);
+  return ir_par_emit_pair(loop, out, IR_OP_ADDRESS_OF,
+                          ir_operand_temp(names->base),
+                          ir_operand_symbol(names->context), NULL);
+}
 
-  base = ir_operand_temp(base_name);
-  if (!base.name) {
+static int ir_par_capture_value(IRParLoop *loop, IRFunction *out,
+                                const IRParCapture *capture, size_t id,
+                                size_t i, IROperand *out_value) {
+  char address_name[96];
+
+  if (!capture->take_address) {
+    *out_value = capture->is_temp ? ir_operand_temp(capture->name)
+                                  : ir_operand_symbol(capture->name);
+    return out_value->name != NULL;
+  }
+  snprintf(address_name, sizeof(address_name), ".__par_addr%zu_%zu", id, i);
+  if (!ir_par_emit_pair(loop, out, IR_OP_ADDRESS_OF,
+                        ir_operand_temp(address_name),
+                        ir_operand_symbol(capture->name), NULL)) {
     return 0;
   }
+  *out_value = ir_operand_temp(address_name);
+  return out_value->name != NULL;
+}
+
+static int ir_par_dispatch_store_captures(IRParLoop *loop, IRFunction *out,
+                                          const IRParDispatchNames *names,
+                                          size_t id) {
   for (size_t i = 0; i < loop->capture_count; i++) {
     const IRParCapture *capture = &loop->captures[i];
-    IROperand offset = ir_operand_int((long long)(i * 8u));
-    IROperand value;
+    IROperand value = {0};
+    char slot_name[96];
     int ok;
+
     snprintf(slot_name, sizeof(slot_name), ".__par_put%zu_%zu", id, i);
-    if (!ir_par_emit_binary(loop, out, slot_name, "+", &base, &offset)) {
-      ir_operand_destroy(&base);
+    if (!ir_par_emit_offset(loop, out, slot_name, names->base,
+                            (long long)(i * 8u))) {
       return 0;
     }
-    if (capture->take_address) {
-      IRInstruction take = {0};
-      snprintf(address_name, sizeof(address_name), ".__par_addr%zu_%zu", id, i);
-      take.op = IR_OP_ADDRESS_OF;
-      take.location = loop->location;
-      take.dest = ir_operand_temp(address_name);
-      take.lhs = ir_operand_symbol(capture->name);
-      if (!take.dest.name || !take.lhs.name || !ir_par_emit(out, &take)) {
-        ir_operand_destroy(&take.dest);
-        ir_operand_destroy(&take.lhs);
-        ir_operand_destroy(&base);
-        return 0;
-      }
-      ir_operand_destroy(&take.dest);
-      ir_operand_destroy(&take.lhs);
-      value = ir_operand_temp(address_name);
-    } else if (capture->is_temp) {
-      value = ir_operand_temp(capture->name);
-    } else {
-      value = ir_operand_symbol(capture->name);
-    }
-    if (!value.name) {
-      ir_operand_destroy(&base);
+    if (!ir_par_capture_value(loop, out, capture, id, i, &value)) {
+      ir_operand_destroy(&value);
       return 0;
     }
     ok = ir_par_emit_store(loop, out, slot_name, &value, capture);
     ir_operand_destroy(&value);
     if (!ok) {
-      ir_operand_destroy(&base);
       return 0;
     }
   }
+  return 1;
+}
 
+static int ir_par_dispatch_seed_slots(IRParLoop *loop, IRFunction *out,
+                                      const IRParDispatchNames *names,
+                                      size_t id) {
   for (size_t k = 0; k < IR_PARALLEL_MAX_SLOTS; k++) {
     for (size_t r = 0; r < loop->reduction_count; r++) {
       const IRParReduction *reduction = &loop->reductions[r];
-      IROperand offset = ir_operand_int((long long)(
-          (loop->capture_count + k * loop->reduction_count + r) * 8u));
       IROperand identity =
           ir_operand_int(ir_par_reduction_identity(reduction->op));
       char seed_name[96];
+
       snprintf(seed_name, sizeof(seed_name), ".__par_seed%zu_%zu_%zu", id, k,
                r);
-      if (!ir_par_emit_binary(loop, out, seed_name, "+", &base, &offset) ||
+      if (!ir_par_emit_offset(loop, out, seed_name, names->base,
+                              (long long)ir_par_slot_offset(loop, k, r)) ||
           !ir_par_emit_store(loop, out, seed_name, &identity,
                              &reduction->shape)) {
-        ir_operand_destroy(&base);
-        return 0;
-      }
-    }
-  }
-
-  memset(&in, 0, sizeof(in));
-  in.op = IR_OP_ADDRESS_OF;
-  in.location = loop->location;
-  in.dest = ir_operand_temp(pointer_name);
-  in.lhs = ir_operand_symbol(worker_name);
-  if (!in.dest.name || !in.lhs.name || !ir_par_emit(out, &in)) {
-    ir_operand_destroy(&in.dest);
-    ir_operand_destroy(&in.lhs);
-    ir_operand_destroy(&base);
-    return 0;
-  }
-  ir_operand_destroy(&in.dest);
-  ir_operand_destroy(&in.lhs);
-
-  memset(&in, 0, sizeof(in));
-  in.op = IR_OP_CAST;
-  in.location = loop->location;
-  in.dest = ir_operand_temp(lo_name);
-  in.lhs = ir_operand_symbol(loop->iv);
-  in.text = (char *)"int64";
-  if (!in.dest.name || !in.lhs.name || !ir_par_emit(out, &in)) {
-    ir_operand_destroy(&in.dest);
-    ir_operand_destroy(&in.lhs);
-    ir_operand_destroy(&base);
-    return 0;
-  }
-  ir_operand_destroy(&in.dest);
-  ir_operand_destroy(&in.lhs);
-
-  memset(&in, 0, sizeof(in));
-  in.op = IR_OP_CAST;
-  in.location = loop->location;
-  in.dest = ir_operand_temp(hi_name);
-  in.lhs = loop->bound;
-  in.text = (char *)"int64";
-  if (!in.dest.name || !ir_par_emit(out, &in)) {
-    ir_operand_destroy(&in.dest);
-    ir_operand_destroy(&base);
-    return 0;
-  }
-  ir_operand_destroy(&in.dest);
-
-  if (loop->bound_inclusive) {
-    IROperand lhs = ir_operand_temp(hi_name);
-    IROperand one = ir_operand_int(1);
-    int ok;
-    if (!lhs.name) {
-      ir_operand_destroy(&base);
-      return 0;
-    }
-    ok = ir_par_emit_binary(loop, out, stop_name, "+", &lhs, &one);
-    ir_operand_destroy(&lhs);
-    if (!ok) {
-      ir_operand_destroy(&base);
-      return 0;
-    }
-  }
-
-  memset(&in, 0, sizeof(in));
-  call_args[0] = ir_operand_temp(pointer_name);
-  call_args[1] = ir_operand_temp(base_name);
-  call_args[2] = ir_operand_temp(lo_name);
-  call_args[3] = ir_operand_temp(loop->bound_inclusive ? stop_name : hi_name);
-  call_args[4] = ir_operand_int(min_chunk);
-  in.op = IR_OP_CALL;
-  in.location = loop->location;
-  in.text = (char *)(loop->reduction_count ? IR_PARALLEL_SLOTS_SYMBOL
-                                           : IR_PARALLEL_RANGE_SYMBOL);
-  in.arguments = call_args;
-  in.argument_count = 5u;
-  if (!call_args[0].name || !call_args[1].name || !call_args[2].name ||
-      !call_args[3].name || !ir_par_emit(out, &in)) {
-    for (size_t i = 0; i < 4u; i++) {
-      ir_operand_destroy(&call_args[i]);
-    }
-    ir_operand_destroy(&base);
-    return 0;
-  }
-  for (size_t i = 0; i < 4u; i++) {
-    ir_operand_destroy(&call_args[i]);
-  }
-  ir_operand_destroy(&base);
-
-  {
-    const char *stop = loop->bound_inclusive ? stop_name : hi_name;
-    char done_label[96];
-    char guard_name[96];
-    char settle_name[96];
-    IROperand lo_value = ir_operand_temp(lo_name);
-    IROperand stop_value = ir_operand_temp(stop);
-    IRInstruction step = {0};
-    int ok;
-    snprintf(done_label, sizeof(done_label), "__par_done_%zu", id);
-    snprintf(guard_name, sizeof(guard_name), ".__par_ran_%zu", id);
-    snprintf(settle_name, sizeof(settle_name), ".__par_end_%zu", id);
-    if (!lo_value.name || !stop_value.name) {
-      ir_operand_destroy(&lo_value);
-      ir_operand_destroy(&stop_value);
-      return 0;
-    }
-    ok = ir_par_emit_binary(loop, out, guard_name, "<", &lo_value,
-                            &stop_value);
-    ir_operand_destroy(&lo_value);
-    ir_operand_destroy(&stop_value);
-    if (!ok) {
-      return 0;
-    }
-
-    step.op = IR_OP_BRANCH_ZERO;
-    step.location = loop->location;
-    step.lhs = ir_operand_temp(guard_name);
-    step.text = done_label;
-    if (!step.lhs.name || !ir_par_emit(out, &step)) {
-      ir_operand_destroy(&step.lhs);
-      return 0;
-    }
-    ir_operand_destroy(&step.lhs);
-
-    memset(&step, 0, sizeof(step));
-    step.op = IR_OP_CAST;
-    step.location = loop->location;
-    step.dest = ir_operand_temp(settle_name);
-    step.lhs = ir_operand_temp(stop);
-    step.text = (char *)loop->iv_type;
-    if (!step.dest.name || !step.lhs.name || !ir_par_emit(out, &step)) {
-      ir_operand_destroy(&step.dest);
-      ir_operand_destroy(&step.lhs);
-      return 0;
-    }
-    ir_operand_destroy(&step.dest);
-    ir_operand_destroy(&step.lhs);
-
-    memset(&step, 0, sizeof(step));
-    step.op = IR_OP_ASSIGN;
-    step.location = loop->location;
-    step.dest = ir_operand_symbol(loop->iv);
-    step.lhs = ir_operand_temp(settle_name);
-    if (!step.dest.name || !step.lhs.name || !ir_par_emit(out, &step)) {
-      ir_operand_destroy(&step.dest);
-      ir_operand_destroy(&step.lhs);
-      return 0;
-    }
-    ir_operand_destroy(&step.dest);
-    ir_operand_destroy(&step.lhs);
-
-    memset(&step, 0, sizeof(step));
-    step.op = IR_OP_LABEL;
-    step.location = loop->location;
-    step.text = done_label;
-    if (!ir_par_emit(out, &step)) {
-      return 0;
-    }
-  }
-
-  for (size_t k = 0; k < IR_PARALLEL_MAX_SLOTS; k++) {
-    for (size_t r = 0; r < loop->reduction_count; r++) {
-      const IRParReduction *reduction = &loop->reductions[r];
-      IROperand ctx_base = ir_operand_temp(base_name);
-      IROperand offset = ir_operand_int((long long)(
-          (loop->capture_count + k * loop->reduction_count + r) * 8u));
-      IROperand loaded;
-      IROperand accumulator;
-      IRInstruction merge = {0};
-      char address[96];
-      char value_name[96];
-      int ok;
-      snprintf(address, sizeof(address), ".__par_get%zu_%zu_%zu", id, k, r);
-      snprintf(value_name, sizeof(value_name), ".__par_val%zu_%zu_%zu", id, k,
-               r);
-      if (!ctx_base.name ||
-          !ir_par_emit_binary(loop, out, address, "+", &ctx_base, &offset)) {
-        ir_operand_destroy(&ctx_base);
-        return 0;
-      }
-      ir_operand_destroy(&ctx_base);
-      loaded = ir_operand_temp(value_name);
-      if (!loaded.name ||
-          !ir_par_emit_load(loop, out, &loaded, address, &reduction->shape)) {
-        ir_operand_destroy(&loaded);
-        return 0;
-      }
-      ir_operand_destroy(&loaded);
-      accumulator = ir_operand_symbol(reduction->name);
-      merge.op = IR_OP_BINARY;
-      merge.location = loop->location;
-      merge.dest = ir_operand_symbol(reduction->name);
-      merge.lhs = accumulator;
-      merge.rhs = ir_operand_temp(value_name);
-      merge.text = (char *)reduction->op;
-      merge.is_unsigned = reduction->shape.is_unsigned;
-      ok = merge.dest.name && merge.lhs.name && merge.rhs.name &&
-           ir_par_emit(out, &merge);
-      ir_operand_destroy(&merge.dest);
-      ir_operand_destroy(&merge.lhs);
-      ir_operand_destroy(&merge.rhs);
-      if (!ok) {
         return 0;
       }
     }
   }
   return 1;
+}
+
+static int ir_par_dispatch_bounds(IRParLoop *loop, IRFunction *out,
+                                  const IRParDispatchNames *names,
+                                  const char *worker_name) {
+  return ir_par_emit_pair(loop, out, IR_OP_ADDRESS_OF,
+                          ir_operand_temp(names->pointer),
+                          ir_operand_symbol(worker_name), NULL) &&
+         ir_par_emit_pair(loop, out, IR_OP_CAST, ir_operand_temp(names->lo),
+                          ir_operand_symbol(loop->iv), "int64") &&
+         ir_par_emit_cast_of(loop, out, names->hi, &loop->bound, "int64") &&
+         (!loop->bound_inclusive ||
+          ir_par_emit_offset(loop, out, names->stop, names->hi, 1));
+}
+
+static int ir_par_dispatch_call(IRParLoop *loop, IRFunction *out,
+                               const IRParDispatchNames *names,
+                               int min_chunk) {
+  IROperand call_args[5] = {0};
+  IRInstruction in = {0};
+  int ok;
+
+  call_args[0] = ir_operand_temp(names->pointer);
+  call_args[1] = ir_operand_temp(names->base);
+  call_args[2] = ir_operand_temp(names->lo);
+  call_args[3] =
+      ir_operand_temp(loop->bound_inclusive ? names->stop : names->hi);
+  call_args[4] = ir_operand_int(min_chunk);
+  in.op = IR_OP_CALL;
+  in.location = loop->location;
+  in.text = (char *)(loop->reduction_count ? IR_PARALLEL_SLOTS_SYMBOL
+                                          : IR_PARALLEL_RANGE_SYMBOL);
+  in.arguments = call_args;
+  in.argument_count = 5u;
+  ok = call_args[0].name && call_args[1].name && call_args[2].name &&
+       call_args[3].name && ir_par_emit(out, &in);
+  for (size_t i = 0; i < 4u; i++) {
+    ir_operand_destroy(&call_args[i]);
+  }
+  return ok;
+}
+
+static int ir_par_dispatch_settle_iv(IRParLoop *loop, IRFunction *out,
+                                     const IRParDispatchNames *names,
+                                     size_t id) {
+  const char *stop = loop->bound_inclusive ? names->stop : names->hi;
+  IROperand lo_value = ir_operand_temp(names->lo);
+  IROperand stop_value = ir_operand_temp(stop);
+  IRInstruction label = {0};
+  char guard_name[96];
+  char settle_name[96];
+  int ok;
+
+  snprintf(guard_name, sizeof(guard_name), ".__par_ran_%zu", id);
+  snprintf(settle_name, sizeof(settle_name), ".__par_end_%zu", id);
+  ok = lo_value.name && stop_value.name &&
+       ir_par_emit_binary(loop, out, guard_name, "<", &lo_value, &stop_value);
+  ir_operand_destroy(&lo_value);
+  ir_operand_destroy(&stop_value);
+  if (!ok) {
+    return 0;
+  }
+  if (!ir_par_emit_pair(loop, out, IR_OP_BRANCH_ZERO, ir_operand_none(),
+                        ir_operand_temp(guard_name), names->done)) {
+    return 0;
+  }
+  if (!ir_par_emit_pair(loop, out, IR_OP_CAST, ir_operand_temp(settle_name),
+                        ir_operand_temp(stop), loop->iv_type)) {
+    return 0;
+  }
+  if (!ir_par_emit_pair(loop, out, IR_OP_ASSIGN, ir_operand_symbol(loop->iv),
+                        ir_operand_temp(settle_name), NULL)) {
+    return 0;
+  }
+  label.op = IR_OP_LABEL;
+  label.location = loop->location;
+  label.text = (char *)names->done;
+  return ir_par_emit(out, &label);
+}
+
+static int ir_par_dispatch_merge_one(IRParLoop *loop, IRFunction *out,
+                                     const IRParDispatchNames *names,
+                                     size_t id, size_t k, size_t r) {
+  const IRParReduction *reduction = &loop->reductions[r];
+  IRInstruction merge = {0};
+  IROperand loaded;
+  char address[96];
+  char value_name[96];
+  int ok;
+
+  snprintf(address, sizeof(address), ".__par_get%zu_%zu_%zu", id, k, r);
+  snprintf(value_name, sizeof(value_name), ".__par_val%zu_%zu_%zu", id, k, r);
+  if (!ir_par_emit_offset(loop, out, address, names->base,
+                          (long long)ir_par_slot_offset(loop, k, r))) {
+    return 0;
+  }
+  loaded = ir_operand_temp(value_name);
+  ok = loaded.name &&
+       ir_par_emit_load(loop, out, &loaded, address, &reduction->shape);
+  ir_operand_destroy(&loaded);
+  if (!ok) {
+    return 0;
+  }
+  merge.op = IR_OP_BINARY;
+  merge.location = loop->location;
+  merge.dest = ir_operand_symbol(reduction->name);
+  merge.lhs = ir_operand_symbol(reduction->name);
+  merge.rhs = ir_operand_temp(value_name);
+  merge.text = (char *)reduction->op;
+  merge.is_unsigned = reduction->shape.is_unsigned;
+  ok = merge.dest.name && merge.lhs.name && merge.rhs.name &&
+       ir_par_emit(out, &merge);
+  ir_operand_destroy(&merge.dest);
+  ir_operand_destroy(&merge.lhs);
+  ir_operand_destroy(&merge.rhs);
+  return ok;
+}
+
+static int ir_par_dispatch_merge_slots(IRParLoop *loop, IRFunction *out,
+                                       const IRParDispatchNames *names,
+                                       size_t id) {
+  for (size_t k = 0; k < IR_PARALLEL_MAX_SLOTS; k++) {
+    for (size_t r = 0; r < loop->reduction_count; r++) {
+      if (!ir_par_dispatch_merge_one(loop, out, names, id, k, r)) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+static int ir_par_emit_dispatch(IRParLoop *loop, IRFunction *out,
+                                const char *worker_name, size_t id) {
+  IRParDispatchNames names;
+  int min_chunk = IR_PARALLEL_WORK_TARGET / ir_par_body_size(loop);
+
+  if (min_chunk < 1) {
+    min_chunk = 1;
+  }
+  ir_par_dispatch_names(&names, id);
+  return ir_par_dispatch_context(loop, out, &names) &&
+         ir_par_dispatch_store_captures(loop, out, &names, id) &&
+         ir_par_dispatch_seed_slots(loop, out, &names, id) &&
+         ir_par_dispatch_bounds(loop, out, &names, worker_name) &&
+         ir_par_dispatch_call(loop, out, &names, min_chunk) &&
+         ir_par_dispatch_settle_iv(loop, out, &names, id) &&
+         ir_par_dispatch_merge_slots(loop, out, &names, id);
 }
 
 static void ir_par_free_instructions(IRFunction *scratch) {
