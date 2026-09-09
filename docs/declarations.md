@@ -299,10 +299,11 @@ note: 1 `@simd` loop present but not verified; vectorization contracts are
 only checked with -O/--release
 ```
 
-`@parallel` goes on a `for` or `while` loop. The compiler finds the counter,
-moves the body into a function of its own, lifts everything the body only reads
-into a context beside it, and replaces the loop with one call to the parallel
-runtime, which hands each thread a slice of the counter's range.
+`@parallel` goes on a `for` or `while` loop, the `for i in lo..hi` form included.
+The compiler finds the counter, moves the body into a function of its own, lifts
+everything the body only reads into a context beside it, and replaces the loop
+with one call to the parallel runtime, which hands each thread a slice of the
+counter's range.
 
 ```mettle
 @parallel while (row < height) {
