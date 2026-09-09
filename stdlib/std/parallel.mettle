@@ -1,0 +1,15 @@
+export extern fn parallel_fill_bytes(destination: rawptr, count: int64, value: int64) = "mettle_parallel_fill";
+export extern fn parallel_fill_sized(destination: rawptr, count: int64, value: int64, element_size: int32) = "mettle_parallel_fill";
+export extern fn parallel_copy(destination: rawptr, source: rawptr, bytes: int64) = "mettle_parallel_copy_bytes";
+
+export fn parallel_fill_i32(destination: int32*, count: int64, value: int32) {
+  parallel_fill_sized((rawptr)destination, count, (int64)value, 4);
+}
+
+export fn parallel_fill_i64(destination: int64*, count: int64, value: int64) {
+  parallel_fill_sized((rawptr)destination, count, value, 8);
+}
+
+export fn parallel_zero(destination: rawptr, bytes: int64) {
+  parallel_fill_sized(destination, bytes, 0, 1);
+}

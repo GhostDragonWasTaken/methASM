@@ -1,0 +1,63 @@
+import "std/io";
+import "std/parallel";
+import "std/mem";
+
+extern fn exit2(code: int32) -> int32 = "exit";
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+  var n: int64 = 300000;
+  var a: int32* = (int32*)malloc(n * 4);
+  var b: int32* = (int32*)malloc(n * 4);
+  var bytes: rawptr = malloc(n);
+
+  if (a == (int32*)0 || b == (int32*)0 || bytes == (rawptr)0) {
+    println("malloc failed");
+    return 1;
+  }
+
+  parallel_fill_i32(a, n, 0 - 7);
+  var i: int64 = 0;
+  var bad: int64 = 0;
+  while (i < n) { if (a[i] != (0 - 7)) { bad += 1; } i += 1; }
+  if (bad != 0) { fails |= 1; }
+
+  parallel_copy((rawptr)b, (rawptr)a, n * 4);
+  bad = 0;
+  i = 0;
+  while (i < n) { if (b[i] != (0 - 7)) { bad += 1; } i += 1; }
+  if (bad != 0) { fails |= 2; }
+
+  parallel_zero((rawptr)a, n * 4);
+  bad = 0;
+  i = 0;
+  while (i < n) { if (a[i] != 0) { bad += 1; } i += 1; }
+  if (bad != 0) { fails |= 4; }
+
+  parallel_fill_bytes(bytes, n, 200);
+  var p: uint8* = (uint8*)bytes;
+  bad = 0;
+  i = 0;
+  while (i < n) { if ((int32)p[i] != 200) { bad += 1; } i += 1; }
+  if (bad != 0) { fails |= 8; }
+
+  parallel_fill_i32(a, 0, 99);
+  parallel_copy((rawptr)b, (rawptr)a, 0);
+  parallel_fill_i32(a, 1, 5);
+  if (a[0] != 5) { fails |= 16; }
+
+  var overlap: int32* = (int32*)malloc(64 * 4);
+  i = 0;
+  while (i < 64) { overlap[i] = (int32)i; i += 1; }
+  parallel_copy((rawptr)(overlap + 1), (rawptr)overlap, 32 * 4);
+  if (overlap[1] != 0) { fails |= 32; }
+  if (overlap[32] != 31) { fails |= 32; }
+
+  if (fails == 0) {
+    println("PASS");
+    return 0;
+  }
+  println("FAIL mask {fails}");
+  exit2(fails);
+  return fails;
+}

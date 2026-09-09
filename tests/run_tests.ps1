@@ -12971,6 +12971,34 @@ foreach ($variant in @("plain", "assume")) {
     Write-CaseResult -Name "assume_no_signed_overflow_$variant" -Passed $false -Reason $_.Exception.Message
   }
 }
+# std/parallel over src/runtime/parallel.c: a range split across hardware
+# threads must give the same answer as a serial one, at one thread and at
+# many. Covers fills of every element width, a copy, a zero, empty and
+# single-element ranges, and an overlapping copy that must stay serial.
+# Self-checking: exit code is the failing-check mask.
+foreach ($threads in @("1", "4")) {
+  $total++
+  try {
+    if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+    $exePath = Join-Path $tmpDir "parallel_runtime_$threads.exe"
+    $buildOut = & $CompilerPath --build --release "tests/test_parallel_runtime.mettle" -o $exePath 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "build failed: $buildOut" }
+    if (-not (Test-Path $exePath)) { throw "build produced no executable" }
+    $previous = $env:METTLE_PARALLEL_THREADS
+    $env:METTLE_PARALLEL_THREADS = $threads
+    & $exePath 2>&1 | Out-Null
+    $code = $LASTEXITCODE
+    $env:METTLE_PARALLEL_THREADS = $previous
+    if ($code -ne 0) {
+      throw "a parallel range gave a different answer at $threads threads (mask $code)"
+    }
+    Write-CaseResult -Name "parallel_runtime_$threads" -Passed $true
+  }
+  catch {
+    $failed++
+    Write-CaseResult -Name "parallel_runtime_$threads" -Passed $false -Reason $_.Exception.Message
+  }
+}
 # Declarative rewrite engine (ir_optimize_rewrite.c): the Tier-1 algebraic
 # identity table and the Tier-2 constant-reassociation pass must preserve the
 # exact integer result of the arithmetic they rewrite. Exercised across

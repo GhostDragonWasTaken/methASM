@@ -229,8 +229,14 @@ void mettle_parallel_copy_bytes(void *destination, const void *source,
     return;
   }
   if (d < s + bytes && s < d + bytes) {
-    for (long long i = 0; i < bytes; i++) {
-      d[i] = s[i];
+    if (d < s) {
+      for (long long i = 0; i < bytes; i++) {
+        d[i] = s[i];
+      }
+    } else if (d > s) {
+      for (long long i = bytes; i > 0; i--) {
+        d[i - 1] = s[i - 1];
+      }
     }
     return;
   }
