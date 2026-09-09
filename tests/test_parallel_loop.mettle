@@ -77,6 +77,21 @@ fn scale(out: float64*, src: float64*, n: int32, gain: float64,
   return sum + count * 3 + (int64)bits;
 }
 
+@noinline fn combine(src: uint32*, n: int32) -> int64 {
+  var anded: uint32 = 4294967295;
+  var ored: uint32 = 0;
+  var product: int64 = 1;
+  var i: int32 = 0;
+  @parallel while (i < n) {
+    var v: uint32 = src[i];
+    anded = anded & (v | 4026531840);
+    ored = ored | v;
+    if ((v & 1) == 1) { product = product * 3; }
+    i += 1;
+  }
+  return (int64)anded * 1000000 + (int64)ored + product;
+}
+
 fn main() -> int32 {
   var a: int64* = (int64*)malloc(8 * (int64)N);
   var b: int64* = (int64*)malloc(8 * (int64)N);
@@ -149,6 +164,11 @@ fn main() -> int32 {
 
   var tallied: int64 = tally(wide, 4096);
 
+  var bitsrc: uint32* = (uint32*)malloc(4 * 96);
+  i = 0;
+  while (i < 96) { bitsrc[i] = (uint32)1 << (uint32)(i % 28); i += 1; }
+  var combined: int64 = combine(bitsrc, 96);
+
   println("mixed = {mixed}");
   println("striped = {striped}");
   if (mixed != 392376813670142450) {
@@ -182,6 +202,11 @@ fn main() -> int32 {
   println("tallied = {tallied}");
   if (tallied != -1362689809609858153) {
     println("FAIL: the reductions did not reproduce the serial answer");
+    return 1;
+  }
+  println("combined = {combined}");
+  if (combined != 4026532108435536) {
+    println("FAIL: the and, or and multiply reductions did not fold correctly");
     return 1;
   }
   println("ok");
