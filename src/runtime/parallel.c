@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
+
+extern char *getenv(const char *name);
 
 #define METTLE_PARALLEL_MAX_THREADS 16u
 
@@ -66,11 +67,32 @@ static unsigned mettle_parallel_hardware_threads(void) { return 4u; }
 
 #endif
 
+static long mettle_parallel_parse_count(const char *text) {
+  long value = 0;
+  if (!text) {
+    return 0;
+  }
+  while (*text == ' ' || *text == '\t') {
+    text++;
+  }
+  if (*text < '0' || *text > '9') {
+    return 0;
+  }
+  while (*text >= '0' && *text <= '9') {
+    value = value * 10 + (*text - '0');
+    if (value > 4096) {
+      return 4096;
+    }
+    text++;
+  }
+  return value;
+}
+
 static unsigned mettle_parallel_threads(void) {
   static int cached = -1;
   if (cached < 0) {
     const char *spec = getenv("METTLE_PARALLEL_THREADS");
-    long requested = spec && spec[0] ? atol(spec) : 0;
+    long requested = mettle_parallel_parse_count(spec);
     if (requested <= 0) {
       requested = (long)mettle_parallel_hardware_threads();
     }
