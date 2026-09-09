@@ -1838,6 +1838,7 @@ static mt_i64 mt_syscall6(mt_i64 number, mt_i64 a1, mt_i64 a2, mt_i64 a3,
 #define MT_SYS_LISTEN 50
 #define MT_SYS_SETSOCKOPT 54
 #define MT_SYS_EXIT 60
+#define MT_SYS_EXIT_GROUP 231
 #define MT_SYS_EXECVE 59
 #define MT_SYS_WAIT4 61
 #define MT_SYS_RT_SIGACTION 13
@@ -1882,6 +1883,7 @@ static mt_i64 mt_syscall6(mt_i64 number, mt_i64 a1, mt_i64 a2, mt_i64 a3,
 #define MT_SYS_READ 63
 #define MT_SYS_WRITE 64
 #define MT_SYS_EXIT 93
+#define MT_SYS_EXIT_GROUP 94
 #define MT_SYS_EXECVE 221
 #define MT_SYS_WAIT4 260
 #define MT_SYS_RT_SIGACTION 134
@@ -3309,6 +3311,7 @@ int posix_atomic_add_i32(volatile int *target, int value) {
 
 MT_NORETURN void exit(int status) {
   mt_flush_open_streams();
+  mt_syscall6(MT_SYS_EXIT_GROUP, status, 0, 0, 0, 0, 0);
   mt_syscall6(MT_SYS_EXIT, status, 0, 0, 0, 0, 0);
   for (;;) {
   }

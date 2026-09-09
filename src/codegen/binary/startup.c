@@ -88,7 +88,7 @@ static int binary_write_elf_start_object(const char *path, int profile_runtime,
   }
 
   if (!binary_emit_mov_reg_reg(&code, BINARY_GP_RDI, BINARY_GP_RAX) ||
-      !binary_emit_mov_reg_imm32_zero_extend(&code, BINARY_GP_RAX, 60) ||
+      !binary_emit_mov_reg_imm32_zero_extend(&code, BINARY_GP_RAX, 231) ||
       !binary_emit_syscall(&code)) {
     goto cleanup;
   }
