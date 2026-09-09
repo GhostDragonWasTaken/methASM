@@ -2919,6 +2919,9 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
         return 1;
       }
 
+      char shared_target[RE_PROMOTE_MAX_EXITS][64];
+      char shared_tail[RE_PROMOTE_MAX_EXITS][64];
+      size_t shared_count = 0;
       for (size_t k = 0; k < exit_count; k++) {
         SourceLocation where = function->instructions[exits[k].at].location;
         size_t inserted_here = 0;
@@ -2942,11 +2945,34 @@ static int re_try_promote_one(IRFunction *function, const REDefs *defs_in,
 
         IRInstruction *br = &function->instructions[exits[k].at];
         char tail_name[64];
+        size_t shared = shared_count;
+        for (size_t m = 0; m < shared_count; m++) {
+          if (br->text && strcmp(shared_target[m], br->text) == 0) {
+            shared = m;
+            break;
+          }
+        }
+        if (shared < shared_count) {
+          mettle_free_string(br->text);
+          br->text = mettle_strdup(shared_tail[shared]);
+          if (!br->text) {
+            return 0;
+          }
+          continue;
+        }
         snprintf(tail_name, sizeof(tail_name), "__promx_%d_%zu", counter - 1,
                  k);
         char *old_target = mettle_strdup(br->text);
         if (!old_target) {
           return 0;
+        }
+        if (shared_count < RE_PROMOTE_MAX_EXITS &&
+            strlen(old_target) < sizeof(shared_target[0])) {
+          snprintf(shared_target[shared_count], sizeof(shared_target[0]), "%s",
+                   old_target);
+          snprintf(shared_tail[shared_count], sizeof(shared_tail[0]), "%s",
+                   tail_name);
+          shared_count++;
         }
         mettle_free_string(br->text);
         br->text = mettle_strdup(tail_name);
