@@ -597,10 +597,11 @@ fiber scheme, a request pipeline, a state machine, an actor mailbox: every
 serious program builds one already, and Mettle's position is that it builds
 it in Mettle, and that the compiler understands what it built.
 
-`std/thread` is the whole of what ships: threads, mutexes, atomics and spin
-locks, mapped onto Kernel32 on Windows and onto `clone` with futexes on
-Linux. Nothing above that is linked unless the program wrote it, which is
-V.3.2 applied to scheduling.
+`std/thread` and `std/parallel` are the whole of what ships: threads, mutexes,
+atomics and spin locks, mapped onto Kernel32 on Windows and onto `clone` with
+futexes on Linux, and one splitter that runs a body over a range of indexes
+across the cores. Nothing above that is linked unless the program wrote it,
+which is V.3.2 applied to scheduling.
 
 What makes that a supported shape has two halves. `quiesce` is the point the
 program names, and staged work lands there and nowhere else; it is the proof

@@ -344,6 +344,54 @@ ones that do take a resource, `CreateThread` and `CreateMutexA`, declare
 nothing and are read as performing anything, which is what an unannotated
 extern means.
 
+## std/parallel
+
+Runs one body over a range of indexes across the machine's cores. Both
+platforms: Windows threads, pthreads elsewhere.
+
+| Function | Effect |
+|----------|--------|
+| `parallel_range(body, ctx: rawptr, lo: int64, hi: int64, min_chunk: int64)` | Split `[lo,hi)` across threads |
+| `parallel_fill_bytes(destination: rawptr, count: int64, value: int64)` | Fill bytes |
+| `parallel_fill_sized(destination: rawptr, count: int64, value: int64, element_size: int32)` | Fill 1, 2, 4 or 8-byte elements |
+| `parallel_fill_i32(destination: int32*, count: int64, value: int32)` | Fill `int32` |
+| `parallel_fill_i64(destination: int64*, count: int64, value: int64)` | Fill `int64` |
+| `parallel_zero(destination: rawptr, bytes: int64)` | Zero bytes |
+| `parallel_copy(destination: rawptr, source: rawptr, bytes: int64)` | Copy, moving correctly when the buffers overlap |
+
+The body has type `fn(rawptr, int64, int64) -> int32` and is called once per
+chunk with the context and that chunk's half-open range. It must be safe to
+run chunks at the same time: read what you like, write only to the indexes you
+were handed.
+
+```mettle
+struct Work { src: float64*; dst: float64*; }
+
+@noinline fn scale(ctx: rawptr, lo: int64, hi: int64) -> int32 {
+  var w: Work* = (Work*)ctx;
+  var i: int64 = lo;
+  while (i < hi) { w->dst[i] = w->src[i] * 2.0; i += 1; }
+  return 0;
+}
+
+parallel_range(&scale, (rawptr)w, 0, n, 1024);
+```
+
+The context must be heap-allocated. Handing a stack address to the body is a
+compile error, because the body outlives the frame as far as the compiler can
+see, even though `parallel_range` joins before it returns.
+
+`min_chunk` is the smallest range worth a thread. Below `min_chunk * 2` the
+body runs once on the calling thread, so a short range costs one call and no
+thread. The caller always runs the last chunk itself.
+
+`METTLE_PARALLEL_THREADS` overrides the core count at run time, capped at 16.
+
+How much this buys depends on what the loop waits for. A body that computes
+scales close to the core count; one that streams memory saturates the memory
+bus first. On a loop doing 200 dependent rounds per element it measured 7.2x,
+and on a 64MB fill 1.8x.
+
 ## std/machine
 
 One type, `MachineInsn`, and a `const` of it is an instruction set: `name`,
