@@ -1211,40 +1211,102 @@ static int emit_lea_scaled_w(BinaryCodeBuffer *buffer, BinaryGpRegister dst,
                                                          index, scale, 0);
 }
 
-static int emit_imul_small_imm_w(BinaryCodeBuffer *buffer,
-                                 BinaryGpRegister destination,
-                                 BinaryGpRegister source, int32_t immediate,
-                                 int w) {
-  if (w) {
-    return binary_emit_imul_reg_reg_small_imm(buffer, destination, source,
-                                              immediate);
+typedef enum {
+  MUL_ODD_LEA1,
+  MUL_ODD_LEA2,
+  MUL_ODD_SHL_ADD,
+  MUL_ODD_SHL_SUB
+} MulOddKind;
+
+typedef struct {
+  MulOddKind kind;
+  int first_scale;
+  int second_scale;
+  unsigned char shift;
+  int via_scratch;
+} MulOddPlan;
+
+static int mul_odd_plan(int32_t odd, BinaryGpRegister destination,
+                        BinaryGpRegister source, int have_scratch,
+                        BinaryGpRegister scratch, MulOddPlan *plan) {
+  static const struct {
+    int32_t product;
+    int first;
+    int second;
+  } PAIRS[] = {{15, 3, 5}, {25, 5, 5}, {27, 3, 9}, {45, 5, 9}, {81, 9, 9}};
+  unsigned char shift = 0;
+  size_t p;
+
+  if (odd < 3 || source == BINARY_GP_RSP || destination == BINARY_GP_RSP) {
+    return 0;
   }
-  int negate = 0;
-  if (immediate < 0) {
-    if (immediate == INT32_MIN) {
-      return 0;
+  if (odd == 3 || odd == 5 || odd == 9) {
+    plan->kind = MUL_ODD_LEA1;
+    plan->first_scale = (int)(odd - 1);
+    return 1;
+  }
+  for (p = 0; p < sizeof(PAIRS) / sizeof(PAIRS[0]); p++) {
+    if (PAIRS[p].product != odd) {
+      continue;
     }
-    negate = 1;
-    immediate = -immediate;
+    plan->kind = MUL_ODD_LEA2;
+    plan->first_scale = PAIRS[p].first - 1;
+    plan->second_scale = PAIRS[p].second - 1;
+    return 1;
   }
-  int scale = 0;
-  if (immediate == 3) {
-    scale = 2;
-  } else if (immediate == 5) {
-    scale = 4;
-  } else if (immediate == 9) {
-    scale = 8;
-  } else {
-    return 0;
+  {
+    int scratch_usable = have_scratch && scratch != destination &&
+                         scratch != source && scratch != BINARY_GP_RSP;
+    if (binary_immediate_positive_power_of_two_i32(odd - 1, &shift)) {
+      plan->kind = MUL_ODD_SHL_ADD;
+      plan->shift = shift;
+      plan->via_scratch = destination == source;
+      return !plan->via_scratch || scratch_usable;
+    }
+    if (binary_immediate_positive_power_of_two_i32(odd + 1, &shift)) {
+      plan->kind = MUL_ODD_SHL_SUB;
+      plan->shift = shift;
+      plan->via_scratch = destination == source;
+      return !plan->via_scratch || scratch_usable;
+    }
   }
-  if (!binary_emit_lea32_reg_base_index_scale_disp(buffer, destination, source,
-                                                   source, scale, 0)) {
-    return 0;
+  return 0;
+}
+
+static int emit_mul_odd_w(BinaryCodeBuffer *buffer, BinaryGpRegister destination,
+                          BinaryGpRegister source, const MulOddPlan *plan,
+                          BinaryGpRegister scratch, int w) {
+  switch (plan->kind) {
+  case MUL_ODD_LEA1:
+    return emit_lea_scaled_w(buffer, destination, source, source,
+                             plan->first_scale, w);
+  case MUL_ODD_LEA2:
+    return emit_lea_scaled_w(buffer, destination, source, source,
+                             plan->first_scale, w) &&
+           emit_lea_scaled_w(buffer, destination, destination, destination,
+                             plan->second_scale, w);
+  case MUL_ODD_SHL_ADD:
+    if (plan->via_scratch) {
+      return emit_mov_w(buffer, scratch, source, w) &&
+             emit_shl_w(buffer, destination, plan->shift, w) &&
+             emit_alu_w(buffer, 0x01, destination, scratch, w);
+    }
+    return emit_mov_w(buffer, destination, source, w) &&
+           emit_shl_w(buffer, destination, plan->shift, w) &&
+           emit_alu_w(buffer, 0x01, destination, source, w);
+  case MUL_ODD_SHL_SUB:
+    if (plan->via_scratch) {
+      return emit_mov_w(buffer, scratch, source, w) &&
+             emit_shl_w(buffer, destination, plan->shift, w) &&
+             emit_alu_w(buffer, 0x29, destination, scratch, w);
+    }
+    return emit_mov_w(buffer, destination, source, w) &&
+           emit_shl_w(buffer, destination, plan->shift, w) &&
+           emit_alu_w(buffer, 0x29, destination, source, w);
+  default:
+    break;
   }
-  if (negate && !binary_emit_neg_reg32(buffer, destination)) {
-    return 0;
-  }
-  return 1;
+  return 0;
 }
 
 static int binary_emit_imul_imm_scratch_width(BinaryCodeBuffer *buffer,
@@ -1285,35 +1347,6 @@ static int binary_emit_imul_imm_scratch_width(BinaryCodeBuffer *buffer,
            emit_shl_w(buffer, destination, shift, w) &&
            emit_neg_w(buffer, destination, w);
   }
-  if (signed_immediate >= 3 &&
-      binary_immediate_positive_power_of_two_i32(signed_immediate - 1, &shift)) {
-    if (shift >= 1 && shift <= 3 && source != BINARY_GP_RSP) {
-      return emit_lea_scaled_w(buffer, destination, source, source, 1 << shift, w);
-    }
-    if (destination != source) {
-      return emit_mov_w(buffer, destination, source, w) &&
-             emit_shl_w(buffer, destination, shift, w) &&
-             emit_alu_w(buffer, 0x01, destination, source, w);
-    }
-    if (have_scratch && scratch != destination && scratch != BINARY_GP_RSP) {
-      return emit_mov_w(buffer, scratch, source, w) &&
-             emit_shl_w(buffer, scratch, shift, w) &&
-             emit_alu_w(buffer, 0x01, destination, scratch, w);
-    }
-  }
-  if (signed_immediate >= 7 && destination != source &&
-      binary_immediate_positive_power_of_two_i32(signed_immediate + 1,
-                                                 &shift)) {
-    return emit_mov_w(buffer, destination, source, w) &&
-           emit_shl_w(buffer, destination, shift, w) &&
-           emit_alu_w(buffer, 0x29, destination, source, w);
-  }
-
-  if (emit_imul_small_imm_w(buffer, destination, source, signed_immediate,
-                            w)) {
-    return 1;
-  }
-
   {
     int32_t magnitude = signed_immediate;
     int negate = 0;
@@ -1321,21 +1354,26 @@ static int binary_emit_imul_imm_scratch_width(BinaryCodeBuffer *buffer,
       magnitude = -magnitude;
       negate = 1;
     }
-    if (magnitude > 0 && source != BINARY_GP_RSP) {
+    if (magnitude > 0) {
       unsigned char k = 0;
       int32_t odd = magnitude;
+      MulOddPlan plan;
       while ((odd & 1) == 0) {
         odd >>= 1;
         k++;
       }
-      if (k > 0 && (odd == 3 || odd == 5 || odd == 9)) {
-        if (emit_lea_scaled_w(buffer, destination, source, source, (int)(odd - 1),
-                w) &&
-            emit_shl_w(buffer, destination, k, w) &&
-            (!negate || emit_neg_w(buffer, destination, w))) {
-          return 1;
+      if (mul_odd_plan(odd, destination, source, have_scratch, scratch,
+                       &plan)) {
+        if (!emit_mul_odd_w(buffer, destination, source, &plan, scratch, w)) {
+          return 0;
         }
-        return 0;
+        if (k > 0 && !emit_shl_w(buffer, destination, k, w)) {
+          return 0;
+        }
+        if (negate && !emit_neg_w(buffer, destination, w)) {
+          return 0;
+        }
+        return 1;
       }
     }
   }

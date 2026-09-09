@@ -6469,6 +6469,12 @@ $simdRuntimeCases = @(
     IrMustMatch     = @("__prom_")
   },
   @{
+    Name            = "const_multiply"
+    Path            = "tests/const_multiply_check.mettle"
+    OutputMustMatch = "CONST MULTIPLY: ALL OK"
+    IrMustMatch     = @("mul_dyn64")
+  },
+  @{
     Name            = "demote_scalar_addresses"
     Path            = "tests/demote_scalar_addresses_check.mettle"
     OutputMustMatch = "DEMOTE SCALAR ADDRESSES: ALL OK"
