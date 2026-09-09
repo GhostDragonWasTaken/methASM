@@ -293,6 +293,9 @@ static void mettle_parallel_dispatch(MettleParallelBody body,
     min_chunk = 1;
   }
   wanted = mettle_parallel_threads();
+  if (wanted > METTLE_PARALLEL_MAX_THREADS) {
+    wanted = METTLE_PARALLEL_MAX_THREADS;
+  }
   if ((long long)wanted > total / min_chunk) {
     wanted = (unsigned)(total / min_chunk);
   }

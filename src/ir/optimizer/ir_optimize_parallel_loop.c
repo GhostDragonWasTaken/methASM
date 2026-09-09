@@ -1073,8 +1073,31 @@ static int ir_par_emit_store(IRParLoop *loop, IRFunction *out,
 }
 
 static int ir_par_body_size(const IRParLoop *loop) {
-  size_t body = loop->latch - loop->header;
-  return body < 1u ? 1 : (int)body;
+  const IRFunction *function = loop->function;
+  size_t weight = 0;
+  size_t depth = 0;
+  for (size_t i = loop->header; i <= loop->latch; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    size_t step = 1u;
+    if (in->op == IR_OP_LABEL && i > loop->header &&
+        ir_par_is_back_edge_target(function, i)) {
+      depth++;
+    }
+    if (in->op == IR_OP_JUMP && in->text && i < loop->latch) {
+      size_t at = 0;
+      if (ir_par_label_index(function, in->text, &at) && at < i && depth > 0u) {
+        depth--;
+      }
+    }
+    for (size_t d = 0; d < depth && d < 3u; d++) {
+      step *= 8u;
+    }
+    weight += step;
+  }
+  if (weight > 100000u) {
+    weight = 100000u;
+  }
+  return weight < 1u ? 1 : (int)weight;
 }
 
 static IRFunction *ir_par_build_worker(IRParLoop *loop, size_t id) {
