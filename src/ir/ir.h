@@ -484,6 +484,8 @@ void ir_value_maybe_sabotage(IRFunction *function, const char *pass_name);
 int ir_function_check_structure(const IRFunction *function,
                                 IRStructureReport *report, char *why,
                                 size_t why_capacity);
+size_t ir_structure_dominance_violations(IRFunction *function, char *why,
+                                         size_t why_capacity);
 size_t ir_structure_snapshot(const IRFunction *function);
 void ir_structure_check_after_pass(const IRFunction *function,
                                    const char *pass_name, size_t before);

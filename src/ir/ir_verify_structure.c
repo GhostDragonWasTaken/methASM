@@ -273,6 +273,62 @@ void ir_structure_maybe_sabotage(IRFunction *function, const char *pass_name) {
   }
 }
 
+size_t ir_structure_dominance_violations(IRFunction *function, char *why,
+                                         size_t why_capacity) {
+  if (!function || function->instruction_count == 0) {
+    return 0;
+  }
+  const IRAnalysis *analysis = ir_function_analysis(function);
+  if (!analysis || !analysis->ud.built || !analysis->dom.built ||
+      !analysis->instruction_block) {
+    return 0;
+  }
+
+  size_t violations = 0;
+  for (uint32_t id = 1; id < (uint32_t)analysis->ud.value_count; id++) {
+    if (analysis->ud.def_count[id] != 1) {
+      continue;
+    }
+    if (ir_value_table_kind(&function->values, id) != IR_OPERAND_TEMP) {
+      continue;
+    }
+    const uint32_t def = analysis->ud.def_first[id];
+    if (def == IR_INSTRUCTION_NONE) {
+      continue;
+    }
+    size_t use_count = 0;
+    const IRValueUse *uses = ir_function_value_uses(function, id, &use_count);
+    for (size_t u = 0; u < use_count; u++) {
+      const uint32_t at = uses[u].instruction;
+      if (function->instructions[at].op == IR_OP_PHI ||
+          function->instructions[at].op == IR_OP_ADDRESS_OF) {
+        continue;
+      }
+      const size_t use_block = analysis->instruction_block[at];
+      const size_t def_block = analysis->instruction_block[def];
+      if (use_block == IR_BLOCK_NONE || def_block == IR_BLOCK_NONE ||
+          use_block >= analysis->dom.block_count ||
+          def_block >= analysis->dom.block_count ||
+          analysis->dom.rpo_index[use_block] == IR_BLOCK_NONE ||
+          analysis->dom.rpo_index[def_block] == IR_BLOCK_NONE) {
+        continue;
+      }
+      if (ir_function_instruction_dominates(function, def, at)) {
+        continue;
+      }
+      violations++;
+      if (violations == 1 && why && why_capacity) {
+        snprintf(why, why_capacity,
+                 "instruction %u in block %zu uses '%s' which instruction %u "
+                 "in block %zu defines without dominating it",
+                 at, use_block, ir_value_table_name(&function->values, id), def,
+                 def_block);
+      }
+    }
+  }
+  return violations;
+}
+
 size_t ir_structure_snapshot(const IRFunction *function) {
   if (!ir_structure_enabled() || !function) {
     return 0;
@@ -307,6 +363,31 @@ void ir_structure_check_after_pass(const IRFunction *function,
                pass_name ? pass_name : "<unnamed>",
                function->name ? function->name : "<unnamed>", why);
       mettle_compiler_ice(message);
+    }
+  }
+
+  if (getenv("METTLE_IR_DOMCHECK")) {
+    char dom_why[512];
+    dom_why[0] = 0;
+    const size_t dominance =
+        ir_structure_dominance_violations((IRFunction *)function, dom_why,
+                                          sizeof(dom_why));
+    if (dominance > 0) {
+      g_structure_violations++;
+      fprintf(stderr,
+              "mettle: %zu uses reach past their definition after pass '%s' in "
+              "'%s': %s\n",
+              dominance, pass_name ? pass_name : "<unnamed>",
+              function->name ? function->name : "<unnamed>", dom_why);
+      if (strcmp(getenv("METTLE_IR_DOMCHECK"), "strict") == 0) {
+        char message[768];
+        snprintf(message, sizeof(message),
+                 "optimization pass '%s' left %zu uses not dominated by their "
+                 "definition in '%s': %s",
+                 pass_name ? pass_name : "<unnamed>", dominance,
+                 function->name ? function->name : "<unnamed>", dom_why);
+        mettle_compiler_ice(message);
+      }
     }
   }
 
