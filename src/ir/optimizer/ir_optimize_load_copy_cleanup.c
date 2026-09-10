@@ -2013,7 +2013,7 @@ static int ir_accum_operand_same(const IROperand *a, const IROperand *b) {
     return a->int_value == b->int_value;
   case IR_OPERAND_TEMP:
   case IR_OPERAND_SYMBOL:
-    return a->name && b->name && strcmp(a->name, b->name) == 0;
+    return a->name && b->name && ir_operand_names_match(a, b);
   default:
     return 0;
   }
@@ -2419,7 +2419,7 @@ int ir_eliminate_load_symbol_copy_pass(IRFunction *function,
     if (assign->op != IR_OP_ASSIGN ||
         assign->dest.kind != IR_OPERAND_SYMBOL || !assign->dest.name ||
         assign->lhs.kind != IR_OPERAND_TEMP || !assign->lhs.name ||
-        strcmp(assign->lhs.name, load->dest.name) != 0) {
+        !ir_operand_names_match(&assign->lhs, &load->dest)) {
       continue;
     }
 
@@ -2886,7 +2886,7 @@ static int ir_guard_match_loop(const IRFunction *function, size_t header,
   }
   if (loop->branch->op != IR_OP_BRANCH_ZERO || !loop->branch->text ||
       loop->branch->lhs.kind != IR_OPERAND_TEMP || !loop->branch->lhs.name ||
-      strcmp(loop->branch->lhs.name, loop->test->dest.name) != 0) {
+      !ir_operand_names_match(&loop->branch->lhs, &loop->test->dest)) {
     return 0;
   }
   loop->latch = ir_cleanup_loop_latch(function, header, loop->header_label);

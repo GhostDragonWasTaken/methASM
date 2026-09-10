@@ -1084,7 +1084,7 @@ static int sel_operand_matches(const IROperand *a, const IROperand *b,
     if (!a->name || !b->name) {
       return 0;
     }
-    if (strcmp(a->name, b->name) == 0) {
+    if (ir_operand_names_match(a, b)) {
       return 1;
     }
     if (!re_name_key(key, sizeof(key), IR_OPERAND_TEMP, b->name)) {
@@ -1099,7 +1099,7 @@ static int sel_operand_matches(const IROperand *a, const IROperand *b,
   }
   case IR_OPERAND_SYMBOL:
   case IR_OPERAND_LABEL:
-    return a->name && b->name && strcmp(a->name, b->name) == 0;
+    return a->name && b->name && ir_operand_names_match(a, b);
   case IR_OPERAND_INT:
     return a->int_value == b->int_value;
   case IR_OPERAND_FLOAT:
@@ -1295,7 +1295,7 @@ static int sel_match_at(const IRFunction *function, size_t branch,
       }
     } else if (a->dest.kind != IR_OPERAND_NONE) {
       if (!a->dest.name || !b->dest.name ||
-          strcmp(a->dest.name, b->dest.name) != 0 || k + 1 != then_arm.count) {
+          !ir_operand_names_match(&a->dest, &b->dest) || k + 1 != then_arm.count) {
         ok = 0;
       }
     }
@@ -3768,7 +3768,7 @@ static int bp_trace_stored_byte(const IRFunction *function, const REDefs *defs,
 
 static int bp_same_operand(const IROperand *a, const IROperand *b) {
   return a && b && a->kind == b->kind && a->name && b->name &&
-         strcmp(a->name, b->name) == 0;
+         ir_operand_names_match(a, b);
 }
 
 static int bp_store_span_is_clean(const IRFunction *function, size_t from,
@@ -4379,7 +4379,7 @@ static int fwd_rewrite_load(FwdCtx *ctx, IRInstruction *ins, long long size,
 
   int self_copy = fact->value.kind == ins->dest.kind && ins->dest.name &&
                   fact->value.name &&
-                  strcmp(fact->value.name, ins->dest.name) == 0;
+                  ir_operand_names_match(&fact->value, &ins->dest);
   if (fact->from_load || size == 8) {
     if (self_copy) {
       ir_instruction_destroy_storage(ins);

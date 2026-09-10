@@ -310,7 +310,7 @@ static int ir_try_parse_any_direct_unit_increment(const IRInstruction *ins,
 
 static int ir_operand_same_symbol(const IROperand *a, const IROperand *b) {
   return a && b && a->kind == IR_OPERAND_SYMBOL && b->kind == IR_OPERAND_SYMBOL &&
-         a->name && b->name && strcmp(a->name, b->name) == 0;
+         a->name && b->name && ir_operand_names_match(a, b);
 }
 
 static int ir_resolve_reverse_i32_index_base(const IRFunction *function,

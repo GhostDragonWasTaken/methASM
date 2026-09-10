@@ -777,7 +777,7 @@ static int ir_vec_try_unroll_reduction_at(IRFunction *function, size_t h,
       (g->rhs.kind != IR_OPERAND_SYMBOL && g->rhs.kind != IR_OPERAND_INT) ||
       gb->op != IR_OP_BRANCH_ZERO || gb->lhs.kind != IR_OPERAND_TEMP ||
       !gb->lhs.name || !gb->text ||
-      strcmp(gb->lhs.name, g->dest.name) != 0) {
+      !ir_operand_names_match(&gb->lhs, &g->dest)) {
     return 1;
   }
   const char *iv = g->lhs.name;
@@ -790,7 +790,7 @@ static int ir_vec_try_unroll_reduction_at(IRFunction *function, size_t h,
       inc->rhs.kind != IR_OPERAND_INT || inc->rhs.int_value != 1 ||
       inc->dest.kind != IR_OPERAND_TEMP || !inc->dest.name ||
       !ir_vec_assign_sym_from_temp(incs, iv) ||
-      strcmp(incs->lhs.name, inc->dest.name) != 0) {
+      !ir_operand_names_match(&incs->lhs, &inc->dest)) {
     return 1;
   }
 
@@ -808,7 +808,7 @@ static int ir_vec_try_unroll_reduction_at(IRFunction *function, size_t h,
         m->dest.name && m->lhs.kind == IR_OPERAND_SYMBOL && m->lhs.name &&
         strcmp(m->lhs.name, iv) != 0 && m->rhs.kind == IR_OPERAND_TEMP &&
         m->rhs.name && ir_vec_assign_sym_from_temp(st, m->lhs.name) &&
-        strcmp(st->lhs.name, m->dest.name) == 0) {
+        ir_operand_names_match(&st->lhs, &m->dest)) {
       if (acc) {
         return 1;
       }
@@ -1443,7 +1443,7 @@ static int ir_unroll_annotated_try_marker(IRFunction *function,
   const IRInstruction *branch = &function->instructions[branch_index];
   if (branch->op != IR_OP_BRANCH_ZERO || !branch->text ||
       branch->lhs.kind != IR_OPERAND_TEMP || !branch->lhs.name ||
-      strcmp(branch->lhs.name, compare->dest.name) != 0) {
+      !ir_operand_names_match(&branch->lhs, &compare->dest)) {
     return 1;
   }
 

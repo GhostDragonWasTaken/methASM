@@ -467,6 +467,7 @@ const IRBasicBlock *ir_function_blocks(IRFunction *function,
 
 void ir_instruction_destroy(IRInstruction *instruction);
 int ir_instruction_writes_destination(const IRInstruction *instruction);
+int ir_operand_names_match(const IROperand *a, const IROperand *b);
 int ir_operand_is_value(const IROperand *operand);
 uint32_t ir_function_value_id(IRFunction *function, const IROperand *operand);
 const char *ir_function_value_name(const IRFunction *function, uint32_t id);

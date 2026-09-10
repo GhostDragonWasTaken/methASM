@@ -1267,7 +1267,7 @@ int ir_operand_equals(const IROperand *lhs, const IROperand *rhs) {
     if (!lhs->name || !rhs->name) {
       return 0;
     }
-    return strcmp(lhs->name, rhs->name) == 0;
+    return ir_operand_names_match(lhs, rhs);
   default:
     return 0;
   }

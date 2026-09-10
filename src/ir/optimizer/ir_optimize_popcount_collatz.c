@@ -471,7 +471,7 @@ static int ir_try_find_loop_latch(const IRFunction *function, size_t header_inde
         strcmp(probe->text, "+") == 0 &&
         probe->dest.kind == IR_OPERAND_SYMBOL && probe->dest.name &&
         probe->lhs.kind == IR_OPERAND_SYMBOL && probe->lhs.name &&
-        strcmp(probe->dest.name, probe->lhs.name) == 0 &&
+        ir_operand_names_match(&probe->dest, &probe->lhs) &&
         ir_operand_is_int_value(&probe->rhs, 1)) {
       increment_index = i;
       break;
@@ -1278,7 +1278,7 @@ static int ir_kernighan_is_counter_bump(const IRInstruction *in) {
   return ir_kernighan_is_binary(in, "+") &&
          in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
          in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
-         strcmp(in->lhs.name, in->dest.name) == 0 &&
+         ir_operand_names_match(&in->lhs, &in->dest) &&
          in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 1;
 }
 

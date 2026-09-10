@@ -220,7 +220,7 @@ int ir_coalesce_single_use_temp_assign_pass(IRFunction *function,
     }
     if (!producer || !ir_instruction_writes_destination(producer) ||
         producer->dest.kind != IR_OPERAND_TEMP || !producer->dest.name ||
-        strcmp(producer->dest.name, assign_instruction->lhs.name) != 0) {
+        !ir_operand_names_match(&producer->dest, &assign_instruction->lhs)) {
       continue;
     }
 
@@ -895,7 +895,7 @@ static int ir_cp_record_temp_write(IRCopyPropState *state,
     return 1;
   }
   if (instruction->lhs.kind == IR_OPERAND_TEMP && instruction->lhs.name &&
-      strcmp(instruction->lhs.name, instruction->dest.name) == 0) {
+      ir_operand_names_match(&instruction->lhs, &instruction->dest)) {
     ir_temp_value_map_remove(&state->map, instruction->dest.name);
     return 1;
   }
@@ -918,7 +918,7 @@ static int ir_cp_record_symbol_write(IRCopyPropState *state,
     return 1;
   }
   if (instruction->lhs.kind == IR_OPERAND_SYMBOL && instruction->lhs.name &&
-      strcmp(instruction->lhs.name, instruction->dest.name) == 0) {
+      ir_operand_names_match(&instruction->lhs, &instruction->dest)) {
     ir_symbol_value_map_invalidate_name(&state->symbol_map,
                                         instruction->dest.name);
     return 1;
@@ -1370,7 +1370,7 @@ static int ir_branch_zero_not_equal_zero_forwarding_pass(IRFunction *function,
 
     IRInstruction *branch = &function->instructions[branch_index];
     if (branch->op != IR_OP_BRANCH_ZERO || branch->lhs.kind != IR_OPERAND_TEMP ||
-        !branch->lhs.name || strcmp(branch->lhs.name, cmp->dest.name) != 0) {
+        !branch->lhs.name || !ir_operand_names_match(&branch->lhs, &cmp->dest)) {
       continue;
     }
 
@@ -1471,7 +1471,7 @@ static int ir_branch_eq_chain_shortcut_pass(IRFunction *function, int *changed) 
     IRInstruction *branch = &function->instructions[branch_index];
     if (branch->op != IR_OP_BRANCH_ZERO || branch->lhs.kind != IR_OPERAND_TEMP ||
         !branch->lhs.name ||
-        strcmp(branch->lhs.name, producer->dest.name) != 0 || !branch->text) {
+        !ir_operand_names_match(&branch->lhs, &producer->dest) || !branch->text) {
       continue;
     }
 
@@ -1510,7 +1510,7 @@ static int ir_branch_eq_chain_shortcut_pass(IRFunction *function, int *changed) 
 
 static int ir_bitset_same_operand(const IROperand *a, const IROperand *b) {
   return a->kind == b->kind && a->name && b->name &&
-         strcmp(a->name, b->name) == 0 &&
+         ir_operand_names_match(a, b) &&
          (a->kind == IR_OPERAND_TEMP || a->kind == IR_OPERAND_SYMBOL);
 }
 
@@ -1655,7 +1655,7 @@ static int ir_bitset_match_chain(const IRFunction *function,
   br = &function->instructions[branch];
   if (br->op != IR_OP_BRANCH_ZERO || br->lhs.kind != IR_OPERAND_TEMP ||
       !br->lhs.name || !br->text ||
-      strcmp(br->lhs.name, cmp->dest.name) != 0) {
+      !ir_operand_names_match(&br->lhs, &cmp->dest)) {
     return 0;
   }
 
@@ -2391,7 +2391,7 @@ static int ir_ascii_range_branch(const IRInstruction *branch,
          branch->text && branch->lhs.kind == IR_OPERAND_TEMP &&
          branch->lhs.name && compare->dest.kind == IR_OPERAND_TEMP &&
          compare->dest.name &&
-         strcmp(branch->lhs.name, compare->dest.name) == 0;
+         ir_operand_names_match(&branch->lhs, &compare->dest);
 }
 
 static int ir_ascii_next(const IRFunction *function, size_t after,

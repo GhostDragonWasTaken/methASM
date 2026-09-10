@@ -921,10 +921,10 @@ static void ir_simd_scan_binary(IrSimdBail *d, const IRInstruction *ins) {
       !ins->text[1] && ins->dest.kind == IR_OPERAND_SYMBOL &&
       ins->dest.name &&
       ((ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
-        strcmp(ins->lhs.name, ins->dest.name) == 0 &&
+        ir_operand_names_match(&ins->lhs, &ins->dest) &&
         ins->rhs.kind == IR_OPERAND_TEMP) ||
        (ins->rhs.kind == IR_OPERAND_SYMBOL && ins->rhs.name &&
-        strcmp(ins->rhs.name, ins->dest.name) == 0 &&
+        ir_operand_names_match(&ins->rhs, &ins->dest) &&
         ins->lhs.kind == IR_OPERAND_TEMP))) {
     d->has_int_accum = 1;
     d->int_accum_sym = ins->dest.name;
@@ -1659,12 +1659,12 @@ static int ir_simd_widen_accumulator(IRFunction *clone, size_t begin,
         strcmp(ins->text, "+") == 0 && ins->dest.kind == IR_OPERAND_SYMBOL &&
         ins->dest.name && ins->rhs.kind == IR_OPERAND_TEMP && ins->rhs.name &&
         ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
-        strcmp(ins->lhs.name, ins->dest.name) == 0) {
+        ir_operand_names_match(&ins->lhs, &ins->dest)) {
       acc_symbol = ins->dest.name;
       for (size_t j = i; j-- > begin;) {
         IRInstruction *cast = &clone->instructions[j];
         if (cast->op == IR_OP_CAST && cast->dest.kind == IR_OPERAND_TEMP &&
-            cast->dest.name && strcmp(cast->dest.name, ins->rhs.name) == 0) {
+            cast->dest.name && ir_operand_names_match(&cast->dest, &ins->rhs)) {
           mettle_free_string(cast->text);
           cast->text = mettle_strdup("int64");
           rewrote_cast = cast->text != NULL;
@@ -2044,7 +2044,7 @@ static int ir_simd_mutate_fill_base_pointer(IRFunction *clone, size_t begin,
       if (cand->op == IR_OP_BINARY && !cand->is_float && cand->text &&
           strcmp(cand->text, "+") == 0 &&
           cand->lhs.kind == IR_OPERAND_TEMP && cand->lhs.name &&
-          strcmp(cand->lhs.name, addr_of->dest.name) == 0) {
+          ir_operand_names_match(&cand->lhs, &addr_of->dest)) {
         addr = cand;
         break;
       }

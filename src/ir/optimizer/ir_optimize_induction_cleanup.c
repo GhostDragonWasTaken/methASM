@@ -33,7 +33,7 @@ static int ir_civ_steps_match(const IROperand *a, const IROperand *b) {
     return a->int_value == b->int_value;
   }
   if (a->kind == IR_OPERAND_SYMBOL || a->kind == IR_OPERAND_TEMP) {
-    return a->name && b->name && strcmp(a->name, b->name) == 0;
+    return a->name && b->name && ir_operand_names_match(a, b);
   }
   return 0;
 }

@@ -423,7 +423,7 @@ static int ir_par_read_header_test(IRParLoop *loop) {
   }
   if (branch->op != IR_OP_BRANCH_ZERO || !branch->text ||
       !ir_par_operand_is_value(&branch->lhs) || !compare->dest.name ||
-      strcmp(branch->lhs.name, compare->dest.name) != 0) {
+      !ir_operand_names_match(&branch->lhs, &compare->dest)) {
     ir_par_reject(loop, "the header test does not guard the loop", NULL);
     return 0;
   }

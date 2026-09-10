@@ -359,6 +359,17 @@ int ir_instruction_writes_destination(const IRInstruction *instruction) {
              : 0;
 }
 
+int ir_operand_names_match(const IROperand *a, const IROperand *b) {
+  if (!a || !b || !a->name || !b->name) {
+    return 0;
+  }
+  if (a->kind == b->kind && a->value_id != IR_VALUE_ID_NONE &&
+      b->value_id != IR_VALUE_ID_NONE) {
+    return a->value_id == b->value_id;
+  }
+  return strcmp(a->name, b->name) == 0;
+}
+
 int ir_operand_is_value(const IROperand *operand) {
   if (!operand || !operand->name) {
     return 0;

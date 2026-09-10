@@ -1062,7 +1062,7 @@ static int ir_try_vectorize_lcg_at(IRFunction *function, size_t header_index,
     if (in->op == IR_OP_BINARY && !in->is_float && in->text &&
         strcmp(in->text, "+") == 0 && in->dest.kind == IR_OPERAND_SYMBOL &&
         in->dest.name && in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
-        strcmp(in->lhs.name, in->dest.name) == 0 &&
+        ir_operand_names_match(&in->lhs, &in->dest) &&
         ir_operand_is_temp_named(&in->rhs, cast_tmp)) {
       sum_sym = in->dest.name;
       have_acc = 1;
@@ -1108,7 +1108,7 @@ static int ir_try_vectorize_lcg_at(IRFunction *function, size_t header_index,
                   (mask_tmp && strcmp(in->dest.name, mask_tmp) == 0) ||
                   (cast_tmp && strcmp(in->dest.name, cast_tmp) == 0) ||
                   (compare->dest.name &&
-                   strcmp(in->dest.name, compare->dest.name) == 0))) ||
+                   ir_operand_names_match(&in->dest, &compare->dest)))) ||
                 (in->dest.kind == IR_OPERAND_SYMBOL &&
                  (strcmp(in->dest.name, state_sym) == 0 ||
                   strcmp(in->dest.name, sum_sym) == 0 ||

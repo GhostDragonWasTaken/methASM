@@ -1897,7 +1897,7 @@ static int safety_operand_same(const IROperand *a, const IROperand *b) {
   if (a->kind == IR_OPERAND_INT) {
     return a->int_value == b->int_value;
   }
-  return a->name && b->name && strcmp(a->name, b->name) == 0;
+  return a->name && b->name && ir_operand_names_match(a, b);
 }
 
 static int safety_emit_span_resolve(IRInstructionVector *out,
@@ -3405,7 +3405,7 @@ static int safety_retire_stack_notes(const IRProgram *program,
       const IRInstruction *candidate = &function->instructions[d];
       if (candidate->op == IR_OP_DECLARE_LOCAL &&
           candidate->dest.kind == IR_OPERAND_SYMBOL && candidate->dest.name &&
-          strcmp(candidate->dest.name, take->lhs.name) == 0) {
+          ir_operand_names_match(&candidate->dest, &take->lhs)) {
         declared = 1;
       }
     }

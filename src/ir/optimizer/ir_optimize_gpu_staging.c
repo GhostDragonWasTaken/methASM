@@ -249,7 +249,7 @@ static int gpu_pair_is_promotable(const IRFunction *function,
   if (load->op != IR_OP_LOAD || store->op != IR_OP_STORE ||
       load->dest.kind != IR_OPERAND_TEMP || !load->dest.name ||
       store->lhs.kind != IR_OPERAND_TEMP || !store->lhs.name ||
-      strcmp(load->dest.name, store->lhs.name) != 0 ||
+      !ir_operand_names_match(&load->dest, &store->lhs) ||
       load->rhs.kind != IR_OPERAND_INT ||
       store->rhs.kind != IR_OPERAND_INT ||
       load->rhs.int_value != store->rhs.int_value ||

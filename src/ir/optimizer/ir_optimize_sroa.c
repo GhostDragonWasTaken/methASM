@@ -629,7 +629,7 @@ static int ir_sroa_collect_records(IRFunction *function, size_t i,
     const IRSroaHashEnt *de = ir_sroa_hash_get(rec_hash, insn->dest.name);
     const IRSroaHashEnt *se = ir_sroa_hash_get(rec_hash, insn->lhs.name);
     if (de || se) {
-      if (strcmp(insn->dest.name, insn->lhs.name) == 0) {
+      if (ir_operand_names_match(&insn->dest, &insn->lhs)) {
         (*recs)[(de ? de : se)->member].eligible = 0;
         return 1;
       }

@@ -316,7 +316,7 @@ static int ir_float_reduction_frame(IRFunction *function, size_t header_index,
       const IRInstruction *ins = &function->instructions[i];
       if (ir_instruction_writes_destination(ins) &&
           ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
-          strcmp(ins->dest.name, compare->rhs.name) == 0) {
+          ir_operand_names_match(&ins->dest, &compare->rhs)) {
         return 1;
       }
     }
@@ -2492,7 +2492,7 @@ static int ir_minmax_same_operand(const IRFunction *function, size_t body_lo,
   if (!a || !b || !a->name || !b->name) {
     return 0;
   }
-  if (a->kind == b->kind && strcmp(a->name, b->name) == 0) {
+  if (a->kind == b->kind && ir_operand_names_match(a, b)) {
     return 1;
   }
   for (size_t i = body_lo; i < before; i++) {
@@ -3239,7 +3239,7 @@ static int vloop_operand_same(const IROperand *a, const IROperand *b) {
     return a->int_value == b->int_value;
   case IR_OPERAND_TEMP:
   case IR_OPERAND_SYMBOL:
-    return a->name && b->name && strcmp(a->name, b->name) == 0;
+    return a->name && b->name && ir_operand_names_match(a, b);
   default:
     return 0;
   }
@@ -4071,7 +4071,7 @@ static int vfind_same_operand(const IROperand *a, const IROperand *b) {
   if (!a || !b || a->kind != b->kind) return 0;
   if (a->kind == IR_OPERAND_INT) return a->int_value == b->int_value;
   if (a->kind == IR_OPERAND_SYMBOL || a->kind == IR_OPERAND_TEMP) {
-    return a->name && b->name && strcmp(a->name, b->name) == 0;
+    return a->name && b->name && ir_operand_names_match(a, b);
   }
   return 0;
 }
@@ -4248,7 +4248,7 @@ static int ir_try_vectorize_ascii_ident_find_at(IRFunction *function,
         strcmp(base->name, assign->dest.name) == 0)) ||
       (bound_cmp->rhs.kind == IR_OPERAND_SYMBOL &&
        (strcmp(bound_cmp->rhs.name, iv) == 0 ||
-        strcmp(bound_cmp->rhs.name, assign->dest.name) == 0))) {
+        ir_operand_names_match(&bound_cmp->rhs, &assign->dest)))) {
     return 1;
   }
 
