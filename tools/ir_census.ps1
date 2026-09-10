@@ -8,6 +8,8 @@ param(
     [string]$ValueIds = "off",
     [ValidateSet("off", "census", "strict")]
     [string]$Structure = "off",
+    [ValidateSet("off", "on", "verbose")]
+    [string]$DomCrossCheck = "off",
     [switch]$Quiet
 )
 
@@ -189,6 +191,9 @@ $compileFailures = New-Object System.Collections.ArrayList
 $valueIdReports = New-Object System.Collections.ArrayList
 $structureReports = New-Object System.Collections.ArrayList
 $structureRegressions = New-Object System.Collections.ArrayList
+$domReports = New-Object System.Collections.ArrayList
+$domAgreements = 0
+if ($DomCrossCheck -ne "off") { $env:METTLE_DOM_CROSSCHECK = $(if ($DomCrossCheck -eq "verbose") { "verbose" } else { "1" }) } else { Remove-Item Env:\METTLE_DOM_CROSSCHECK -ErrorAction SilentlyContinue }
 if ($ValueIds -ne "off") { $env:METTLE_VALUE_IDS = $ValueIds } else { Remove-Item Env:\METTLE_VALUE_IDS -ErrorAction SilentlyContinue }
 if ($Structure -ne "off") { $env:METTLE_IR_STRUCT = $Structure } else { Remove-Item Env:\METTLE_IR_STRUCT -ErrorAction SilentlyContinue }
 $index = 0
@@ -205,12 +210,16 @@ foreach ($s in $sources) {
         $logErr = Join-Path $WorkDir "compile.err"
         $proc = Start-Process -FilePath $CompilerPath -ArgumentList $argList -NoNewWindow -Wait -PassThru `
                               -RedirectStandardOutput $logOut -RedirectStandardError $logErr
-        if (($ValueIds -ne "off" -or $Structure -ne "off") -and (Test-Path $logErr)) {
+        if (($ValueIds -ne "off" -or $Structure -ne "off" -or $DomCrossCheck -ne "off") -and (Test-Path $logErr)) {
             foreach ($ln in (Get-Content $logErr)) {
                 if ($ln -match "value id disagrees") {
                     [void]$valueIdReports.Add([pscustomobject]@{ Name = $s.Name; Detail = $ln.Trim() })
                 } elseif ($ln -match "ir structure broken") {
                     [void]$structureReports.Add([pscustomobject]@{ Name = $s.Name; Detail = $ln.Trim() })
+                } elseif ($ln -match "dominance (cross-check|self-check) agrees") {
+                    $domAgreements++
+                } elseif ($ln -match "dominance (cross-check|self-check)") {
+                    [void]$domReports.Add([pscustomobject]@{ Name = $s.Name; Detail = $ln.Trim() })
                 } elseif ($ln -match "raised the values defined more than once") {
                     $pass = "unknown"
                     if ($ln -match "pass '([^']+)'") { $pass = $Matches[1] }
@@ -261,6 +270,14 @@ if ($ValueIds -ne "off") {
     Add-Line ("value id mode " + $ValueIds)
     Add-Line ("value id disagreements " + $valueIdReports.Count)
     foreach ($e in ($valueIdReports | Select-Object -First 40)) { Add-Line ("  " + $e.Name + ": " + $e.Detail) }
+    Add-Line ("")
+}
+
+if ($DomCrossCheck -ne "off") {
+    Add-Line ("dominance cross-check mode " + $DomCrossCheck)
+    Add-Line ("dominance functions agreeing " + $domAgreements)
+    Add-Line ("dominance mismatches " + $domReports.Count)
+    foreach ($e in ($domReports | Select-Object -First 40)) { Add-Line ("  " + $e.Name + ": " + $e.Detail) }
     Add-Line ("")
 }
 
@@ -372,7 +389,12 @@ if (-not $Quiet) {
         Write-Host ("structure violations " + $structureReports.Count)
         Write-Host ("multi-def raised reports " + $structureRegressions.Count)
     }
+    if ($DomCrossCheck -ne "off") {
+        Write-Host ("dominance functions agreeing " + $domAgreements)
+        Write-Host ("dominance mismatches " + $domReports.Count)
+    }
 }
 Remove-Item Env:\METTLE_VALUE_IDS -ErrorAction SilentlyContinue
 Remove-Item Env:\METTLE_IR_STRUCT -ErrorAction SilentlyContinue
-exit ([int](($valueIdReports.Count + $structureReports.Count) -gt 0))
+Remove-Item Env:\METTLE_DOM_CROSSCHECK -ErrorAction SilentlyContinue
+exit ([int](($valueIdReports.Count + $structureReports.Count + $domReports.Count) -gt 0))

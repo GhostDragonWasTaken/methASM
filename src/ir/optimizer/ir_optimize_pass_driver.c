@@ -318,6 +318,7 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
   ir_function_number_values(function);
   ir_structure_maybe_sabotage(function, pass->name);
   ir_structure_check_after_pass(function, pass->name, structure_before);
+  ir_analysis_self_check(function);
 
   if (audit_volatile && ir_volatile_signature(function) != volatile_before) {
     char message[256];

@@ -3,6 +3,7 @@
 
 #include "../simd_attr.h"
 #include "../source_location.h"
+#include "ir_analysis.h"
 #include "ir_values.h"
 #include "ir_verify_structure.h"
 #include "mtlc/intrinsic.h"
@@ -283,6 +284,7 @@ typedef struct {
   int cfg_valid;
   IRValueTable values;
   uint64_t generation;
+  void *analysis;
   int is_inline;
   int is_inline_contract;
   int is_noinline;
@@ -482,6 +484,20 @@ size_t ir_structure_snapshot(const IRFunction *function);
 void ir_structure_check_after_pass(const IRFunction *function,
                                    const char *pass_name, size_t before);
 void ir_structure_maybe_sabotage(IRFunction *function, const char *pass_name);
+
+const IRAnalysis *ir_function_analysis(IRFunction *function);
+void ir_function_release_analysis(IRFunction *function);
+size_t ir_function_instruction_block(IRFunction *function, size_t index);
+int ir_block_dominates(const IRAnalysis *analysis, size_t a, size_t b);
+int ir_function_block_dominates(IRFunction *function, size_t a, size_t b);
+int ir_function_instruction_dominates(IRFunction *function, size_t a, size_t b);
+uint32_t ir_function_value_single_def(IRFunction *function, uint32_t id);
+size_t ir_function_value_def_count(IRFunction *function, uint32_t id);
+const IRValueUse *ir_function_value_uses(IRFunction *function, uint32_t id,
+                                         size_t *count_out);
+const size_t *ir_function_dominance_frontier(IRFunction *function, size_t block,
+                                             size_t *count_out);
+size_t ir_analysis_self_check(IRFunction *function);
 size_t ir_value_stale_report_count(void);
 size_t ir_value_unnumbered_count(void);
 

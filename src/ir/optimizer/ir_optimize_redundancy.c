@@ -639,139 +639,6 @@ static void re_table_kill_name(RETable *table, const char *name) {
 }
 
 typedef struct {
-  size_t *idom;
-  size_t *rpo_index;
-  size_t *order;
-  size_t order_count;
-  size_t *child_head;
-  size_t *child_next;
-} REDom;
-
-static void re_dom_destroy(REDom *dom) {
-  free(dom->idom);
-  free(dom->rpo_index);
-  free(dom->order);
-  free(dom->child_head);
-  free(dom->child_next);
-  memset(dom, 0, sizeof(*dom));
-}
-
-static int re_dom_build(const IRBasicBlock *blocks, size_t block_count,
-                        size_t entry, REDom *dom) {
-  memset(dom, 0, sizeof(*dom));
-  if (block_count == 0 || entry >= block_count) {
-    return 0;
-  }
-
-  dom->idom = malloc(block_count * sizeof(size_t));
-  dom->rpo_index = malloc(block_count * sizeof(size_t));
-  dom->order = malloc(block_count * sizeof(size_t));
-  dom->child_head = malloc(block_count * sizeof(size_t));
-  dom->child_next = malloc(block_count * sizeof(size_t));
-  size_t *stack = malloc(block_count * sizeof(size_t));
-  size_t *next_succ = malloc(block_count * sizeof(size_t));
-  unsigned char *seen = calloc(block_count, 1);
-  size_t *postorder = malloc(block_count * sizeof(size_t));
-  if (!dom->idom || !dom->rpo_index || !dom->order || !dom->child_head ||
-      !dom->child_next || !stack || !next_succ || !seen || !postorder) {
-    free(stack);
-    free(next_succ);
-    free(seen);
-    free(postorder);
-    re_dom_destroy(dom);
-    return 0;
-  }
-
-  for (size_t i = 0; i < block_count; i++) {
-    dom->idom[i] = SIZE_MAX;
-    dom->rpo_index[i] = SIZE_MAX;
-    dom->child_head[i] = SIZE_MAX;
-    dom->child_next[i] = SIZE_MAX;
-  }
-
-  size_t post_count = 0;
-  size_t depth = 0;
-  stack[depth] = entry;
-  next_succ[depth] = 0;
-  seen[entry] = 1;
-  depth = 1;
-  while (depth > 0) {
-    size_t block = stack[depth - 1];
-    if (next_succ[depth - 1] < blocks[block].successor_count) {
-      size_t successor = blocks[block].successors[next_succ[depth - 1]++];
-      if (successor < block_count && !seen[successor]) {
-        seen[successor] = 1;
-        stack[depth] = successor;
-        next_succ[depth] = 0;
-        depth++;
-      }
-      continue;
-    }
-    postorder[post_count++] = block;
-    depth--;
-  }
-
-  dom->order_count = post_count;
-  for (size_t i = 0; i < post_count; i++) {
-    dom->order[i] = postorder[post_count - 1 - i];
-    dom->rpo_index[dom->order[i]] = i;
-  }
-  free(postorder);
-  free(stack);
-  free(next_succ);
-  free(seen);
-
-  dom->idom[entry] = entry;
-  int changed = 1;
-  while (changed) {
-    changed = 0;
-    for (size_t k = 0; k < dom->order_count; k++) {
-      size_t block = dom->order[k];
-      if (block == entry) {
-        continue;
-      }
-      size_t candidate = SIZE_MAX;
-      for (size_t p = 0; p < blocks[block].predecessor_count; p++) {
-        size_t pred = blocks[block].predecessors[p];
-        if (pred >= block_count || dom->idom[pred] == SIZE_MAX) {
-          continue;
-        }
-        if (candidate == SIZE_MAX) {
-          candidate = pred;
-          continue;
-        }
-        size_t a = pred;
-        size_t b = candidate;
-        while (a != b) {
-          while (dom->rpo_index[a] > dom->rpo_index[b]) {
-            a = dom->idom[a];
-          }
-          while (dom->rpo_index[b] > dom->rpo_index[a]) {
-            b = dom->idom[b];
-          }
-        }
-        candidate = a;
-      }
-      if (candidate != SIZE_MAX && dom->idom[block] != candidate) {
-        dom->idom[block] = candidate;
-        changed = 1;
-      }
-    }
-  }
-
-  for (size_t k = dom->order_count; k-- > 0;) {
-    size_t block = dom->order[k];
-    if (block == entry || dom->idom[block] == SIZE_MAX) {
-      continue;
-    }
-    size_t parent = dom->idom[block];
-    dom->child_next[block] = dom->child_head[parent];
-    dom->child_head[parent] = block;
-  }
-  return 1;
-}
-
-typedef struct {
   IRFunction *function;
   const REDefs *defs;
   const IRTempValueMap *addr_taken;
@@ -953,7 +820,7 @@ static int re_survives_summary(const REWalk *walk, const char *mem_base,
 }
 
 static void re_process_block(REWalk *walk, size_t block_index,
-                             const REDom *dom) {
+                             const IRDomTree *dom) {
   if (walk->failed) {
     return;
   }
@@ -1077,7 +944,7 @@ static void re_process_block(REWalk *walk, size_t block_index,
     }
   }
 
-  for (size_t child = dom->child_head[block_index]; child != SIZE_MAX;
+  for (size_t child = dom->child_head[block_index]; child != IR_BLOCK_NONE;
        child = dom->child_next[child]) {
     re_process_block(walk, child, dom);
     if (walk->failed) {
@@ -1101,9 +968,13 @@ int ir_redundancy_elimination_pass(IRFunction *function, int *changed) {
   }
 
   REDefs defs = {0};
-  REDom dom = {0};
+  const IRAnalysis *analysis = ir_function_analysis(function);
   IRTempValueMap addr_taken;
   int ok = 1;
+
+  if (!analysis || !analysis->dom.built) {
+    return 1;
+  }
 
   if (!ir_temp_value_map_init(&addr_taken)) {
     return 1;
@@ -1111,8 +982,7 @@ int ir_redundancy_elimination_pass(IRFunction *function, int *changed) {
   defs.function = function;
   defs.addr_taken = &addr_taken;
   if (!ir_addr_taken_set_build(function, &addr_taken) ||
-      !re_collect_defs(function, &defs) ||
-      !re_dom_build(blocks, block_count, function->entry_block, &dom)) {
+      !re_collect_defs(function, &defs)) {
     ok = 0;
   }
 
@@ -1143,7 +1013,7 @@ int ir_redundancy_elimination_pass(IRFunction *function, int *changed) {
       }
     }
     if (!walk.failed) {
-      re_process_block(&walk, function->entry_block, &dom);
+      re_process_block(&walk, function->entry_block, &analysis->dom);
     }
     re_table_destroy(&walk.global);
     re_table_destroy(&walk.local);
@@ -1151,7 +1021,6 @@ int ir_redundancy_elimination_pass(IRFunction *function, int *changed) {
     re_kills_destroy(&walk.summary);
   }
 
-  re_dom_destroy(&dom);
   re_map_destroy(&defs.defs);
   re_map_destroy(&defs.def_at);
   ir_temp_value_map_destroy(&addr_taken);

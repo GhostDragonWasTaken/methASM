@@ -943,7 +943,7 @@ static void ir_function_clear_parameters(IRFunction *function) {
   function->parameter_count = 0;
 }
 
-void ir_function_clear_cfg(IRFunction *function) {
+static void ir_function_free_blocks(IRFunction *function) {
   if (!function) {
     return;
   }
@@ -960,6 +960,14 @@ void ir_function_clear_cfg(IRFunction *function) {
   function->block_count = 0;
   function->entry_block = 0;
   function->cfg_valid = 0;
+}
+
+void ir_function_clear_cfg(IRFunction *function) {
+  if (!function) {
+    return;
+  }
+  ir_function_free_blocks(function);
+  ir_function_touch(function);
 }
 
 typedef struct {
@@ -1228,6 +1236,7 @@ void ir_function_destroy(IRFunction *function) {
   ir_function_set_effects(function, IR_EFFECT_CLAUSE_PROVIDES, NULL, 0);
   ir_function_clear_parameters(function);
   ir_function_clear_cfg(function);
+  ir_function_release_analysis(function);
   ir_value_table_clear(&function->values);
   for (size_t i = 0; i < function->instruction_count; i++) {
     ir_instruction_destroy(&function->instructions[i]);
@@ -1298,6 +1307,7 @@ int ir_function_append_instruction(IRFunction *function,
 
   function->instruction_count++;
   ir_function_clear_cfg(function);
+  ir_function_touch(function);
   return 1;
 }
 
@@ -1390,6 +1400,7 @@ int ir_function_insert_instruction(IRFunction *function, size_t index,
 
   function->instruction_count++;
   ir_function_clear_cfg(function);
+  ir_function_touch(function);
   return 1;
 
 fail_unshift:
@@ -1548,7 +1559,7 @@ int ir_function_rebuild_cfg(IRFunction *function) {
     return 0;
   }
 
-  ir_function_clear_cfg(function);
+  ir_function_free_blocks(function);
 
   size_t instruction_count = function->instruction_count;
   if (instruction_count == 0) {
