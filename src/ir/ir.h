@@ -4,6 +4,7 @@
 #include "../simd_attr.h"
 #include "../source_location.h"
 #include "ir_values.h"
+#include "ir_verify_structure.h"
 #include "mtlc/intrinsic.h"
 #include "mtlc/tensor.h"
 #include "mtlc/type.h"
@@ -473,6 +474,14 @@ void ir_function_touch(IRFunction *function);
 void ir_value_check_after_pass(const IRFunction *function,
                                const char *pass_name);
 void ir_value_maybe_sabotage(IRFunction *function, const char *pass_name);
+
+int ir_function_check_structure(const IRFunction *function,
+                                IRStructureReport *report, char *why,
+                                size_t why_capacity);
+size_t ir_structure_snapshot(const IRFunction *function);
+void ir_structure_check_after_pass(const IRFunction *function,
+                                   const char *pass_name, size_t before);
+void ir_structure_maybe_sabotage(IRFunction *function, const char *pass_name);
 size_t ir_value_stale_report_count(void);
 size_t ir_value_unnumbered_count(void);
 

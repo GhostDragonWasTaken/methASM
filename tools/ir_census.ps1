@@ -6,6 +6,8 @@ param(
     [string]$WorkDir = "",
     [ValidateSet("off", "check", "strict")]
     [string]$ValueIds = "off",
+    [ValidateSet("off", "census", "strict")]
+    [string]$Structure = "off",
     [switch]$Quiet
 )
 
@@ -185,7 +187,10 @@ if (-not $Quiet) { Write-Host ("census over " + $sources.Count + " sources") }
 $irFiles = New-Object System.Collections.ArrayList
 $compileFailures = New-Object System.Collections.ArrayList
 $valueIdReports = New-Object System.Collections.ArrayList
+$structureReports = New-Object System.Collections.ArrayList
+$structureRegressions = New-Object System.Collections.ArrayList
 if ($ValueIds -ne "off") { $env:METTLE_VALUE_IDS = $ValueIds } else { Remove-Item Env:\METTLE_VALUE_IDS -ErrorAction SilentlyContinue }
+if ($Structure -ne "off") { $env:METTLE_IR_STRUCT = $Structure } else { Remove-Item Env:\METTLE_IR_STRUCT -ErrorAction SilentlyContinue }
 $index = 0
 foreach ($s in $sources) {
     $index++
@@ -200,10 +205,16 @@ foreach ($s in $sources) {
         $logErr = Join-Path $WorkDir "compile.err"
         $proc = Start-Process -FilePath $CompilerPath -ArgumentList $argList -NoNewWindow -Wait -PassThru `
                               -RedirectStandardOutput $logOut -RedirectStandardError $logErr
-        if ($ValueIds -ne "off" -and (Test-Path $logErr)) {
+        if (($ValueIds -ne "off" -or $Structure -ne "off") -and (Test-Path $logErr)) {
             foreach ($ln in (Get-Content $logErr)) {
                 if ($ln -match "value id disagrees") {
                     [void]$valueIdReports.Add([pscustomobject]@{ Name = $s.Name; Detail = $ln.Trim() })
+                } elseif ($ln -match "ir structure broken") {
+                    [void]$structureReports.Add([pscustomobject]@{ Name = $s.Name; Detail = $ln.Trim() })
+                } elseif ($ln -match "raised the values defined more than once") {
+                    $pass = "unknown"
+                    if ($ln -match "pass '([^']+)'") { $pass = $Matches[1] }
+                    [void]$structureRegressions.Add([pscustomobject]@{ Name = $s.Name; Pass = $pass; Detail = $ln.Trim() })
                 }
             }
         }
@@ -250,6 +261,18 @@ if ($ValueIds -ne "off") {
     Add-Line ("value id mode " + $ValueIds)
     Add-Line ("value id disagreements " + $valueIdReports.Count)
     foreach ($e in ($valueIdReports | Select-Object -First 40)) { Add-Line ("  " + $e.Name + ": " + $e.Detail) }
+    Add-Line ("")
+}
+
+if ($Structure -ne "off") {
+    Add-Line ("structure mode " + $Structure)
+    Add-Line ("structure violations " + $structureReports.Count)
+    foreach ($e in ($structureReports | Select-Object -First 40)) { Add-Line ("  " + $e.Name + ": " + $e.Detail) }
+    Add-Line ("multi-def raised by a pass: " + $structureRegressions.Count + " reports")
+    $byPass = $structureRegressions | Group-Object -Property Pass | Sort-Object -Property Count -Descending
+    foreach ($g in $byPass) {
+        Add-Line ("  {0,-36} {1,5} reports over {2} units" -f $g.Name, $g.Count, (($g.Group | Group-Object -Property Name).Count))
+    }
     Add-Line ("")
 }
 
@@ -345,6 +368,11 @@ if (-not $Quiet) {
     if ($ValueIds -ne "off") {
         Write-Host ("value id disagreements " + $valueIdReports.Count)
     }
+    if ($Structure -ne "off") {
+        Write-Host ("structure violations " + $structureReports.Count)
+        Write-Host ("multi-def raised reports " + $structureRegressions.Count)
+    }
 }
-if ($ValueIds -ne "off") { Remove-Item Env:\METTLE_VALUE_IDS -ErrorAction SilentlyContinue }
-exit ([int]($valueIdReports.Count -gt 0))
+Remove-Item Env:\METTLE_VALUE_IDS -ErrorAction SilentlyContinue
+Remove-Item Env:\METTLE_IR_STRUCT -ErrorAction SilentlyContinue
+exit ([int](($valueIdReports.Count + $structureReports.Count) -gt 0))

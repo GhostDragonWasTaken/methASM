@@ -298,6 +298,7 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
   IRVerifySnapshot *verify_snapshot = ir_verify_snapshot_take(function);
 
   ir_function_number_values(function);
+  const size_t structure_before = ir_structure_snapshot(function);
 
   mettle_compiler_ctx_set_pass_name(pass->name);
   ir_explain_pass_begin(function);
@@ -314,6 +315,9 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
   }
   ir_value_maybe_sabotage(function, pass->name);
   ir_value_check_after_pass(function, pass->name);
+  ir_function_number_values(function);
+  ir_structure_maybe_sabotage(function, pass->name);
+  ir_structure_check_after_pass(function, pass->name, structure_before);
 
   if (audit_volatile && ir_volatile_signature(function) != volatile_before) {
     char message[256];
