@@ -766,11 +766,13 @@ IROperand ir_operand_copy(const IROperand *operand) {
   case IR_OPERAND_TEMP: {
     IROperand copy = ir_operand_temp(operand->name);
     copy.float_bits = operand->float_bits;
+    copy.value_id = operand->value_id;
     return copy;
   }
   case IR_OPERAND_SYMBOL: {
     IROperand copy = ir_operand_symbol(operand->name);
     copy.float_bits = operand->float_bits;
+    copy.value_id = operand->value_id;
     return copy;
   }
   case IR_OPERAND_INT:
@@ -1071,6 +1073,8 @@ IRFunction *ir_function_create(const char *name) {
   function->instructions = NULL;
   function->instruction_count = 0;
   function->instruction_capacity = 0;
+  ir_value_table_init(&function->values);
+  function->generation = 1;
   function->blocks = NULL;
   function->block_count = 0;
   function->entry_block = 0;
@@ -1224,6 +1228,7 @@ void ir_function_destroy(IRFunction *function) {
   ir_function_set_effects(function, IR_EFFECT_CLAUSE_PROVIDES, NULL, 0);
   ir_function_clear_parameters(function);
   ir_function_clear_cfg(function);
+  ir_value_table_clear(&function->values);
   for (size_t i = 0; i < function->instruction_count; i++) {
     ir_instruction_destroy(&function->instructions[i]);
   }

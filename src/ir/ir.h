@@ -3,6 +3,7 @@
 
 #include "../simd_attr.h"
 #include "../source_location.h"
+#include "ir_values.h"
 #include "mtlc/intrinsic.h"
 #include "mtlc/tensor.h"
 #include "mtlc/type.h"
@@ -44,6 +45,7 @@ typedef struct {
   long long int_value;
   double float_value;
   int float_bits;
+  uint32_t value_id;
 } IROperand;
 
 typedef enum {
@@ -278,6 +280,8 @@ typedef struct {
   size_t block_count;
   size_t entry_block;
   int cfg_valid;
+  IRValueTable values;
+  uint64_t generation;
   int is_inline;
   int is_inline_contract;
   int is_noinline;
@@ -456,6 +460,21 @@ void ir_function_clear_cfg(IRFunction *function);
 int ir_function_rebuild_cfg(IRFunction *function);
 const IRBasicBlock *ir_function_blocks(IRFunction *function,
                                        size_t *block_count);
+
+int ir_operand_is_value(const IROperand *operand);
+uint32_t ir_function_value_id(IRFunction *function, const IROperand *operand);
+const char *ir_function_value_name(const IRFunction *function, uint32_t id);
+int ir_function_number_values(IRFunction *function);
+int ir_function_values_agree(const IRFunction *function, char *why,
+                             size_t why_capacity);
+int ir_function_values_audit(const IRFunction *function, char *why,
+                             size_t why_capacity, size_t *unnumbered_out);
+void ir_function_touch(IRFunction *function);
+void ir_value_check_after_pass(const IRFunction *function,
+                               const char *pass_name);
+void ir_value_maybe_sabotage(IRFunction *function, const char *pass_name);
+size_t ir_value_stale_report_count(void);
+size_t ir_value_unnumbered_count(void);
 
 int ir_program_global_address_taken(IRProgram *program, const char *name);
 IRProgram *ir_program_create(void);
