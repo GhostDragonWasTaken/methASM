@@ -160,6 +160,7 @@ function Measure-SourceBurndown {
     )
     $rows = New-Object System.Collections.ArrayList
     $reName = [regex]::new('\.name\b|->name\b', 'Compiled')
+    $reOperandName = [regex]::new('(?:dest|lhs|rhs)\.name\b|arguments\[[^\]]+\]\.name\b', 'Compiled')
     $reStrcmpName = [regex]::new('str(n?)cmp\s*\([^;]*\bname\b', 'Compiled')
     $reForwardScan = [regex]::new('for\s*\(\s*size_t\s+(\w+)\s*=\s*\w+\s*\+\s*1\s*;\s*\1\s*<\s*[^;]*instruction_count', 'Compiled')
     foreach ($d in $dirs) {
@@ -168,6 +169,7 @@ function Measure-SourceBurndown {
         foreach ($f in $files) {
             $text = [System.IO.File]::ReadAllText($f.FullName)
             $nameReads = $reName.Matches($text).Count
+            $operandNameReads = $reOperandName.Matches($text).Count
             $strcmps = $reStrcmpName.Matches($text).Count
             $scans = $reForwardScan.Matches($text).Count
             if ($nameReads -eq 0 -and $strcmps -eq 0 -and $scans -eq 0) { continue }
@@ -175,6 +177,7 @@ function Measure-SourceBurndown {
                 Dir = $d.Label
                 File = $f.Name
                 NameReads = $nameReads
+                OperandNameReads = $operandNameReads
                 NameCompares = $strcmps
                 ForwardScans = $scans
             })
@@ -350,7 +353,8 @@ foreach ($g in $byDir) {
     $n = ($g.Group | Measure-Object -Property NameReads -Sum).Sum
     $c = ($g.Group | Measure-Object -Property NameCompares -Sum).Sum
     $f = ($g.Group | Measure-Object -Property ForwardScans -Sum).Sum
-    Add-Line ("  {0,-22} name reads {1,6}   name compares {2,5}   forward scans {3,4}   files {4}" -f $g.Name, $n, $c, $f, $g.Group.Count)
+    $o = ($g.Group | Measure-Object -Property OperandNameReads -Sum).Sum
+    Add-Line ("  {0,-22} name reads {1,6}   operand-field reads {2,5}   name compares {3,5}   forward scans {4,4}   files {5}" -f $g.Name, $n, $o, $c, $f, $g.Group.Count)
 }
 Add-Line ("")
 Add-Line ("source burn-down by file")
