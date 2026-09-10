@@ -895,7 +895,7 @@ void ir_instruction_tensor_borrow(IRInstruction *dst, IRTensorAux *block,
   dst->tensor = block;
 }
 
-static void ir_instruction_destroy(IRInstruction *instruction) {
+void ir_instruction_destroy(IRInstruction *instruction) {
   if (!instruction) {
     return;
   }

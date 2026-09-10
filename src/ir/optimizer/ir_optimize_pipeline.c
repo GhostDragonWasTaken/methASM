@@ -140,6 +140,16 @@ static const IROptNamedPass g_ir_post_recognizer_tail[] = {
     {"prefetch_indirect", ir_prefetch_indirect_pass, IR_GATE_LOOP_LOAD},
 };
 
+static const IROptNamedPass g_ir_ssa_enter[] = {
+    {"promote_scalar_locals", ir_promote_scalar_locals_pass,
+     {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
+};
+
+static const IROptNamedPass g_ir_ssa_leave[] = {
+    {"leave_ssa", ir_leave_ssa_pass,
+     {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
+};
+
 static const IROptNamedPass g_ir_lowering_cleanup[] = {
     {"select_field_load", ir_select_adjacent_field_pass,
      {IR_OPT_FEATURE_LOAD | IR_OPT_FEATURE_BRANCH_ZERO, IR_OPT_REQUIRE_NONE}},
@@ -646,6 +656,23 @@ int ir_optimize_function_pipeline(IRFunction *function) {
           IR_ARRAY_COUNT(g_ir_lowering_cleanup), 1, "lowering cleanup",
           "IR optimization pass failed", 0)) {
     return 0;
+  }
+
+  if (ir_ssa_enabled()) {
+    mettle_compiler_ctx_set_pass_name("enter ssa");
+    if (!ir_run_named_stage_fixpoint(function, g_ir_ssa_enter,
+                                     IR_ARRAY_COUNT(g_ir_ssa_enter), 1,
+                                     "enter ssa", "IR optimization pass failed",
+                                     0)) {
+      return 0;
+    }
+    mettle_compiler_ctx_set_pass_name("leave ssa");
+    if (!ir_run_named_stage_fixpoint(function, g_ir_ssa_leave,
+                                     IR_ARRAY_COUNT(g_ir_ssa_leave), 1,
+                                     "leave ssa", "IR optimization pass failed",
+                                     0)) {
+      return 0;
+    }
   }
 
   t0 = ir_pass_time_begin();

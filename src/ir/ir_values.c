@@ -301,6 +301,64 @@ void ir_value_check_after_pass(const IRFunction *function,
   }
 }
 
+static const int IR_WRITES_DESTINATION[IR_OP_KIND_COUNT] = {
+    [IR_OP_ASSIGN] = 1,
+    [IR_OP_ADDRESS_OF] = 1,
+    [IR_OP_LOAD] = 1,
+    [IR_OP_BINARY] = 1,
+    [IR_OP_UNARY] = 1,
+    [IR_OP_ROTATE_ADD] = 1,
+    [IR_OP_CALL] = 1,
+    [IR_OP_CALL_INDIRECT] = 1,
+    [IR_OP_NEW] = 1,
+    [IR_OP_CAST] = 1,
+    [IR_OP_COUNT_WORD_STARTS] = 1,
+    [IR_OP_MEMCPY_INLINE] = 1,
+    [IR_OP_SIMD_FILL] = 1,
+    [IR_OP_SIMD_COPY] = 1,
+    [IR_OP_SIMD_SUM_I32] = 1,
+    [IR_OP_SIMD_SUM_U8] = 1,
+    [IR_OP_SIMD_MATMUL_N32] = 1,
+    [IR_OP_SIMD_INSERTION_SORT_I32] = 1,
+    [IR_OP_SIMD_DOT_I32] = 1,
+    [IR_OP_SIMD_DOT_I8] = 1,
+    [IR_OP_SIMD_SLP_MAC_I32] = 1,
+    [IR_OP_SIMD_SLP_MAC_I8] = 1,
+    [IR_OP_SIMD_SCALE_I32] = 1,
+    [IR_OP_SIMD_CLAMP_I32] = 1,
+    [IR_OP_SIMD_REVERSE_COPY_I32] = 1,
+    [IR_OP_LOWER_BOUND_I32] = 1,
+    [IR_OP_PREFIX_SUM_I32] = 1,
+    [IR_OP_SIMD_MINMAX_I32] = 1,
+    [IR_OP_SIMD_SUM_F64] = 1,
+    [IR_OP_SIMD_SUM_F32] = 1,
+    [IR_OP_SIMD_DOT_F64] = 1,
+    [IR_OP_SIMD_DOT_F32] = 1,
+    [IR_OP_SIMD_AFFINE_MAP_F64] = 1,
+    [IR_OP_SIMD_AFFINE_MAP_F32] = 1,
+    [IR_OP_SIMD_EXP_F32] = 1,
+    [IR_OP_SIMD_SILU_F32] = 1,
+    [IR_OP_SIMD_I2F_REDUCE_F64] = 1,
+    [IR_OP_SIMD_VLOOP_F64] = 1,
+    [IR_OP_SIMD_VLOOP_I32] = 1,
+    [IR_OP_SIMD_FIND] = 1,
+    [IR_OP_SIMD_OUTER_LANE_F64] = 1,
+    [IR_OP_SELECT] = 1,
+    [IR_OP_SIMD_LCG_U32] = 1,
+    [IR_OP_ADDRESS_SPACE_ALLOC] = 1,
+    [IR_OP_PHI] = 1,
+};
+
+int ir_instruction_writes_destination(const IRInstruction *instruction) {
+  if (!instruction || instruction->dest.kind == IR_OPERAND_NONE) {
+    return 0;
+  }
+
+  return (unsigned)instruction->op < (unsigned)IR_OP_KIND_COUNT
+             ? IR_WRITES_DESTINATION[instruction->op]
+             : 0;
+}
+
 int ir_operand_is_value(const IROperand *operand) {
   if (!operand || !operand->name) {
     return 0;

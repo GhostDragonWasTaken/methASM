@@ -14760,7 +14760,8 @@ try {
                "src/common.c", "src/lexer/lexer.c",
                "src/compiler/compiler_context.c", "src/compiler/compiler_crash.c",
                "src/runtime/crash_handler.c", "src/ir/ir.c", "src/ir/ir_values.c",
-               "src/ir/ir_analysis.c", "-o", $iceExe) + $iceLibs
+               "src/ir/ir_analysis.c", "src/ir/ir_ssa.c",
+               "src/ir/ir_verify_structure.c", "-o", $iceExe) + $iceLibs
   $iceCompile = & gcc @iceArgs 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) {
     throw "compiler ICE report harness compile failed: $iceCompile"

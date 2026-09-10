@@ -465,6 +465,7 @@ int ir_function_rebuild_cfg(IRFunction *function);
 const IRBasicBlock *ir_function_blocks(IRFunction *function,
                                        size_t *block_count);
 
+void ir_instruction_destroy(IRInstruction *instruction);
 int ir_instruction_writes_destination(const IRInstruction *instruction);
 int ir_operand_is_value(const IROperand *operand);
 uint32_t ir_function_value_id(IRFunction *function, const IROperand *operand);

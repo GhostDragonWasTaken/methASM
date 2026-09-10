@@ -330,7 +330,9 @@ typedef struct {
   X(SIMD_INSERTION_SORT_I32, "simd_insertion_sort_i32")                      \
   X(SROA, "sroa")                                                             \
   X(EGRAPH_SIMPLIFY, "egraph_simplify")                                       \
-  X(USER_REWRITE, "user_rewrite")
+  X(USER_REWRITE, "user_rewrite")                                             \
+  X(PROMOTE_SCALAR_LOCALS, "promote_scalar_locals")                           \
+  X(LEAVE_SSA, "leave_ssa")
 
 typedef enum {
 #define IR_OPT_PASS_ENUM(id, name) IR_OPT_PASS_##id,
@@ -419,6 +421,9 @@ int ir_hoist_invariant_arith_pass(IRFunction *function, int *changed);
 int ir_if_convert_accumulate_pass(IRFunction *function, int *changed);
 int ir_normalize_scan_from_first_pass(IRFunction *function, int *changed);
 int ir_redundancy_elimination_pass(IRFunction *function, int *changed);
+int ir_promote_scalar_locals_pass(IRFunction *function, int *changed);
+int ir_leave_ssa_pass(IRFunction *function, int *changed);
+int ir_ssa_enabled(void);
 int ir_select_adjacent_field_pass(IRFunction *function, int *changed);
 
 int ir_or_chain_to_bitset_pass(IRFunction *function, int *changed);
