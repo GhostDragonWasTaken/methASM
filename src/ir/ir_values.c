@@ -359,6 +359,63 @@ int ir_instruction_writes_destination(const IRInstruction *instruction) {
              : 0;
 }
 
+static void ir_fingerprint_mix(uint64_t *hash, const char *text) {
+  *hash ^= 0x9e3779b97f4a7c15ull;
+  *hash *= 1099511628211ull;
+  if (!text) {
+    return;
+  }
+  for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+    *hash ^= (uint64_t)*p;
+    *hash *= 1099511628211ull;
+  }
+}
+
+uint64_t ir_function_fingerprint(const IRFunction *function) {
+  if (!function) {
+    return 0;
+  }
+  uint64_t hash = 1469598103934665603ull;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    hash ^= (uint64_t)in->op;
+    hash *= 1099511628211ull;
+    ir_fingerprint_mix(&hash, in->dest.name);
+    ir_fingerprint_mix(&hash, in->lhs.name);
+    ir_fingerprint_mix(&hash, in->rhs.name);
+    ir_fingerprint_mix(&hash, in->text);
+    for (size_t j = 0; j < in->argument_count; j++) {
+      if (in->arguments) {
+        ir_fingerprint_mix(&hash, in->arguments[j].name);
+      }
+    }
+  }
+  return hash;
+}
+
+static size_t g_silent_mutations = 0;
+
+size_t ir_silent_mutation_count(void) { return g_silent_mutations; }
+
+void ir_check_silent_mutation(const IRFunction *function, const char *pass_name,
+                              uint64_t before, uint64_t generation_before) {
+  if (!getenv("METTLE_CACHE_AUDIT") || !function) {
+    return;
+  }
+  const uint64_t after = ir_function_fingerprint(function);
+  if (after == before) {
+    return;
+  }
+  if (function->generation != generation_before) {
+    return;
+  }
+  g_silent_mutations++;
+  fprintf(stderr,
+          "mettle: pass '%s' changed '%s' without invalidating the analysis\n",
+          pass_name ? pass_name : "<unnamed>",
+          function->name ? function->name : "<unnamed>");
+}
+
 int ir_operand_names_match(const IROperand *a, const IROperand *b) {
   if (!a || !b || !a->name || !b->name) {
     return 0;

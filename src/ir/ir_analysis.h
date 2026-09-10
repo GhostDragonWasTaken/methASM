@@ -62,11 +62,13 @@ typedef struct {
   size_t value_count;
   uint32_t *prev_label;
   int built;
+  int complete;
 } IRDestIndex;
 
 typedef struct {
   uint64_t generation;
   size_t instruction_count;
+  size_t block_count;
   size_t *instruction_block;
   IRDomTree dom;
   IRUseDefs ud;

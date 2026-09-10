@@ -299,6 +299,9 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
 
   ir_function_number_values(function);
   const size_t structure_before = ir_structure_snapshot(function);
+  const uint64_t fingerprint_before =
+      getenv("METTLE_CACHE_AUDIT") ? ir_function_fingerprint(function) : 0;
+  const uint64_t generation_before = function->generation;
 
   mettle_compiler_ctx_set_pass_name(pass->name);
   ir_explain_pass_begin(function);
@@ -313,6 +316,8 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
   if (changed) {
     ir_function_touch(function);
   }
+  ir_check_silent_mutation(function, pass->name, fingerprint_before,
+                           generation_before);
   ir_value_maybe_sabotage(function, pass->name);
   ir_value_check_after_pass(function, pass->name);
   ir_function_number_values(function);

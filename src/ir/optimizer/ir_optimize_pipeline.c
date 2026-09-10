@@ -1027,6 +1027,7 @@ int ir_optimize_program_pipeline(IRProgram *program,
     ir_explain_finalize(1);
   }
   ir_pass_time_report();
+  ir_analysis_report_stats();
   ir_verify_end_program();
 
   ir_function_index_reset();
