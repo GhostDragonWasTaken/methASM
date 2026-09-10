@@ -1,4 +1,7 @@
 #include "ir_optimize_internal.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 unsigned ir_opt_feature_flags(const IROptFunctionFeatures *features) {
   unsigned flags = 0;
@@ -110,13 +113,8 @@ void ir_collect_function_features(const IRFunction *function,
   }
 }
 
-const IRInstruction *ir_find_temp_producer_before(const IRFunction *function,
-                                                  size_t before_index,
-                                                  const char *temp_name) {
-  if (!function || !temp_name) {
-    return NULL;
-  }
-
+static const IRInstruction *ir_scan_temp_producer_before(
+    const IRFunction *function, size_t before_index, const char *temp_name) {
   for (size_t i = before_index; i > 0;) {
     i--;
     const IRInstruction *instruction = &function->instructions[i];
@@ -132,5 +130,56 @@ const IRInstruction *ir_find_temp_producer_before(const IRFunction *function,
     }
   }
   return NULL;
+}
+
+static int ir_producer_index_mode(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    const char *setting = getenv("METTLE_PRODUCER_INDEX");
+    if (!setting || !*setting) {
+      cached = 0;
+    } else if (strcmp(setting, "index") == 0) {
+      cached = 1;
+    } else if (strcmp(setting, "verify") == 0) {
+      cached = 2;
+    } else {
+      cached = 1;
+    }
+  }
+  return cached;
+}
+
+const IRInstruction *ir_find_temp_producer_before(const IRFunction *function,
+                                                  size_t before_index,
+                                                  const char *temp_name) {
+  if (!function || !temp_name) {
+    return NULL;
+  }
+
+  const int mode = ir_producer_index_mode();
+  if (mode == 0) {
+    return ir_scan_temp_producer_before(function, before_index, temp_name);
+  }
+
+  int usable = 0;
+  const IRInstruction *fast =
+      ir_function_temp_producer_before(function, before_index, temp_name,
+                                       &usable);
+  if (!usable) {
+    return ir_scan_temp_producer_before(function, before_index, temp_name);
+  }
+
+  if (mode == 2) {
+    const IRInstruction *slow =
+        ir_scan_temp_producer_before(function, before_index, temp_name);
+    if (slow != fast) {
+      fprintf(stderr,
+              "mettle: producer index disagrees for '%s' before %zu in '%s'\n",
+              temp_name, before_index,
+              function->name ? function->name : "<unnamed>");
+      return slow;
+    }
+  }
+  return fast;
 }
 

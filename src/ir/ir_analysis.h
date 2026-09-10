@@ -55,12 +55,23 @@ typedef struct {
 } IRJumpIndex;
 
 typedef struct {
+  uint32_t *starts;
+  uint32_t *counts;
+  uint32_t *sites;
+  size_t total;
+  size_t value_count;
+  uint32_t *prev_label;
+  int built;
+} IRDestIndex;
+
+typedef struct {
   uint64_t generation;
   size_t instruction_count;
   size_t *instruction_block;
   IRDomTree dom;
   IRUseDefs ud;
   IRJumpIndex jumps;
+  IRDestIndex dests;
   IRValueTable *labels;
   int valid;
 } IRAnalysis;

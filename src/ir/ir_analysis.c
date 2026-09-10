@@ -36,6 +36,17 @@ static void ir_use_defs_destroy(IRUseDefs *ud) {
   memset(ud, 0, sizeof(*ud));
 }
 
+static void ir_dest_index_destroy(IRDestIndex *dests) {
+  if (!dests) {
+    return;
+  }
+  free(dests->starts);
+  free(dests->counts);
+  free(dests->sites);
+  free(dests->prev_label);
+  memset(dests, 0, sizeof(*dests));
+}
+
 static void ir_jump_index_destroy(IRJumpIndex *jumps) {
   if (!jumps) {
     return;
@@ -53,6 +64,7 @@ static void ir_analysis_destroy(IRAnalysis *analysis) {
   ir_dom_destroy(&analysis->dom);
   ir_use_defs_destroy(&analysis->ud);
   ir_jump_index_destroy(&analysis->jumps);
+  ir_dest_index_destroy(&analysis->dests);
   if (analysis->labels) {
     ir_value_table_clear(analysis->labels);
     free(analysis->labels);
@@ -512,8 +524,167 @@ static int ir_jump_index_build(IRAnalysis *analysis, const IRFunction *function)
   return 1;
 }
 
+static int ir_dest_index_build(IRDestIndex *dests, const IRFunction *function) {
+  memset(dests, 0, sizeof(*dests));
+  const size_t value_count = ir_value_table_count(&function->values) + 1;
+  dests->value_count = value_count;
+  dests->starts = (uint32_t *)calloc(value_count, sizeof(uint32_t));
+  dests->counts = (uint32_t *)calloc(value_count, sizeof(uint32_t));
+  dests->prev_label = (uint32_t *)malloc(
+      (function->instruction_count + 1) * sizeof(uint32_t));
+  if (!dests->starts || !dests->counts || !dests->prev_label) {
+    ir_dest_index_destroy(dests);
+    return 0;
+  }
+
+  uint32_t seen = IR_INSTRUCTION_NONE;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    dests->prev_label[i] = seen;
+    if (function->instructions[i].op == IR_OP_LABEL) {
+      seen = (uint32_t)i;
+    }
+  }
+  dests->prev_label[function->instruction_count] = seen;
+
+  size_t total = 0;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IROperand *dest = &function->instructions[i].dest;
+    if (dest->kind != IR_OPERAND_TEMP || !dest->name ||
+        dest->value_id == IR_VALUE_ID_NONE || dest->value_id >= value_count) {
+      continue;
+    }
+    dests->counts[dest->value_id]++;
+    total++;
+  }
+
+  dests->total = total;
+  dests->sites = total ? (uint32_t *)malloc(total * sizeof(uint32_t)) : NULL;
+  if (total && !dests->sites) {
+    ir_dest_index_destroy(dests);
+    return 0;
+  }
+
+  size_t running = 0;
+  for (size_t i = 0; i < value_count; i++) {
+    dests->starts[i] = (uint32_t)running;
+    running += dests->counts[i];
+    dests->counts[i] = 0;
+  }
+
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IROperand *dest = &function->instructions[i].dest;
+    if (dest->kind != IR_OPERAND_TEMP || !dest->name ||
+        dest->value_id == IR_VALUE_ID_NONE || dest->value_id >= value_count) {
+      continue;
+    }
+    const uint32_t id = dest->value_id;
+    dests->sites[dests->starts[id] + dests->counts[id]] = (uint32_t)i;
+    dests->counts[id]++;
+  }
+
+  dests->built = 1;
+  return 1;
+}
+
+const IRInstruction *ir_function_temp_producer_before(const IRFunction *function,
+                                                      size_t before_index,
+                                                      const char *temp_name,
+                                                      int *usable) {
+  if (usable) {
+    *usable = 0;
+  }
+  if (!function || !temp_name || before_index == 0 ||
+      before_index > function->instruction_count) {
+    return NULL;
+  }
+  const IRAnalysis *analysis = ir_function_analysis((IRFunction *)function);
+  if (!analysis || !analysis->dests.built ||
+      analysis->instruction_count != function->instruction_count) {
+    return NULL;
+  }
+  const IRDestIndex *dests = &analysis->dests;
+  const uint32_t id = ir_value_table_lookup(
+      &function->values, (unsigned char)IR_OPERAND_TEMP, temp_name);
+  if (usable) {
+    *usable = 1;
+  }
+  if (id == IR_VALUE_ID_NONE || id >= dests->value_count) {
+    return NULL;
+  }
+  const uint32_t barrier = dests->prev_label[before_index];
+  const uint32_t start = dests->starts[id];
+  const uint32_t count = dests->counts[id];
+  for (uint32_t k = count; k-- > 0;) {
+    const uint32_t at = dests->sites[start + k];
+    if ((size_t)at >= before_index) {
+      continue;
+    }
+    if (barrier != IR_INSTRUCTION_NONE && at <= barrier) {
+      break;
+    }
+    const IRInstruction *candidate = &function->instructions[at];
+    if (candidate->op == IR_OP_NOP) {
+      continue;
+    }
+    if (candidate->dest.kind != IR_OPERAND_TEMP || !candidate->dest.name ||
+        strcmp(candidate->dest.name, temp_name) != 0) {
+      if (usable) {
+        *usable = 0;
+      }
+      return NULL;
+    }
+    return candidate;
+  }
+  return NULL;
+}
+
+static size_t ir_scan_jump_to(const IRFunction *function, size_t after,
+                              const char *label, int last) {
+  size_t found = IR_BLOCK_NONE;
+  for (size_t i = after + 1; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op == IR_OP_JUMP && in->text && strcmp(in->text, label) == 0) {
+      found = i;
+      if (!last) {
+        return found;
+      }
+    }
+  }
+  return found;
+}
+
+static int ir_jump_index_mode(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    const char *setting = getenv("METTLE_JUMP_INDEX");
+    if (!setting || !*setting) {
+      cached = 0;
+    } else if (strcmp(setting, "index") == 0) {
+      cached = 1;
+    } else if (strcmp(setting, "verify") == 0) {
+      cached = 2;
+    } else {
+      cached = 1;
+    }
+  }
+  return cached;
+}
+
+static void ir_jump_index_report(const IRFunction *function, const char *label,
+                                 size_t after, size_t fast, size_t slow) {
+  fprintf(stderr,
+          "mettle: jump index disagrees for '%s' after %zu in '%s': index %zd, "
+          "scan %zd\n",
+          label, after, function->name ? function->name : "<unnamed>",
+          (ptrdiff_t)fast, (ptrdiff_t)slow);
+}
+
 size_t ir_function_first_jump_to(const IRFunction *function, size_t after,
                                  const char *label) {
+  const int mode = ir_jump_index_mode();
+  if (mode == 0) {
+    return ir_scan_jump_to(function, after, label, 0);
+  }
   const IRAnalysis *analysis = ir_function_analysis((IRFunction *)function);
   if (!analysis || !analysis->jumps.built || !analysis->labels || !label) {
     return IR_BLOCK_NONE;
@@ -525,17 +696,30 @@ size_t ir_function_first_jump_to(const IRFunction *function, size_t after,
   }
   const uint32_t start = analysis->jumps.starts[id];
   const uint32_t count = analysis->jumps.counts[id];
+  size_t fast = IR_BLOCK_NONE;
   for (uint32_t k = 0; k < count; k++) {
     const uint32_t at = analysis->jumps.targets[start + k];
     if ((size_t)at > after) {
-      return (size_t)at;
+      fast = (size_t)at;
+      break;
     }
   }
-  return IR_BLOCK_NONE;
+  if (mode == 2) {
+    const size_t slow = ir_scan_jump_to(function, after, label, 0);
+    if (slow != fast) {
+      ir_jump_index_report(function, label, after, fast, slow);
+      return slow;
+    }
+  }
+  return fast;
 }
 
 size_t ir_function_last_jump_to(const IRFunction *function, size_t after,
                                 const char *label) {
+  const int mode = ir_jump_index_mode();
+  if (mode == 0) {
+    return ir_scan_jump_to(function, after, label, 1);
+  }
   const IRAnalysis *analysis = ir_function_analysis((IRFunction *)function);
   if (!analysis || !analysis->jumps.built || !analysis->labels || !label) {
     return IR_BLOCK_NONE;
@@ -547,13 +731,22 @@ size_t ir_function_last_jump_to(const IRFunction *function, size_t after,
   }
   const uint32_t start = analysis->jumps.starts[id];
   const uint32_t count = analysis->jumps.counts[id];
+  size_t fast = IR_BLOCK_NONE;
   for (uint32_t k = count; k-- > 0;) {
     const uint32_t at = analysis->jumps.targets[start + k];
     if ((size_t)at > after) {
-      return (size_t)at;
+      fast = (size_t)at;
+      break;
     }
   }
-  return IR_BLOCK_NONE;
+  if (mode == 2) {
+    const size_t slow = ir_scan_jump_to(function, after, label, 1);
+    if (slow != fast) {
+      ir_jump_index_report(function, label, after, fast, slow);
+      return slow;
+    }
+  }
+  return fast;
 }
 
 const IRAnalysis *ir_function_analysis(IRFunction *function) {
@@ -608,6 +801,7 @@ const IRAnalysis *ir_function_analysis(IRFunction *function) {
   ir_dom_build(&analysis->dom, blocks, block_count, function->entry_block);
   ir_use_defs_build(&analysis->ud, function);
   ir_jump_index_build(analysis, function);
+  ir_dest_index_build(&analysis->dests, function);
 
   analysis->generation = function->generation;
   analysis->instruction_count = function->instruction_count;

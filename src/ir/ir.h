@@ -503,6 +503,9 @@ const IRValueUse *ir_function_value_uses(IRFunction *function, uint32_t id,
                                          size_t *count_out);
 const size_t *ir_function_dominance_frontier(IRFunction *function, size_t block,
                                              size_t *count_out);
+const IRInstruction *ir_function_temp_producer_before(
+    const IRFunction *function, size_t before_index, const char *temp_name,
+    int *usable);
 size_t ir_function_first_jump_to(const IRFunction *function, size_t after,
                                  const char *label);
 size_t ir_function_last_jump_to(const IRFunction *function, size_t after,
