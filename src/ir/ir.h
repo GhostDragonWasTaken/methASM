@@ -117,6 +117,7 @@ typedef enum {
   IR_OP_PREFETCH,
   IR_OP_SELECT,
   IR_OP_SAFETY_CHECK,
+  IR_OP_PHI,
   IR_OP_KIND_COUNT
 } IROpcode;
 
@@ -464,6 +465,7 @@ int ir_function_rebuild_cfg(IRFunction *function);
 const IRBasicBlock *ir_function_blocks(IRFunction *function,
                                        size_t *block_count);
 
+int ir_instruction_writes_destination(const IRInstruction *instruction);
 int ir_operand_is_value(const IROperand *operand);
 uint32_t ir_function_value_id(IRFunction *function, const IROperand *operand);
 const char *ir_function_value_name(const IRFunction *function, uint32_t id);

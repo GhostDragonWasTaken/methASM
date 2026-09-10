@@ -326,14 +326,15 @@ static int ir_use_defs_build(IRUseDefs *ud, const IRFunction *function) {
   size_t use_total = 0;
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
-    if (ir_operand_is_value(&instruction->dest) &&
+    const int writes = ir_instruction_writes_destination(instruction);
+    if (writes && ir_operand_is_value(&instruction->dest) &&
         instruction->dest.value_id != IR_VALUE_ID_NONE &&
         instruction->dest.value_id < value_count) {
       ud->def_count[instruction->dest.value_id]++;
       def_total++;
     }
     const size_t operands = 3 + instruction->argument_count;
-    for (size_t j = 1; j < operands; j++) {
+    for (size_t j = writes ? 1 : 0; j < operands; j++) {
       const IROperand *operand = ir_analysis_operand_at(instruction, j);
       if (!operand || !ir_operand_is_value(operand) ||
           operand->value_id == IR_VALUE_ID_NONE ||
@@ -383,7 +384,8 @@ static int ir_use_defs_build(IRUseDefs *ud, const IRFunction *function) {
 
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
-    if (ir_operand_is_value(&instruction->dest) &&
+    const int writes = ir_instruction_writes_destination(instruction);
+    if (writes && ir_operand_is_value(&instruction->dest) &&
         instruction->dest.value_id != IR_VALUE_ID_NONE &&
         instruction->dest.value_id < value_count) {
       const uint32_t id = instruction->dest.value_id;
@@ -394,7 +396,7 @@ static int ir_use_defs_build(IRUseDefs *ud, const IRFunction *function) {
       def_fill[id]++;
     }
     const size_t operands = 3 + instruction->argument_count;
-    for (size_t j = 1; j < operands; j++) {
+    for (size_t j = writes ? 1 : 0; j < operands; j++) {
       const IROperand *operand = ir_analysis_operand_at(instruction, j);
       if (!operand || !ir_operand_is_value(operand) ||
           operand->value_id == IR_VALUE_ID_NONE ||

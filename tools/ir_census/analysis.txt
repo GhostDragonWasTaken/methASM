@@ -1,6 +1,6 @@
 mettle ir census
-generated 2026-09-10 04:29:26
-commit a4ae0472
+generated 2026-09-10 04:57:22
+commit b590d95b
 compiler G:\Projects\Mettle\bin\mettle.exe
 units 129 of 135
 
@@ -15,20 +15,19 @@ compile failures 6
 value id mode check
 value id disagreements 0
 
-dominance cross-check mode verbose
-dominance functions agreeing 310604
+dominance cross-check mode on
+dominance functions agreeing 0
 dominance mismatches 0
 
 structure mode census
 structure violations 0
-multi-def raised by a pass: 547 reports
-  hoist_global_bases                     219 reports over 15 units
-  hoist_row_pointers                     143 reports over 31 units
-  redundancy_copy_prop                    54 reports over 13 units
+multi-def raised by a pass: 188 reports
   promote_loop_memory                     53 reports over 10 units
   induction_pointer                       51 reports over 21 units
-  leaf_copy_prop                          23 reports over 8 units
-  hoist_load_bases                         4 reports over 4 units
+  simd_copy                               37 reports over 5 units
+  demote_scalar_addresses                 34 reports over 15 units
+  auto_vectorize_int                      12 reports over 6 units
+  auto_vectorize                           1 reports over 1 units
 
 value census
   functions              7809

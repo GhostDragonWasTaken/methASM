@@ -302,6 +302,7 @@ static const int IR_WRITES_SYMBOL[IR_OP_KIND_COUNT] = {
     [IR_OP_SELECT] = 1,
     [IR_OP_SIMD_LCG_U32] = 1,
     [IR_OP_ADDRESS_SPACE_ALLOC] = 1,
+    [IR_OP_PHI] = 1,
 };
 
 int ir_instruction_writes_symbol(const IRInstruction *instruction) {
@@ -361,6 +362,7 @@ static const int IR_WRITES_DESTINATION[IR_OP_KIND_COUNT] = {
     [IR_OP_SELECT] = 1,
     [IR_OP_SIMD_LCG_U32] = 1,
     [IR_OP_ADDRESS_SPACE_ALLOC] = 1,
+    [IR_OP_PHI] = 1,
 };
 
 int ir_instruction_writes_destination(const IRInstruction *instruction) {

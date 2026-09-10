@@ -2320,6 +2320,7 @@ static const char *const IR_OPCODE_NAMES[IR_OP_KIND_COUNT] = {
     [IR_OP_PREFETCH] = "prefetch",
     [IR_OP_SELECT] = "select",
     [IR_OP_SAFETY_CHECK] = "safety_check",
+    [IR_OP_PHI] = "phi",
     [IR_OP_BINARY] = "binary",
     [IR_OP_ROTATE_ADD] = "rotate_add",
     [IR_OP_UNARY] = "unary",
@@ -2521,6 +2522,30 @@ static int ir_format_value_line(const IRInstruction *instruction,
       written = snprintf(buffer, buffer_size, "%s = select(%s, %s, %s)", dest,
                          lhs, rhs, else_val);
     }
+    break;
+  }
+  case IR_OP_PHI: {
+    int used = snprintf(buffer, buffer_size, "%s = phi", dest);
+    if (used < 0) {
+      used = 0;
+    }
+    for (size_t i = 0; i + 1 < instruction->argument_count; i += 2) {
+      char value[128];
+      char label[128];
+      ir_format_operand(&instruction->arguments[i], value, sizeof(value));
+      ir_format_operand(&instruction->arguments[i + 1], label, sizeof(label));
+      if ((size_t)used >= buffer_size) {
+        break;
+      }
+      const int more =
+          snprintf(buffer + used, buffer_size - (size_t)used, " [%s from %s]",
+                   value, label);
+      if (more < 0) {
+        break;
+      }
+      used += more;
+    }
+    written = used;
     break;
   }
   default:
@@ -4641,6 +4666,7 @@ static int ir_gpu_instruction_defines_dest(const IRInstruction *instruction) {
   case IR_OP_NEW:
   case IR_OP_CAST:
   case IR_OP_SELECT:
+  case IR_OP_PHI:
     return 1;
   default:
     return 0;

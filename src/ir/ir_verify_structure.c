@@ -151,7 +151,8 @@ int ir_function_check_structure(const IRFunction *function,
       }
     }
 
-    if (defs && ir_operand_is_value(&instruction->dest)) {
+    if (defs && ir_instruction_writes_destination(instruction) &&
+        ir_operand_is_value(&instruction->dest)) {
       const uint32_t id = instruction->dest.value_id;
       if (id != IR_VALUE_ID_NONE && id < value_capacity) {
         defs[id]++;
