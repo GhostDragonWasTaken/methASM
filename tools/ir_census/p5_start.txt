@@ -1,0 +1,229 @@
+mettle ir census
+generated 2026-09-10 10:30:23
+commit c269f27c
+compiler G:\Projects\Mettle\bin\mettle.exe
+units 0 of 135
+
+compile failures 135
+  fib: no ir sidecar
+  word_count: no ir sidecar
+  grep: no ir sidecar
+  sum_squares: no ir sidecar
+  collatz: no ir sidecar
+  byte_hash: no ir sidecar
+  prime_count: no ir sidecar
+  matrix_mul: no ir sidecar
+  sort_insertion: no ir sidecar
+  memcpy_bench: no ir sidecar
+  memset_bench: no ir sidecar
+  memcmp_bench: no ir sidecar
+  binary_search: no ir sidecar
+  dot_product: no ir sidecar
+  lcg_rng: no ir sidecar
+  prefix_sum: no ir sidecar
+  popcount: no ir sidecar
+  reverse_i32: no ir sidecar
+  minmax_scan: no ir sidecar
+  scale_i32: no ir sidecar
+  clamp_i32: no ir sidecar
+  float_sum: no ir sidecar
+  mandelbrot: no ir sidecar
+  rec_fib: no ir sidecar
+  int_divmod: no ir sidecar
+  leaf_call: no ir sidecar
+  func_ptr: no ir sidecar
+  saxpy: no ir sidecar
+  fp_div: no ir sidecar
+  struct_byval: no ir sidecar
+  switch_vm: no ir sidecar
+  aos_sum: no ir sidecar
+  transpose: no ir sidecar
+  const_mod: no ir sidecar
+  global_acc: no ir sidecar
+  i2f_conv: no ir sidecar
+  byte_arith: no ir sidecar
+  quicksort: no ir sidecar
+  crc32: no ir sidecar
+  base64_encode: no ir sidecar
+  linked_list_sum: no ir sidecar
+  gather_sum: no ir sidecar
+  field_sum: no ir sidecar
+  matvec: no ir sidecar
+  heapsort: no ir sidecar
+  merge_sort: no ir sidecar
+  radix_sort: no ir sidecar
+  rle_encode: no ir sidecar
+  bst_insert: no ir sidecar
+  json_parse: no ir sidecar
+  interp_ast: no ir sidecar
+  word_freq: no ir sidecar
+  huffman: no ir sidecar
+  lz77: no ir sidecar
+  astar_grid: no ir sidecar
+  regex_match: no ir sidecar
+  physics_grid: no ir sidecar
+  bignum_mul: no ir sidecar
+  btree_index: no ir sidecar
+  bytecode_vm: no ir sidecar
+  sudoku_solve: no ir sidecar
+  voxel_trace: no ir sidecar
+  life_bits: no ir sidecar
+  diff_lcs: no ir sidecar
+  csv_query: no ir sidecar
+  mark_sweep: no ir sidecar
+  link_resolve: no ir sidecar
+  abstractions/table: no ir sidecar
+  abstractions/variants: no ir sidecar
+  abstractions/wire: no ir sidecar
+  awfy/bounce: no ir sidecar
+  awfy/sieve: no ir sidecar
+  desk/board: no ir sidecar
+  desk/desk: no ir sidecar
+  direct_object_smoke/direct_object_smoke: no ir sidecar
+  distinct/distinct: no ir sidecar
+  engine/engine: no ir sidecar
+  explain_demo/explain_demo: no ir sidecar
+  exp_bench/exp_bench: no ir sidecar
+  field_ranges/field_ranges: no ir sidecar
+  float32_sum/float32_sum: no ir sidecar
+  gguf_reader/gguf_reader: no ir sidecar
+  gpu_inference/decode_decls: no ir sidecar
+  gpu_inference/decode_host: no ir sidecar
+  gpu_inference/decode_kernels: no ir sidecar
+  gpu_minimal/scale_host: no ir sidecar
+  gpu_minimal/scale_kernel: no ir sidecar
+  gpu_vadd/vadd_decls: no ir sidecar
+  gpu_vadd/vadd_host: no ir sidecar
+  gpu_vadd/vadd_kernel: no ir sidecar
+  guessing-game/guessing_game: no ir sidecar
+  hello/hello: no ir sidecar
+  hello_ui/hello_ui: no ir sidecar
+  hexdump/hexdump: no ir sidecar
+  inference/inference: no ir sidecar
+  job_system/job_system: no ir sidecar
+  llm/dequant_test: no ir sidecar
+  llm/gemv_test: no ir sidecar
+  llm/gguf_probe: no ir sidecar
+  machine/little: no ir sidecar
+  orbit_demo/orbits: no ir sidecar
+  os/boot: no ir sidecar
+  os/kernel: no ir sidecar
+  os/stage2: no ir sidecar
+  quant_dot/quant_dot: no ir sidecar
+  quant_matmul/quant_matmul: no ir sidecar
+  raylib/raylib: no ir sidecar
+  raylib/sphere: no ir sidecar
+  string_interp/string_interp: no ir sidecar
+  testing/ui_test: no ir sidecar
+  tracy_demo/tracy_demo: no ir sidecar
+  ui_demo/ui_demo: no ir sidecar
+  video_player/aac: no ir sidecar
+  video_player/aac_decode: no ir sidecar
+  video_player/aac_tables: no ir sidecar
+  video_player/audio: no ir sidecar
+  video_player/avi: no ir sidecar
+  video_player/h264: no ir sidecar
+  video_player/h264_bslice: no ir sidecar
+  video_player/h264_deblock: no ir sidecar
+  video_player/h264_decode: no ir sidecar
+  video_player/h264_frame: no ir sidecar
+  video_player/h264_gpu: no ir sidecar
+  video_player/h264_inter: no ir sidecar
+  video_player/h264_predict: no ir sidecar
+  video_player/h264_pslice: no ir sidecar
+  video_player/h264_tables: no ir sidecar
+  video_player/jpeg: no ir sidecar
+  video_player/mp4: no ir sidecar
+  video_player/paint: no ir sidecar
+  video_player/player: no ir sidecar
+  video_player/source: no ir sidecar
+  video_player/video_kernels: no ir sidecar
+  video_player/video_kernel_decls: no ir sidecar
+  video_player/vptool: no ir sidecar
+
+value census
+  functions              0
+  blocks                 
+  instructions           
+  temps                  
+  temps multi-def          n/a
+  symbols                
+  symbols multi-def        n/a
+  locals declared        
+  locals address-taken     n/a
+  phi instructions       
+
+multi-def by unit
+
+functions with multi-def temps
+  count 0
+
+source burn-down
+  src/ir/optimizer       name reads   2721   name compares   441   forward scans   52   files 44
+  src/ir                 name reads    775   name compares   214   forward scans    3   files 31
+  src/codegen/binary     name reads    816   name compares   102   forward scans    1   files 18
+  src/codegen            name reads    305   name compares    20   forward scans    1   files 7
+
+source burn-down by file
+  src/codegen/binary     mir_lower.c                                  reads   299  compares   34  scans   1
+  src/ir/optimizer       ir_optimize_simd_float.c                     reads   251  compares   37  scans   5
+  src/ir/optimizer       ir_optimize_scan_search.c                    reads   248  compares   44  scans   8
+  src/ir/optimizer       ir_optimize_load_copy_cleanup.c              reads   199  compares   26  scans   2
+  src/ir/optimizer       ir_optimize_redundancy.c                     reads   183  compares   21  scans   6
+  src/ir                 ir.c                                         reads   182  compares   29  scans   0
+  src/codegen            ptx_emitter.c                                reads   153  compares    9  scans   1
+  src/codegen/binary     arm64_ir_encode.c                            reads   142  compares   18  scans   0
+  src/ir/optimizer       ir_optimize_safety.c                         reads   130  compares   21  scans   2
+  src/ir/optimizer       ir_optimize_scalar_simplify.c                reads   120  compares   25  scans   0
+  src/ir/optimizer       ir_optimize_simd_contract.c                  reads   115  compares   20  scans   2
+  src/codegen/binary     abi.c                                        reads   114  compares   18  scans   0
+  src/ir/optimizer       ir_optimize_popcount_collatz.c               reads   112  compares   16  scans   2
+  src/ir/optimizer       ir_optimize_simd_memory_maps.c               reads   111  compares   22  scans   1
+  src/ir/optimizer       ir_optimize_loop_unroll.c                    reads   108  compares   21  scans   3
+  src/ir/optimizer       ir_optimize_sroa.c                           reads   103  compares    3  scans   0
+  src/codegen            spirv_emitter.c                              reads    95  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_simd_fill.c                      reads    93  compares   18  scans   1
+  src/ir                 ir_interp.c                                  reads    88  compares   96  scans   1
+  src/ir/optimizer       ir_optimize_parallel_loop.c                  reads    84  compares   15  scans   0
+  src/ir/optimizer       ir_optimize_simd_sum_i32.c                   reads    83  compares   21  scans   5
+  src/codegen/binary     emit.c                                       reads    79  compares    1  scans   0
+  src/ir/optimizer       ir_optimize_core.c                           reads    75  compares    9  scans   0
+  src/ir/optimizer       ir_optimize_user_rewrite.c                   reads    66  compares    8  scans   0
+  src/codegen/binary     x86_16.c                                     reads    59  compares    4  scans   0
+  src/ir                 ir_effects.c                                 reads    55  compares   13  scans   0
+  src/ir/optimizer       ir_optimize_word_count_and_div_shift.c       reads    52  compares    6  scans   3
+  src/ir/optimizer       ir_optimize_pointer_induction.c              reads    52  compares    6  scans   0
+  src/ir/optimizer       ir_optimize_layout.c                         reads    52  compares    8  scans   0
+  src/ir/optimizer       ir_optimize_inline.c                         reads    51  compares   13  scans   2
+  src/codegen/binary     globals.c                                    reads    50  compares   10  scans   0
+  src/ir                 ir_lower_expr.c                              reads    49  compares    2  scans   0
+  src/ir/optimizer       ir_optimize_alias.c                          reads    48  compares   10  scans   0
+  src/ir                 ir_verify.c                                  reads    43  compares   10  scans   0
+  src/ir/optimizer       ir_optimize_tail_recursion.c                 reads    36  compares    5  scans   0
+  src/ir                 ir_lower_address.c                           reads    36  compares    1  scans   0
+  src/ir/optimizer       ir_optimize_pure_call_licm.c                 reads    35  compares    7  scans   1
+  src/ir/optimizer       ir_optimize_pass_driver.c                    reads    33  compares    4  scans   0
+  src/codegen            binary_emitter.c                             reads    32  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_prefetch.c                       reads    32  compares    2  scans   0
+  src/ir/optimizer       ir_optimize_value_range.c                    reads    32  compares   12  scans   0
+  src/ir                 ir_lower_stmt.c                              reads    30  compares    4  scans   0
+  src/ir                 ir_twins.c                                   reads    28  compares    4  scans   0
+  src/ir/optimizer       ir_optimize_shift_sort.c                     reads    27  compares    6  scans   1
+  src/ir                 ir_lower_switch_match.c                      reads    27  compares    0  scans   0
+  src/ir/optimizer       ir_optimize_explain.c                        reads    26  compares    7  scans   0
+  src/ir                 ir_values.c                                  reads    25  compares    3  scans   0
+  src/ir                 ir_comptime.c                                reads    24  compares    5  scans   0
+  src/ir                 mtlc_type.c                                  reads    23  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_gpu_staging.c                    reads    23  compares    7  scans   0
+  src/ir                 ir_deadline.c                                reads    23  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_induction_cleanup.c              reads    23  compares    5  scans   0
+  src/codegen/binary     driver.c                                     reads    18  compares    2  scans   0
+  src/codegen/binary     support.c                                    reads    17  compares    4  scans   0
+  src/ir                 ir_verify_structure.c                        reads    17  compares    1  scans   2
+  src/ir                 ir_lower_types.c                             reads    16  compares    4  scans   0
+  src/ir/optimizer       ir_optimize_pipeline.c                       reads    15  compares    0  scans   0
+  src/ir/optimizer       ir_optimize_readonly_globals.c               reads    15  compares    1  scans   0
+  src/codegen/binary     mir_annotate.c                               reads    15  compares    3  scans   0
+  src/ir/optimizer       ir_optimize_rewrite.c                        reads    14  compares    3  scans   0
+
+binary hashes

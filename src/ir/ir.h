@@ -503,6 +503,10 @@ const IRValueUse *ir_function_value_uses(IRFunction *function, uint32_t id,
                                          size_t *count_out);
 const size_t *ir_function_dominance_frontier(IRFunction *function, size_t block,
                                              size_t *count_out);
+size_t ir_function_first_jump_to(const IRFunction *function, size_t after,
+                                 const char *label);
+size_t ir_function_last_jump_to(const IRFunction *function, size_t after,
+                                const char *label);
 size_t ir_analysis_self_check(IRFunction *function);
 size_t ir_value_stale_report_count(void);
 size_t ir_value_unnumbered_count(void);

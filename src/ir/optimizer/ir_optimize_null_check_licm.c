@@ -46,14 +46,9 @@ int ir_null_check_licm_pass(IRFunction *function, int *changed) {
     }
     const char *loop_label = header->text;
 
-    size_t backedge_index = (size_t)-1;
-    for (size_t j = i + 1; j < function->instruction_count; j++) {
-      const IRInstruction *probe = &function->instructions[j];
-      if (probe->op == IR_OP_JUMP && probe->text &&
-          strcmp(probe->text, loop_label) == 0) {
-        backedge_index = j;
-        break;
-      }
+    size_t backedge_index = ir_function_first_jump_to(function, i, loop_label);
+    if (backedge_index == IR_BLOCK_NONE) {
+      backedge_index = (size_t)-1;
     }
     if (backedge_index == (size_t)-1) {
       continue;

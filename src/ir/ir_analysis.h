@@ -1,6 +1,8 @@
 #ifndef IR_ANALYSIS_H
 #define IR_ANALYSIS_H
 
+#include "ir_values.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -44,11 +46,22 @@ typedef struct {
 } IRUseDefs;
 
 typedef struct {
+  uint32_t *starts;
+  uint32_t *counts;
+  uint32_t *targets;
+  size_t total;
+  size_t label_count;
+  int built;
+} IRJumpIndex;
+
+typedef struct {
   uint64_t generation;
   size_t instruction_count;
   size_t *instruction_block;
   IRDomTree dom;
   IRUseDefs ud;
+  IRJumpIndex jumps;
+  IRValueTable *labels;
   int valid;
 } IRAnalysis;
 

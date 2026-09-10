@@ -83,14 +83,8 @@ static int ir_cleanup_label_is_loop_header(const char *label) {
 
 static size_t ir_cleanup_loop_latch(const IRFunction *function, size_t header,
                                     const char *label) {
-  size_t latch = 0;
-  for (size_t i = header + 1; i < function->instruction_count; i++) {
-    const IRInstruction *ins = &function->instructions[i];
-    if (ins->op == IR_OP_JUMP && ins->text && strcmp(ins->text, label) == 0) {
-      latch = i;
-    }
-  }
-  return latch;
+  const size_t latch = ir_function_last_jump_to(function, header, label);
+  return latch == IR_BLOCK_NONE ? 0 : latch;
 }
 
 int ir_hoist_body_locals_pass(IRFunction *function, int *changed) {

@@ -161,7 +161,7 @@ function Measure-SourceBurndown {
     $rows = New-Object System.Collections.ArrayList
     $reName = [regex]::new('\.name\b|->name\b', 'Compiled')
     $reStrcmpName = [regex]::new('str(n?)cmp\s*\([^;]*\bname\b', 'Compiled')
-    $reForwardScan = [regex]::new('for\s*\(\s*size_t\s+\w+\s*=\s*\w+\s*\+\s*1\s*;', 'Compiled')
+    $reForwardScan = [regex]::new('for\s*\(\s*size_t\s+(\w+)\s*=\s*\w+\s*\+\s*1\s*;\s*\1\s*<\s*[^;]*instruction_count', 'Compiled')
     foreach ($d in $dirs) {
         if (-not (Test-Path $d.Path)) { continue }
         $files = Get-ChildItem -Path $d.Path -Filter "*.c" -File

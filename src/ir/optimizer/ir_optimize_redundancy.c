@@ -1644,14 +1644,8 @@ static int re_label_is_loop_header(const char *text) {
 
 static size_t re_loop_latch(const IRFunction *function, size_t header) {
   const char *label = function->instructions[header].text;
-  size_t latch = 0;
-  for (size_t i = header + 1; i < function->instruction_count; i++) {
-    const IRInstruction *ins = &function->instructions[i];
-    if (ins->op == IR_OP_JUMP && ins->text && strcmp(ins->text, label) == 0) {
-      latch = i;
-    }
-  }
-  return latch;
+  const size_t latch = ir_function_last_jump_to(function, header, label);
+  return latch == IR_BLOCK_NONE ? 0 : latch;
 }
 
 static int re_collect_loop_writes(const IRFunction *function,
