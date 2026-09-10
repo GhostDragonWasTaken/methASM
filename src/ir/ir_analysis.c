@@ -827,7 +827,8 @@ static const IRJumpIndex *ir_analysis_require_jumps(IRFunction *function) {
     }
   }
   if (analysis->jumps.built &&
-      analysis->jumps_writes != g_ir_operand_writes) {
+      (analysis->jumps_writes != g_ir_operand_writes ||
+       analysis->jumps_generation != function->structure_generation)) {
     ir_jump_index_destroy(&analysis->jumps);
     if (analysis->labels) {
       ir_value_table_clear(analysis->labels);
