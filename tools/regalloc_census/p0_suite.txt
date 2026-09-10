@@ -1,0 +1,69 @@
+regalloc census  compiler=G:\Projects\Mettle\bin\mettle.exe
+sources=67  arms=base,ssa
+
+arm base: functions=173 kept=24315 spilled=490 (1,98%) copies=2648 coalesced=534 spill_side=392
+  suite 3: kept=13621 spilled=333 copies=1117 coalesced=360
+  suite 2: kept=5142 spilled=89 copies=773 coalesced=136
+  suite 1: kept=5552 spilled=68 copies=758 coalesced=38
+  worst by spills:
+    regex_match                  gen_corpus               kept=256   spilled=57    copies=38    coalesced=10
+    huffman                      assign_codes             kept=132   spilled=32    copies=46    coalesced=8
+    voxel_trace                  render                   kept=67    spilled=28    copies=14    coalesced=0
+    life_bits                    step                     kept=90    spilled=21    copies=9     coalesced=1
+    sudoku_solve                 main                     kept=380   spilled=17    copies=21    coalesced=6
+    huffman                      roundtrip                kept=120   spilled=16    copies=26    coalesced=6
+    quicksort                    main                     kept=282   spilled=14    copies=57    coalesced=8
+    json_parse                   gen_doc                  kept=301   spilled=14    copies=53    coalesced=26
+    lz77                         compress                 kept=63    spilled=9     copies=4     coalesced=2
+    quicksort                    quicksort                kept=39    spilled=9     copies=17    coalesced=4
+  worst by surviving copies:
+    bst_insert                   bst_insert               copies=132   coalesced=29    spill_side=0     spilled=0
+    bst_insert                   build_tree               copies=123   coalesced=27    spill_side=19    spilled=4
+    fib                          main                     copies=92    coalesced=0     spill_side=0     spilled=3
+    fib                          bench_unrolled           copies=68    coalesced=0     spill_side=0     spilled=0
+    fib                          bench_looped             copies=68    coalesced=0     spill_side=0     spilled=0
+    bst_insert                   inorder_sum              copies=88    coalesced=22    spill_side=3     spilled=3
+    interp_ast                   gen_source               copies=90    coalesced=38    spill_side=5     spilled=8
+    quicksort                    main                     copies=57    coalesced=8     spill_side=20    spilled=14
+    sort_insertion               main                     copies=49    coalesced=5     spill_side=21    spilled=1
+    huffman                      assign_codes             copies=46    coalesced=8     spill_side=36    spilled=32
+
+arm ssa: functions=173 kept=26947 spilled=1087 (3,88%) copies=5945 coalesced=1098 spill_side=1641
+  suite 3: kept=15315 spilled=663 copies=3178 coalesced=800
+  suite 2: kept=5642 spilled=322 copies=1625 coalesced=204
+  suite 1: kept=5990 spilled=102 copies=1142 coalesced=94
+  worst by spills:
+    life_bits                    step                     kept=140   spilled=115   copies=193   coalesced=5
+    quicksort                    main                     kept=341   spilled=100   copies=266   coalesced=18
+    link_resolve                 generate_stream          kept=271   spilled=100   copies=249   coalesced=3
+    link_resolve                 parse_stream             kept=173   spilled=87    copies=142   coalesced=5
+    voxel_trace                  render                   kept=118   spilled=81    copies=149   coalesced=15
+    quicksort                    quicksort                kept=75    spilled=44    copies=113   coalesced=9
+    json_parse                   gen_doc                  kept=424   spilled=38    copies=208   coalesced=48
+    sudoku_solve                 main                     kept=421   spilled=35    copies=80    coalesced=10
+    huffman                      assign_codes             kept=132   spilled=32    copies=46    coalesced=8
+    matrix_mul                   matmul                   kept=26    spilled=23    copies=40    coalesced=0
+  worst by surviving copies:
+    quicksort                    main                     copies=266   coalesced=18    spill_side=191   spilled=100
+    link_resolve                 generate_stream          copies=249   coalesced=3     spill_side=198   spilled=100
+    life_bits                    step                     copies=193   coalesced=5     spill_side=165   spilled=115
+    json_parse                   gen_doc                  copies=208   coalesced=48    spill_side=80    spilled=38
+    interp_ast                   gen_source               copies=211   coalesced=72    spill_side=36    spilled=22
+    link_resolve                 parse_stream             copies=142   coalesced=5     spill_side=129   spilled=87
+    voxel_trace                  render                   copies=149   coalesced=15    spill_side=120   spilled=81
+    regex_match                  gen_corpus               copies=165   coalesced=50    spill_side=34    spilled=18
+    quicksort                    quicksort                copies=113   coalesced=9     spill_side=75    spilled=44
+    bst_insert                   bst_insert               copies=132   coalesced=29    spill_side=0     spilled=0
+
+ssa minus base, per function (spilled delta, worst first):
+    life_bits::step                                      spilled   94 surviving_copies  180
+    link_resolve::generate_stream                        spilled   92 surviving_copies  210
+    link_resolve::parse_stream                           spilled   87 surviving_copies  132
+    quicksort::main                                      spilled   86 surviving_copies  199
+    voxel_trace::render                                  spilled   53 surviving_copies  120
+    quicksort::quicksort                                 spilled   35 surviving_copies   91
+    json_parse::gen_doc                                  spilled   24 surviving_copies  133
+    matrix_mul::matmul                                   spilled   23 surviving_copies   40
+    sudoku_solve::main                                   spilled   18 surviving_copies   55
+    interp_ast::gen_source                               spilled   14 surviving_copies   87
+

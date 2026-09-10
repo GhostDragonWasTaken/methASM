@@ -189,9 +189,21 @@ MIR, in `src/codegen/binary/mir*.c`, is a machine-level IR with real register
 allocation. `mir_lower.c` lowers IR to MIR, `mir_regalloc.c` allocates,
 `peephole.c` cleans up, and `mir_encode.c` emits bytes.
 
-Allocation is Chaitin-Briggs graph coloring by default;
-`METTLE_LINEAR_ALLOC` selects a linear allocator instead. The pool is the full
-general set plus xmm0-15, with R10 and R11 held back as scratch.
+Allocation is graph coloring by default; `METTLE_LINEAR_ALLOC` selects a
+linear allocator instead. `mir_cfg.c` builds the blocks, dominators, natural
+loops and per-block liveness once per function, and the colourer reads every
+fact from it: interference is between values that are live and defined at the
+same point, a value crosses a call only where it is live across that call, a
+register is barred only where a live value spans an instruction that pins it,
+and spill cost weights each use by its real loop depth. Before colouring,
+`mir_coalesce.c` merges every register copy whose two sides do not interfere
+and pass the Briggs or George test, so the copies SSA destruction leaves behind
+cost nothing. Dead code elimination is a mark-and-sweep from real consumers, so
+a cycle of copies with no reader is removed whole. The pool is the full general
+set plus xmm0-15, with R10 and R11 held back as scratch.
+`mir_regalloc_verify.c` recomputes liveness on its own after allocation and
+rejects two live values in one register; `METTLE_REGALLOC_VERIFY=1` runs it,
+`METTLE_REGALLOC_VERIFY_BREAK=1` corrupts one colouring to prove it.
 
 Loop rotation converts a top-testing loop to a bottom-testing one under three
 guards, the third being that the latch must be the only edge into the header.

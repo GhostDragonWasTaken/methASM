@@ -133,6 +133,7 @@ MirVregId mir_new_vreg(MirFunction *fn, MirRegClass rclass, int width) {
   v->spill_offset = 0;
   v->live_start = MIR_LIVE_NONE;
   v->live_end = MIR_LIVE_NONE;
+  v->coalesced_into = MIR_VREG_NONE;
   v->loop_carried = 0;
   v->coalesce_hint = MIR_VREG_NONE;
   return (MirVregId)(fn->vreg_count++);

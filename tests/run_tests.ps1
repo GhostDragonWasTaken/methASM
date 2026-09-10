@@ -475,6 +475,7 @@ $cases = @(
     Name          = "naked_interrupt"
     Path          = "tests/test_naked_interrupt.mettle"
     ShouldSucceed = $true
+    SkipRunDiff   = -not $script:OnWindows
   },
   @{
     Name          = "volatile_accesses"

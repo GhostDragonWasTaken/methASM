@@ -36,6 +36,7 @@ typedef struct {
   int entry_live;
   int crosses_preserving_only;
   int crosses_xmm_preserving_only;
+  int coalesced_into;
 } MirVreg;
 #define MIR_LIVE_NONE (-1)
 
@@ -286,6 +287,8 @@ typedef struct {
   size_t iconst_capacity;
 
   int spill_bytes;
+
+  size_t merged_copies;
 
   int preserve_slot;
   int preserve_xmm_slot;

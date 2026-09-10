@@ -718,7 +718,7 @@ int mir_regalloc_verify(MirFunction *fn) {
   for (size_t i = 0; ok && i < fn->insn_count; i++) {
     ok = mir_verify_check_insn(&st, i);
   }
-  if (ok) {
+  if (ok && getenv("METTLE_REGALLOC_TRACE")) {
     fprintf(stderr, "RA-VERIFY\t%s\tOK\n", mir_verify_fn_name(fn));
   }
   mir_verify_free(&st);

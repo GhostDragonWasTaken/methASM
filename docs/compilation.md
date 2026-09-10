@@ -283,6 +283,14 @@ itself.
 | `METTLE_TRACE_IR_PASSES` | Trace each IR pass. |
 | `METTLE_TIME_CODEGEN` | Time code generation. |
 | `METTLE_LINEAR_ALLOC` | Use the linear register allocator in place of the graph-coloring default. |
+| `METTLE_REGALLOC_TRACE` | One `RA-DONE` line per function: values kept, spilled, register copies, copies coalesced. |
+| `METTLE_REGALLOC_VERIFY` | Recompute liveness independently after allocation and reject any two live values sharing a register. |
+| `METTLE_REGALLOC_VERIFY_BREAK` | Deliberately corrupt one colouring so the verifier is proven on a known-bad build. |
+| `METTLE_INTERVAL_INTERFERENCE` | Colour from the old linear-interval interference graph in place of exact liveness, for A/B. |
+| `METTLE_RA_NO_COALESCE` | Skip the pre-colouring copy coalescing, for A/B. |
+| `METTLE_RA_COALESCE_CHECK` | Rebuild the interference graph after coalescing and fail on any edge the merged graph lost. |
+| `METTLE_RA_COALESCE_AGGRESSIVE` | Merge every non-interfering copy without the conservative test; correct, may spill more. |
+| `METTLE_RA_LIVE_DUMP` | With the trace: print the values live at the point of peak register pressure. |
 | `METTLE_MIR_DUMP` | Dump MIR with register assignments. |
 | `METTLE_NO_SIMD` | Turn the vectorizers off. |
 | `METTLE_LINK_GC_REPORT` | Report what link-time section collection removed. |

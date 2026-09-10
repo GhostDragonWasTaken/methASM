@@ -1,11 +1,15 @@
 #include "codegen/binary/mir.h"
 #include "codegen/binary/mir_machine.h"
+#include "codegen/binary/mir_cfg.h"
+#include "codegen/binary/mir_color.h"
 #include "../../common.h"
 #include "internal.h"
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+static const char *mir_ra_trace_name(void);
 
 static int mir_home_bytes_for(const MirVreg *vr, int *base) {
   int home = vr->home_bytes > 0 ? vr->home_bytes : 8;
@@ -40,11 +44,17 @@ static int mir_fn_has_calls(const MirFunction *fn) {
   return 0;
 }
 
-static void mir_mark_crosses_call(MirFunction *fn) {
+static void mir_mark_crosses_call_exact(MirFunction *fn, const MirRaFacts *facts);
+
+static void mir_mark_crosses_call(MirFunction *fn, const MirRaFacts *facts) {
   for (size_t v = 0; v < fn->vreg_count; v++) {
     fn->vregs[v].crosses_call = 0;
     fn->vregs[v].crosses_preserving_only = 1;
     fn->vregs[v].crosses_xmm_preserving_only = 1;
+  }
+  if (facts && facts->valid) {
+    mir_mark_crosses_call_exact(fn, facts);
+    return;
   }
   for (size_t i = 0; i < fn->insn_count; i++) {
     if (!mir_op_is_call_barrier(fn->insns[i].op)) {
@@ -953,7 +963,18 @@ static MirVregId *mir_order_by_start(MirFunction *fn, size_t *count_out) {
   return order;
 }
 
-static void mir_compute_coalesce_hints(MirFunction *fn) {
+static int mir_ra_operand_dies(const MirRaFacts *facts, const MirFunction *fn,
+                               size_t i, int which) {
+  const MirInst *in = &fn->insns[i];
+  const MirOperand *op = which ? &in->b : &in->a;
+  if (facts && facts->valid) {
+    return which ? facts->b_dies[i] : facts->a_dies[i];
+  }
+  return op->kind == MIR_OPK_VREG && fn->vregs[op->vreg].live_end == (int)i;
+}
+
+static void mir_compute_coalesce_hints(MirFunction *fn,
+                                       const MirRaFacts *facts) {
   for (size_t v = 0; v < fn->vreg_count; v++) {
     fn->vregs[v].coalesce_hint = MIR_VREG_NONE;
   }
@@ -979,11 +1000,11 @@ static void mir_compute_coalesce_hints(MirFunction *fn) {
     MirVregId cand = MIR_VREG_NONE;
     if (in->a.kind == MIR_OPK_VREG && in->a.vreg != d &&
         fn->vregs[in->a.vreg].rclass == dcls &&
-        fn->vregs[in->a.vreg].live_end == (int)i) {
+        mir_ra_operand_dies(facts, fn, i, 0)) {
       cand = in->a.vreg;
     } else if (commutative && in->b.kind == MIR_OPK_VREG && in->b.vreg != d &&
                fn->vregs[in->b.vreg].rclass == dcls &&
-               fn->vregs[in->b.vreg].live_end == (int)i) {
+               mir_ra_operand_dies(facts, fn, i, 1)) {
       cand = in->b.vreg;
     }
     fn->vregs[d].coalesce_hint = cand;
@@ -1192,6 +1213,186 @@ static int mir_reg_clobbered_in_range(const MirFunction *fn,
   return 0;
 }
 
+static uint32_t mir_ra_insn_busy_mask(const MirInst *in) {
+  uint32_t m = 0;
+  for (int r = 0; r < 16; r++) {
+    if (mir_inst_clobbers_reg(in, (BinaryGpRegister)r)) {
+      m |= 1u << (unsigned)r;
+    }
+  }
+  return m;
+}
+
+static void mir_ra_facts_free(MirRaFacts *facts) {
+  if (facts->valid) {
+    mir_cfg_free(&facts->cfg);
+  }
+  free(facts->clobbered);
+  free(facts->a_dies);
+  free(facts->b_dies);
+  free(facts->undef_live);
+  memset(facts, 0, sizeof(*facts));
+}
+
+static void mir_ra_facts_note_operand(const MirRaFacts *facts,
+                                      const MirCfgCursor *cur,
+                                      const MirOperand *op,
+                                      unsigned char *dies) {
+  *dies = 0;
+  if (op->kind == MIR_OPK_VREG && op->vreg >= 0 &&
+      (size_t)op->vreg < facts->cfg.fn->vreg_count &&
+      !mir_cfg_set_get(cur->live, (size_t)op->vreg)) {
+    *dies = 1;
+  }
+}
+
+static void mir_ra_facts_at(MirRaFacts *facts, const MirCfgCursor *cur,
+                            size_t i) {
+  const MirFunction *fn = facts->cfg.fn;
+  const MirInst *in = &fn->insns[i];
+  MirVregId d = mir_cfg_insn_def(in);
+  uint32_t busy = in->op == MIR_NOP ? 0 : mir_ra_insn_busy_mask(in);
+  int live_gp = 0;
+  int live_xmm = 0;
+  mir_ra_facts_note_operand(facts, cur, &in->a, &facts->a_dies[i]);
+  mir_ra_facts_note_operand(facts, cur, &in->b, &facts->b_dies[i]);
+  for (size_t w = 0; w < facts->cfg.words; w++) {
+    unsigned long long bits = cur->live[w] & ~cur->defd[w];
+    while (bits) {
+      size_t v = w * 64 + (size_t)__builtin_ctzll(bits);
+      bits &= bits - 1;
+      if (v < fn->vreg_count) {
+        facts->undef_live[v] = 1;
+      }
+    }
+  }
+  for (size_t w = 0; w < facts->cfg.words; w++) {
+    unsigned long long bits = cur->live[w] & cur->defd[w];
+    while (bits) {
+      size_t v = w * 64 + (size_t)__builtin_ctzll(bits);
+      bits &= bits - 1;
+      if (v >= fn->vreg_count || fn->vregs[v].address_taken) {
+        continue;
+      }
+      if (fn->vregs[v].rclass == MIR_RC_XMM) {
+        live_xmm++;
+      } else {
+        live_gp++;
+      }
+      if (busy != 0 && (MirVregId)v != d) {
+        facts->clobbered[v] |= busy;
+      }
+    }
+  }
+  if (live_gp > facts->max_live_gp) {
+    facts->max_live_gp = live_gp;
+    facts->max_live_at = i;
+    if (getenv("METTLE_RA_LIVE_DUMP")) {
+      fprintf(stderr, "RA-LIVE\t%s\tinsn=%zu\tgp=%d:", mir_ra_trace_name(), i,
+              live_gp);
+      for (size_t w = 0; w < facts->cfg.words; w++) {
+        unsigned long long bits = cur->live[w] & cur->defd[w];
+        while (bits) {
+          size_t v = w * 64 + (size_t)__builtin_ctzll(bits);
+          bits &= bits - 1;
+          if (v < fn->vreg_count && !fn->vregs[v].address_taken &&
+              fn->vregs[v].rclass == MIR_RC_GP) {
+            fprintf(stderr, " v%zu", v);
+          }
+        }
+      }
+      fputc('\n', stderr);
+    }
+  }
+  if (live_xmm > facts->max_live_xmm) {
+    facts->max_live_xmm = live_xmm;
+  }
+}
+
+static int mir_ra_facts_build(MirRaFacts *facts, MirFunction *fn) {
+  MirCfgCursor cur;
+  static int interval_only = -1;
+  memset(facts, 0, sizeof(*facts));
+  if (interval_only < 0) {
+    interval_only = getenv("METTLE_INTERVAL_INTERFERENCE") ? 1 : 0;
+  }
+  if (interval_only || !mir_cfg_build(&facts->cfg, fn)) {
+    return 0;
+  }
+  facts->valid = 1;
+  facts->clobbered = (uint32_t *)calloc(fn->vreg_count, sizeof(uint32_t));
+  facts->a_dies = (unsigned char *)calloc(fn->insn_count, 1);
+  facts->b_dies = (unsigned char *)calloc(fn->insn_count, 1);
+  facts->undef_live = (unsigned char *)calloc(fn->vreg_count, 1);
+  if (!facts->clobbered || !facts->a_dies || !facts->b_dies ||
+      !facts->undef_live || !mir_cfg_cursor_init(&cur, &facts->cfg)) {
+    mir_ra_facts_free(facts);
+    return 0;
+  }
+  for (size_t b = 0; b < facts->cfg.block_count; b++) {
+    const MirCfgBlock *blk = &facts->cfg.blocks[b];
+    mir_cfg_cursor_start_block(&cur, b);
+    for (int at = blk->end; at > blk->start; at--) {
+      mir_ra_facts_at(facts, &cur, (size_t)at - 1);
+      mir_cfg_cursor_step_back(&cur);
+    }
+  }
+  mir_cfg_cursor_free(&cur);
+  return 1;
+}
+
+static void mir_mark_crosses_call_exact(MirFunction *fn,
+                                        const MirRaFacts *facts) {
+  MirCfgCursor cur;
+  if (!mir_cfg_cursor_init(&cur, &facts->cfg)) {
+    return;
+  }
+  for (size_t b = 0; b < facts->cfg.block_count; b++) {
+    const MirCfgBlock *blk = &facts->cfg.blocks[b];
+    mir_cfg_cursor_start_block(&cur, b);
+    for (int at = blk->end; at > blk->start; at--) {
+      const MirInst *in = &fn->insns[at - 1];
+      MirVregId d = mir_cfg_insn_def(in);
+      int is_call = in->op == MIR_CALL;
+      int keeps_rax = is_call && in->preserves_rax;
+      int keeps_xmm = is_call && in->preserves_xmm;
+      if (!mir_op_is_call_barrier(in->op)) {
+        mir_cfg_cursor_step_back(&cur);
+        continue;
+      }
+      for (size_t w = 0; w < facts->cfg.words; w++) {
+        unsigned long long bits = cur.live[w] & cur.defd[w];
+        while (bits) {
+          size_t v = w * 64 + (size_t)__builtin_ctzll(bits);
+          MirVreg *vr = &fn->vregs[v];
+          bits &= bits - 1;
+          if ((MirVregId)v == d) {
+            continue;
+          }
+          vr->crosses_call = 1;
+          if (!keeps_rax) {
+            vr->crosses_preserving_only = 0;
+          }
+          if (!keeps_xmm) {
+            vr->crosses_xmm_preserving_only = 0;
+          }
+        }
+      }
+      mir_cfg_cursor_step_back(&cur);
+    }
+  }
+  mir_cfg_cursor_free(&cur);
+}
+
+static int mir_ra_reg_busy(const MirRaFacts *facts, const MirFunction *fn,
+                           MirVregId v, BinaryGpRegister reg) {
+  const MirVreg *vr = &fn->vregs[v];
+  if (facts && facts->valid) {
+    return (facts->clobbered[v] >> (unsigned)reg) & 1u;
+  }
+  return mir_reg_clobbered_in_range(fn, reg, vr->live_start, vr->live_end);
+}
+
 static int mir_vreg_is_param_in_reg(const MirFunction *fn, MirVregId v,
                                     BinaryGpRegister reg) {
   int ai = mir_reg_arg_index(reg);
@@ -1219,7 +1420,8 @@ static uint32_t mir_color_reg_mask(const MirFunction *fn, MirVregId v,
                                    const BinaryGpRegister *gp_leaf_pool,
                                    size_t gp_leaf_n,
                                    const BinaryGpRegister *gp_cross_pool,
-                                   size_t gp_cross_n, int allow_rbp) {
+                                   size_t gp_cross_n, int allow_rbp,
+                                   const MirRaFacts *facts) {
   const MirVreg *vr = &fn->vregs[v];
   uint32_t m = 0;
   BinaryGpRegister cross_ext[MIR_GP_CROSSCALL_POOL_EXT];
@@ -1252,13 +1454,11 @@ static uint32_t mir_color_reg_mask(const MirFunction *fn, MirVregId v,
           continue;
         }
       }
-      if (!mir_reg_clobbered_in_range(fn, reg, vr->live_start, vr->live_end)) {
+      if (!mir_ra_reg_busy(facts, fn, v, reg)) {
         m |= 1u << reg;
       }
     }
-    if (allow_rbp &&
-        !mir_reg_clobbered_in_range(fn, BINARY_GP_RBP, vr->live_start,
-                                    vr->live_end)) {
+    if (allow_rbp && !mir_ra_reg_busy(facts, fn, v, BINARY_GP_RBP)) {
       m |= 1u << BINARY_GP_RBP;
     }
   } else if (vr->rclass == MIR_RC_XMM &&
@@ -1400,6 +1600,14 @@ static int mir_spill_rank(const MirFunction *fn, const unsigned char *use_depth,
 
 const char *g_mir_ra_trace_name = NULL;
 
+static int mir_env_no_coalesce(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    cached = getenv("METTLE_RA_NO_COALESCE") ? 1 : 0;
+  }
+  return cached;
+}
+
 static int mir_env_regalloc_trace(void) {
   static int cached = -1;
   if (cached < 0) {
@@ -1414,8 +1622,12 @@ static const char *mir_ra_trace_name(void) {
 
 static void mir_color_spill_costs(const MirFunction *fn,
                                   const int *colorable, int *cost,
-                                  unsigned char *use_depth, size_t count) {
-  unsigned char *loop_depth = mir_build_loop_depths(fn);
+                                  unsigned char *use_depth, size_t count,
+                                  const MirRaFacts *facts) {
+  unsigned char *owned_depth =
+      facts && facts->valid ? NULL : mir_build_loop_depths(fn);
+  const unsigned char *loop_depth =
+      facts && facts->valid ? facts->cfg.insn_depth : owned_depth;
 
   for (size_t i = 0; i < fn->insn_count; i++) {
     const MirInst *in = &fn->insns[i];
@@ -1445,7 +1657,7 @@ static void mir_color_spill_costs(const MirFunction *fn,
       }
     }
   }
-  free(loop_depth);
+  free(owned_depth);
   for (size_t i = 0; i < fn->iconst_count; i++) {
     MirVregId v = fn->iconsts[i].vreg;
     if (v >= 0 && (size_t)v < count && colorable[v]) {
@@ -1469,35 +1681,8 @@ static void mir_color_spill_costs(const MirFunction *fn,
   }
 }
 
-typedef struct {
-  MirFunction *fn;
-  size_t count;
-  size_t words;
-  uint64_t *inter;
-  uint32_t *mask;
-  int *degree;
-  int *cost;
-  int *colorable;
-  int *removed;
-  int *reg_count;
-  long long *metric;
-  MirVregId *stack;
-  MirVregId *narrow_src;
-  unsigned char *use_depth;
-} MirColorState;
-
-#define MIR_INTER_FOR_EACH(st, a, bvar)                                        \
-  for (size_t w_ = 0; w_ < (st)->words; w_++)                                  \
-    for (uint64_t bits_ = (st)->inter[(size_t)(a) * (st)->words + w_], bvar;   \
-         bits_ && ((bvar = w_ * 64 + (size_t)__builtin_ctzll(bits_)), 1);      \
-         bits_ &= bits_ - 1)
-
 static long long mir_color_metric(const MirColorState *st, size_t v) {
   return (long long)st->cost[v] * 1000 / (st->degree[v] + 1);
-}
-
-static int mir_inter_get(const MirColorState *st, size_t a, size_t b) {
-  return (int)((st->inter[a * st->words + (b >> 6)] >> (b & 63)) & 1u);
 }
 
 static void mir_inter_add(MirColorState *st, size_t a, size_t b) {
@@ -1522,17 +1707,22 @@ static void mir_color_state_free(MirColorState *st) {
   free(st->stack);
   free(st->narrow_src);
   free(st->use_depth);
+  free(st->rep);
+  free(st->phys_hint);
+  free(st->copy_partner);
 }
 
 static int mir_color_state_init(MirColorState *st, MirFunction *fn,
                                 const BinaryGpRegister *gp_leaf_pool,
                                 size_t gp_leaf_n,
                                 const BinaryGpRegister *gp_cross_pool,
-                                size_t gp_cross_n, int allow_rbp) {
+                                size_t gp_cross_n, int allow_rbp,
+                                const MirRaFacts *facts) {
   size_t n = fn->vreg_count;
 
   memset(st, 0, sizeof(*st));
   st->fn = fn;
+  st->facts = facts;
   st->count = n;
   st->words = (n + 63) / 64;
   st->inter = (uint64_t *)calloc(n * st->words, sizeof(uint64_t));
@@ -1546,9 +1736,12 @@ static int mir_color_state_init(MirColorState *st, MirFunction *fn,
   st->stack = (MirVregId *)malloc(n * sizeof(MirVregId));
   st->use_depth = (unsigned char *)calloc(n, sizeof(unsigned char));
   st->narrow_src = mir_build_narrowing_extend_map(fn);
+  st->rep = (MirVregId *)malloc(n * sizeof(MirVregId));
+  st->phys_hint = (int *)malloc(n * sizeof(int));
+  st->copy_partner = (MirVregId *)malloc(n * sizeof(MirVregId));
   if (!st->inter || !st->mask || !st->degree || !st->cost || !st->colorable ||
       !st->removed || !st->reg_count || !st->metric || !st->stack ||
-      !st->use_depth) {
+      !st->use_depth || !st->rep || !st->phys_hint || !st->copy_partner) {
     mir_color_state_free(st);
     return 0;
   }
@@ -1559,11 +1752,12 @@ static int mir_color_state_init(MirColorState *st, MirFunction *fn,
     }
     st->colorable[v] = 1;
     st->mask[v] = mir_color_reg_mask(fn, (MirVregId)v, gp_leaf_pool, gp_leaf_n,
-                                     gp_cross_pool, gp_cross_n, allow_rbp);
+                                     gp_cross_pool, gp_cross_n, allow_rbp,
+                                     facts);
     st->reg_count[v] = __builtin_popcount(st->mask[v]);
     st->cost[v] = 1;
   }
-  mir_color_spill_costs(fn, st->colorable, st->cost, st->use_depth, n);
+  mir_color_spill_costs(fn, st->colorable, st->cost, st->use_depth, n, facts);
   return 1;
 }
 
@@ -1585,49 +1779,6 @@ static void mir_color_add_live_edges(MirColorState *st, size_t d,
   }
 }
 
-static void mir_color_add_block_edges(MirColorState *st, const MirLiveCfg *cfg,
-                                      unsigned long long *live) {
-  MirFunction *fn = st->fn;
-
-  for (size_t block = 0; block < cfg->block_count; block++) {
-    size_t lo = (size_t)cfg->block_start[block];
-    size_t hi = block + 1 < cfg->block_count
-                    ? (size_t)cfg->block_start[block + 1]
-                    : fn->insn_count;
-    memcpy(live, cfg->live_out + block * st->words, st->words * sizeof(*live));
-    for (size_t at = hi; at-- > lo;) {
-      const MirInst *in = &fn->insns[at];
-      if (in->dst.kind == MIR_OPK_VREG) {
-        MirVregId d = in->dst.vreg;
-        if (d >= 0 && (size_t)d < st->count) {
-          if (st->colorable[d]) {
-            mir_color_add_live_edges(st, (size_t)d, live);
-          }
-          live[(size_t)d >> 6] &= ~(1ull << ((size_t)d & 63));
-        }
-      }
-      mir_live_add_operand(fn, &in->dst, live, 1);
-      mir_live_add_operand(fn, &in->a, live, 0);
-      mir_live_add_operand(fn, &in->b, live, 0);
-    }
-  }
-}
-
-static void mir_color_add_entry_edges(MirColorState *st,
-                                      const MirLiveCfg *cfg) {
-  for (size_t a = 0; a < st->count; a++) {
-    if (!st->colorable[a] || !mir_live_bit_get(cfg->live_in, a)) {
-      continue;
-    }
-    for (size_t b = a + 1; b < st->count; b++) {
-      if (st->colorable[b] && mir_live_bit_get(cfg->live_in, b) &&
-          mir_color_same_class(st, a, b)) {
-        mir_inter_add(st, a, b);
-      }
-    }
-  }
-}
-
 static void mir_color_add_interval_edges(MirColorState *st) {
   for (size_t a = 0; a < st->count; a++) {
     if (!st->colorable[a]) {
@@ -1642,92 +1793,66 @@ static void mir_color_add_interval_edges(MirColorState *st) {
   }
 }
 
-static int mir_color_pressure(const MirColorState *st) {
-  int over = 0;
-
-  for (size_t v = 0; v < st->count; v++) {
-    if (st->colorable[v] && st->degree[v] >= st->reg_count[v]) {
-      over++;
+static void mir_color_add_exact_edges(MirColorState *st) {
+  const MirRaFacts *facts = st->facts;
+  MirFunction *fn = st->fn;
+  MirCfgCursor cur;
+  unsigned long long *both;
+  if (!mir_cfg_cursor_init(&cur, &facts->cfg)) {
+    mir_color_add_interval_edges(st);
+    return;
+  }
+  both = (unsigned long long *)malloc(st->words * sizeof(*both));
+  if (!both) {
+    mir_cfg_cursor_free(&cur);
+    mir_color_add_interval_edges(st);
+    return;
+  }
+  for (size_t b = 0; b < facts->cfg.block_count; b++) {
+    const MirCfgBlock *blk = &facts->cfg.blocks[b];
+    mir_cfg_cursor_start_block(&cur, b);
+    for (int at = blk->end; at > blk->start; at--) {
+      MirVregId d = mir_cfg_insn_def(&fn->insns[at - 1]);
+      if (d >= 0 && (size_t)d < st->count && st->colorable[d]) {
+        for (size_t w = 0; w < st->words; w++) {
+          both[w] = cur.live[w] & cur.defd[w];
+        }
+        mir_color_add_live_edges(st, (size_t)d, both);
+      }
+      mir_cfg_cursor_step_back(&cur);
     }
   }
-  return over;
-}
-
-static void mir_color_prefer_interval_graph(MirColorState *st) {
-  MirColorState probe = *st;
-  int exact_pressure;
-  int interval_pressure;
-
-  probe.inter = (uint64_t *)calloc(st->count * st->words, sizeof(uint64_t));
-  probe.degree = (int *)calloc(st->count, sizeof(int));
-  if (!probe.inter || !probe.degree) {
-    free(probe.inter);
-    free(probe.degree);
-    return;
+  for (size_t w = 0; w < st->words; w++) {
+    both[w] = facts->cfg.live_in[w] & facts->cfg.defd_in[w];
   }
-  mir_color_add_interval_edges(&probe);
-  exact_pressure = mir_color_pressure(st);
-  interval_pressure = mir_color_pressure(&probe);
-  if (mir_env_regalloc_trace()) {
-    fprintf(stderr, "RA-PRESSURE\t%s\tinterval=%d\texact=%d\n",
-            mir_ra_trace_name(), interval_pressure, exact_pressure);
+  for (size_t a = 0; a < st->count; a++) {
+    if (st->colorable[a] && mir_cfg_set_get(both, a)) {
+      mir_color_add_live_edges(st, a, both);
+    }
   }
-  if (interval_pressure - exact_pressure < (int)MIR_GP_LEAF_POOL_MAX) {
-    free(st->inter);
-    free(st->degree);
-    st->inter = probe.inter;
-    st->degree = probe.degree;
-    return;
-  }
-  free(probe.inter);
-  free(probe.degree);
-}
-
-static int mir_color_want_cfg(const MirColorState *st, size_t branch_count) {
-  static int interval_only = -1;
-
-  if (interval_only < 0) {
-    interval_only = getenv("METTLE_INTERVAL_INTERFERENCE") ? 1 : 0;
-  }
-  return !interval_only && st->fn->insn_count >= 8 && branch_count >= 1 &&
-         (unsigned long long)st->fn->insn_count *
-                 (unsigned long long)st->words <= MIR_LIVE_CFG_MAX_WORK;
+  free(both);
+  mir_cfg_cursor_free(&cur);
 }
 
 static void mir_color_build_interference(MirColorState *st) {
   MirFunction *fn = st->fn;
-  MirLiveCfg cfg;
-  size_t branch_count = 0;
-  int use_cfg;
-  int have_cfg;
-  unsigned long long *live;
+  int exact = st->facts && st->facts->valid;
 
-  for (size_t i = 0; i < fn->insn_count; i++) {
-    if (mir_inst_ends_block(&fn->insns[i])) {
-      branch_count++;
-    }
-  }
-  use_cfg = mir_color_want_cfg(st, branch_count);
   if (mir_env_regalloc_trace()) {
-    fprintf(stderr, "RA\t%s\tvregs=%zu\tinsns=%zu\tblocks=%zu\tcfg=%d\n",
-            mir_ra_trace_name(), st->count, fn->insn_count, branch_count,
-            use_cfg);
+    fprintf(stderr,
+            "RA\t%s\tvregs=%zu\tinsns=%zu\tblocks=%zu\tcfg=%d\tmaxlive_gp=%d"
+            "\tmaxlive_xmm=%d\tmaxlive_at=%zu\n",
+            mir_ra_trace_name(), st->count, fn->insn_count,
+            exact ? st->facts->cfg.block_count : (size_t)0, exact,
+            exact ? st->facts->max_live_gp : -1,
+            exact ? st->facts->max_live_xmm : -1,
+            exact ? st->facts->max_live_at : (size_t)0);
   }
-  have_cfg = use_cfg && mir_live_cfg_build(fn, &cfg, 1);
-  live = have_cfg ? (unsigned long long *)malloc(st->words * sizeof(*live))
-                  : NULL;
-  if (!live) {
-    if (have_cfg) {
-      mir_live_cfg_free(&cfg);
-    }
-    mir_color_add_interval_edges(st);
+  if (exact) {
+    mir_color_add_exact_edges(st);
     return;
   }
-  mir_color_add_block_edges(st, &cfg, live);
-  mir_color_add_entry_edges(st, &cfg);
-  free(live);
-  mir_live_cfg_free(&cfg);
-  mir_color_prefer_interval_graph(st);
+  mir_color_add_interval_edges(st);
 }
 
 static void mir_color_add_narrowing_edges(MirColorState *st) {
@@ -1841,6 +1966,16 @@ static int mir_color_choose_reg(const MirColorState *st, MirVregId v,
       return hv->phys;
     }
   }
+  if (st->phys_hint[v] >= 0 && (preferred & (1u << (unsigned)st->phys_hint[v]))) {
+    return st->phys_hint[v];
+  }
+  if (st->copy_partner[v] != MIR_VREG_NONE) {
+    const MirVreg *pv = &st->fn->vregs[st->copy_partner[v]];
+    if (pv->in_register && pv->rclass == vr->rclass &&
+        (preferred & (1u << pv->phys))) {
+      return pv->phys;
+    }
+  }
   for (int saved = 0; saved < 2; saved++) {
     for (int r = 0; r < 16; r++) {
       if ((preferred & (1u << r)) &&
@@ -1892,7 +2027,7 @@ static int mir_color_move_is_coalescable(const MirColorState *st,
   dv = &st->fn->vregs[d];
   sv = &st->fn->vregs[s];
   if (!dv->in_register || !sv->in_register || dv->rclass != sv->rclass ||
-      dv->phys == sv->phys || sv->live_end != (int)at ||
+      dv->phys == sv->phys || !mir_ra_operand_dies(st->facts, st->fn, at, 0) ||
       mir_inter_get(st, (size_t)d, (size_t)s) ||
       !(st->mask[d] & (1u << sv->phys))) {
     return 0;
@@ -1924,28 +2059,78 @@ static void mir_color_coalesce_moves(MirColorState *st) {
   }
 }
 
+static void mir_color_check_merged_graph(const MirColorState *st,
+                                         const BinaryGpRegister *gp_leaf_pool,
+                                         size_t gp_leaf_n,
+                                         const BinaryGpRegister *gp_cross_pool,
+                                         size_t gp_cross_n, int allow_rbp) {
+  MirRaFacts fresh;
+  MirColorState again;
+  size_t missing = 0;
+  if (!mir_ra_facts_build(&fresh, st->fn)) {
+    return;
+  }
+  if (!mir_color_state_init(&again, st->fn, gp_leaf_pool, gp_leaf_n,
+                            gp_cross_pool, gp_cross_n, allow_rbp, &fresh)) {
+    mir_ra_facts_free(&fresh);
+    return;
+  }
+  mir_color_build_interference(&again);
+  fprintf(stderr, "RA-COALESCE-CHECK\t%s\tmaxlive_gp=%d\tmaxlive_xmm=%d\n",
+          mir_ra_trace_name(), fresh.max_live_gp, fresh.max_live_xmm);
+  for (size_t a = 0; a < st->count; a++) {
+    if (!st->colorable[a]) {
+      continue;
+    }
+    MIR_INTER_FOR_EACH(&again, a, b) {
+      if (b > a && st->colorable[b] && !mir_inter_get(st, a, b)) {
+        fprintf(stderr, "RA-COALESCE-CHECK\t%s\tmissing edge v%zu v%zu\n",
+                mir_ra_trace_name(), a, b);
+        missing++;
+      }
+    }
+  }
+  if (missing) {
+    st->fn->has_error = 1;
+  }
+  mir_color_state_free(&again);
+  mir_ra_facts_free(&fresh);
+}
+
 static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool,
                            size_t gp_leaf_n,
                            const BinaryGpRegister *gp_cross_pool,
-                           size_t gp_cross_n, int *next_spill, int allow_rbp) {
+                           size_t gp_cross_n, int *next_spill, int allow_rbp,
+                           const MirRaFacts *facts) {
   MirColorState st;
 
   if (fn->vreg_count == 0) {
     return 1;
   }
   if (!mir_color_state_init(&st, fn, gp_leaf_pool, gp_leaf_n, gp_cross_pool,
-                            gp_cross_n, allow_rbp)) {
+                            gp_cross_n, allow_rbp, facts)) {
     return 0;
   }
   mir_color_build_interference(&st);
   mir_color_add_narrowing_edges(&st);
+  for (size_t v = 0; v < st.count; v++) {
+    st.rep[v] = (MirVregId)v;
+  }
+  if (!mir_env_no_coalesce() && !mir_color_coalesce(&st)) {
+    mir_color_state_free(&st);
+    return 0;
+  }
+  if (getenv("METTLE_RA_COALESCE_CHECK")) {
+    mir_color_check_merged_graph(&st, gp_leaf_pool, gp_leaf_n, gp_cross_pool,
+                                 gp_cross_n, allow_rbp);
+  }
+  mir_color_note_phys_hints(&st);
   mir_color_assign(&st, mir_color_order_vregs(&st), next_spill);
   mir_color_coalesce_moves(&st);
+  mir_color_mirror_members(&st);
   mir_color_state_free(&st);
   return 1;
 }
-
-#undef MIR_INTER_FOR_EACH
 
 static int mir_regalloc_report_saved(MirFunction *fn) {
   if (!fn->context) {
@@ -2017,7 +2202,8 @@ static void mir_regalloc_trace_done(const MirFunction *fn) {
   }
   for (size_t v = 0; v < fn->vreg_count; v++) {
     const MirVreg *vr = &fn->vregs[v];
-    if (vr->live_start == MIR_LIVE_NONE || vr->address_taken) {
+    if (vr->live_start == MIR_LIVE_NONE || vr->address_taken ||
+        vr->coalesced_into != MIR_VREG_NONE) {
       continue;
     }
     if (vr->assigned && vr->in_register) {
@@ -2045,8 +2231,9 @@ static void mir_regalloc_trace_done(const MirFunction *fn) {
   }
   fprintf(stderr,
           "RA-DONE\t%s\tkept=%zu\tspilled=%zu\tcopies=%zu\tcoalesced=%zu"
-          "\tspill_side=%zu\n",
-          mir_ra_trace_name(), kept, spilled, copies, coalesced, spill_side);
+          "\tspill_side=%zu\tmerged=%zu\n",
+          mir_ra_trace_name(), kept, spilled, copies + fn->merged_copies,
+          coalesced + fn->merged_copies, spill_side, fn->merged_copies);
 }
 
 static int mir_regalloc_finish(MirFunction *fn) {
@@ -2061,9 +2248,11 @@ static int mir_regalloc_finish(MirFunction *fn) {
 }
 
 static int mir_regalloc_color(MirFunction *fn) {
+  MirRaFacts facts;
   mir_compute_liveness(fn);
-  mir_compute_coalesce_hints(fn);
-  mir_mark_crosses_call(fn);
+  mir_ra_facts_build(&facts, fn);
+  mir_compute_coalesce_hints(fn, &facts);
+  mir_mark_crosses_call(fn, &facts);
 
   int next_spill = fn->context ? fn->context->raw_frame_size : 0;
   fn->preserve_slot = 0;
@@ -2097,10 +2286,12 @@ static int mir_regalloc_color(MirFunction *fn) {
   int allow_rbp = fn->context && fn->context->omit_frame_pointer &&
                   !mir_fn_uses_slp(fn);
   if (!mir_color_graph(fn, gp_leaf_pool, gp_leaf_n, gp_cross_pool, gp_cross_n,
-                       &next_spill, allow_rbp)) {
+                       &next_spill, allow_rbp, &facts)) {
+    mir_ra_facts_free(&facts);
     fn->has_error = 1;
     return 0;
   }
+  mir_ra_facts_free(&facts);
   mir_drop_unused_preserves(fn);
   mir_regalloc_trace_done(fn);
   fn->spill_bytes = next_spill - (fn->context ? fn->context->raw_frame_size : 0);
@@ -2115,68 +2306,113 @@ static int mir_op_pure_def(MirOpcode op) {
   return mir_op_has(op, MIR_OPF_PURE_DEF);
 }
 
-static void mir_dce_add_read(MirVregId v, int *reads, size_t n) {
-  if (v >= 0 && (size_t)v < n) {
-    reads[v]++;
+typedef struct {
+  const MirFunction *fn;
+  int *def_head;
+  int *def_next;
+  unsigned char *marked;
+  size_t *work;
+  size_t work_count;
+} MirDce;
+
+static void mir_dce_mark(MirDce *d, size_t i) {
+  if (d->marked[i]) {
+    return;
+  }
+  d->marked[i] = 1;
+  d->work[d->work_count++] = i;
+}
+
+static int mir_dce_is_root(const MirFunction *fn, const MirInst *in) {
+  if (!mir_op_pure_def(in->op) || in->dst.kind != MIR_OPK_VREG) {
+    return 1;
+  }
+  if (in->op == MIR_MOV && in->a.kind == MIR_OPK_MEM) {
+    return 1;
+  }
+  if (in->dst.vreg < 0 || (size_t)in->dst.vreg >= fn->vreg_count) {
+    return 1;
+  }
+  return in->dst.vreg == fn->indirect_return_vreg ||
+         fn->vregs[in->dst.vreg].address_taken;
+}
+
+static void mir_dce_mark_defs_of(MirDce *d, MirVregId v) {
+  if (v < 0 || (size_t)v >= d->fn->vreg_count) {
+    return;
+  }
+  for (int j = d->def_head[v]; j >= 0; j = d->def_next[j]) {
+    mir_dce_mark(d, (size_t)j);
   }
 }
 
-static void mir_dce_count_operand(const MirOperand *op, int *reads, size_t n) {
-  if (op->kind == MIR_OPK_VREG) {
-    mir_dce_add_read(op->vreg, reads, n);
-  } else if (op->kind == MIR_OPK_MEM) {
-    mir_dce_add_read(op->mem.base, reads, n);
-    mir_dce_add_read(op->mem.index, reads, n);
+static void mir_dce_mark_uses(MirDce *d, const MirInst *in) {
+  MirVregId ids[6];
+  int n = mir_cfg_insn_uses(in, ids);
+  const MirOperand *ops[3] = {&in->dst, &in->a, &in->b};
+  for (int k = 0; k < n; k++) {
+    mir_dce_mark_defs_of(d, ids[k]);
   }
+  for (int k = 0; k < 3; k++) {
+    if (ops[k]->kind == MIR_OPK_MEM && ops[k]->mem.frame_home_valid) {
+      mir_dce_mark_defs_of(d, ops[k]->mem.frame_home);
+    }
+  }
+}
+
+static int mir_dce_init(MirDce *d, const MirFunction *fn) {
+  memset(d, 0, sizeof(*d));
+  d->fn = fn;
+  d->def_head = (int *)malloc(fn->vreg_count * sizeof(int));
+  d->def_next = (int *)malloc(fn->insn_count * sizeof(int));
+  d->marked = (unsigned char *)calloc(fn->insn_count, 1);
+  d->work = (size_t *)malloc(fn->insn_count * sizeof(size_t));
+  if (!d->def_head || !d->def_next || !d->marked || !d->work) {
+    return 0;
+  }
+  for (size_t v = 0; v < fn->vreg_count; v++) {
+    d->def_head[v] = -1;
+  }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    MirVregId v = mir_cfg_insn_def(&fn->insns[i]);
+    d->def_next[i] = -1;
+    if (v >= 0 && (size_t)v < fn->vreg_count) {
+      d->def_next[i] = d->def_head[v];
+      d->def_head[v] = (int)i;
+    }
+  }
+  return 1;
+}
+
+static void mir_dce_free(MirDce *d) {
+  free(d->def_head);
+  free(d->def_next);
+  free(d->marked);
+  free(d->work);
 }
 
 static void mir_dce(MirFunction *fn) {
-  if (fn->vreg_count == 0 || fn->insn_count == 0) {
+  MirDce d;
+  if (fn->vreg_count == 0 || fn->insn_count == 0 || !mir_dce_init(&d, fn)) {
+    mir_dce_free(&d);
     return;
   }
-  int *reads = (int *)malloc(fn->vreg_count * sizeof(int));
-  if (!reads) {
-    return;
-  }
-  int changed = 1;
-  while (changed) {
-    changed = 0;
-    memset(reads, 0, fn->vreg_count * sizeof(int));
-    for (size_t i = 0; i < fn->insn_count; i++) {
-      const MirInst *in = &fn->insns[i];
-      if (in->op == MIR_NOP) {
-        continue;
-      }
-      mir_dce_count_operand(&in->a, reads, fn->vreg_count);
-      mir_dce_count_operand(&in->b, reads, fn->vreg_count);
-      if (in->dst.kind == MIR_OPK_MEM) {
-        mir_dce_add_read(in->dst.mem.base, reads, fn->vreg_count);
-        mir_dce_add_read(in->dst.mem.index, reads, fn->vreg_count);
-      }
-    }
-    for (size_t i = 0; i < fn->insn_count; i++) {
-      MirInst *in = &fn->insns[i];
-      if (in->op == MIR_NOP || !mir_op_pure_def(in->op)) {
-        continue;
-      }
-      if (in->dst.kind != MIR_OPK_VREG) {
-        continue;
-      }
-      if (in->op == MIR_MOV && in->a.kind == MIR_OPK_MEM) {
-        continue;
-      }
-      MirVregId d = in->dst.vreg;
-      if (d < 0 || (size_t)d >= fn->vreg_count ||
-          d == fn->indirect_return_vreg) {
-        continue;
-      }
-      if (reads[d] == 0) {
-        in->op = MIR_NOP;
-        changed = 1;
-      }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    const MirInst *in = &fn->insns[i];
+    if (in->op != MIR_NOP && mir_dce_is_root(fn, in)) {
+      mir_dce_mark(&d, i);
     }
   }
-  free(reads);
+  while (d.work_count > 0) {
+    size_t i = d.work[--d.work_count];
+    mir_dce_mark_uses(&d, &fn->insns[i]);
+  }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    if (fn->insns[i].op != MIR_NOP && !d.marked[i]) {
+      fn->insns[i].op = MIR_NOP;
+    }
+  }
+  mir_dce_free(&d);
 }
 
 int mir_regalloc(MirFunction *fn) {
@@ -2188,6 +2424,7 @@ int mir_regalloc(MirFunction *fn) {
   }
 
   mir_clobber_index_reset();
+  fn->merged_copies = 0;
 
   mir_dce(fn);
 
@@ -2206,9 +2443,9 @@ int mir_regalloc(MirFunction *fn) {
   }
 
   mir_compute_liveness(fn);
-  mir_compute_coalesce_hints(fn);
+  mir_compute_coalesce_hints(fn, NULL);
 
-  mir_mark_crosses_call(fn);
+  mir_mark_crosses_call(fn, NULL);
 
   size_t order_count = 0;
   MirVregId *order = mir_order_by_start(fn, &order_count);

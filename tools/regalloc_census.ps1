@@ -13,7 +13,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
-$CompilerPath = [System.IO.Path]::GetFullPath((Join-Path $Root $Compiler))
+$CompilerPath = if ([System.IO.Path]::IsPathRooted($Compiler)) { $Compiler } else { [System.IO.Path]::GetFullPath((Join-Path $Root $Compiler)) }
 if (-not (Test-Path $CompilerPath)) { throw "compiler not found: $CompilerPath" }
 
 if ([string]::IsNullOrEmpty($WorkDir)) {
@@ -80,7 +80,7 @@ function Invoke-Arm {
             $parts = $line -split "`t"
             if ($parts.Count -lt 3) { continue }
             $row = [ordered]@{ Unit = $Source.Name; Suite = $Source.Suite; Function = $parts[1]; Arm = $Arm
-                               Kept = 0; Spilled = 0; Copies = 0; Coalesced = 0; SpillSide = 0 }
+                               Kept = 0; Spilled = 0; Copies = 0; Coalesced = 0; SpillSide = 0; Merged = 0 }
             foreach ($kv in $parts[2..($parts.Count - 1)]) {
                 $eq = $kv.IndexOf("=")
                 if ($eq -lt 0) { continue }
@@ -92,6 +92,7 @@ function Invoke-Arm {
                     "copies" { $row.Copies = $v }
                     "coalesced" { $row.Coalesced = $v }
                     "spill_side" { $row.SpillSide = $v }
+                    "merged" { $row.Merged = $v }
                 }
             }
             [void]$rows.Add([pscustomobject]$row)
@@ -169,7 +170,7 @@ if ($arms.Count -eq 2) {
         [void]$deltas.Add([pscustomobject]@{ Key = $key; Spilled = $r.Spilled - $b.Spilled; Copies = ($r.Copies - $r.Coalesced) - ($b.Copies - $b.Coalesced) })
     }
     foreach ($d in ($deltas | Sort-Object -Property Spilled -Descending | Select-Object -First $Worst)) {
-        [void]$sb.AppendLine(("    {0,-52} spilled{1,+5} surviving_copies{2,+5}" -f $d.Key, $d.Spilled, $d.Copies))
+        [void]$sb.AppendLine(("    {0,-52} spilled{1,5} surviving_copies{2,5}" -f $d.Key, $d.Spilled, $d.Copies))
     }
     [void]$sb.AppendLine("")
 }

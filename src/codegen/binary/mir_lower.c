@@ -10152,6 +10152,41 @@ static char *mir_jt_own_name(MirFunction *fn, const char *name) {
   return copy;
 }
 
+static int mir_jt_label_is_free(const MirFunction *fn, const char *sym) {
+  for (size_t k = 0; k < fn->insn_count; k++) {
+    const MirInst *in = &fn->insns[k];
+    if ((in->op == MIR_JMP || in->op == MIR_JCC || in->op == MIR_CMPBR ||
+         in->op == MIR_FCMPBR) &&
+        in->dst.kind == MIR_OPK_LABEL && in->dst.sym &&
+        strcmp(in->dst.sym, sym) == 0) {
+      return 0;
+    }
+    if (in->op == MIR_JMP_TABLE && in->aux) {
+      const MirJumpTable *table = (const MirJumpTable *)in->aux;
+      for (size_t s = 0; s < table->count; s++) {
+        if (table->labels[s] && strcmp(table->labels[s], sym) == 0) {
+          return 0;
+        }
+      }
+    }
+  }
+  return 1;
+}
+
+static int mir_jt_skippable(const MirFunction *fn, size_t j, MirVregId key) {
+  const MirInst *in = &fn->insns[j];
+  MirVregId peek = key;
+  long long value = 0;
+  if (in->op == MIR_NOP) {
+    return 1;
+  }
+  if (in->op != MIR_LABEL || in->dst.kind != MIR_OPK_LABEL || !in->dst.sym ||
+      j + 1 >= fn->insn_count || !mir_jt_case(&fn->insns[j + 1], &peek, &value)) {
+    return 0;
+  }
+  return mir_jt_label_is_free(fn, in->dst.sym);
+}
+
 static void mir_build_jump_tables(MirFunction *fn) {
   if (!fn || fn->insn_count == 0) {
     return;
@@ -10163,18 +10198,27 @@ static void mir_build_jump_tables(MirFunction *fn) {
       continue;
     }
     size_t j = i;
+    size_t cases = 0;
     long long lo = value;
     long long hi = value;
-    while (j < fn->insn_count && mir_jt_case(&fn->insns[j], &key, &value)) {
-      if (value < lo) {
-        lo = value;
+    while (j < fn->insn_count) {
+      if (mir_jt_case(&fn->insns[j], &key, &value)) {
+        if (value < lo) {
+          lo = value;
+        }
+        if (value > hi) {
+          hi = value;
+        }
+        cases++;
+        j++;
+        continue;
       }
-      if (value > hi) {
-        hi = value;
+      if (mir_jt_skippable(fn, j, key)) {
+        j++;
+        continue;
       }
-      j++;
+      break;
     }
-    size_t cases = j - i;
     long long span = hi - lo + 1;
     if (cases < MIR_JUMP_TABLE_MIN_CASES || span > MIR_JUMP_TABLE_MAX_SPAN ||
         span > 2 * (long long)cases || j >= fn->insn_count) {
@@ -10203,7 +10247,11 @@ static void mir_build_jump_tables(MirFunction *fn) {
     }
     int duplicate = 0;
     for (size_t k = i; k < j; k++) {
-      long long slot = fn->insns[k].b.imm - lo;
+      long long slot;
+      if (fn->insns[k].op != MIR_CMPBR) {
+        continue;
+      }
+      slot = fn->insns[k].b.imm - lo;
       if (slots[slot]) {
         duplicate = 1;
         break;
@@ -10217,7 +10265,11 @@ static void mir_build_jump_tables(MirFunction *fn) {
     char *deflt = duplicate ? NULL : mir_jt_own_name(fn, fallthrough);
     int forward = 1;
     for (size_t k = i; k < j && forward; k++) {
-      size_t at = mir_label_index(fn, fn->insns[k].dst.sym);
+      size_t at;
+      if (fn->insns[k].op != MIR_CMPBR) {
+        continue;
+      }
+      at = mir_label_index(fn, fn->insns[k].dst.sym);
       if (at == (size_t)-1 || at <= j) {
         forward = 0;
       }
