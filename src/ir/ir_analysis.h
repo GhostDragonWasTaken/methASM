@@ -61,6 +61,7 @@ typedef struct {
   size_t total;
   size_t value_count;
   uint32_t *prev_label;
+  size_t built_instruction_count;
   int built;
   int complete;
 } IRDestIndex;

@@ -570,6 +570,7 @@ static int ir_dest_index_build(IRAnalysis *analysis, const IRFunction *function)
   if (!complete) {
     dests->built = 1;
     dests->complete = 0;
+    dests->built_instruction_count = function->instruction_count;
     return 1;
   }
 
@@ -600,6 +601,7 @@ static int ir_dest_index_build(IRAnalysis *analysis, const IRFunction *function)
 
   dests->built = 1;
   dests->complete = 1;
+  dests->built_instruction_count = function->instruction_count;
   return 1;
 }
 
@@ -877,31 +879,34 @@ static IRAnalysis *ir_function_analysis_raw(IRFunction *function) {
 
   g_analysis_queries++;
   IRAnalysis *analysis = (IRAnalysis *)function->analysis;
-  if (analysis && analysis->valid &&
-      analysis->structure_generation == function->structure_generation &&
-      analysis->instruction_count == function->instruction_count &&
-      analysis->block_count == block_count) {
-    analysis->generation = function->generation;
-    return analysis;
-  }
-  g_analysis_rebuilds++;
-
   if (!analysis) {
     analysis = (IRAnalysis *)calloc(1, sizeof(IRAnalysis));
     if (!analysis) {
       return NULL;
     }
     function->analysis = analysis;
-  } else {
-    ir_analysis_destroy(analysis);
   }
 
-  analysis->block_count = block_count;
-  if (!blocks || block_count == 0) {
+  const int structure_moved =
+      !analysis->valid ||
+      analysis->structure_generation != function->structure_generation ||
+      analysis->instruction_count != function->instruction_count ||
+      analysis->block_count != block_count;
+
+  if (!structure_moved) {
     analysis->generation = function->generation;
-    analysis->structure_generation = function->structure_generation;
-    analysis->instruction_count = function->instruction_count;
-    analysis->valid = 1;
+    return analysis;
+  }
+  g_analysis_rebuilds++;
+
+  ir_analysis_destroy(analysis);
+  analysis->block_count = block_count;
+  analysis->generation = function->generation;
+  analysis->structure_generation = function->structure_generation;
+  analysis->instruction_count = function->instruction_count;
+  analysis->valid = 1;
+
+  if (!blocks || block_count == 0) {
     return analysis;
   }
 
@@ -921,11 +926,6 @@ static IRAnalysis *ir_function_analysis_raw(IRFunction *function) {
     }
   }
 
-
-  analysis->generation = function->generation;
-  analysis->structure_generation = function->structure_generation;
-  analysis->instruction_count = function->instruction_count;
-  analysis->valid = 1;
   return analysis;
 }
 
