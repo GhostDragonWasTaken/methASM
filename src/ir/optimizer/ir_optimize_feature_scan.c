@@ -137,9 +137,9 @@ static int ir_producer_index_mode(void) {
   if (cached < 0) {
     const char *setting = getenv("METTLE_PRODUCER_INDEX");
     if (!setting || !*setting) {
-      cached = 0;
-    } else if (strcmp(setting, "index") == 0) {
       cached = 1;
+    } else if (strcmp(setting, "scan") == 0) {
+      cached = 0;
     } else if (strcmp(setting, "verify") == 0) {
       cached = 2;
     } else {
@@ -174,9 +174,11 @@ const IRInstruction *ir_find_temp_producer_before(const IRFunction *function,
         ir_scan_temp_producer_before(function, before_index, temp_name);
     if (slow != fast) {
       fprintf(stderr,
-              "mettle: producer index disagrees for '%s' before %zu in '%s'\n",
+              "mettle: producer index disagrees for '%s' before %zu in pass '%s'\n",
               temp_name, before_index,
-              function->name ? function->name : "<unnamed>");
+              mettle_compiler_ctx()->pass_name
+                  ? mettle_compiler_ctx()->pass_name
+                  : "<none>");
       return slow;
     }
   }

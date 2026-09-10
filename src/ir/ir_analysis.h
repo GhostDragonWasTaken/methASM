@@ -73,6 +73,8 @@ typedef struct {
   uint64_t jumps_generation;
   uint64_t use_defs_generation;
   uint64_t dests_generation;
+  uint64_t dests_writes;
+  uint64_t jumps_writes;
   size_t instruction_count;
   size_t block_count;
   size_t *instruction_block;

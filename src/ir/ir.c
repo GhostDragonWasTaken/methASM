@@ -790,9 +790,15 @@ IROperand ir_operand_copy(const IROperand *operand) {
   }
 }
 
+uint64_t g_ir_operand_writes = 1;
+
 void ir_operand_destroy(IROperand *operand) {
   if (!operand) {
     return;
+  }
+  if (operand->kind == IR_OPERAND_TEMP || operand->kind == IR_OPERAND_SYMBOL ||
+      operand->kind == IR_OPERAND_LABEL) {
+    g_ir_operand_writes++;
   }
 
   switch (operand->kind) {

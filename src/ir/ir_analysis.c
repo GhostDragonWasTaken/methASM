@@ -826,9 +826,19 @@ static const IRJumpIndex *ir_analysis_require_jumps(IRFunction *function) {
       analysis->labels = NULL;
     }
   }
+  if (analysis->jumps.built &&
+      analysis->jumps_writes != g_ir_operand_writes) {
+    ir_jump_index_destroy(&analysis->jumps);
+    if (analysis->labels) {
+      ir_value_table_clear(analysis->labels);
+      free(analysis->labels);
+      analysis->labels = NULL;
+    }
+  }
   if (!analysis->jumps.built) {
     ir_jump_index_build(analysis, function);
     analysis->jumps_generation = function->structure_generation;
+    analysis->jumps_writes = g_ir_operand_writes;
   }
   return analysis->jumps.built ? &analysis->jumps : NULL;
 }
@@ -839,12 +849,16 @@ static const IRDestIndex *ir_analysis_require_dests(IRFunction *function) {
     return NULL;
   }
   if (analysis->dests.built &&
-      analysis->dests_generation != function->generation) {
+      (analysis->dests_generation != function->generation ||
+       analysis->dests_writes != g_ir_operand_writes ||
+       analysis->dests.built_instruction_count !=
+           function->instruction_count)) {
     ir_dest_index_destroy(&analysis->dests);
   }
   if (!analysis->dests.built) {
     ir_dest_index_build(analysis, function);
     analysis->dests_generation = function->generation;
+    analysis->dests_writes = g_ir_operand_writes;
   }
   return analysis->dests.built ? &analysis->dests : NULL;
 }
@@ -899,7 +913,8 @@ static IRAnalysis *ir_function_analysis_raw(IRFunction *function) {
   }
   g_analysis_rebuilds++;
 
-  ir_analysis_destroy(analysis);
+  free(analysis->instruction_block);
+  analysis->instruction_block = NULL;
   analysis->block_count = block_count;
   analysis->generation = function->generation;
   analysis->structure_generation = function->structure_generation;
