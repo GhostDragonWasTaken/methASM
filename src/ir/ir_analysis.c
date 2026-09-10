@@ -779,11 +779,16 @@ static const IRDomTree *ir_analysis_require_dom(IRFunction *function) {
   if (!analysis) {
     return NULL;
   }
+  if (analysis->dom.built &&
+      analysis->dom_generation != function->structure_generation) {
+    ir_dom_destroy(&analysis->dom);
+  }
   if (!analysis->dom.built) {
     size_t block_count = 0;
     const IRBasicBlock *blocks = ir_function_blocks(function, &block_count);
     if (blocks && block_count > 0) {
       ir_dom_build(&analysis->dom, blocks, block_count, function->entry_block);
+      analysis->dom_generation = function->structure_generation;
     }
   }
   return analysis->dom.built ? &analysis->dom : NULL;
@@ -794,8 +799,13 @@ static const IRUseDefs *ir_analysis_require_use_defs(IRFunction *function) {
   if (!analysis) {
     return NULL;
   }
+  if (analysis->ud.built &&
+      analysis->use_defs_generation != function->generation) {
+    ir_use_defs_destroy(&analysis->ud);
+  }
   if (!analysis->ud.built) {
     ir_use_defs_build(&analysis->ud, function);
+    analysis->use_defs_generation = function->generation;
   }
   return analysis->ud.built ? &analysis->ud : NULL;
 }
@@ -805,8 +815,18 @@ static const IRJumpIndex *ir_analysis_require_jumps(IRFunction *function) {
   if (!analysis) {
     return NULL;
   }
+  if (analysis->jumps.built &&
+      analysis->jumps_generation != function->structure_generation) {
+    ir_jump_index_destroy(&analysis->jumps);
+    if (analysis->labels) {
+      ir_value_table_clear(analysis->labels);
+      free(analysis->labels);
+      analysis->labels = NULL;
+    }
+  }
   if (!analysis->jumps.built) {
     ir_jump_index_build(analysis, function);
+    analysis->jumps_generation = function->structure_generation;
   }
   return analysis->jumps.built ? &analysis->jumps : NULL;
 }
@@ -816,8 +836,13 @@ static const IRDestIndex *ir_analysis_require_dests(IRFunction *function) {
   if (!analysis) {
     return NULL;
   }
+  if (analysis->dests.built &&
+      analysis->dests_generation != function->generation) {
+    ir_dest_index_destroy(&analysis->dests);
+  }
   if (!analysis->dests.built) {
     ir_dest_index_build(analysis, function);
+    analysis->dests_generation = function->generation;
   }
   return analysis->dests.built ? &analysis->dests : NULL;
 }
@@ -853,9 +878,10 @@ static IRAnalysis *ir_function_analysis_raw(IRFunction *function) {
   g_analysis_queries++;
   IRAnalysis *analysis = (IRAnalysis *)function->analysis;
   if (analysis && analysis->valid &&
-      analysis->generation == function->generation &&
+      analysis->structure_generation == function->structure_generation &&
       analysis->instruction_count == function->instruction_count &&
       analysis->block_count == block_count) {
+    analysis->generation = function->generation;
     return analysis;
   }
   g_analysis_rebuilds++;
@@ -873,6 +899,7 @@ static IRAnalysis *ir_function_analysis_raw(IRFunction *function) {
   analysis->block_count = block_count;
   if (!blocks || block_count == 0) {
     analysis->generation = function->generation;
+    analysis->structure_generation = function->structure_generation;
     analysis->instruction_count = function->instruction_count;
     analysis->valid = 1;
     return analysis;
@@ -896,6 +923,7 @@ static IRAnalysis *ir_function_analysis_raw(IRFunction *function) {
 
 
   analysis->generation = function->generation;
+  analysis->structure_generation = function->structure_generation;
   analysis->instruction_count = function->instruction_count;
   analysis->valid = 1;
   return analysis;

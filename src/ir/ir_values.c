@@ -393,7 +393,51 @@ uint64_t ir_function_fingerprint(const IRFunction *function) {
   return hash;
 }
 
+uint64_t ir_function_structure_fingerprint(const IRFunction *function) {
+  if (!function) {
+    return 0;
+  }
+  uint64_t hash = 1469598103934665603ull;
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op != IR_OP_LABEL && in->op != IR_OP_JUMP &&
+        in->op != IR_OP_BRANCH_ZERO && in->op != IR_OP_BRANCH_EQ &&
+        in->op != IR_OP_RETURN) {
+      continue;
+    }
+    hash ^= (uint64_t)in->op;
+    hash *= 1099511628211ull;
+    ir_fingerprint_mix(&hash, in->text);
+  }
+  return hash;
+}
+
 static size_t g_silent_mutations = 0;
+static size_t g_silent_structure = 0;
+
+size_t ir_silent_structure_count(void) { return g_silent_structure; }
+
+void ir_check_silent_structure(const IRFunction *function,
+                               const char *pass_name, uint64_t before,
+                               uint64_t structure_before) {
+  if (!getenv("METTLE_CFG_AUDIT") || !function) {
+    return;
+  }
+  const uint64_t after = ir_function_structure_fingerprint(function);
+  if (after == before) {
+    return;
+  }
+  if (function->structure_generation != structure_before) {
+    return;
+  }
+  g_silent_structure++;
+  fprintf(stderr,
+          "mettle: pass '%s' changed the control flow of '%s' without "
+          "clearing the graph\n",
+          pass_name ? pass_name : "<unnamed>",
+          function->name ? function->name : "<unnamed>");
+}
+
 
 size_t ir_silent_mutation_count(void) { return g_silent_mutations; }
 
@@ -460,6 +504,13 @@ const char *ir_function_value_name(const IRFunction *function, uint32_t id) {
 void ir_function_touch(IRFunction *function) {
   if (function) {
     function->generation++;
+  }
+}
+
+void ir_function_touch_structure(IRFunction *function) {
+  if (function) {
+    function->generation++;
+    function->structure_generation++;
   }
 }
 

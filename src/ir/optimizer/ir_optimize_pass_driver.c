@@ -36,6 +36,19 @@ static int ir_pass_time_covers(const IRFunction *function) {
   return function && function->name && strcmp(function->name, only) == 0;
 }
 
+static size_t g_cfg_repairs = 0;
+
+static int ir_cfg_repair_enabled(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    const char *setting = getenv("METTLE_CFG_REPAIR");
+    cached = (setting && strcmp(setting, "0") == 0) ? 0 : 1;
+  }
+  return cached;
+}
+
+size_t ir_cfg_repair_count(void) { return g_cfg_repairs; }
+
 static double g_ir_pass_ms[IR_OPT_PASS_COUNT];
 static unsigned long long g_ir_pass_runs[IR_OPT_PASS_COUNT];
 #define IR_PASS_TIME_NAMED_MAX 96
@@ -302,6 +315,10 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
   const uint64_t fingerprint_before =
       getenv("METTLE_CACHE_AUDIT") ? ir_function_fingerprint(function) : 0;
   const uint64_t generation_before = function->generation;
+  const uint64_t cfg_fingerprint_before =
+      getenv("METTLE_CFG_AUDIT") ? ir_function_structure_fingerprint(function)
+                                 : 0;
+  const uint64_t structure_generation_before = function->structure_generation;
 
   mettle_compiler_ctx_set_pass_name(pass->name);
   ir_explain_pass_begin(function);
@@ -318,6 +335,13 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
   }
   ir_check_silent_mutation(function, pass->name, fingerprint_before,
                            generation_before);
+  ir_check_silent_structure(function, pass->name, cfg_fingerprint_before,
+                            structure_generation_before);
+  if (ir_cfg_repair_enabled() && changed &&
+      function->structure_generation == structure_generation_before) {
+    ir_function_clear_cfg(function);
+    g_cfg_repairs++;
+  }
   ir_value_maybe_sabotage(function, pass->name);
   ir_value_check_after_pass(function, pass->name);
   ir_function_number_values(function);

@@ -285,6 +285,7 @@ typedef struct {
   int cfg_valid;
   IRValueTable values;
   uint64_t generation;
+  uint64_t structure_generation;
   void *analysis;
   int is_inline;
   int is_inline_contract;
@@ -468,6 +469,12 @@ const IRBasicBlock *ir_function_blocks(IRFunction *function,
 void ir_instruction_destroy(IRInstruction *instruction);
 int ir_instruction_writes_destination(const IRInstruction *instruction);
 uint64_t ir_function_fingerprint(const IRFunction *function);
+uint64_t ir_function_structure_fingerprint(const IRFunction *function);
+void ir_check_silent_structure(const IRFunction *function,
+                               const char *pass_name, uint64_t before,
+                               uint64_t structure_before);
+size_t ir_silent_structure_count(void);
+size_t ir_cfg_repair_count(void);
 void ir_check_silent_mutation(const IRFunction *function,
                               const char *pass_name, uint64_t before,
                               uint64_t generation_before);
@@ -484,6 +491,7 @@ int ir_function_values_agree(const IRFunction *function, char *why,
 int ir_function_values_audit(const IRFunction *function, char *why,
                              size_t why_capacity, size_t *unnumbered_out);
 void ir_function_touch(IRFunction *function);
+void ir_function_touch_structure(IRFunction *function);
 void ir_value_check_after_pass(const IRFunction *function,
                                const char *pass_name);
 void ir_value_maybe_sabotage(IRFunction *function, const char *pass_name);

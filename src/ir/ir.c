@@ -967,7 +967,7 @@ void ir_function_clear_cfg(IRFunction *function) {
     return;
   }
   ir_function_free_blocks(function);
-  ir_function_touch(function);
+  ir_function_touch_structure(function);
 }
 
 typedef struct {
@@ -1083,6 +1083,7 @@ IRFunction *ir_function_create(const char *name) {
   function->instruction_capacity = 0;
   ir_value_table_init(&function->values);
   function->generation = 1;
+  function->structure_generation = 1;
   function->blocks = NULL;
   function->block_count = 0;
   function->entry_block = 0;
