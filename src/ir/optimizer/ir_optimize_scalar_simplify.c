@@ -894,7 +894,7 @@ static int ir_cp_record_temp_write(IRCopyPropState *state,
       !ir_operand_is_propagatable_value(&instruction->lhs)) {
     return 1;
   }
-  if (instruction->lhs.kind == IR_OPERAND_TEMP && instruction->lhs.name &&
+  if (ir_operand_is_temp(&instruction->lhs) &&
       ir_operand_names_match(&instruction->lhs, &instruction->dest)) {
     ir_temp_value_map_remove(&state->map, instruction->dest.name);
     return 1;
@@ -917,7 +917,7 @@ static int ir_cp_record_symbol_write(IRCopyPropState *state,
       ir_temp_value_map_lookup(&state->storage_syms, instruction->dest.name)) {
     return 1;
   }
-  if (instruction->lhs.kind == IR_OPERAND_SYMBOL && instruction->lhs.name &&
+  if (ir_operand_is_symbol(&instruction->lhs) &&
       ir_operand_names_match(&instruction->lhs, &instruction->dest)) {
     ir_symbol_value_map_invalidate_name(&state->symbol_map,
                                         instruction->dest.name);
@@ -2899,7 +2899,7 @@ static int ir_try_fuse_rotate_add_at(IRFunction *function, size_t index,
 
   const char *sym_next = assign_next->dest.name;
   int next_from_temp =
-      assign_next->lhs.kind == IR_OPERAND_TEMP && assign_next->lhs.name &&
+      ir_operand_is_temp(&assign_next->lhs) &&
       strcmp(assign_next->lhs.name, temp_sum) == 0;
   if (!next_from_temp) {
     return 1;
@@ -2915,7 +2915,7 @@ static int ir_try_fuse_rotate_add_at(IRFunction *function, size_t index,
       ir_operand_is_symbol_named(&assign_b->lhs, sym_next);
   int b_from_temp =
       ir_operand_is_symbol_named(&assign_b->dest, sym_b) &&
-      assign_b->lhs.kind == IR_OPERAND_TEMP && assign_b->lhs.name &&
+      ir_operand_is_temp(&assign_b->lhs) &&
       strcmp(assign_b->lhs.name, temp_sum) == 0;
   if (!b_from_next && !b_from_temp) {
     return 1;

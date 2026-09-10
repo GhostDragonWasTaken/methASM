@@ -2841,6 +2841,18 @@ $cases = @(
      Env = @{ METTLE_VERIFY_BREAK = "constant_and_branch_simplify:dot" }
      SkipDeterminism = $true
      OutputMustMatch = @("MISCOMPILE CAUGHT", "quarantined", "pre-pass IR restored") },
+  # The register allocation verifier recomputes liveness on its own and
+  # rejects two live values in one register. A sabotaged colouring proves
+  # the checker sees what it claims to see.
+  @{ Name = "regalloc_verify_clean"; Path = "tests/verify_clean.mettle"; ShouldSucceed = $true
+     Args = @("--release")
+     Env = @{ METTLE_REGALLOC_VERIFY = "1" }
+     SkipDeterminism = $true },
+  @{ Name = "regalloc_verify_sabotage_caught"; Path = "tests/verify_clean.mettle"; ShouldSucceed = $false
+     Args = @("--release")
+     Env = @{ METTLE_REGALLOC_VERIFY = "1"; METTLE_REGALLOC_VERIFY_BREAK = "1" }
+     SkipDeterminism = $true
+     Pattern = "register allocation verifier: two live values share a register" },
   # `mettle test`: interpreted @test functions - pass/fail/leak reporting with
   # assertion diagnostics; @test bodies are dropped from normal builds.
   @{ Name = "comptime_test_run"; Path = "tests/comptime_tests_demo.mettle"; ShouldSucceed = $false

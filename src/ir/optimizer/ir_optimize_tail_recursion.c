@@ -109,7 +109,7 @@ static size_t ir_tre_skip_errdefer_diamond(const IRFunction *function,
 static int ir_tre_match_site(const IRFunction *function, size_t call_index,
                              IRTailSite *site) {
   const IRInstruction *call = &function->instructions[call_index];
-  const char *traced = (call->dest.kind == IR_OPERAND_TEMP && call->dest.name)
+  const char *traced = (ir_operand_is_temp(&call->dest))
                            ? call->dest.name
                            : NULL;
 
@@ -166,7 +166,7 @@ static int ir_tre_match_site(const IRFunction *function, size_t call_index,
     return 0;
   }
 
-  if (call->dest.kind == IR_OPERAND_TEMP && call->dest.name &&
+  if (ir_operand_is_temp(&call->dest) &&
       ir_tre_temp_uses_outside(function, call->dest.name, call_index,
                                ret_index) != 0) {
     return 0;

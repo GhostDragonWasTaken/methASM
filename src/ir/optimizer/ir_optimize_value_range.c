@@ -407,7 +407,7 @@ static void vr_apply_branch_fact(IRValueRangeCtx *ctx, size_t branch_index,
   for (size_t i = producer_index + 1; i < branch_index; i++) {
     const IRInstruction *in = &fn->instructions[i];
     if (ir_instruction_writes_destination(in) &&
-        in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name && symbol &&
+        ir_operand_is_symbol(&in->dest) && symbol &&
         strcmp(in->dest.name, symbol) == 0) {
       return;
     }
@@ -463,7 +463,7 @@ static void vr_apply_guards(IRValueRangeCtx *ctx, size_t at, const char *symbol,
       continue;
     }
     if (ir_instruction_writes_destination(in) &&
-        in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name && symbol &&
+        ir_operand_is_symbol(&in->dest) && symbol &&
         strcmp(in->dest.name, symbol) == 0) {
       return;
     }
@@ -731,7 +731,7 @@ static void vr_instruction_range(IRValueRangeCtx *ctx, size_t index, int depth,
     break;
   }
 
-  if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name) {
+  if (ir_operand_is_symbol(&in->dest)) {
     IRIntRange declared;
     vr_declared_range(ctx, in->dest.name, &declared);
     vr_narrow_to(out, &declared);
@@ -1057,11 +1057,11 @@ static const IROperand *vr_zero_test_operand(const IRInstruction *in) {
       (strcmp(in->text, "==") != 0 && strcmp(in->text, "!=") != 0)) {
     return NULL;
   }
-  if (in->lhs.kind == IR_OPERAND_TEMP && in->lhs.name &&
+  if (ir_operand_is_temp(&in->lhs) &&
       ir_operand_is_int_value(&in->rhs, 0)) {
     return &in->lhs;
   }
-  if (in->rhs.kind == IR_OPERAND_TEMP && in->rhs.name &&
+  if (ir_operand_is_temp(&in->rhs) &&
       ir_operand_is_int_value(&in->lhs, 0)) {
     return &in->rhs;
   }

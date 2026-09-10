@@ -291,7 +291,7 @@ static const IRInstruction *defines_temp(const IRBasicBlock *block,
   }
   for (size_t i = block->instruction_count; i-- > 0;) {
     const IRInstruction *insn = &block->instructions[i];
-    if (insn->dest.kind == IR_OPERAND_TEMP && insn->dest.name &&
+    if (ir_operand_is_temp(&insn->dest) &&
         strcmp(insn->dest.name, temp->name) == 0) {
       return insn;
     }

@@ -426,7 +426,7 @@ static int alias_symbol_def_count(const IRFunction *function,
     if (ins->op == IR_OP_DECLARE_LOCAL) {
       continue;
     }
-    if (ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+    if (ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, name) == 0) {
       count++;
     }

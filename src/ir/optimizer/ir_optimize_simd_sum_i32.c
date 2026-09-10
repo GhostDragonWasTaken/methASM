@@ -57,7 +57,7 @@ static int ir_symbol_assigned_once(const IRFunction *function,
       continue;
     }
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, symbol_name) == 0 && ++writes > 1) {
       return 0;
     }
@@ -98,7 +98,7 @@ int ir_symbol_is_loop_bound(const IRFunction *function,
                                 i < function->instruction_count; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, symbol_name) == 0) {
       return 0;
     }
@@ -303,7 +303,7 @@ static int ir_try_vectorize_sum_i32_at(IRFunction *function, size_t header_index
       int ok = 0;
       if (prod && prod->op == IR_OP_CAST && prod->text &&
           strcmp(prod->text, "int64") == 0 &&
-          prod->lhs.kind == IR_OPERAND_TEMP && prod->lhs.name) {
+          ir_operand_is_temp(&prod->lhs)) {
         const IRInstruction *load =
             ir_find_temp_producer_before(function, i, prod->lhs.name);
         if (load && load->op == IR_OP_LOAD &&
@@ -321,7 +321,7 @@ static int ir_try_vectorize_sum_i32_at(IRFunction *function, size_t header_index
         sum_load_index = (size_t)(prod - function->instructions);
       } else if (prod && prod->op == IR_OP_CAST && prod->text &&
                  strcmp(prod->text, "int32") == 0 &&
-                 prod->lhs.kind == IR_OPERAND_TEMP && prod->lhs.name &&
+                 ir_operand_is_temp(&prod->lhs) &&
                  ir_sum_accumulator_is_int64(function, ins->dest.name)) {
         const IRInstruction *load =
             ir_find_temp_producer_before(function, i, prod->lhs.name);
@@ -353,7 +353,7 @@ static int ir_try_vectorize_sum_i32_at(IRFunction *function, size_t header_index
               strcmp(addr->text, "+") == 0 &&
               addr->rhs.kind == IR_OPERAND_TEMP &&
               ir_operand_is_temp_named(&addr->rhs, ins->dest.name) &&
-              addr->lhs.kind == IR_OPERAND_SYMBOL && addr->lhs.name) {
+              ir_operand_is_symbol(&addr->lhs)) {
             load = probe;
             base_symbol = addr->lhs.name;
             has_indexed_load = 1;
@@ -455,7 +455,7 @@ int ir_instruction_is_safety_scaffolding(const IRInstruction *instruction) {
       strncmp(instruction->text, "mettle_safety_", 14) == 0) {
     return 1;
   }
-  return instruction->dest.kind == IR_OPERAND_TEMP && instruction->dest.name &&
+  return ir_operand_is_temp(&instruction->dest) &&
          strncmp(instruction->dest.name, IR_SAFETY_TEMP_PREFIX,
                  sizeof(IR_SAFETY_TEMP_PREFIX) - 1) == 0;
 }
@@ -480,7 +480,7 @@ int ir_iv_zero_at_header(const IRFunction *function, size_t header_index,
       if (ins->lhs.kind == IR_OPERAND_INT) {
         return ins->lhs.int_value == 0;
       }
-      if (ins->lhs.kind == IR_OPERAND_TEMP && ins->lhs.name) {
+      if (ir_operand_is_temp(&ins->lhs)) {
         const IRInstruction *p =
             ir_find_temp_producer_before(function, i, ins->lhs.name);
         return p && p->op == IR_OP_CAST && !p->is_float &&
@@ -630,7 +630,7 @@ static int ir_try_vectorize_sum_u8_at(IRFunction *function, size_t header_index,
       if (addr && addr->op == IR_OP_BINARY && addr->text &&
           strcmp(addr->text, "+") == 0 &&
           ir_operand_is_symbol_named(&addr->rhs, iv_symbol) &&
-          addr->lhs.kind == IR_OPERAND_SYMBOL && addr->lhs.name) {
+          ir_operand_is_symbol(&addr->lhs)) {
         base_symbol = addr->lhs.name;
         has_indexed_load = 1;
         indexed_load_index = i;
@@ -819,7 +819,7 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
     }
 
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
-        !ins->is_float && ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+        !ins->is_float && ir_operand_is_temp(&ins->dest) &&
         ins->lhs.kind == IR_OPERAND_SYMBOL && ins->rhs.kind == IR_OPERAND_SYMBOL) {
       const char *b = NULL;
       if (ir_operand_is_symbol_named(&ins->rhs, iv_symbol)) {
@@ -840,7 +840,7 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
     if (ins->op == IR_OP_LOAD && ins->rhs.kind == IR_OPERAND_INT &&
         ins->rhs.int_value == 1 && addr_temp &&
         ir_operand_is_temp_named(&ins->lhs, addr_temp) &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name) {
+        ir_operand_is_temp(&ins->dest)) {
       cur = ins->dest.name;
       continue;
     }
@@ -855,7 +855,7 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
     }
 
     if (ins->op == IR_OP_CAST && !ins->is_float && cur &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+        ir_operand_is_temp(&ins->dest) &&
         ir_operand_is_temp_named(&ins->lhs, cur) &&
         ir_type_name_is_integer(ins->text)) {
       cur = ins->dest.name;
@@ -863,7 +863,7 @@ static int ir_try_vectorize_byte_map_at(IRFunction *function,
     }
 
     if (ins->op == IR_OP_BINARY && !ins->is_float &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name && cur) {
+        ir_operand_is_temp(&ins->dest) && cur) {
       int commutative = 0;
       int code = ir_byte_map_op_code(ins->text, &commutative);
       int lhs_is_cur = ir_operand_is_temp_named(&ins->lhs, cur);
@@ -997,7 +997,7 @@ static int ir_try_vectorize_lcg_at(IRFunction *function, size_t header_index,
     const IRInstruction *in = &function->instructions[i];
     if (in->op == IR_OP_BINARY && !in->is_float && in->text &&
         strcmp(in->text, "*") == 0 && in->dest.kind == IR_OPERAND_TEMP &&
-        in->dest.name && in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+        in->dest.name && ir_operand_is_symbol(&in->lhs) &&
         in->rhs.kind == IR_OPERAND_INT) {
       state_sym = in->lhs.name;
       A = in->rhs.int_value;
@@ -1061,7 +1061,7 @@ static int ir_try_vectorize_lcg_at(IRFunction *function, size_t header_index,
     const IRInstruction *in = &function->instructions[i];
     if (in->op == IR_OP_BINARY && !in->is_float && in->text &&
         strcmp(in->text, "+") == 0 && in->dest.kind == IR_OPERAND_SYMBOL &&
-        in->dest.name && in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+        in->dest.name && ir_operand_is_symbol(&in->lhs) &&
         ir_operand_names_match(&in->lhs, &in->dest) &&
         ir_operand_is_temp_named(&in->rhs, cast_tmp)) {
       sum_sym = in->dest.name;

@@ -231,7 +231,7 @@ static void pure_licm_global_effects(const IRFunction *function,
       pure_licm_effects_note_read(function, &inst->lhs, fx);
       pure_licm_effects_note_read(function, &inst->rhs, fx);
       if (ir_instruction_writes_destination(inst) &&
-          inst->dest.kind == IR_OPERAND_SYMBOL && inst->dest.name &&
+          ir_operand_is_symbol(&inst->dest) &&
           pure_licm_symbol_is_global(function, inst->dest.name) &&
           !pure_licm_effects_add(fx->writes, &fx->write_count,
                                  inst->dest.name)) {
@@ -286,13 +286,13 @@ static int pure_licm_collapse_idempotent_body(IRProgram *program,
       case IR_OP_ASSIGN:
         if (inc_temp && !counter && inst->dest.kind == IR_OPERAND_SYMBOL &&
             inst->dest.name && strcmp(inst->dest.name, inc_sym) == 0 &&
-            inst->lhs.kind == IR_OPERAND_TEMP && inst->lhs.name &&
+            ir_operand_is_temp(&inst->lhs) &&
             strcmp(inst->lhs.name, inc_temp) == 0) {
           counter = inc_sym;
           counter_at = k;
           break;
         }
-        if (inst->dest.kind == IR_OPERAND_SYMBOL && inst->dest.name &&
+        if (ir_operand_is_symbol(&inst->dest) &&
             pure_licm_symbol_is_global(function, inst->dest.name) &&
             inst->lhs.kind == IR_OPERAND_INT) {
           if (group_count >= 64 ||
@@ -308,7 +308,7 @@ static int pure_licm_collapse_idempotent_body(IRProgram *program,
       case IR_OP_BINARY:
         if (!counter && !inst->is_float && inst->text &&
             strcmp(inst->text, "+") == 0 &&
-            inst->dest.kind == IR_OPERAND_SYMBOL && inst->dest.name &&
+            ir_operand_is_symbol(&inst->dest) &&
             !pure_licm_symbol_is_global(function, inst->dest.name) &&
             ir_operand_is_symbol_named(&inst->lhs, inst->dest.name) &&
             inst->rhs.kind == IR_OPERAND_INT) {
@@ -318,8 +318,8 @@ static int pure_licm_collapse_idempotent_body(IRProgram *program,
         }
         if (!counter && !inc_temp && !inst->is_float && inst->text &&
             strcmp(inst->text, "+") == 0 &&
-            inst->dest.kind == IR_OPERAND_TEMP && inst->dest.name &&
-            inst->lhs.kind == IR_OPERAND_SYMBOL && inst->lhs.name &&
+            ir_operand_is_temp(&inst->dest) &&
+            ir_operand_is_symbol(&inst->lhs) &&
             !pure_licm_symbol_is_global(function, inst->lhs.name) &&
             inst->rhs.kind == IR_OPERAND_INT) {
           inc_temp = inst->dest.name;

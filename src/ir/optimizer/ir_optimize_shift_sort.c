@@ -288,7 +288,7 @@ static int ir_try_vectorize_insertion_sort_loop_at(IRFunction *function,
         strcmp(probe->text, "+") == 0 &&
         !probe->is_float &&
         ir_operand_is_symbol_named(&probe->dest, cur_symbol) &&
-        probe->lhs.kind == IR_OPERAND_SYMBOL && probe->lhs.name &&
+        ir_operand_is_symbol(&probe->lhs) &&
         ir_i32_ptr_offset_is_element_step(&probe->rhs)) {
       base_symbol = probe->lhs.name;
       break;

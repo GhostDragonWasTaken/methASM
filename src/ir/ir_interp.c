@@ -3577,7 +3577,7 @@ static int ii_fill_indexed(IRInterpMachine *machine, IIFrame *frame,
     }
   }
   machine->fuel -= bound > start ? bound - start : 0;
-  if (insn->dest.kind == IR_OPERAND_SYMBOL && insn->dest.name) {
+  if (ir_operand_is_symbol(&insn->dest)) {
     long long final_value = bound > start ? bound : start;
     int wide = insn->argument_count > 5 &&
                insn->arguments[5].kind == IR_OPERAND_INT &&
@@ -3636,7 +3636,7 @@ static int ii_fill_offset(IRInterpMachine *machine, IIFrame *frame,
     steps++;
   }
   machine->fuel -= steps;
-  if (insn->dest.kind == IR_OPERAND_SYMBOL && insn->dest.name) {
+  if (ir_operand_is_symbol(&insn->dest)) {
     IRInterpValue out = ii_int_value(off);
     if (!ii_store_dest(machine, frame, &insn->dest, &out)) {
       return 0;
@@ -4966,7 +4966,7 @@ static const char *ii_gpu_value_name(const IRFunction *fn, size_t index,
     const IRInstruction *next = &fn->instructions[i];
     if ((next->op == IR_OP_ASSIGN || next->op == IR_OP_STORE) &&
         next->lhs.name && strcmp(next->lhs.name, temp) == 0 &&
-        next->dest.kind == IR_OPERAND_SYMBOL && next->dest.name) {
+        ir_operand_is_symbol(&next->dest)) {
       return next->dest.name;
     }
   }
@@ -5481,7 +5481,7 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
     long long source_offset = 0;
     IIBuffer *source_buffer = NULL;
     int is_aggregate_source = 0;
-    if (insn->lhs.kind == IR_OPERAND_SYMBOL && insn->lhs.name) {
+    if (ir_operand_is_symbol(&insn->lhs)) {
       IIVar *var = ii_env_find(&frame->env, insn->lhs.name);
       if (!var) {
         var = ii_env_find(&machine->globals, insn->lhs.name);
@@ -5586,7 +5586,7 @@ static int ii_op_assign(IRInterpMachine *machine, IIFrame *frame,
                          const IRInstruction *insn) {
   IRInterpValue value;
   if (insn->lhs.kind == IR_OPERAND_STRING && insn->lhs.name &&
-      insn->dest.kind == IR_OPERAND_SYMBOL && insn->dest.name) {
+      ir_operand_is_symbol(&insn->dest)) {
     IIVar *dest = ii_env_find(&frame->env, insn->dest.name);
     if (dest && dest->is_cstring) {
       unsigned long long chars = 0, record = 0;

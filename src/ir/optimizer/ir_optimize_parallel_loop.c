@@ -510,7 +510,7 @@ static int ir_par_step_is_increment(const IRFunction *function, size_t at,
   const IRInstruction *in = &function->instructions[at];
   if (in->op == IR_OP_BINARY) {
     return in->text && strcmp(in->text, "+") == 0 &&
-           in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+           ir_operand_is_symbol(&in->lhs) &&
            strcmp(in->lhs.name, iv) == 0 && in->rhs.kind == IR_OPERAND_INT &&
            in->rhs.int_value == 1;
   }
@@ -880,9 +880,9 @@ static int ir_par_recognize_reduction(IRParLoop *loop, const char *name,
       return 0;
     }
     op = found;
-    uses_lhs = combine->lhs.kind == IR_OPERAND_SYMBOL && combine->lhs.name &&
+    uses_lhs = ir_operand_is_symbol(&combine->lhs) &&
                strcmp(combine->lhs.name, name) == 0;
-    uses_rhs = combine->rhs.kind == IR_OPERAND_SYMBOL && combine->rhs.name &&
+    uses_rhs = ir_operand_is_symbol(&combine->rhs) &&
                strcmp(combine->rhs.name, name) == 0;
     if (uses_lhs == uses_rhs) {
       return 0;

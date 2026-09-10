@@ -70,14 +70,14 @@ static int ir_civ_find_offset_init(const IRFunction *function, size_t label_idx,
         !ir_civ_operand_is_sym(&in->dest, v)) {
       continue;
     }
-    if (in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+    if (ir_operand_is_symbol(&in->lhs) &&
         in->rhs.kind == IR_OPERAND_INT) {
       *base_out = in->lhs.name;
       *offset_out = in->rhs.int_value;
       *init_idx_out = i;
       return 1;
     }
-    if (in->rhs.kind == IR_OPERAND_SYMBOL && in->rhs.name &&
+    if (ir_operand_is_symbol(&in->rhs) &&
         in->lhs.kind == IR_OPERAND_INT) {
       *base_out = in->rhs.name;
       *offset_out = in->lhs.int_value;
@@ -271,7 +271,7 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
     }
 
     int hit = -1;
-    if (insn->lhs.kind == IR_OPERAND_SYMBOL && insn->lhs.name) {
+    if (ir_operand_is_symbol(&insn->lhs)) {
       for (size_t d = 0; d < derived_count; d++) {
         if (strcmp(insn->lhs.name, derived_names[d]) == 0) {
           hit = (int)d;
@@ -280,7 +280,7 @@ int ir_eliminate_congruent_ivs_pass(IRFunction *function, int *changed) {
       }
     }
     int hit_rhs = -1;
-    if (hit < 0 && insn->rhs.kind == IR_OPERAND_SYMBOL && insn->rhs.name) {
+    if (hit < 0 && ir_operand_is_symbol(&insn->rhs)) {
       for (size_t d = 0; d < derived_count; d++) {
         if (strcmp(insn->rhs.name, derived_names[d]) == 0) {
           hit_rhs = (int)d;

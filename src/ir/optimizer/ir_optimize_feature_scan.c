@@ -121,7 +121,7 @@ static const IRInstruction *ir_scan_temp_producer_before(
     if (instruction->op == IR_OP_NOP) {
       continue;
     }
-    if (instruction->dest.kind == IR_OPERAND_TEMP && instruction->dest.name &&
+    if (ir_operand_is_temp(&instruction->dest) &&
         strcmp(instruction->dest.name, temp_name) == 0) {
       return instruction;
     }

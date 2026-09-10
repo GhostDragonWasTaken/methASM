@@ -111,14 +111,14 @@ static int ir_try_fuse_lower_bound_i32_at(IRFunction *function,
       continue;
     }
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "-") == 0 &&
-        !ins->is_float && ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+        !ins->is_float && ir_operand_is_temp(&ins->dest) &&
         ir_operand_is_symbol_named(&ins->lhs, hi_symbol) &&
         ir_operand_is_symbol_named(&ins->rhs, lo_symbol)) {
       delta_temp = ins->dest.name;
       continue;
     }
     if (ins->op == IR_OP_BINARY && ins->text && !ins->is_float &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name && delta_temp &&
+        ir_operand_is_temp(&ins->dest) && delta_temp &&
         ir_operand_is_temp_named(&ins->lhs, delta_temp) &&
         ((strcmp(ins->text, "/") == 0 && ir_operand_is_int_value(&ins->rhs, 2)) ||
          (strcmp(ins->text, ">>") == 0 && ir_operand_is_int_value(&ins->rhs, 1)))) {
@@ -126,14 +126,14 @@ static int ir_try_fuse_lower_bound_i32_at(IRFunction *function,
       continue;
     }
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
-        !ins->is_float && ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        !ins->is_float && ir_operand_is_symbol(&ins->dest) &&
         half_temp && ir_operand_is_symbol_named(&ins->lhs, lo_symbol) &&
         ir_operand_is_temp_named(&ins->rhs, half_temp)) {
       mid_symbol = ins->dest.name;
       continue;
     }
     if (ins->op == IR_OP_BINARY && ins->text && !ins->is_float &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name && mid_symbol &&
+        ir_operand_is_temp(&ins->dest) && mid_symbol &&
         ir_operand_is_symbol_named(&ins->lhs, mid_symbol) &&
         ((strcmp(ins->text, "<<") == 0 && ir_operand_is_int_value(&ins->rhs, 2)) ||
          (strcmp(ins->text, "*") == 0 && ir_operand_is_int_value(&ins->rhs, 4)))) {
@@ -141,8 +141,8 @@ static int ir_try_fuse_lower_bound_i32_at(IRFunction *function,
       continue;
     }
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
-        !ins->is_float && ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
-        scaled_temp && ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
+        !ins->is_float && ir_operand_is_temp(&ins->dest) &&
+        scaled_temp && ir_operand_is_symbol(&ins->lhs) &&
         ir_operand_is_temp_named(&ins->rhs, scaled_temp)) {
       arr_symbol = ins->lhs.name;
       addr_temp = ins->dest.name;
@@ -151,14 +151,14 @@ static int ir_try_fuse_lower_bound_i32_at(IRFunction *function,
     if (ins->op == IR_OP_LOAD && addr_temp &&
         ir_operand_is_temp_named(&ins->lhs, addr_temp) &&
         ir_operand_is_int_value(&ins->rhs, 4) &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name) {
+        ir_operand_is_temp(&ins->dest)) {
       loaded_temp = ins->dest.name;
       continue;
     }
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "<") == 0 &&
         !ins->is_float && loaded_temp &&
         ir_operand_is_temp_named(&ins->lhs, loaded_temp) &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name) {
+        ir_operand_is_temp(&ins->dest)) {
       cmp_temp = ins->dest.name;
       key_operand = ins->rhs;
       continue;
@@ -344,7 +344,7 @@ static int ir_body_is_minmax_scan_loop(const IRFunction *function,
       continue;
     }
     if (ins->op == IR_OP_BINARY && ins->text && !ins->is_float &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name) {
+        ir_operand_is_temp(&ins->dest)) {
       if (strcmp(ins->text, "<") == 0 &&
           ((ins->lhs.kind == IR_OPERAND_SYMBOL &&
             (ir_operand_is_symbol_named(&ins->lhs, minv) ||
@@ -651,7 +651,7 @@ static int ir_body_is_prefix_sum_loop(const IRFunction *function,
       saw_sum_add = 1;
       continue;
     }
-    if (ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+    if (ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, iv) != 0 &&
         !ir_prefix_sum_symbol_is_body_local(function, header_index,
                                             branch_index + 1, jump_index,
@@ -779,7 +779,7 @@ const char *ir_find_ptr_step_with_suffix(const IRFunction *function,
   for (i = start; i < end; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         ir_operand_is_symbol_named(&ins->lhs, ins->dest.name) &&
         ir_operand_is_int_value(&ins->rhs, step) &&
         ir_symbol_contains(ins->dest.name, suffix)) {
@@ -814,7 +814,7 @@ static int ir_body_is_minmax_ptr_loop(const IRFunction *function,
       continue;
     }
     if (ins->op == IR_OP_BINARY && ins->text && !ins->is_float &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name) {
+        ir_operand_is_temp(&ins->dest)) {
       if (strcmp(ins->text, "<") == 0 &&
           ins->rhs.kind == IR_OPERAND_SYMBOL &&
           ir_operand_is_symbol_named(&ins->rhs, minv)) {
@@ -984,7 +984,7 @@ static int ir_try_fuse_prefix_sum_ptr_at(IRFunction *function,
         ir_operand_is_symbol_named(&ins->dest, sum_symbol)) {
       continue;
     }
-    if (ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+    if (ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, src_p) != 0 &&
         strcmp(ins->dest.name, dst_p) != 0 &&
         !ir_prefix_sum_symbol_is_body_local(function, header_index,
@@ -1375,7 +1375,7 @@ static int ir_memcmp_byte_loop_value_symbol(const IRFunction *function,
   }
   producer = ir_find_temp_producer_before(function, before_index, operand->name);
   if (producer && producer->op == IR_OP_CAST &&
-      producer->lhs.kind == IR_OPERAND_SYMBOL && producer->lhs.name) {
+      ir_operand_is_symbol(&producer->lhs)) {
     *out_symbol = producer->lhs.name;
     return 1;
   }
@@ -1490,7 +1490,7 @@ static int ir_try_memcmp_byte_loop_function(IRFunction *function,
       }
     } else if (ins->op == IR_OP_CAST && ins->text &&
                strcmp(ins->text, "uint8") == 0 &&
-               ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name) {
+               ir_operand_is_symbol(&ins->dest)) {
       if (!lhs_byte && last_byte_load_base == 1) {
         lhs_byte = ins->dest.name;
       } else if (!rhs_byte && last_byte_load_base == 2 &&
@@ -1609,17 +1609,17 @@ static int ir_slp_load_base_index(const IRFunction *function, size_t load_index,
       shl->rhs.int_value != 2) {
     return 0;
   }
-  if (shl->lhs.kind == IR_OPERAND_SYMBOL && shl->lhs.name) {
+  if (ir_operand_is_symbol(&shl->lhs)) {
     *lane_base_out = shl->lhs.name;
     *lane_out = 0;
     return 1;
   }
-  if (shl->lhs.kind == IR_OPERAND_TEMP && shl->lhs.name) {
+  if (ir_operand_is_temp(&shl->lhs)) {
     const IRInstruction *off = ir_find_temp_producer_before(function, load_index,
                                                             shl->lhs.name);
     if (off && off->op == IR_OP_BINARY && off->text &&
         strcmp(off->text, "+") == 0 && !off->is_float &&
-        off->lhs.kind == IR_OPERAND_SYMBOL && off->lhs.name &&
+        ir_operand_is_symbol(&off->lhs) &&
         off->rhs.kind == IR_OPERAND_INT) {
       *lane_base_out = off->lhs.name;
       *lane_out = off->rhs.int_value;
@@ -1634,7 +1634,7 @@ static int ir_slp_find_init(const IRFunction *function, size_t before_index,
   for (size_t i = before_index; i-- > 0;) {
     const IRInstruction *in = &function->instructions[i];
     if ((in->op == IR_OP_ASSIGN || in->op == IR_OP_CAST) &&
-        in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+        ir_operand_is_symbol(&in->dest) &&
         strcmp(in->dest.name, sym) == 0) {
       if (in->lhs.kind == IR_OPERAND_SYMBOL || in->lhs.kind == IR_OPERAND_INT) {
         return ir_operand_clone(&in->lhs, out);
@@ -1704,7 +1704,7 @@ static int ir_slp_loop_frame_is_replayable(const IRFunction *function,
                                            const IRInstruction *compare,
                                            const char *iv_symbol) {
   const char *bound_sym = NULL;
-  if (compare->rhs.kind == IR_OPERAND_SYMBOL && compare->rhs.name) {
+  if (ir_operand_is_symbol(&compare->rhs)) {
     bound_sym = compare->rhs.name;
   } else if (compare->rhs.kind != IR_OPERAND_INT) {
     return 0;
@@ -1801,12 +1801,12 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
       continue;
     }
     const char *cand_av = NULL, *cand_ld = NULL;
-    if (mul->lhs.kind == IR_OPERAND_SYMBOL && mul->lhs.name &&
-        mul->rhs.kind == IR_OPERAND_TEMP && mul->rhs.name) {
+    if (ir_operand_is_symbol(&mul->lhs) &&
+        ir_operand_is_temp(&mul->rhs)) {
       cand_av = mul->lhs.name;
       cand_ld = mul->rhs.name;
-    } else if (mul->rhs.kind == IR_OPERAND_SYMBOL && mul->rhs.name &&
-               mul->lhs.kind == IR_OPERAND_TEMP && mul->lhs.name) {
+    } else if (ir_operand_is_symbol(&mul->rhs) &&
+               ir_operand_is_temp(&mul->lhs)) {
       cand_av = mul->rhs.name;
       cand_ld = mul->lhs.name;
     } else {
@@ -1861,7 +1861,7 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
     }
     const char *bb = NULL, *bi = NULL;
     long long lane = 0;
-    int rok = ld && ld->lhs.kind == IR_OPERAND_TEMP && ld->lhs.name &&
+    int rok = ld && ir_operand_is_temp(&ld->lhs) &&
               ir_slp_load_base_index(function,
                                      (size_t)(ld - function->instructions),
                                      ld->lhs.name, &bb, &bi, &lane);
@@ -1897,13 +1897,13 @@ static int ir_try_vectorize_slp_mac_i32_at(IRFunction *function,
         in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 1) {
       a_inc_ok = 1;
     } else if (strcmp(in->dest.name, b_idx_sym) == 0) {
-      if (in->rhs.kind == IR_OPERAND_SYMBOL && in->rhs.name) {
+      if (ir_operand_is_symbol(&in->rhs)) {
         stride_op = ir_operand_symbol(in->rhs.name);
         b_inc_ok = have_stride = stride_op.name != NULL;
       } else if (in->rhs.kind == IR_OPERAND_INT) {
         stride_op = ir_operand_int(in->rhs.int_value);
         b_inc_ok = have_stride = 1;
-      } else if (in->rhs.kind == IR_OPERAND_TEMP && in->rhs.name) {
+      } else if (ir_operand_is_temp(&in->rhs)) {
         const IRInstruction *p =
             ir_find_temp_producer_before(function, i, in->rhs.name);
         if (p && p->op == IR_OP_CAST && p->lhs.kind == IR_OPERAND_SYMBOL &&
@@ -2048,7 +2048,7 @@ static int ir_slp_i8_resolve(IRFunction *fn, size_t lo, size_t hi,
     const IRInstruction *in = &fn->instructions[i];
     if (in->op == IR_OP_LOAD && ir_operand_is_temp_named(&in->dest, cast->lhs.name) &&
         in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 1 &&
-        in->lhs.kind == IR_OPERAND_TEMP && in->lhs.name) {
+        ir_operand_is_temp(&in->lhs)) {
       ld = in;
       load_idx = i;
       break;
@@ -2065,17 +2065,17 @@ static int ir_slp_i8_resolve(IRFunction *fn, size_t lo, size_t hi,
     return 0;
   }
   *base_out = addp->lhs.name;
-  if (addp->rhs.kind == IR_OPERAND_SYMBOL && addp->rhs.name) {
+  if (ir_operand_is_symbol(&addp->rhs)) {
     *lane_base_out = addp->rhs.name;
     *lane_out = 0;
     return 1;
   }
-  if (addp->rhs.kind == IR_OPERAND_TEMP && addp->rhs.name) {
+  if (ir_operand_is_temp(&addp->rhs)) {
     const IRInstruction *off =
         ir_find_temp_producer_before(fn, load_idx, addp->rhs.name);
     if (off && off->op == IR_OP_BINARY && off->text &&
         strcmp(off->text, "+") == 0 && !off->is_float &&
-        off->lhs.kind == IR_OPERAND_SYMBOL && off->lhs.name &&
+        ir_operand_is_symbol(&off->lhs) &&
         off->rhs.kind == IR_OPERAND_INT) {
       *lane_base_out = off->lhs.name;
       *lane_out = off->rhs.int_value;
@@ -2155,12 +2155,12 @@ static int ir_try_vectorize_slp_mac_i8_at(IRFunction *function,
       continue;
     }
     const char *cand_av = NULL, *cand_ld = NULL;
-    if (mul->lhs.kind == IR_OPERAND_SYMBOL && mul->lhs.name &&
-        mul->rhs.kind == IR_OPERAND_TEMP && mul->rhs.name) {
+    if (ir_operand_is_symbol(&mul->lhs) &&
+        ir_operand_is_temp(&mul->rhs)) {
       cand_av = mul->lhs.name;
       cand_ld = mul->rhs.name;
-    } else if (mul->rhs.kind == IR_OPERAND_SYMBOL && mul->rhs.name &&
-               mul->lhs.kind == IR_OPERAND_TEMP && mul->lhs.name) {
+    } else if (ir_operand_is_symbol(&mul->rhs) &&
+               ir_operand_is_temp(&mul->lhs)) {
       cand_av = mul->rhs.name;
       cand_ld = mul->lhs.name;
     } else {
@@ -2230,10 +2230,10 @@ static int ir_try_vectorize_slp_mac_i8_at(IRFunction *function,
         in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 1) {
       a_inc_ok = 1;
     } else if (strcmp(in->dest.name, b_idx_sym) == 0) {
-      if (in->rhs.kind == IR_OPERAND_SYMBOL && in->rhs.name) {
+      if (ir_operand_is_symbol(&in->rhs)) {
         stride_sym = in->rhs.name;
         b_inc_ok = 1;
-      } else if (in->rhs.kind == IR_OPERAND_TEMP && in->rhs.name) {
+      } else if (ir_operand_is_temp(&in->rhs)) {
         const IRInstruction *p =
             ir_find_temp_producer_before(function, i, in->rhs.name);
         if (p && p->op == IR_OP_CAST && p->lhs.kind == IR_OPERAND_SYMBOL &&
@@ -2381,7 +2381,7 @@ static int ir_try_vectorize_exp_f32_at(IRFunction *function, size_t header_index
     if (in->op == IR_OP_CALL && in->text && strcmp(in->text, "expf") == 0 &&
         in->argument_count == 1 && in->arguments &&
         in->arguments[0].kind == IR_OPERAND_TEMP && in->arguments[0].name &&
-        in->dest.kind == IR_OPERAND_TEMP && in->dest.name) {
+        ir_operand_is_temp(&in->dest)) {
       call_arg = in->arguments[0].name;
       call_res = in->dest.name;
       break;
@@ -2397,7 +2397,7 @@ static int ir_try_vectorize_exp_f32_at(IRFunction *function, size_t header_index
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *in = &function->instructions[i];
     if (in->op == IR_OP_LOAD && ir_operand_is_temp_named(&in->dest, call_arg) &&
-        in->lhs.kind == IR_OPERAND_TEMP && in->lhs.name &&
+        ir_operand_is_temp(&in->lhs) &&
         ir_slp_load_base_index(function, i, in->lhs.name, &a_base, &a_idx,
                                &lane) &&
         lane == 0) {
@@ -2416,7 +2416,7 @@ static int ir_try_vectorize_exp_f32_at(IRFunction *function, size_t header_index
     long long sl = 0;
     if (in->op == IR_OP_STORE &&
         ir_operand_is_temp_named(&in->lhs, call_res) &&
-        in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+        ir_operand_is_temp(&in->dest) &&
         ir_slp_load_base_index(function, i, in->dest.name, &sb, &si, &sl) &&
         sl == 0 && sb && si && strcmp(sb, a_base) == 0 &&
         strcmp(si, iv_symbol) == 0) {
@@ -2525,7 +2525,7 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
     if (in->op == IR_OP_CALL && in->text && strcmp(in->text, "expf") == 0 &&
         in->argument_count == 1 && in->arguments &&
         in->arguments[0].kind == IR_OPERAND_TEMP && in->arguments[0].name &&
-        in->dest.kind == IR_OPERAND_TEMP && in->dest.name) {
+        ir_operand_is_temp(&in->dest)) {
       exp_arg = in->arguments[0].name;
       exp_res = in->dest.name;
       break;
@@ -2592,7 +2592,7 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
       const char *nb = NULL, *ni = NULL;
       long long nl = 0;
       num_ok = nload && nload->op == IR_OP_LOAD &&
-               nload->lhs.kind == IR_OPERAND_TEMP && nload->lhs.name &&
+               ir_operand_is_temp(&nload->lhs) &&
                ir_slp_load_base_index(function,
                                       (size_t)(nload - function->instructions),
                                       nload->lhs.name, &nb, &ni, &nl) &&
@@ -2644,7 +2644,7 @@ static int ir_try_vectorize_silu_f32_at(IRFunction *function,
         const char *uidx = NULL;
         long long ulane = 0;
         if (uload && uload->op == IR_OP_LOAD &&
-            uload->lhs.kind == IR_OPERAND_TEMP && uload->lhs.name &&
+            ir_operand_is_temp(&uload->lhs) &&
             ir_slp_load_base_index(function,
                                    (size_t)(uload - function->instructions),
                                    uload->lhs.name, &base_u, &uidx, &ulane) &&

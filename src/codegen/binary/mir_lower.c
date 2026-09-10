@@ -762,7 +762,7 @@ static int mir_temp_is_indirect_call_result(const IRFunction *irf,
   }
   for (size_t i = 0; i < irf->instruction_count; i++) {
     const IRInstruction *in = &irf->instructions[i];
-    if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+    if (ir_operand_is_temp(&in->dest) &&
         strcmp(in->dest.name, op->name) == 0) {
       return in->op == IR_OP_CALL_INDIRECT && in->lhs.kind == IR_OPERAND_TEMP;
     }
@@ -819,7 +819,7 @@ static int mir_temp_is_float(CodeGenerator *g, const IRFunction *function,
              0;
     }
     if (in->op == IR_OP_CALL_INDIRECT && g->ir_program &&
-        in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name) {
+        ir_operand_is_symbol(&in->lhs)) {
       const MtlcType *ft = mir_local_or_param_type(g, function, in->lhs.name, NULL);
       const CgSym *callee = ft ? NULL : code_generator_lookup_symbol(g,
                                                        in->lhs.name);
@@ -1755,7 +1755,7 @@ static int mir_gate_value(CodeGenerator *generator,
         break;
       }
       if (in->lhs.kind == IR_OPERAND_STRING &&
-          in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+          ir_operand_is_symbol(&in->dest) &&
           mir_name_is_global_aggregate(generator, ir_function,
                                        in->dest.name)) {
         break;
@@ -2332,7 +2332,7 @@ static void mir_scan_global_write(CodeGenerator *generator,
                                   int *has_global_write, int *gw_overflow,
                                   const char **gw_names,
                                   size_t *gw_count) {
-  if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name) {
+  if (ir_operand_is_symbol(&in->dest)) {
     int found = 0;
     for (size_t j = 0; j < defined->count; j++) {
       if (strcmp(defined->items[j].name, in->dest.name) == 0) {
@@ -2406,7 +2406,7 @@ static int mir_global_aggregate_read_ok(CodeGenerator *generator,
     return 0;
   }
   return mir_operand_struct_home_size(generator, ir_function, &in->dest) > 0 ||
-         (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+         (ir_operand_is_symbol(&in->dest) &&
           mir_name_is_global_aggregate(generator, ir_function, in->dest.name));
 }
 
@@ -2551,7 +2551,7 @@ static int mir_indirect_is_whole_struct_assign(CodeGenerator *generator,
                                                const IROperand *o) {
   int lea_able =
       mir_operand_struct_home_size(generator, ir_function, &in->dest) > 0 ||
-      (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+      (ir_operand_is_symbol(&in->dest) &&
        mir_name_is_global_aggregate(generator, ir_function, in->dest.name));
 
   return in->op == IR_OP_ASSIGN && (o == &in->dest || o == &in->lhs) &&
@@ -3217,7 +3217,7 @@ static unsigned long long *mir_compute_global_dirty_masks(
           in->op == IR_OP_INLINE_ASM) {
         s = 0;
       }
-      if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+      if (ir_operand_is_symbol(&in->dest) &&
           in->op != IR_OP_DECLARE_LOCAL) {
         for (size_t j = 0; j < count; j++) {
           if (strcmp(names[j], in->dest.name) == 0) {
@@ -3272,7 +3272,7 @@ static int mir_instruction_writes_symbol(const IRInstruction *in,
   if (!in || in->op == IR_OP_DECLARE_LOCAL || in->op == IR_OP_NOP) {
     return 0;
   }
-  return name && in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+  return name && ir_operand_is_symbol(&in->dest) &&
          strcmp(in->dest.name, name) == 0;
 }
 
@@ -3334,7 +3334,7 @@ static int mir_ir_function_may_write_global(CodeGenerator *g,
     default:
       break;
     }
-    if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+    if (ir_operand_is_symbol(&in->dest) &&
         !mir_local_or_param_type(g, irf, in->dest.name, NULL) &&
         mir_name_is_global_scalar(g, in->dest.name)) {
       return 1;
@@ -3380,7 +3380,7 @@ static int mir_call_may_write_globals(CodeGenerator *g, const IRFunction *irf,
   if (in->op == IR_OP_CALL) {
     target = in->text;
   } else if (in->op == IR_OP_CALL_INDIRECT &&
-             in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name) {
+             ir_operand_is_symbol(&in->lhs)) {
     target = mir_known_function_pointer_target(g, irf, index, in->lhs.name);
   }
   if (!target || !target[0]) {
@@ -3770,7 +3770,7 @@ static int mir_fused_cmp_imm(CodeGenerator *g, BinaryFunctionContext *ctx,
     int defs = 0;
     for (size_t i = 0; i < f->instruction_count; i++) {
       const IRInstruction *in = &f->instructions[i];
-      if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+      if (ir_operand_is_temp(&in->dest) &&
           strcmp(in->dest.name, op->name) == 0) {
         def = in;
         defs++;
@@ -4164,7 +4164,7 @@ static int mir_lower_assign(MirFunction *fn, CodeGenerator *g,
               ? code_generator_find_ir_function_binary(g, ctx->function_name)
               : NULL;
       int ssz = mir_operand_struct_home_size(g, airf, &in->dest);
-      if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+      if (ir_operand_is_symbol(&in->dest) &&
           mir_name_is_global_aggregate(g, airf, in->dest.name)) {
         const CgSym *gs = code_generator_lookup_symbol(g, in->dest.name);
         int gsz = gs && gs->type ? (int)code_generator_abi_type_size(gs->type)
@@ -4295,7 +4295,7 @@ static const IRInstruction *mir_find_divmod_sibling(
         break;
       }
       if (nx->op == IR_OP_BINARY && nx->text && !nx->is_float &&
-          nx->dest.kind == IR_OPERAND_TEMP && nx->dest.name &&
+          ir_operand_is_temp(&nx->dest) &&
           ((mod && strcmp(nx->text, "/") == 0) ||
            (!mod && strcmp(nx->text, "%") == 0)) &&
           mir_ir_operand_equal(&nx->lhs, &in->lhs) &&
@@ -4633,7 +4633,7 @@ static int mir_lower_load(MirFunction *fn, CodeGenerator *g,
       fn->has_error = 1;
       return 0;
     }
-    if (size == 8 && in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name) {
+    if (size == 8 && ir_operand_is_symbol(&in->dest)) {
       const IRFunction *lirf =
           ctx && ctx->function_name
               ? code_generator_find_ir_function_binary(g, ctx->function_name)
@@ -6265,7 +6265,7 @@ static int mir_indirect_scalar_result(MirFunction *fn, CodeGenerator *g,
       ft ? ft->fn_return_type : in->value_type);
   MirOperand dst;
 
-  if (float_bits && in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+  if (float_bits && ir_operand_is_temp(&in->dest) &&
       !code_generator_binary_mark_float_symbol(ctx, in->dest.name,
                                                float_bits)) {
     fn->has_error = 1;
@@ -7134,10 +7134,10 @@ static int mir_temp_use_build(const IRFunction *f, MirTempUseIndex *ix) {
     const IRInstruction *in = &f->instructions[i];
     const IROperand *reads[3];
     int nreads = 0;
-    if (in->lhs.kind == IR_OPERAND_TEMP && in->lhs.name) {
+    if (ir_operand_is_temp(&in->lhs)) {
       reads[nreads++] = &in->lhs;
     }
-    if (in->rhs.kind == IR_OPERAND_TEMP && in->rhs.name) {
+    if (ir_operand_is_temp(&in->rhs)) {
       reads[nreads++] = &in->rhs;
     }
     if (in->op == IR_OP_STORE && in->dest.kind == IR_OPERAND_TEMP &&
@@ -7177,7 +7177,7 @@ static int mir_temp_use_build(const IRFunction *f, MirTempUseIndex *ix) {
         e->addr_reads++;
       }
     }
-    if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name) {
+    if (ir_operand_is_temp(&in->dest)) {
       MirTempUse *e = mir_temp_use_slot(ix, in->dest.name);
       if (!e) {
         mir_temp_use_destroy(ix);
@@ -7408,7 +7408,7 @@ static long mir_temp_single_def(const IRFunction *f, const char *name) {
     if (in->op == IR_OP_NOP || in->op == IR_OP_STORE) {
       continue;
     }
-    if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+    if (ir_operand_is_temp(&in->dest) &&
         strcmp(in->dest.name, name) == 0) {
       if (found >= 0) {
         return -1;
@@ -7721,7 +7721,7 @@ static int mir_lower_folded_access(MirFunction *fn, CodeGenerator *g,
           ? code_generator_find_ir_function_binary(g, ctx->function_name)
           : NULL;
   if (in->op == IR_OP_LOAD) {
-    if (size == 8 && in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+    if (size == 8 && ir_operand_is_symbol(&in->dest) &&
         mir_name_is_string_local(g, sirf, in->dest.name)) {
       MirVregId ptr = mir_new_vreg(fn, MIR_RC_GP, 8);
       MirOperand dsym = mir_value_operand(fn, g, ctx, map, &in->dest);
@@ -11580,7 +11580,7 @@ static int mir_cache_globals(MirFunction *fn, CodeGenerator *generator,
   for (size_t i = 0; i < ir_function->instruction_count; i++) {
     const IRInstruction *in = &ir_function->instructions[i];
 
-    if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+    if (ir_operand_is_symbol(&in->dest) &&
         mir_name_is_global_scalar(generator, in->dest.name) &&
         !mir_name_list_has(wb->names, wb->count, in->dest.name) &&
         !mir_name_list_add(&wb->names, &wb->count, dirty_cap, in->dest.name)) {

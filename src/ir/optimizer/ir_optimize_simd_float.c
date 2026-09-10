@@ -96,12 +96,12 @@ static int ir_decode_byte_indexed_address(IRFunction *function, size_t before,
       strcmp(addr->text, "+") != 0) {
     return 0;
   }
-  if (addr->lhs.kind == IR_OPERAND_SYMBOL && addr->lhs.name &&
+  if (ir_operand_is_symbol(&addr->lhs) &&
       ir_operand_is_symbol_named(&addr->rhs, iv)) {
     *base_out = addr->lhs.name;
     return 1;
   }
-  if (addr->rhs.kind == IR_OPERAND_SYMBOL && addr->rhs.name &&
+  if (ir_operand_is_symbol(&addr->rhs) &&
       ir_operand_is_symbol_named(&addr->lhs, iv)) {
     *base_out = addr->rhs.name;
     return 1;
@@ -146,7 +146,7 @@ static int ir_symbol_is_float_array_base(IRFunction *function,
       continue;
     }
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, symbol_name) == 0) {
       return 0;
     }
@@ -315,7 +315,7 @@ static int ir_float_reduction_frame(IRFunction *function, size_t header_index,
     for (size_t i = branch_index + 1; i < jump_index; i++) {
       const IRInstruction *ins = &function->instructions[i];
       if (ir_instruction_writes_destination(ins) &&
-          ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+          ir_operand_is_symbol(&ins->dest) &&
           ir_operand_names_match(&ins->dest, &compare->rhs)) {
         return 1;
       }
@@ -404,7 +404,7 @@ static int ir_try_vectorize_sum_float_at(IRFunction *function,
     if (ins->op == IR_OP_BINARY && ins->is_float && ins->text &&
         strcmp(ins->text, "+") == 0 && ins->dest.kind == IR_OPERAND_SYMBOL &&
         ins->dest.name && ir_operand_is_symbol_named(&ins->lhs, ins->dest.name) &&
-        ins->rhs.kind == IR_OPERAND_TEMP && ins->rhs.name) {
+        ir_operand_is_temp(&ins->rhs)) {
       int bits = 0;
       const char *base = NULL;
       if (!ir_decode_float_indexed_load(function, i, ins->rhs.name, iv_symbol,
@@ -523,7 +523,7 @@ static int ir_try_vectorize_dot_float_at(IRFunction *function,
           strcmp(ins->text, "+") == 0 && ins->dest.kind == IR_OPERAND_SYMBOL &&
           ins->dest.name &&
           ir_operand_is_symbol_named(&ins->lhs, ins->dest.name) &&
-          ins->rhs.kind == IR_OPERAND_TEMP && ins->rhs.name)) {
+          ir_operand_is_temp(&ins->rhs))) {
       continue;
     }
     mul = ir_find_temp_producer_before(function, i, ins->rhs.name);
@@ -772,7 +772,7 @@ static int ir_try_parse_affine_map_term(IRFunction *function, size_t before,
     return 0;
   }
 
-  if (producer->lhs.kind == IR_OPERAND_TEMP && producer->lhs.name &&
+  if (ir_operand_is_temp(&producer->lhs) &&
       ir_decode_float_indexed_load(function, before, producer->lhs.name,
                                    iv_symbol, &base, &bits) &&
       bits == terms->width_bits &&
@@ -782,7 +782,7 @@ static int ir_try_parse_affine_map_term(IRFunction *function, size_t before,
     ir_operand_destroy(&scalar);
     return ok;
   }
-  if (producer->rhs.kind == IR_OPERAND_TEMP && producer->rhs.name &&
+  if (ir_operand_is_temp(&producer->rhs) &&
       ir_decode_float_indexed_load(function, before, producer->rhs.name,
                                    iv_symbol, &base, &bits) &&
       bits == terms->width_bits &&
@@ -1217,7 +1217,7 @@ static int ir_try_vectorize_i2f_reduce_at(IRFunction *function,
           strcmp(ins->text, "+") == 0 && ins->dest.kind == IR_OPERAND_SYMBOL &&
           ins->dest.name &&
           ir_operand_is_symbol_named(&ins->lhs, ins->dest.name) &&
-          ins->rhs.kind == IR_OPERAND_TEMP && ins->rhs.name)) {
+          ir_operand_is_temp(&ins->rhs))) {
       continue;
     }
     t = ins->dest.name;
@@ -1441,7 +1441,7 @@ static int vloop_symbol_written_in_body(const IRFunction *function,
   for (size_t i = d->body_lo; i < d->body_hi; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, name) == 0) {
       return 1;
     }
@@ -1632,7 +1632,7 @@ static int vloop_resolve_body_local(IRFunction *function, const char *sym,
   for (size_t i = d->body_lo; i < d->body_hi; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, sym) == 0) {
       if (def) {
         return -1;
@@ -1658,7 +1658,7 @@ static int vloop_resolve_body_local(IRFunction *function, const char *sym,
   } else if (def->op == IR_OP_ASSIGN) {
     result = vloop_build(function, def_idx, &def->lhs, iv, d);
   } else if (def->op == IR_OP_LOAD && def->is_float &&
-             def->lhs.kind == IR_OPERAND_TEMP && def->lhs.name &&
+             ir_operand_is_temp(&def->lhs) &&
              def->rhs.kind == IR_OPERAND_INT &&
              def->rhs.int_value == d->width_bits / 8) {
     const char *base = NULL;
@@ -1875,15 +1875,15 @@ static int ir_try_vectorize_reduce_at(IRFunction *function, size_t header_index,
            ins->rhs.kind == IR_OPERAND_SYMBOL))) {
       continue;
     }
-    if (ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+    if (ir_operand_is_symbol(&ins->dest) &&
         ir_operand_is_symbol_named(&ins->lhs, ins->dest.name)) {
       acc_symbol = ins->dest.name;
       addend = &ins->rhs;
       reduce_index = i;
       assign_index = (size_t)-1;
       found++;
-    } else if (ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
-               ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name) {
+    } else if (ir_operand_is_temp(&ins->dest) &&
+               ir_operand_is_symbol(&ins->lhs)) {
       size_t j = i + 1;
       while (j < jump_index && function->instructions[j].op == IR_OP_NOP) {
         j++;
@@ -1923,7 +1923,7 @@ static int ir_try_vectorize_reduce_at(IRFunction *function, size_t header_index,
       continue;
     }
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name) {
+        ir_operand_is_symbol(&ins->dest)) {
       if (strcmp(ins->dest.name, acc_symbol) == 0) {
         ir_operand_destroy(&bound);
         return 1;
@@ -3890,7 +3890,7 @@ static int ir_try_vectorize_int_reduce_at(IRFunction *function,
   for (size_t i = branch_index + 1; i < jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (i != reduce_index && ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         (strcmp(ins->dest.name, acc_symbol) == 0 ||
          strcmp(ins->dest.name, iv_symbol) != 0)) {
       ir_operand_destroy(&bound);
@@ -4057,7 +4057,7 @@ static int vfind_symbol_written_in(const IRFunction *function, size_t lo,
   for (size_t i = lo; i < hi; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, name) == 0) {
       return 1;
     }
@@ -4466,11 +4466,11 @@ static int ir_try_vectorize_find_at(IRFunction *function, size_t header_index,
       ir_operand_destroy(&bound);
       return 1;
     }
-    if (cmp->lhs.kind == IR_OPERAND_TEMP && cmp->lhs.name &&
+    if (ir_operand_is_temp(&cmp->lhs) &&
         vfind_decode_indexed_load(function, cb, cmp->lhs.name, iv_symbol,
                                   &a_base, &a_u8, &a_load)) {
       other = &cmp->rhs;
-    } else if (cmp->rhs.kind == IR_OPERAND_TEMP && cmp->rhs.name &&
+    } else if (ir_operand_is_temp(&cmp->rhs) &&
                vfind_decode_indexed_load(function, cb, cmp->rhs.name,
                                          iv_symbol, &a_base, &a_u8, &a_load)) {
       other = &cmp->lhs;
@@ -5146,7 +5146,7 @@ static int ir_try_vectorize_outer_lane_at(IRFunction *function,
     if (ins->op == IR_OP_BINARY && ins->is_float && ins->text &&
         strcmp(ins->text, "+") == 0 && ins->dest.kind == IR_OPERAND_SYMBOL &&
         ins->dest.name && ir_operand_is_symbol_named(&ins->lhs, ins->dest.name) &&
-        ins->rhs.kind == IR_OPERAND_SYMBOL && ins->rhs.name) {
+        ir_operand_is_symbol(&ins->rhs)) {
       total_sym = ins->dest.name;
       iacc_sym = ins->rhs.name;
       break;

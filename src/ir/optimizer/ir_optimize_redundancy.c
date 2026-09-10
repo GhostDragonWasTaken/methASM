@@ -698,7 +698,7 @@ static int re_instruction_write_region(const IRFunction *function,
   case IR_OP_UNARY:
   case IR_OP_CAST:
   case IR_OP_SELECT:
-    if (ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+    if (ir_operand_is_symbol(&ins->dest) &&
         (ir_temp_value_map_lookup(addr_taken, ins->dest.name) ||
          (!ir_function_symbol_is_parameter(function, ins->dest.name) &&
           ir_function_local_declared_type(function, ins->dest.name) == NULL))) {

@@ -344,11 +344,11 @@ int ir_egraph_simplify_pass(IRFunction *function, int *changed) {
         ins && ins->op == IR_OP_BINARY && !ins->is_float
             ? eg_op_char(ins->text, &op2)
             : 0;
-    int dest_temp = ins && ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name
+    int dest_temp = ins && ir_operand_is_temp(&ins->dest)
                         ? 1
                         : 0;
     int dest_sym =
-        ins && ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name ? 1 : 0;
+        ins && ir_operand_is_symbol(&ins->dest) ? 1 : 0;
     int is_copy = ins && ins->op == IR_OP_ASSIGN && !ins->is_float &&
                   (dest_temp || dest_sym);
     int is_bin = opch != 0 && (dest_temp || dest_sym);

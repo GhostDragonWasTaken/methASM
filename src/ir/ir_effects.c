@@ -557,7 +557,7 @@ static const char *store_base_global(const IRProgram *program,
       const IRInstruction *source = NULL;
       for (size_t i = at; i-- > 0;) {
         const IRInstruction *candidate = &fn->instructions[i];
-        if (candidate->dest.kind == IR_OPERAND_TEMP && candidate->dest.name &&
+        if (ir_operand_is_temp(&candidate->dest) &&
             strcmp(candidate->dest.name, address.name) == 0) {
           source = candidate;
           break;

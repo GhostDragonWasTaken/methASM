@@ -45,7 +45,7 @@ static int ir_symbol_is_byte_wide(const IRFunction *function,
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
     if (instruction->op == IR_OP_DECLARE_LOCAL &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name &&
+        ir_operand_is_symbol(&instruction->dest) &&
         strcmp(instruction->dest.name, symbol) == 0) {
       return ir_type_name_is_byte(instruction->text);
     }
@@ -93,7 +93,7 @@ static int ir_popcount_body_matches(const IRFunction *function, size_t body_star
 
     if (instruction->op == IR_OP_BINARY && instruction->text &&
         strcmp(instruction->text, "+") == 0 &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name) {
+        ir_operand_is_symbol(&instruction->dest)) {
       if (count_symbol && strcmp(count_symbol, instruction->dest.name) != 0) {
         return 0;
       }
@@ -142,7 +142,7 @@ static int ir_popcount_body_matches(const IRFunction *function, size_t body_star
     }
 
     if (ir_instruction_writes_destination(instruction) &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name) {
+        ir_operand_is_symbol(&instruction->dest)) {
       if (!ir_operand_is_symbol_named(&instruction->dest, v_symbol) &&
           !(count_symbol &&
             ir_operand_is_symbol_named(&instruction->dest, count_symbol))) {
@@ -469,8 +469,8 @@ static int ir_try_find_loop_latch(const IRFunction *function, size_t header_inde
     }
     if (probe->op == IR_OP_BINARY && probe->text &&
         strcmp(probe->text, "+") == 0 &&
-        probe->dest.kind == IR_OPERAND_SYMBOL && probe->dest.name &&
-        probe->lhs.kind == IR_OPERAND_SYMBOL && probe->lhs.name &&
+        ir_operand_is_symbol(&probe->dest) &&
+        ir_operand_is_symbol(&probe->lhs) &&
         ir_operand_names_match(&probe->dest, &probe->lhs) &&
         ir_operand_is_int_value(&probe->rhs, 1)) {
       increment_index = i;
@@ -519,7 +519,7 @@ static int ir_try_match_popcount_buffer_call_body(const IRFunction *function,
     if (instruction->op == IR_OP_LOAD && instruction->dest.kind == IR_OPERAND_TEMP &&
         instruction->dest.name && instruction->rhs.kind == IR_OPERAND_INT &&
         instruction->rhs.int_value == 1) {
-      if (instruction->lhs.kind == IR_OPERAND_SYMBOL && instruction->lhs.name) {
+      if (ir_operand_is_symbol(&instruction->lhs)) {
         load_source = instruction->lhs.name;
         load_via_ptr = 1;
       } else if (instruction->lhs.kind == IR_OPERAND_TEMP &&
@@ -532,7 +532,7 @@ static int ir_try_match_popcount_buffer_call_body(const IRFunction *function,
         }
         if (addr && addr->op == IR_OP_BINARY && addr->text &&
             strcmp(addr->text, "+") == 0 &&
-            addr->lhs.kind == IR_OPERAND_SYMBOL && addr->lhs.name &&
+            ir_operand_is_symbol(&addr->lhs) &&
             addr->dest.kind == IR_OPERAND_TEMP &&
             ir_operand_is_temp_named(&addr->dest, instruction->lhs.name)) {
           load_source = addr->lhs.name;
@@ -554,7 +554,7 @@ static int ir_try_match_popcount_buffer_call_body(const IRFunction *function,
 
     if (instruction->op == IR_OP_BINARY && instruction->text &&
         strcmp(instruction->text, "+") == 0 &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name &&
+        ir_operand_is_symbol(&instruction->dest) &&
         (ir_operand_is_symbol_named(&instruction->lhs, instruction->dest.name) ||
          ir_operand_is_symbol_named(&instruction->rhs, instruction->dest.name))) {
       total_symbol = instruction->dest.name;
@@ -615,7 +615,7 @@ static int ir_try_match_popcount_buffer_inlined_body(
     if (instruction->op == IR_OP_LOAD && instruction->dest.kind == IR_OPERAND_TEMP &&
         instruction->dest.name && instruction->rhs.kind == IR_OPERAND_INT &&
         instruction->rhs.int_value == 1) {
-      if (instruction->lhs.kind == IR_OPERAND_SYMBOL && instruction->lhs.name) {
+      if (ir_operand_is_symbol(&instruction->lhs)) {
         load_source = instruction->lhs.name;
         load_via_ptr = 1;
       } else if (instruction->lhs.kind == IR_OPERAND_TEMP &&
@@ -626,7 +626,7 @@ static int ir_try_match_popcount_buffer_inlined_body(
           const IRInstruction *addr = &function->instructions[producer_index];
           if (addr->op == IR_OP_BINARY && addr->text &&
               strcmp(addr->text, "+") == 0 &&
-              addr->lhs.kind == IR_OPERAND_SYMBOL && addr->lhs.name) {
+              ir_operand_is_symbol(&addr->lhs)) {
             load_source = addr->lhs.name;
             load_via_ptr = 0;
           }
@@ -650,7 +650,7 @@ static int ir_try_match_popcount_buffer_inlined_body(
     }
 
     if (instruction->op == IR_OP_BRANCH_ZERO &&
-        instruction->lhs.kind == IR_OPERAND_SYMBOL && instruction->lhs.name) {
+        ir_operand_is_symbol(&instruction->lhs)) {
       v_symbol = instruction->lhs.name;
       if (popcount_start == body_end) {
         popcount_start = i;
@@ -661,7 +661,7 @@ static int ir_try_match_popcount_buffer_inlined_body(
 
     if (instruction->op == IR_OP_BINARY && instruction->text &&
         strcmp(instruction->text, "+") == 0 &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name &&
+        ir_operand_is_symbol(&instruction->dest) &&
         count_symbol &&
         ir_operand_is_symbol_named(&instruction->dest, count_symbol)) {
       if (popcount_end <= i) {
@@ -672,7 +672,7 @@ static int ir_try_match_popcount_buffer_inlined_body(
 
     if (instruction->op == IR_OP_BINARY && instruction->text &&
         strcmp(instruction->text, "+") == 0 &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name &&
+        ir_operand_is_symbol(&instruction->dest) &&
         (ir_operand_is_symbol_named(&instruction->lhs, instruction->dest.name) ||
          ir_operand_is_symbol_named(&instruction->rhs, instruction->dest.name))) {
       total_symbol = instruction->dest.name;
@@ -1251,7 +1251,7 @@ typedef struct {
 static int ir_kernighan_is_mask_decrement(const IRInstruction *in,
                                           const char *x_name) {
   return ir_kernighan_is_binary(in, "-") && in->dest.kind == IR_OPERAND_TEMP &&
-         in->dest.name && in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+         in->dest.name && ir_operand_is_symbol(&in->lhs) &&
          strcmp(in->lhs.name, x_name) == 0 &&
          in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 1;
 }
@@ -1259,25 +1259,25 @@ static int ir_kernighan_is_mask_decrement(const IRInstruction *in,
 static int ir_kernighan_is_mask_cast(const IRInstruction *in,
                                      const char *masked) {
   return in->op == IR_OP_CAST && in->dest.kind == IR_OPERAND_TEMP &&
-         in->dest.name && in->lhs.kind == IR_OPERAND_TEMP && in->lhs.name &&
+         in->dest.name && ir_operand_is_temp(&in->lhs) &&
          strcmp(in->lhs.name, masked) == 0;
 }
 
 static int ir_kernighan_is_mask_and(const IRInstruction *in,
                                     const char *x_name, const char *masked) {
   return ir_kernighan_is_binary(in, "&") &&
-         in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+         ir_operand_is_symbol(&in->dest) &&
          strcmp(in->dest.name, x_name) == 0 &&
-         in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+         ir_operand_is_symbol(&in->lhs) &&
          strcmp(in->lhs.name, x_name) == 0 &&
-         in->rhs.kind == IR_OPERAND_TEMP && in->rhs.name &&
+         ir_operand_is_temp(&in->rhs) &&
          strcmp(in->rhs.name, masked) == 0;
 }
 
 static int ir_kernighan_is_counter_bump(const IRInstruction *in) {
   return ir_kernighan_is_binary(in, "+") &&
-         in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
-         in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+         ir_operand_is_symbol(&in->dest) &&
+         ir_operand_is_symbol(&in->lhs) &&
          ir_operand_names_match(&in->lhs, &in->dest) &&
          in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 1;
 }

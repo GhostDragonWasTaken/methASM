@@ -48,10 +48,10 @@ static int ir_try_match_word_count_load(const IRFunction *function,
     }
 
     const char *buf_symbol = NULL;
-    if (addr->lhs.kind == IR_OPERAND_SYMBOL && addr->lhs.name &&
+    if (ir_operand_is_symbol(&addr->lhs) &&
         ir_operand_is_symbol_named(&addr->rhs, iv_symbol)) {
       buf_symbol = addr->lhs.name;
-    } else if (addr->rhs.kind == IR_OPERAND_SYMBOL && addr->rhs.name &&
+    } else if (ir_operand_is_symbol(&addr->rhs) &&
                ir_operand_is_symbol_named(&addr->lhs, iv_symbol)) {
       buf_symbol = addr->rhs.name;
     } else {
@@ -71,7 +71,7 @@ static int ir_try_match_word_count_load(const IRFunction *function,
       continue;
     }
 
-    if (load->dest.kind == IR_OPERAND_SYMBOL && load->dest.name) {
+    if (ir_operand_is_symbol(&load->dest)) {
       *buf_symbol_out = buf_symbol;
       *char_symbol_out = load->dest.name;
       return 1;
@@ -90,7 +90,7 @@ static int ir_try_match_word_count_load(const IRFunction *function,
     const IRInstruction *cast = &function->instructions[cast_index];
     if (cast->op == IR_OP_CAST &&
         ir_operand_is_temp_named(&cast->lhs, load->dest.name) &&
-        cast->dest.kind == IR_OPERAND_SYMBOL && cast->dest.name) {
+        ir_operand_is_symbol(&cast->dest)) {
       *buf_symbol_out = buf_symbol;
       *char_symbol_out = cast->dest.name;
       return 1;
@@ -253,7 +253,7 @@ static int ir_try_match_word_count_state_updates(
     const IRInstruction *add = &function->instructions[add_index];
     if (add->op == IR_OP_BINARY && !add->is_float && add->text &&
         strcmp(add->text, "+") == 0 &&
-        add->dest.kind == IR_OPERAND_SYMBOL && add->dest.name &&
+        ir_operand_is_symbol(&add->dest) &&
         ir_operand_is_symbol_named(&add->lhs, add->dest.name) &&
         ir_operand_is_int_value(&add->rhs, 1)) {
       count = add->dest.name;
@@ -494,7 +494,7 @@ int ir_build_symbol_int_map_before(const IRFunction *function,
     }
 
     if (instruction->op == IR_OP_ASSIGN &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name) {
+        ir_operand_is_symbol(&instruction->dest)) {
       if (instruction->lhs.kind == IR_OPERAND_INT) {
         if (!ir_temp_value_map_set(symbol_map, instruction->dest.name,
                                    &instruction->lhs)) {
@@ -531,7 +531,7 @@ int ir_build_symbol_int_map_before(const IRFunction *function,
     if (instruction->op != IR_OP_ASSIGN &&
         instruction->op != IR_OP_ROTATE_ADD &&
         ir_instruction_writes_destination(instruction) &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name) {
+        ir_operand_is_symbol(&instruction->dest)) {
       ir_temp_value_map_remove(symbol_map, instruction->dest.name);
     }
   }

@@ -627,7 +627,7 @@ static int ir_function_assigns_symbol(const IRFunction *function,
       return 1;
     }
     if (instruction->op == IR_OP_ADDRESS_OF &&
-        instruction->lhs.kind == IR_OPERAND_SYMBOL && instruction->lhs.name &&
+        ir_operand_is_symbol(&instruction->lhs) &&
         strcmp(instruction->lhs.name, symbol_name) == 0) {
       return 1;
     }
@@ -816,7 +816,7 @@ static int ir_inline_call_instruction(IRInstructionVector *vector,
   for (size_t i = 0; i < callee->instruction_count; i++) {
     const IRInstruction *instruction = &callee->instructions[i];
     if (instruction->op == IR_OP_DECLARE_LOCAL &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name) {
+        ir_operand_is_symbol(&instruction->dest)) {
       char *mapped =
           ir_make_inline_name(inline_prefix, "local", instruction->dest.name);
       if (!mapped) {

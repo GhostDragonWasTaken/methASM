@@ -2006,6 +2006,60 @@ static int mir_regalloc_report_saved(MirFunction *fn) {
   return 1;
 }
 
+static void mir_regalloc_trace_done(const MirFunction *fn) {
+  size_t spilled = 0;
+  size_t kept = 0;
+  size_t copies = 0;
+  size_t coalesced = 0;
+  size_t spill_side = 0;
+  if (!mir_env_regalloc_trace()) {
+    return;
+  }
+  for (size_t v = 0; v < fn->vreg_count; v++) {
+    const MirVreg *vr = &fn->vregs[v];
+    if (vr->live_start == MIR_LIVE_NONE || vr->address_taken) {
+      continue;
+    }
+    if (vr->assigned && vr->in_register) {
+      kept++;
+    } else if (vr->assigned) {
+      spilled++;
+    }
+  }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    const MirInst *in = &fn->insns[i];
+    const MirVreg *dv;
+    const MirVreg *sv;
+    if (in->op != MIR_MOV || in->dst.kind != MIR_OPK_VREG ||
+        in->a.kind != MIR_OPK_VREG || in->dst.vreg == in->a.vreg) {
+      continue;
+    }
+    dv = &fn->vregs[in->dst.vreg];
+    sv = &fn->vregs[in->a.vreg];
+    copies++;
+    if (!dv->in_register || !sv->in_register) {
+      spill_side++;
+    } else if (dv->phys == sv->phys) {
+      coalesced++;
+    }
+  }
+  fprintf(stderr,
+          "RA-DONE\t%s\tkept=%zu\tspilled=%zu\tcopies=%zu\tcoalesced=%zu"
+          "\tspill_side=%zu\n",
+          mir_ra_trace_name(), kept, spilled, copies, coalesced, spill_side);
+}
+
+static int mir_regalloc_finish(MirFunction *fn) {
+  if (mir_regalloc_verify_sabotage_enabled()) {
+    mir_regalloc_verify_sabotage(fn);
+  }
+  if (mir_regalloc_verify_enabled() && !mir_regalloc_verify(fn)) {
+    fn->has_error = 1;
+    return 0;
+  }
+  return 1;
+}
+
 static int mir_regalloc_color(MirFunction *fn) {
   mir_compute_liveness(fn);
   mir_compute_coalesce_hints(fn);
@@ -2048,28 +2102,13 @@ static int mir_regalloc_color(MirFunction *fn) {
     return 0;
   }
   mir_drop_unused_preserves(fn);
-  if (mir_env_regalloc_trace()) {
-    size_t spilled = 0, kept = 0;
-    for (size_t v = 0; v < fn->vreg_count; v++) {
-      const MirVreg *vr = &fn->vregs[v];
-      if (vr->live_start == MIR_LIVE_NONE || vr->address_taken) {
-        continue;
-      }
-      if (vr->assigned && vr->in_register) {
-        kept++;
-      } else if (vr->assigned) {
-        spilled++;
-      }
-    }
-    fprintf(stderr, "RA-DONE\t%s\tkept=%zu\tspilled=%zu\n",
-            mir_ra_trace_name(), kept, spilled);
-  }
+  mir_regalloc_trace_done(fn);
   fn->spill_bytes = next_spill - (fn->context ? fn->context->raw_frame_size : 0);
   if (!mir_regalloc_report_saved(fn)) {
     fn->has_error = 1;
     return 0;
   }
-  return 1;
+  return mir_regalloc_finish(fn);
 }
 
 static int mir_op_pure_def(MirOpcode op) {
@@ -2467,5 +2506,6 @@ int mir_regalloc(MirFunction *fn) {
   free(order);
   free(active);
   free(narrow_src);
-  return 1;
+  mir_regalloc_trace_done(fn);
+  return mir_regalloc_finish(fn);
 }

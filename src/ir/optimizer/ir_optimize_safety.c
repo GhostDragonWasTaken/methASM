@@ -864,7 +864,7 @@ static int safety_function_can_release(const IRFunction *function, int depth) {
       break;
     }
     if (ir_instruction_writes_destination(in) &&
-        in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+        ir_operand_is_symbol(&in->dest) &&
         !safety_name_is_functions_own(function, in->dest.name)) {
       return 1;
     }
@@ -2535,7 +2535,7 @@ static int safety_global_is_settled(const IRProgram *program,
         return 0;
       }
       if (ir_instruction_writes_destination(in) &&
-          in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+          ir_operand_is_symbol(&in->dest) &&
           strcmp(in->dest.name, name) == 0) {
         return 0;
       }
@@ -3381,7 +3381,7 @@ static int safety_retire_stack_notes(const IRProgram *program,
         continue;
       }
       if (candidate->op == IR_OP_ADDRESS_OF &&
-          candidate->dest.kind == IR_OPERAND_TEMP && candidate->dest.name &&
+          ir_operand_is_temp(&candidate->dest) &&
           strcmp(candidate->dest.name, argument->name) == 0) {
         take = candidate;
       }
@@ -3404,7 +3404,7 @@ static int safety_retire_stack_notes(const IRProgram *program,
     for (size_t d = 0; d < function->instruction_count && !declared; d++) {
       const IRInstruction *candidate = &function->instructions[d];
       if (candidate->op == IR_OP_DECLARE_LOCAL &&
-          candidate->dest.kind == IR_OPERAND_SYMBOL && candidate->dest.name &&
+          ir_operand_is_symbol(&candidate->dest) &&
           ir_operand_names_match(&candidate->dest, &take->lhs)) {
         declared = 1;
       }

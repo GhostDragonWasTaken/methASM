@@ -94,15 +94,15 @@ int ir_resolve_indexed_address_temp(const IRFunction *function,
     return 0;
   }
 
-  if (add->lhs.kind == IR_OPERAND_SYMBOL && add->lhs.name &&
-      add->rhs.kind == IR_OPERAND_TEMP && add->rhs.name) {
+  if (ir_operand_is_symbol(&add->lhs) &&
+      ir_operand_is_temp(&add->rhs)) {
     base = add->lhs.name;
     other = add->rhs.name;
-  } else if (add->rhs.kind == IR_OPERAND_SYMBOL && add->rhs.name &&
-             add->lhs.kind == IR_OPERAND_TEMP && add->lhs.name) {
+  } else if (ir_operand_is_symbol(&add->rhs) &&
+             ir_operand_is_temp(&add->lhs)) {
     base = add->rhs.name;
     other = add->lhs.name;
-  } else if (add->lhs.kind == IR_OPERAND_SYMBOL && add->lhs.name &&
+  } else if (ir_operand_is_symbol(&add->lhs) &&
              ir_operand_is_symbol_named(&add->rhs, iv)) {
     if (elem_size_out) {
       *elem_size_out = 1;
@@ -123,7 +123,7 @@ int ir_resolve_indexed_address_temp(const IRFunction *function,
     if (assign && assign->op == IR_OP_ASSIGN &&
         assign->dest.kind == IR_OPERAND_TEMP &&
         ir_operand_is_temp_named(&assign->dest, other) &&
-        assign->rhs.kind == IR_OPERAND_TEMP && assign->rhs.name) {
+        ir_operand_is_temp(&assign->rhs)) {
       index = ir_find_temp_producer_before(function, before_index,
                                            assign->rhs.name);
     }
@@ -358,7 +358,7 @@ static int ir_ptr_induction_should_drop_body_insn(
   if (!ins || !iv_symbol) {
     return 0;
   }
-  if (ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+  if (ir_operand_is_temp(&ins->dest) &&
       ir_ptr_lookup_addr_temp(bindings, binding_count, ins->dest.name)) {
     return 1;
   }
@@ -402,12 +402,12 @@ static int ir_ptr_iv_chain_dies_in_drops(const IRFunction *function,
   const char *temp = producer->dest.name;
   for (size_t j = 0; j < function->instruction_count; j++) {
     const IRInstruction *reader = &function->instructions[j];
-    int reads = (reader->lhs.kind == IR_OPERAND_TEMP && reader->lhs.name &&
+    int reads = (ir_operand_is_temp(&reader->lhs) &&
                  strcmp(reader->lhs.name, temp) == 0) ||
-                (reader->rhs.kind == IR_OPERAND_TEMP && reader->rhs.name &&
+                (ir_operand_is_temp(&reader->rhs) &&
                  strcmp(reader->rhs.name, temp) == 0) ||
                 (reader->op == IR_OP_STORE &&
-                 reader->dest.kind == IR_OPERAND_TEMP && reader->dest.name &&
+                 ir_operand_is_temp(&reader->dest) &&
                  strcmp(reader->dest.name, temp) == 0);
     for (size_t a = 0; !reads && a < reader->argument_count; a++) {
       reads = reader->arguments[a].kind == IR_OPERAND_TEMP &&
@@ -422,10 +422,10 @@ static int ir_ptr_iv_chain_dies_in_drops(const IRFunction *function,
     }
     if (reader->op == IR_OP_STORE) {
       int as_value =
-          (reader->lhs.kind == IR_OPERAND_TEMP && reader->lhs.name &&
+          (ir_operand_is_temp(&reader->lhs) &&
            strcmp(reader->lhs.name, temp) == 0);
       int as_bound_address =
-          (reader->dest.kind == IR_OPERAND_TEMP && reader->dest.name &&
+          (ir_operand_is_temp(&reader->dest) &&
            strcmp(reader->dest.name, temp) == 0 &&
            ir_ptr_lookup_addr_temp(bindings, binding_count,
                                    reader->dest.name) != NULL);
@@ -435,7 +435,7 @@ static int ir_ptr_iv_chain_dies_in_drops(const IRFunction *function,
       continue;
     }
     if (reader->op == IR_OP_LOAD) {
-      if (reader->lhs.kind == IR_OPERAND_TEMP && reader->lhs.name &&
+      if (ir_operand_is_temp(&reader->lhs) &&
           strcmp(reader->lhs.name, temp) == 0 &&
           ir_ptr_lookup_addr_temp(bindings, binding_count,
                                   reader->lhs.name) != NULL) {
@@ -468,7 +468,7 @@ static int ir_ptr_loop_is_pure_reduction(const IRFunction *function,
     }
     if (ins->op == IR_OP_BINARY && ins->text &&
         (strcmp(ins->text, "+") == 0 || strcmp(ins->text, "-") == 0) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         (!iv_symbol || strcmp(ins->dest.name, iv_symbol) != 0) &&
         (ir_operand_is_symbol_named(&ins->lhs, ins->dest.name) ||
          ir_operand_is_symbol_named(&ins->rhs, ins->dest.name))) {
@@ -551,7 +551,7 @@ static int ir_ptr_must_keep_counter(const IRFunction *function,
     if (ins->op == IR_OP_NOP) {
       continue;
     }
-    if (ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+    if (ir_operand_is_temp(&ins->dest) &&
         ir_ptr_lookup_addr_temp(bindings, binding_count, ins->dest.name)) {
       continue;
     }

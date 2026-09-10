@@ -17,9 +17,9 @@ static int ir_try_parse_loop_increment(const IRFunction *function, size_t body_s
 
     if (instruction->op == IR_OP_BINARY && !instruction->is_float && instruction->text &&
         strcmp(instruction->text, "+") == 0 &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name &&
+        ir_operand_is_symbol(&instruction->dest) &&
         strcmp(instruction->dest.name, counter_symbol) == 0) {
-      if (instruction->lhs.kind == IR_OPERAND_SYMBOL && instruction->lhs.name &&
+      if (ir_operand_is_symbol(&instruction->lhs) &&
           strcmp(instruction->lhs.name, counter_symbol) == 0 &&
           instruction->rhs.kind == IR_OPERAND_INT) {
         if (instruction->rhs.int_value == 1) {
@@ -36,9 +36,9 @@ static int ir_try_parse_loop_increment(const IRFunction *function, size_t body_s
     }
 
     if (instruction->op == IR_OP_ASSIGN &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name &&
+        ir_operand_is_symbol(&instruction->dest) &&
         strcmp(instruction->dest.name, counter_symbol) == 0) {
-      if (instruction->lhs.kind == IR_OPERAND_TEMP && instruction->lhs.name) {
+      if (ir_operand_is_temp(&instruction->lhs)) {
         size_t producer_index = 0;
         if (!ir_find_last_writer_before(function, i, IR_OPERAND_TEMP,
                                         instruction->lhs.name, &producer_index)) {
@@ -51,7 +51,7 @@ static int ir_try_parse_loop_increment(const IRFunction *function, size_t body_s
           return 0;
         }
 
-        if (producer->lhs.kind == IR_OPERAND_SYMBOL && producer->lhs.name &&
+        if (ir_operand_is_symbol(&producer->lhs) &&
             strcmp(producer->lhs.name, counter_symbol) == 0 &&
             producer->rhs.kind == IR_OPERAND_INT) {
           if (producer->rhs.int_value == 1) {
@@ -66,7 +66,7 @@ static int ir_try_parse_loop_increment(const IRFunction *function, size_t body_s
           }
         }
 
-        if (producer->rhs.kind == IR_OPERAND_SYMBOL && producer->rhs.name &&
+        if (ir_operand_is_symbol(&producer->rhs) &&
             strcmp(producer->rhs.name, counter_symbol) == 0 &&
             producer->lhs.kind == IR_OPERAND_INT) {
           if (producer->lhs.int_value == 1) {
@@ -157,7 +157,7 @@ static int ir_try_parse_counted_while_loop(const IRFunction *function,
 
   size_t compare_index = 0;
   const IRInstruction *compare = NULL;
-  if (branch->lhs.kind == IR_OPERAND_TEMP && branch->lhs.name) {
+  if (ir_operand_is_temp(&branch->lhs)) {
     if (!ir_find_last_writer_before(function, branch_index, IR_OPERAND_TEMP,
                                     branch->lhs.name, &compare_index)) {
       return 0;
@@ -613,7 +613,7 @@ static int ir_vec_symbol_invariant_in_body(const IRFunction *fn, size_t lo,
   }
   for (size_t k = lo; k < hi; k++) {
     const IRInstruction *m = &fn->instructions[k];
-    if (m->dest.kind == IR_OPERAND_SYMBOL && m->dest.name &&
+    if (ir_operand_is_symbol(&m->dest) &&
         strcmp(m->dest.name, sym) == 0) {
       return 0;
     }
@@ -630,7 +630,7 @@ static int ir_vec_assign_sym_from_temp(const IRInstruction *in,
                                        const char *sym) {
   return in && in->op == IR_OP_ASSIGN && !in->ast_ref &&
          ir_operand_is_symbol_named(&in->dest, sym) &&
-         in->lhs.kind == IR_OPERAND_TEMP && in->lhs.name;
+         ir_operand_is_temp(&in->lhs);
 }
 
 static int ir_vec_expr_is_pure(const IRFunction *fn, size_t lo, size_t hi,
@@ -648,7 +648,7 @@ static int ir_vec_expr_is_pure(const IRFunction *fn, size_t lo, size_t hi,
   const IRInstruction *prod = NULL;
   for (size_t k = lo; k < hi; k++) {
     const IRInstruction *m = &fn->instructions[k];
-    if (m->dest.kind == IR_OPERAND_TEMP && m->dest.name &&
+    if (ir_operand_is_temp(&m->dest) &&
         strcmp(m->dest.name, root) == 0) {
       if (prod) {
         return 0;
@@ -805,7 +805,7 @@ static int ir_vec_try_unroll_reduction_at(IRFunction *function, size_t h,
     IRInstruction *m = &function->instructions[k];
     IRInstruction *st = &function->instructions[k + 1];
     if (ir_vec_binary_is(m, "+") && m->dest.kind == IR_OPERAND_TEMP &&
-        m->dest.name && m->lhs.kind == IR_OPERAND_SYMBOL && m->lhs.name &&
+        m->dest.name && ir_operand_is_symbol(&m->lhs) &&
         strcmp(m->lhs.name, iv) != 0 && m->rhs.kind == IR_OPERAND_TEMP &&
         m->rhs.name && ir_vec_assign_sym_from_temp(st, m->lhs.name) &&
         ir_operand_names_match(&st->lhs, &m->dest)) {
@@ -1357,7 +1357,7 @@ static int ir_unroll_annotated_parse_increment(const IRFunction *function,
     if (in->op == IR_OP_BINARY && !in->is_float && in->text &&
         strcmp(in->text, "+") == 0 && in->dest.kind == IR_OPERAND_SYMBOL &&
         in->dest.name && strcmp(in->dest.name, counter_symbol) == 0 &&
-        in->lhs.kind == IR_OPERAND_SYMBOL && in->lhs.name &&
+        ir_operand_is_symbol(&in->lhs) &&
         strcmp(in->lhs.name, counter_symbol) == 0 &&
         in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value > 0) {
       *increment_index = i;
@@ -1366,7 +1366,7 @@ static int ir_unroll_annotated_parse_increment(const IRFunction *function,
     }
     if (in->op == IR_OP_ASSIGN && in->dest.kind == IR_OPERAND_SYMBOL &&
         in->dest.name && strcmp(in->dest.name, counter_symbol) == 0 &&
-        in->lhs.kind == IR_OPERAND_TEMP && in->lhs.name) {
+        ir_operand_is_temp(&in->lhs)) {
       size_t producer_index = 0;
       if (!ir_find_last_writer_before(function, i, IR_OPERAND_TEMP,
                                       in->lhs.name, &producer_index) ||
@@ -1378,7 +1378,7 @@ static int ir_unroll_annotated_parse_increment(const IRFunction *function,
           !producer->text || strcmp(producer->text, "+") != 0) {
         return 0;
       }
-      if (producer->lhs.kind == IR_OPERAND_SYMBOL && producer->lhs.name &&
+      if (ir_operand_is_symbol(&producer->lhs) &&
           strcmp(producer->lhs.name, counter_symbol) == 0 &&
           producer->rhs.kind == IR_OPERAND_INT &&
           producer->rhs.int_value > 0) {
@@ -1478,7 +1478,7 @@ static int ir_unroll_annotated_try_marker(IRFunction *function,
     if (j == increment_index) continue;
     const IRInstruction *in = &function->instructions[j];
     if (in->op == IR_OP_NOP || in->op == IR_OP_STORE) continue;
-    if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+    if (ir_operand_is_symbol(&in->dest) &&
         strcmp(in->dest.name, counter_symbol) == 0) {
       return 1;
     }

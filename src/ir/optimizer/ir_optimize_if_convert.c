@@ -20,7 +20,7 @@ static int ir_ifconv_binary_is_trapping(const IRInstruction *in) {
 }
 
 static int ir_ifconv_writes_local(const IRInstruction *in, const char **out) {
-  if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name) {
+  if (ir_operand_is_symbol(&in->dest)) {
     *out = in->dest.name;
     return 1;
   }

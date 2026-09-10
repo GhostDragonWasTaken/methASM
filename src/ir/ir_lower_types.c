@@ -168,7 +168,7 @@ static int ir_symbol_is_address_space_allocation(const IRFunction *function,
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *instruction = &function->instructions[i];
     if (instruction->op == IR_OP_ADDRESS_SPACE_ALLOC &&
-        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name &&
+        ir_operand_is_symbol(&instruction->dest) &&
         strcmp(instruction->dest.name, name) == 0) {
       return 1;
     }
@@ -320,7 +320,7 @@ int ir_local_declared_float_bits(IRLoweringContext *context,
   for (size_t i = function->instruction_count; i-- > 0;) {
     const IRInstruction *insn = &function->instructions[i];
     if (insn->op == IR_OP_DECLARE_LOCAL &&
-        insn->dest.kind == IR_OPERAND_SYMBOL && insn->dest.name &&
+        ir_operand_is_symbol(&insn->dest) &&
         insn->text && strcmp(insn->dest.name, name) == 0) {
       return ir_named_type_float_bits(context, insn->text);
     }

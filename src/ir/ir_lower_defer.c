@@ -279,7 +279,7 @@ static Type *ir_returned_symbol_type(IRLoweringContext *context,
   for (size_t i = function->instruction_count; i-- > 0;) {
     const IRInstruction *in = &function->instructions[i];
     if (in->op == IR_OP_DECLARE_LOCAL && in->text &&
-        in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+        ir_operand_is_symbol(&in->dest) &&
         strcmp(in->dest.name, value->name) == 0) {
       return ir_resolve_named_type(context, in->text);
     }

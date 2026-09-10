@@ -473,6 +473,8 @@ void ir_check_silent_mutation(const IRFunction *function,
                               uint64_t generation_before);
 size_t ir_silent_mutation_count(void);
 int ir_operand_names_match(const IROperand *a, const IROperand *b);
+int ir_operand_is_temp(const IROperand *operand);
+int ir_operand_is_symbol(const IROperand *operand);
 int ir_operand_is_value(const IROperand *operand);
 uint32_t ir_function_value_id(IRFunction *function, const IROperand *operand);
 const char *ir_function_value_name(const IRFunction *function, uint32_t id);

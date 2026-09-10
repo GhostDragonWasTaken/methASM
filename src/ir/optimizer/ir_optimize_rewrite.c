@@ -400,13 +400,13 @@ static int rw_combine_constants(const IRConstChainRule *rule, long long cp,
 
 static int rw_split_use(const IRInstruction *use, int const_either,
                         const char **t_name, long long *c_out) {
-  if (use->lhs.kind == IR_OPERAND_TEMP && use->lhs.name &&
+  if (ir_operand_is_temp(&use->lhs) &&
       use->rhs.kind == IR_OPERAND_INT) {
     *t_name = use->lhs.name;
     *c_out = use->rhs.int_value;
     return 1;
   }
-  if (const_either && use->rhs.kind == IR_OPERAND_TEMP && use->rhs.name &&
+  if (const_either && ir_operand_is_temp(&use->rhs) &&
       use->lhs.kind == IR_OPERAND_INT) {
     *t_name = use->rhs.name;
     *c_out = use->lhs.int_value;

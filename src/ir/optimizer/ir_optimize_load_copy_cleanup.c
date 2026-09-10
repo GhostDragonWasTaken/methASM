@@ -434,7 +434,7 @@ static int ir_lbase_address_key(const IRFunction *function, size_t before,
     const IRInstruction *def = NULL;
     for (size_t i = 0; i < before; i++) {
       const IRInstruction *ins = &function->instructions[i];
-      if (ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+      if (ir_operand_is_temp(&ins->dest) &&
           strcmp(ins->dest.name, cursor->name) == 0) {
         if (def) {
           return 0;
@@ -646,7 +646,7 @@ static int ir_chain_collect(const IRFunction *function, size_t header,
     size_t def = (size_t)-1;
     for (size_t i = 0; i < latch; i++) {
       const IRInstruction *ins = &function->instructions[i];
-      if (ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+      if (ir_operand_is_temp(&ins->dest) &&
           strcmp(ins->dest.name, operand->name) == 0) {
         if (def != (size_t)-1) {
           return 0;
@@ -806,7 +806,7 @@ static int ir_row_symbol_written(const IRFunction *function, size_t lo,
   for (size_t i = lo; i < hi && i < function->instruction_count; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, sym) == 0) {
       return 1;
     }
@@ -1124,7 +1124,7 @@ static int ir_row_index_is_read_in_loop(const IRFunction *function, size_t s,
     const IRInstruction *use = &function->instructions[j];
     if (use->op == IR_OP_BINARY && !use->is_float && use->text &&
         strcmp(use->text, "+") == 0 &&
-        use->lhs.kind == IR_OPERAND_SYMBOL && use->lhs.name &&
+        ir_operand_is_symbol(&use->lhs) &&
         ir_operand_is_temp_named(&use->rhs, sh_name)) {
       return 1;
     }
@@ -1164,7 +1164,7 @@ static const IRInstruction *ir_row_nearest_def(const IRFunction *function,
   for (size_t j = from; j-- > header + 1;) {
     const IRInstruction *cand = &function->instructions[j];
     if (ir_instruction_writes_destination(cand) &&
-        cand->dest.kind == IR_OPERAND_TEMP && cand->dest.name &&
+        ir_operand_is_temp(&cand->dest) &&
         strcmp(cand->dest.name, name) == 0) {
       *at = j;
       return cand;
@@ -1177,7 +1177,7 @@ static const IRInstruction *ir_row_see_through_narrowing(
     const IRFunction *function, size_t header, const IRInstruction *idx,
     size_t *at) {
   while (idx && idx->op == IR_OP_CAST && !idx->is_float && idx->text &&
-         idx->lhs.kind == IR_OPERAND_TEMP && idx->lhs.name &&
+         ir_operand_is_temp(&idx->lhs) &&
          ir_narrowing_width(idx->text) != 0) {
     idx = ir_row_nearest_def(function, *at, header, idx->lhs.name, at);
   }
@@ -1264,7 +1264,7 @@ static int ir_row_match_shape(const IRFunction *function, size_t header,
                shl->dest.name;
   int unscaled = !scaled && shl->op == IR_OP_BINARY && !shl->is_float &&
                  shl->text && strcmp(shl->text, "+") == 0 &&
-                 shl->dest.kind == IR_OPERAND_TEMP && shl->dest.name;
+                 ir_operand_is_temp(&shl->dest);
 
   out->hop_at = (size_t)-1;
   if (!scaled && !unscaled) {
@@ -1483,7 +1483,7 @@ static int ir_row_collect_consumers(const IRFunction *function, size_t header,
       continue;
     }
     if (j != s && ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+        ir_operand_is_temp(&ins->dest) &&
         strcmp(ins->dest.name, sh_name) == 0) {
       return 0;
     }
@@ -2351,10 +2351,10 @@ static int ir_load_copy_build_facts(const IRFunction *function,
   }
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *ins = &function->instructions[i];
-    if (ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name) {
+    if (ir_operand_is_symbol(&ins->lhs)) {
       ir_name_index_add(reads, ins->lhs.name, 1);
     }
-    if (ins->rhs.kind == IR_OPERAND_SYMBOL && ins->rhs.name) {
+    if (ir_operand_is_symbol(&ins->rhs)) {
       ir_name_index_add(reads, ins->rhs.name, 1);
     }
     if (ins->op == IR_OP_STORE && ins->dest.kind == IR_OPERAND_SYMBOL &&
@@ -2628,7 +2628,7 @@ static int ir_narrowing_sink_is_narrower(const IRFunction *function,
   if (slot == 1 && use->op == IR_OP_CAST) {
     sink = ir_narrowing_width(use->text);
   } else if (slot == 1 && use->op == IR_OP_ASSIGN &&
-             use->dest.kind == IR_OPERAND_SYMBOL && use->dest.name &&
+             ir_operand_is_symbol(&use->dest) &&
              !use->is_float) {
     sink = ir_narrowing_width(
         ir_function_local_declared_type(function, use->dest.name));
@@ -2803,7 +2803,7 @@ static size_t ir_guard_temp_def_index(const IRFunction *function,
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *in = &function->instructions[i];
     if (ir_instruction_writes_destination(in) &&
-        in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+        ir_operand_is_temp(&in->dest) &&
         strcmp(in->dest.name, name) == 0) {
       found = i;
       count++;

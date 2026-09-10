@@ -943,7 +943,7 @@ static int rw_apply(IRFunction *fn, const RwRule *rule, size_t root_index,
       ok = rw_substitute(rw_operand_slot_mut(clone, s), rule, m, names,
                          name_count);
     }
-    if (ok && clone->dest.kind == IR_OPERAND_TEMP && clone->dest.name) {
+    if (ok && ir_operand_is_temp(&clone->dest)) {
       const char *fresh = rw_fresh_for(names, name_count, clone->dest.name);
       IROperand renamed = fresh ? ir_operand_temp(fresh) : ir_operand_none();
       if (!renamed.name) {

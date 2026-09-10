@@ -132,7 +132,7 @@ int ir_find_ptr_loop_len_operand(const IRFunction *function,
          ir_operand_is_int_value(&scale->rhs, 2)) ||
         (strcmp(scale->text, "*") == 0 &&
          ir_operand_is_int_value(&scale->rhs, 4))) {
-      if (scale->lhs.kind == IR_OPERAND_SYMBOL && scale->lhs.name &&
+      if (ir_operand_is_symbol(&scale->lhs) &&
           ir_symbol_is_sum_loop_bound(function, scale->lhs.name)) {
         *out_len = ir_operand_symbol(scale->lhs.name);
         return 1;
@@ -152,7 +152,7 @@ static const char *ir_find_ptr_step_symbol(const IRFunction *function,
   for (i = start; i < end; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         ir_operand_is_symbol_named(&ins->lhs, ins->dest.name) &&
         ir_operand_is_int_value(&ins->rhs, step) &&
         ir_symbol_contains(ins->dest.name, "__ptr_")) {
@@ -401,7 +401,7 @@ static int ir_try_vectorize_simd_scale_i32_at(IRFunction *function,
   for (size_t i = bounds.branch_index + 1; i < bounds.jump_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         ir_operand_is_symbol_named(&ins->lhs, ins->dest.name) &&
         ir_operand_is_int_value(&ins->rhs, 4) &&
         ir_symbol_contains(ins->dest.name, "__ptr_")) {
@@ -589,7 +589,7 @@ static int ir_try_vectorize_simd_reverse_copy_i32_at(IRFunction *function,
         if (ir_resolve_reverse_i32_index_base(function, i, iv_symbol, &len,
                                               ins->lhs.name, &base)) {
           src_base = base;
-          if (ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name) {
+          if (ir_operand_is_temp(&ins->dest)) {
             loaded_temp = ins->dest.name;
           }
           continue;
@@ -603,7 +603,7 @@ static int ir_try_vectorize_simd_reverse_copy_i32_at(IRFunction *function,
       }
       if (ins->op == IR_OP_BINARY && ins->text && strcmp(ins->text, "+") == 0 &&
           !ins->is_float && ins->dest.kind == IR_OPERAND_SYMBOL &&
-          ins->dest.name && ins->rhs.kind == IR_OPERAND_TEMP && ins->rhs.name) {
+          ins->dest.name && ir_operand_is_temp(&ins->rhs)) {
         const IRInstruction *cast =
             ir_find_temp_producer_before(function, i, ins->rhs.name);
         int cast_uses_loaded_value =
@@ -826,7 +826,7 @@ static int ir_try_vectorize_simd_clamp_i32_at(IRFunction *function,
     }
     if (ins->op == IR_OP_ASSIGN && ins->dest.kind == IR_OPERAND_SYMBOL &&
         ir_param_name_is_v(ins->dest.name) &&
-        ins->lhs.kind == IR_OPERAND_TEMP && ins->lhs.name) {
+        ir_operand_is_temp(&ins->lhs)) {
       value_temp = ins->lhs.name;
     }
     if (ins->op == IR_OP_LOAD && ins->rhs.kind == IR_OPERAND_INT &&
@@ -845,7 +845,7 @@ static int ir_try_vectorize_simd_clamp_i32_at(IRFunction *function,
       if (ir_resolve_i32_index_base(function, i, iv_symbol, ins->dest.name,
                                     &base)) {
         dst_base = base;
-        if (ins->lhs.kind == IR_OPERAND_TEMP && ins->lhs.name) {
+        if (ir_operand_is_temp(&ins->lhs)) {
           result_temp = ins->lhs.name;
         }
       }
@@ -1002,7 +1002,7 @@ static int ir_try_vectorize_simd_clamp_ptr_at(IRFunction *function,
     }
     if (ins->op == IR_OP_ASSIGN && ins->dest.kind == IR_OPERAND_SYMBOL &&
         ir_param_name_is_v(ins->dest.name) &&
-        ins->lhs.kind == IR_OPERAND_TEMP && ins->lhs.name) {
+        ir_operand_is_temp(&ins->lhs)) {
       value_temp = ins->lhs.name;
     }
     if (ins->op == IR_OP_LOAD && ins->lhs.kind == IR_OPERAND_SYMBOL &&
@@ -1011,7 +1011,7 @@ static int ir_try_vectorize_simd_clamp_ptr_at(IRFunction *function,
     }
     if (ins->op == IR_OP_STORE && ins->dest.kind == IR_OPERAND_SYMBOL &&
         ir_operand_is_symbol_named(&ins->dest, dst_p)) {
-      if (ins->lhs.kind == IR_OPERAND_TEMP && ins->lhs.name) {
+      if (ir_operand_is_temp(&ins->lhs)) {
         result_temp = ins->lhs.name;
       }
       continue;

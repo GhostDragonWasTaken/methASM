@@ -377,6 +377,10 @@ void mir_function_dump(const MirFunction *fn, FILE *out);
 const char *mir_opcode_name(MirOpcode op);
 
 int mir_regalloc(MirFunction *fn);
+int mir_regalloc_verify(MirFunction *fn);
+int mir_regalloc_verify_enabled(void);
+int mir_regalloc_verify_sabotage_enabled(void);
+void mir_regalloc_verify_sabotage(MirFunction *fn);
 
 static inline BinaryXmmRegister mir_xmm_scratch_a(void) {
   return code_generator_binary_active_abi()->counts_classes_separately

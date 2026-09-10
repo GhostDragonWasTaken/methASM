@@ -43,7 +43,7 @@ static void ir_rg_mark_shadows(IRRgTable *table, const IRFunction *fn,
   for (size_t i = 0; i < fn->instruction_count; i++) {
     const IRInstruction *ins = &fn->instructions[i];
     if (ins->op == IR_OP_DECLARE_LOCAL &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name && ins->text) {
+        ir_operand_is_symbol(&ins->dest) && ins->text) {
       IRRgCandidate *cand = ir_rg_table_find(table, ins->dest.name);
       if (cand) {
         cand->shadow_gen = gen;
@@ -122,7 +122,7 @@ int ir_fold_readonly_globals_pass(IRProgram *program,
         }
       }
       if (ir_instruction_writes_destination(ins) &&
-          ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name) {
+          ir_operand_is_symbol(&ins->dest)) {
         IRRgCandidate *cand = ir_rg_table_find(&table, ins->dest.name);
         if (cand && cand->shadow_gen != gen) {
           cand->disqualified = 1;

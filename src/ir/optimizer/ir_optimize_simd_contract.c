@@ -337,7 +337,7 @@ static const char *ir_region_loop_counter(const IRFunction *function,
         const IRInstruction *step = &function->instructions[j];
         if (step->op == IR_OP_BINARY && !step->is_float && step->text &&
             strcmp(step->text, "+") == 0 &&
-            step->dest.kind == IR_OPERAND_SYMBOL && step->dest.name &&
+            ir_operand_is_symbol(&step->dest) &&
             !ir_symbol_contains(step->dest.name, "__ptr_") &&
             ir_operand_is_symbol_named(&step->lhs, step->dest.name) &&
             ir_operand_is_int_value(&step->rhs, 1)) {
@@ -920,10 +920,10 @@ static void ir_simd_scan_binary(IrSimdBail *d, const IRInstruction *ins) {
   if (!ins->is_float && ins->text && ins->text[0] == '+' &&
       !ins->text[1] && ins->dest.kind == IR_OPERAND_SYMBOL &&
       ins->dest.name &&
-      ((ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
+      ((ir_operand_is_symbol(&ins->lhs) &&
         ir_operand_names_match(&ins->lhs, &ins->dest) &&
         ins->rhs.kind == IR_OPERAND_TEMP) ||
-       (ins->rhs.kind == IR_OPERAND_SYMBOL && ins->rhs.name &&
+       (ir_operand_is_symbol(&ins->rhs) &&
         ir_operand_names_match(&ins->rhs, &ins->dest) &&
         ins->lhs.kind == IR_OPERAND_TEMP))) {
     d->has_int_accum = 1;
@@ -934,8 +934,8 @@ static void ir_simd_scan_binary(IrSimdBail *d, const IRInstruction *ins) {
   }
   if (ins->is_float && ins->text && ins->text[0] == '+' &&
       !ins->text[1] &&
-      ((ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name) ||
-       (ins->rhs.kind == IR_OPERAND_SYMBOL && ins->rhs.name))) {
+      ((ir_operand_is_symbol(&ins->lhs)) ||
+       (ir_operand_is_symbol(&ins->rhs)))) {
     d->has_float_accum = 1;
   }
 
@@ -1657,8 +1657,8 @@ static int ir_simd_widen_accumulator(IRFunction *clone, size_t begin,
     const IRInstruction *ins = &clone->instructions[i];
     if (ins->op == IR_OP_BINARY && !ins->is_float && ins->text &&
         strcmp(ins->text, "+") == 0 && ins->dest.kind == IR_OPERAND_SYMBOL &&
-        ins->dest.name && ins->rhs.kind == IR_OPERAND_TEMP && ins->rhs.name &&
-        ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
+        ins->dest.name && ir_operand_is_temp(&ins->rhs) &&
+        ir_operand_is_symbol(&ins->lhs) &&
         ir_operand_names_match(&ins->lhs, &ins->dest)) {
       acc_symbol = ins->dest.name;
       for (size_t j = i; j-- > begin;) {
@@ -1679,7 +1679,7 @@ static int ir_simd_widen_accumulator(IRFunction *clone, size_t begin,
   for (size_t i = 0; i < clone->instruction_count; i++) {
     IRInstruction *decl = &clone->instructions[i];
     if (decl->op == IR_OP_DECLARE_LOCAL &&
-        decl->dest.kind == IR_OPERAND_SYMBOL && decl->dest.name &&
+        ir_operand_is_symbol(&decl->dest) &&
         strcmp(decl->dest.name, acc_symbol) == 0) {
       mettle_free_string(decl->text);
       decl->text = mettle_strdup("int64");
@@ -1793,7 +1793,7 @@ static int ir_simd_mutate_single_float_width(IRFunction *clone, size_t begin,
       continue;
     }
     if (ins->op == IR_OP_CAST && ins->is_float &&
-        ins->lhs.kind == IR_OPERAND_TEMP && ins->lhs.name) {
+        ir_operand_is_temp(&ins->lhs)) {
       for (size_t r = 0; r < retyped_count; r++) {
         if (strcmp(retyped[r], ins->lhs.name) == 0) {
           ins->op = IR_OP_ASSIGN;
@@ -1811,7 +1811,7 @@ static int ir_simd_symbol_written_in_region(const IRFunction *function,
   for (size_t i = begin + 1; i < end; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, sym) == 0) {
       return 1;
     }
@@ -1888,7 +1888,7 @@ static IRInstruction *ir_simd_index_producer(IRFunction *clone, size_t begin,
     for (size_t j = at; j-- > begin;) {
       IRInstruction *cand = &clone->instructions[j];
       if (ir_instruction_writes_destination(cand) &&
-          cand->dest.kind == IR_OPERAND_TEMP && cand->dest.name &&
+          ir_operand_is_temp(&cand->dest) &&
           strcmp(cand->dest.name, want) == 0) {
         idx = cand;
         break;
@@ -1909,10 +1909,10 @@ static const IROperand *ir_simd_row_invariant_half(IRFunction *clone,
                                                    const char *iv,
                                                    int *variant_index_seen) {
   const IROperand *other = NULL;
-  if (idx->lhs.kind == IR_OPERAND_SYMBOL && idx->lhs.name &&
+  if (ir_operand_is_symbol(&idx->lhs) &&
       strcmp(idx->lhs.name, iv) == 0) {
     other = &idx->rhs;
-  } else if (idx->rhs.kind == IR_OPERAND_SYMBOL && idx->rhs.name &&
+  } else if (ir_operand_is_symbol(&idx->rhs) &&
              strcmp(idx->rhs.name, iv) == 0) {
     other = &idx->lhs;
   } else {
@@ -1943,7 +1943,7 @@ static IRInstruction *ir_simd_address_add(IRFunction *clone, size_t at,
     IRInstruction *cand = &clone->instructions[k];
     if (cand->op == IR_OP_BINARY && !cand->is_float && cand->text &&
         strcmp(cand->text, "+") == 0 && cand->lhs.kind == IR_OPERAND_SYMBOL &&
-        cand->lhs.name && cand->rhs.kind == IR_OPERAND_TEMP && cand->rhs.name &&
+        cand->lhs.name && ir_operand_is_temp(&cand->rhs) &&
         strcmp(cand->rhs.name, shifted) == 0) {
       return cand;
     }
@@ -1955,8 +1955,8 @@ static int ir_simd_is_index_scale(const IRInstruction *shl) {
   return shl->op == IR_OP_BINARY && !shl->is_float && shl->text &&
          strcmp(shl->text, "<<") == 0 && shl->rhs.kind == IR_OPERAND_INT &&
          (shl->rhs.int_value == 2 || shl->rhs.int_value == 3) &&
-         shl->lhs.kind == IR_OPERAND_TEMP && shl->lhs.name &&
-         shl->dest.kind == IR_OPERAND_TEMP && shl->dest.name;
+         ir_operand_is_temp(&shl->lhs) &&
+         ir_operand_is_temp(&shl->dest);
 }
 
 static int ir_simd_mutate_dot_row_pointer(IRFunction *clone, size_t begin,
@@ -2043,7 +2043,7 @@ static int ir_simd_mutate_fill_base_pointer(IRFunction *clone, size_t begin,
       IRInstruction *cand = &clone->instructions[k];
       if (cand->op == IR_OP_BINARY && !cand->is_float && cand->text &&
           strcmp(cand->text, "+") == 0 &&
-          cand->lhs.kind == IR_OPERAND_TEMP && cand->lhs.name &&
+          ir_operand_is_temp(&cand->lhs) &&
           ir_operand_names_match(&cand->lhs, &addr_of->dest)) {
         addr = cand;
         break;
@@ -2075,7 +2075,7 @@ static int ir_simd_mutate_hoist_body_local(IRFunction *clone, size_t begin,
       continue;
     }
     if (header && ins->op == IR_OP_DECLARE_LOCAL &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name) {
+        ir_operand_is_symbol(&ins->dest)) {
       decl = i;
       break;
     }

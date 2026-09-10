@@ -427,6 +427,14 @@ int ir_operand_names_match(const IROperand *a, const IROperand *b) {
   return strcmp(a->name, b->name) == 0;
 }
 
+int ir_operand_is_temp(const IROperand *operand) {
+  return operand && operand->kind == IR_OPERAND_TEMP && operand->name != NULL;
+}
+
+int ir_operand_is_symbol(const IROperand *operand) {
+  return operand && operand->kind == IR_OPERAND_SYMBOL && operand->name != NULL;
+}
+
 int ir_operand_is_value(const IROperand *operand) {
   if (!operand || !operand->name) {
     return 0;

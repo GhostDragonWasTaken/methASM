@@ -43,7 +43,7 @@ int binary_function_local_is_safety_described(const IRFunction *function,
         }
         continue;
       }
-      if (take->lhs.kind == IR_OPERAND_SYMBOL && take->lhs.name &&
+      if (ir_operand_is_symbol(&take->lhs) &&
           strcmp(take->lhs.name, name) == 0) {
         return 1;
       }
@@ -935,8 +935,8 @@ static int binary_global_is_promotable(CodeGenerator *generator,
 static int binary_insn_is_pointer_step(const IRInstruction *insn) {
   return insn->op == IR_OP_BINARY && insn->text &&
          strcmp(insn->text, "+") == 0 && !insn->is_float &&
-         insn->dest.kind == IR_OPERAND_SYMBOL && insn->dest.name &&
-         insn->lhs.kind == IR_OPERAND_SYMBOL && insn->lhs.name &&
+         ir_operand_is_symbol(&insn->dest) &&
+         ir_operand_is_symbol(&insn->lhs) &&
          strcmp(insn->dest.name, insn->lhs.name) == 0 &&
          insn->rhs.kind == IR_OPERAND_INT &&
          (insn->rhs.int_value == 4 || insn->rhs.int_value == -4 ||

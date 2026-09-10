@@ -57,7 +57,7 @@ static int ir_fill_value_operand(const IRFunction *function, size_t begin,
   for (size_t i = begin; i < end; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, value->name) == 0) {
       return 0;
     }
@@ -80,7 +80,7 @@ static int ir_fill_symbol_is_invariant(const IRFunction *function,
   for (size_t i = begin; i < end; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+        ir_operand_is_symbol(&ins->dest) &&
         strcmp(ins->dest.name, name) == 0) {
       return 0;
     }
@@ -387,14 +387,14 @@ static int ir_fill_try_pointer_walk(IRFunction *function, size_t header_index,
       store = ins;
     } else if (ins->op == IR_OP_BINARY && ins->text &&
                strcmp(ins->text, "+") == 0 && !ins->is_float &&
-               ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+               ir_operand_is_symbol(&ins->dest) &&
                strcmp(ins->dest.name, p) == 0 &&
                ir_operand_is_symbol_named(&ins->lhs, p) &&
                ins->rhs.kind == IR_OPERAND_INT && !advance) {
       advance = ins;
     } else if (ins->op == IR_OP_BINARY && ins->text &&
                strcmp(ins->text, "+") == 0 && !ins->is_float &&
-               ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+               ir_operand_is_symbol(&ins->dest) &&
                strcmp(ins->dest.name, p) != 0 && !dead_counter &&
                ir_operand_is_symbol_named(&ins->lhs, ins->dest.name) &&
                ins->rhs.kind == IR_OPERAND_INT) {
@@ -469,7 +469,7 @@ static int ir_fill_role_is_index_add(const IRFillIndexedShape *shape,
                                     const IRInstruction *const *body,
                                     size_t body_count) {
   return ir_fill_is_int_add(ins) && !shape->idx_add && !shape->shl &&
-         !shape->addr && ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+         !shape->addr && ir_operand_is_temp(&ins->dest) &&
          !ir_fill_dest_is_store_address(body, body_count, ins) &&
          ir_fill_reads_iv(ins, iv);
 }
@@ -489,8 +489,8 @@ static int ir_fill_role_is_address_add(const IRFillIndexedShape *shape,
                                        const IRInstruction *ins,
                                        const char *iv) {
   return ir_fill_is_int_add(ins) && !shape->addr &&
-         ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
-         ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
+         ir_operand_is_temp(&ins->dest) &&
+         ir_operand_is_symbol(&ins->lhs) &&
          ((shape->shl &&
            ir_operand_is_temp_named(&ins->rhs, shape->shl->dest.name)) ||
           (!shape->shl && ir_operand_is_symbol_named(&ins->rhs, iv)) ||
@@ -509,7 +509,7 @@ static int ir_fill_role_is_increment(const IRFillIndexedShape *shape,
                                      const IRInstruction *ins,
                                      const char *iv) {
   return ir_fill_is_int_add(ins) && !shape->increment &&
-         ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+         ir_operand_is_symbol(&ins->dest) &&
          strcmp(ins->dest.name, iv) == 0 &&
          ir_operand_is_symbol_named(&ins->lhs, iv) &&
          ins->rhs.kind == IR_OPERAND_INT && ins->rhs.int_value == 1;
@@ -518,7 +518,7 @@ static int ir_fill_role_is_increment(const IRFillIndexedShape *shape,
 static int ir_fill_role_is_offset_producer(const IRInstruction *ins,
                                            size_t position) {
   return ins->op == IR_OP_BINARY && !ins->is_float && position == 0 &&
-         ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name;
+         ir_operand_is_temp(&ins->dest);
 }
 
 static int ir_fill_classify_body(const IRInstruction *const *body,
@@ -595,7 +595,7 @@ static int ir_fill_temp_defined_before(const IRFunction *function,
   for (size_t i = 0; i < header_index; i++) {
     const IRInstruction *ins = &function->instructions[i];
     if (ir_instruction_writes_destination(ins) &&
-        ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
+        ir_operand_is_temp(&ins->dest) &&
         strcmp(ins->dest.name, name) == 0) {
       return 1;
     }
@@ -851,8 +851,8 @@ static int ir_fill_try_byte_walk(IRFunction *function, size_t header_index,
       casts[cast_count++] = ins;
     } else if (ins->op == IR_OP_BINARY && ins->text &&
                strcmp(ins->text, "+") == 0 && !ins->is_float && !addr &&
-               ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name &&
-               ins->lhs.kind == IR_OPERAND_SYMBOL && ins->lhs.name &&
+               ir_operand_is_temp(&ins->dest) &&
+               ir_operand_is_symbol(&ins->lhs) &&
                ir_operand_is_symbol_named(&ins->rhs, iv)) {
       addr = ins;
     } else if (ins->op == IR_OP_STORE && !store && addr &&
@@ -864,7 +864,7 @@ static int ir_fill_try_byte_walk(IRFunction *function, size_t header_index,
       store = ins;
     } else if (ins->op == IR_OP_BINARY && ins->text &&
                strcmp(ins->text, "+") == 0 && !ins->is_float && !advance &&
-               ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name &&
+               ir_operand_is_symbol(&ins->dest) &&
                strcmp(ins->dest.name, iv) == 0 &&
                ir_operand_is_symbol_named(&ins->lhs, iv)) {
       advance = ins;
@@ -1253,7 +1253,7 @@ static int ir_copy_walk_is_load(const IRCopyWalkShape *shape,
   return ins->op == IR_OP_LOAD && !shape->load && !ins->is_float &&
          !ins->is_volatile && ins->rhs.kind == IR_OPERAND_INT &&
          ir_operand_is_symbol_named(&ins->lhs, src_p) &&
-         ins->dest.kind == IR_OPERAND_TEMP && ins->dest.name;
+         ir_operand_is_temp(&ins->dest);
 }
 
 static int ir_copy_walk_is_store(const IRCopyWalkShape *shape,
@@ -1261,7 +1261,7 @@ static int ir_copy_walk_is_store(const IRCopyWalkShape *shape,
   return ins->op == IR_OP_STORE && !shape->store && !ins->is_float &&
          !ins->is_volatile && ins->rhs.kind == IR_OPERAND_INT && shape->load &&
          ir_operand_is_temp_named(&ins->lhs, shape->load->dest.name) &&
-         ins->dest.kind == IR_OPERAND_SYMBOL && ins->dest.name;
+         ir_operand_is_symbol(&ins->dest);
 }
 
 static int ir_copy_walk_is_self_step(const IRInstruction *ins) {
